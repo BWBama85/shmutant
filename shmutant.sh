@@ -41,7 +41,8 @@
 # Row verdicts: killed (the only pass), survived, accidental, aborted, unapplied, unprepared,
 # baseline, timeout, lost.
 #
-# Requires bash >= 5.3 and coreutils plus awk. Nothing else.
+# Requires bash >= 5.3 and coreutils plus awk. Nothing else; `ps` (POSIX) is used when present
+# to reach timed-out descendants that left the run's process group.
 
 SHMUTANT_VERSION=0.1.0
 
@@ -288,6 +289,31 @@ _shmutant_has_red_line() {
   return 1
 }
 
+# _shmutant_descendants <pid> — print every descendant pid of <pid>, via POSIX `ps -A -o pid= -o ppid=`.
+# Prints nothing when ps is unavailable; the process-group kill still applies then.
+_shmutant_descendants() {
+  local table
+  table="$(ps -A -o pid= -o ppid= 2>/dev/null)" || return 0
+  printf '%s\n' "$table" | awk -v root="$1" '
+    { child[NR] = $1; parent[NR] = $2 }
+    END {
+      want[root] = 1
+      do {
+        added = 0
+        for (i = 1; i <= NR; i++) if ((parent[i] in want) && !(child[i] in want)) { want[child[i]] = 1; added = 1 }
+      } while (added)
+      for (p in want) if (p != root) print p
+    }'
+}
+
+# _shmutant_kill_tree <signal> <pid> — send <signal> to <pid>'s process group and to every
+# descendant, including ones that moved to a group or session of their own.
+_shmutant_kill_tree() {
+  local sig="$1" pid="$2" p
+  for p in $(_shmutant_descendants "$pid"); do kill "-$sig" "$p" 2>/dev/null; done
+  kill "-$sig" -- -"$pid" 2>/dev/null
+}
+
 # _shmutant_run_bounded <dir> <run> <root> <select> — run the adapter with stdout+stderr in
 # <dir>/output, killed as a process group after SHMUTANT_TIMEOUT seconds. Sets
 # SHMUTANT_RUN_STATUS to the exit status; writes <dir>/timeout when the bound was hit.
@@ -309,9 +335,9 @@ _shmutant_run_bounded() {
         sleep "$timeout" & s=$!
         wait "$s"
         : > "$dir/timeout"
-        kill -TERM -- -"$pid" 2>/dev/null
+        _shmutant_kill_tree TERM "$pid"
         sleep 1
-        kill -KILL -- -"$pid" 2>/dev/null
+        _shmutant_kill_tree KILL "$pid"
       ) < /dev/null > /dev/null 2>&1 &
       dog=$!
     fi
@@ -474,12 +500,16 @@ shmutant_pool() {
   if ! declare -F -- "$run" > /dev/null 2>&1 && ! command -v -- "$run" > /dev/null 2>&1; then
     _shmutant_err "$label: run callback not found: $run"; return 2
   fi
+  # Digits only AND a bounded width: an all-digit value past bash's integer range fails every
+  # numeric test with a diagnostic and would fall through as if it had passed.
   case "${SHMUTANT_TIMEOUT:-300}" in
     *[!0-9]*|'') _shmutant_err "$label: SHMUTANT_TIMEOUT must be a non-negative integer, got [${SHMUTANT_TIMEOUT:-}]"; return 2 ;;
   esac
+  [ "${#SHMUTANT_TIMEOUT}" -le 9 ] || { _shmutant_err "$label: SHMUTANT_TIMEOUT is too large, got [${SHMUTANT_TIMEOUT}]"; return 2; }
   case "${SHMUTANT_RED_STATUS:-1}" in
     *[!0-9]*|'') _shmutant_err "$label: SHMUTANT_RED_STATUS must be an exit status from 1 to 255, got [${SHMUTANT_RED_STATUS:-}]"; return 2 ;;
   esac
+  [ "${#SHMUTANT_RED_STATUS}" -le 3 ] || { _shmutant_err "$label: SHMUTANT_RED_STATUS must be an exit status from 1 to 255, got [${SHMUTANT_RED_STATUS}]"; return 2; }
   if [ "${SHMUTANT_RED_STATUS:-1}" -lt 1 ] || [ "${SHMUTANT_RED_STATUS:-1}" -gt 255 ]; then
     _shmutant_err "$label: SHMUTANT_RED_STATUS must be an exit status from 1 to 255, got [${SHMUTANT_RED_STATUS:-}] — 0 is green by definition"; return 2
   fi
@@ -489,6 +519,9 @@ shmutant_pool() {
   jobs="$(_shmutant_jobs "$cap")"
   if [ -n "${SHMUTANT_STREAM:-}" ]; then
     local sdir
+    if [ -L "$SHMUTANT_STREAM" ]; then
+      _shmutant_err "$label: SHMUTANT_STREAM is a symlink ($SHMUTANT_STREAM) — name the file itself, so where the records land can be checked"; return 2
+    fi
     if ! sdir="$(_shmutant_abs "$(dirname -- "$SHMUTANT_STREAM")")"; then
       _shmutant_err "$label: SHMUTANT_STREAM points into a directory that does not exist: $SHMUTANT_STREAM"; return 2
     fi
@@ -602,6 +635,10 @@ _shmutant_checksum() {
   fi
 }
 
+# _shmutant_plan_died — EXIT trap armed while the plan is sourced: a plan that exits, or whose own
+# `set -e` fires, still ends this run as a load failure with status 2.
+_shmutant_plan_died() { _shmutant_err "run: the plan failed while loading"; exit 2; }
+
 _shmutant_cli_run() {
   local plan="" wd="" keep=0 made=0 rc
   [ "${SHMUTANT_KEEP:-0}" = 1 ] && keep=1
@@ -626,25 +663,42 @@ _shmutant_cli_run() {
   [ -f "$plan" ] || { _shmutant_err "run: plan not found: $plan"; return 2; }
   SHMUTANT_PLAN_DIR="$(_shmutant_abs "$(dirname -- "$plan")")" || { _shmutant_err "run: cannot resolve $plan"; return 2; }
   export SHMUTANT_PLAN_DIR
-  shmutant_reset
-  # shellcheck disable=SC1090
-  # By its resolved path: a bare name would be looked up on PATH first, not in the directory
-  # the -f check above examined.
-  . "$SHMUTANT_PLAN_DIR/$(basename -- "$plan")" || { _shmutant_err "run: the plan failed while loading"; return 2; }
-  declare -F prepare > /dev/null || { _shmutant_err "run: the plan defines no prepare function"; return 2; }
-  declare -F run > /dev/null || { _shmutant_err "run: the plan defines no run function"; return 2; }
+  # The workdir is settled, absolute, BEFORE the plan runs: a plan may cd, and a relative
+  # --workdir must mean the directory the operator named.
   if [ -z "$wd" ]; then
     wd="$(mktemp -d "${TMPDIR:-/tmp}/shmutant.XXXXXX")" || { _shmutant_err "run: cannot create a workdir"; return 2; }
     made=1
+  else
+    mkdir -p -- "$wd" || { _shmutant_err "run: cannot create workdir $wd"; return 2; }
+    wd="$(_shmutant_abs "$wd")" || { _shmutant_err "run: cannot resolve workdir"; return 2; }
   fi
+  # The plan is sourced INSIDE this function, where bash's dynamic scoping lets it assign any
+  # local by name. The cleanup below decides what to delete, so its inputs are frozen read-only
+  # before the plan runs: a plan that writes `_shmutant_cli_made=1` gets a readonly error, not a
+  # deleted caller directory.
+  local -r _shmutant_cli_plan="$SHMUTANT_PLAN_DIR/$(basename -- "$plan")"
+  local -r _shmutant_cli_wd="$wd" _shmutant_cli_keep="$keep" _shmutant_cli_made="$made"
+  shmutant_reset
+  # Callbacks come from the plan, never from functions exported by the invoking environment.
+  unset -f prepare run
+  # Sourced bare, not in an || list: an || list would switch the plan's own errexit off for the
+  # whole file. The trap turns an errexit exit, or an explicit exit, into status 2.
+  trap _shmutant_plan_died EXIT
+  # shellcheck disable=SC1090
+  . "$_shmutant_cli_plan"
+  rc=$?
+  trap - EXIT
+  [ "$rc" -eq 0 ] || { _shmutant_err "run: the plan failed while loading (status $rc)"; return 2; }
+  declare -F prepare > /dev/null || { _shmutant_err "run: the plan defines no prepare function"; return 2; }
+  declare -F run > /dev/null || { _shmutant_err "run: the plan defines no run function"; return 2; }
   # The plan may have turned errexit on for its own preamble; the pool's non-zero returns are
   # answers, not errors, and the cleanup below must run for every one of them.
   set +o errexit
-  shmutant_pool "$(basename -- "$plan")" "$wd" prepare run; rc=$?
+  shmutant_pool "$(basename -- "$plan")" "$_shmutant_cli_wd" prepare run; rc=$?
   # Only a workdir this run created is removed. A caller-supplied one is theirs: the pool's own
   # artifacts stay in it and nothing else in it is touched.
-  if [ "$keep" = 1 ]; then _shmutant_err "workdir kept: $wd"
-  elif [ "$made" = 1 ]; then rm -rf -- "$wd"
+  if [ "$_shmutant_cli_keep" = 1 ]; then _shmutant_err "workdir kept: $_shmutant_cli_wd"
+  elif [ "$_shmutant_cli_made" = 1 ]; then rm -rf -- "$_shmutant_cli_wd"
   fi
   return "$rc"
 }

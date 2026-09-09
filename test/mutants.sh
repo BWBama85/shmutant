@@ -129,9 +129,9 @@ shmutant_mut 'a timeout is reported as an abort' \
   ': > "$dir/timeout"' \
   ': > "$dir/timeout-never"' \
   't_verdict_timeout'
-shmutant_mut 'a timeout escalates to KILL on the leader only, not its process group' \
-  'kill -KILL -- -"$pid" 2>/dev/null' \
-  'kill -KILL -- "$pid" 2>/dev/null' \
+shmutant_mut 'a timeout never escalates to KILL' \
+  '        _shmutant_kill_tree KILL "$pid"' \
+  '        :' \
   't_verdict_timeout_kills_a_term_ignoring_descendant'
 shmutant_mut 'a blank verdict file reads as a verdict' \
   '[ -n "$SHMUTANT_V_VERDICT" ] || SHMUTANT_V_VERDICT=lost' \
@@ -196,8 +196,8 @@ shmutant_mut 'the label is not the plan name' \
   'shmutant_pool "plan"' \
   't_cli_run'
 shmutant_mut '--keep deletes the workdir' \
-  'if [ "$keep" = 1 ]; then' \
-  'if [ "$keep" = 0 ]; then' \
+  'if [ "$_shmutant_cli_keep" = 1 ]; then' \
+  'if [ "$_shmutant_cli_keep" = 0 ]; then' \
   't_cli_run'
 shmutant_mut 'version prints the wrong marker' \
   '"$SHMUTANT_VERSION"' \
@@ -242,8 +242,8 @@ shmutant_mut 'an unapplied row keeps its clone' \
   '2) printf '"'"'unapplied\n0\n0\n'"'"' > "$dir/verdict"; return 0 ;;' \
   't_verdict_unapplied'
 shmutant_mut 'a caller-supplied workdir is removed' \
-  'elif [ "$made" = 1 ]; then rm -rf -- "$wd"' \
-  'elif true; then rm -rf -- "$wd"' \
+  'elif [ "$_shmutant_cli_made" = 1 ]; then rm -rf -- "$_shmutant_cli_wd"' \
+  'elif true; then rm -rf -- "$_shmutant_cli_wd"' \
   't_cli_run'
 
 # --- guards added for the second review round ---
@@ -264,8 +264,8 @@ shmutant_mut 'a symlink target passes the pool precheck' \
   'if false; then' \
   't_pool_refuses_symlink_target'
 shmutant_mut 'the plan is sourced by its bare name' \
-  '. "$SHMUTANT_PLAN_DIR/$(basename -- "$plan")" ||' \
-  '. "$plan" ||' \
+  'local -r _shmutant_cli_plan="$SHMUTANT_PLAN_DIR/$(basename -- "$plan")"' \
+  'local -r _shmutant_cli_plan="$plan"' \
   't_cli_run'
 shmutant_mut 'SHMUTANT_KEEP=1 is ignored by the CLI cleanup' \
   '[ "${SHMUTANT_KEEP:-0}" = 1 ] && keep=1' \
@@ -327,3 +327,37 @@ shmutant_mut 'the plan errexit is left on across the pool call' \
   'set +o errexit' \
   ':' \
   't_cli_run'
+
+# --- guards added for the fifth review round ---
+shmutant_mut 'the plan is sourced inside an || list, muting its errexit' \
+  '  trap _shmutant_plan_died EXIT' \
+  '  :' \
+  't_cli_run'
+shmutant_mut 'the CLI cleanup reads the clobberable local' \
+  'elif [ "$_shmutant_cli_made" = 1 ]; then rm -rf -- "$_shmutant_cli_wd"' \
+  'elif [ "$made" = 1 ]; then rm -rf -- "$_shmutant_cli_wd"' \
+  't_cli_run'
+shmutant_mut 'a relative --workdir is resolved after the plan may have moved' \
+  '    wd="$(_shmutant_abs "$wd")" || { _shmutant_err "run: cannot resolve workdir"; return 2; }' \
+  '    :' \
+  't_cli_run'
+shmutant_mut 'inherited prepare/run functions are accepted' \
+  '  unset -f prepare run' \
+  '  :' \
+  't_cli_run'
+shmutant_mut 'a symlink stream is accepted' \
+  '    if [ -L "$SHMUTANT_STREAM" ]; then' \
+  '    if false; then' \
+  't_stream_write_failure_is_a_harness_error'
+shmutant_mut 'an overflow-length red status passes' \
+  '[ "${#SHMUTANT_RED_STATUS}" -le 3 ] ||' \
+  '[ "${#SHMUTANT_RED_STATUS}" -le 300 ] ||' \
+  't_pool_validates_red_status_and_prefix'
+shmutant_mut 'an overflow-length timeout passes' \
+  '[ "${#SHMUTANT_TIMEOUT}" -le 9 ] ||' \
+  '[ "${#SHMUTANT_TIMEOUT}" -le 300 ] ||' \
+  't_pool_validates_red_status_and_prefix'
+shmutant_mut 'descendants outside the process group are not killed' \
+  'for p in $(_shmutant_descendants "$pid"); do kill "-$sig" "$p" 2>/dev/null; done' \
+  ':' \
+  't_verdict_timeout_kills_an_escaped_process_group'

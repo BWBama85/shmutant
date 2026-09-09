@@ -395,6 +395,21 @@ t_verdict_timeout_kills_a_term_ignoring_descendant() {
   [ -e "$T/finished" ] && fail_ 'a descendant that ignores TERM outlived the timeout — the watchdog never reached KILL'
 }
 
+t_verdict_timeout_kills_an_escaped_process_group() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'hangs' '$1 + $2' '$1 - $2' 'add-works'
+  escaping_run() { set -m; bash -c "sleep 4; touch '$T/finished'" & wait; }
+  SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=1 pool lbl "$T/wd" toy_prepare escaping_run
+  eq "$(verdict_of 'hangs')" timeout 'verdict is timeout'
+  sleep 4
+  [ -e "$T/finished" ] && fail_ 'a descendant in its own process group outlived the timeout'
+  ( sleep 3 & sleep 3 & wait ) & local p=$!
+  sleep 0.3
+  eq "$(_shmutant_descendants "$p" | wc -l | tr -d ' ')" 2 'the descendant walk finds both children'
+  kill "$p" 2>/dev/null; wait "$p" 2>/dev/null
+}
+
 t_pool_recreates_worker_dirs() {
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
@@ -575,6 +590,10 @@ t_stream_write_failure_is_a_harness_error() {
   SHMUTANT_STREAM="$T/wd/stream" pool lbl "$T/wd" toy_prepare toy_run
   rc_is "$RC" 2 'a stream inside the workdir is refused: cleanup would delete it'
   has "$ERR" 'inside the workdir' 'says why'
+  mkdir -p "$T/wd"; ln -s "$T/wd/inside" "$T/link-stream"
+  SHMUTANT_STREAM="$T/link-stream" pool lbl "$T/wd" toy_prepare toy_run
+  rc_is "$RC" 2 'a symlink stream is refused: its referent could be anywhere'
+  has "$ERR" 'symlink' 'says why'
 }
 
 t_pool_validates_red_status_and_prefix() {
@@ -590,6 +609,11 @@ t_pool_validates_red_status_and_prefix() {
   SHMUTANT_RED_PREFIX='' pool lbl "$T/wd" toy_prepare toy_run
   rc_is "$RC" 2 'an empty red prefix is refused'
   has "$ERR" 'every line' 'says why'
+  SHMUTANT_RED_STATUS=99999999999999999999999 pool lbl "$T/wd" toy_prepare toy_run
+  rc_is "$RC" 2 'a red status wider than a shell integer is refused'
+  SHMUTANT_TIMEOUT=99999999999999999999999 pool lbl "$T/wd" toy_prepare toy_run
+  rc_is "$RC" 2 'a timeout wider than a shell integer is refused'
+  has "$ERR" 'too large' 'says why'
 }
 
 t_stream_to_file() {
@@ -693,6 +717,25 @@ EOF
   [ -n "$kept" ] && rm -rf -- "$kept"
   mkdir -p "$T/decoy"; printf 'exit 3\n' > "$T/decoy/plan.sh"
   ( cd "$T/toy" && PATH="$T/decoy:$PATH" bash "$SHMUTANT" run plan.sh > /dev/null 2>&1 ); rc_is $? 1 'a bare plan name is sourced from its own directory, not from PATH (1: the survivor row, not the decoy'"'"'s 3)'
+  { printf 'set -e\nfalse\n'; cat "$T/toy/plan.sh"; } > "$T/toy/plan-ef.sh"
+  bash "$SHMUTANT" run "$T/toy/plan-ef.sh" > /dev/null 2>"$T/err-ef"; rc_is $? 2 'a plan whose own set -e fires while loading is a load failure'
+  has "$(cat "$T/err-ef")" 'failed while loading' 'says so'
+  { cat "$T/toy/plan.sh"; printf 'made=1\nkeep=0\n'; } > "$T/toy/plan-clobber.sh"
+  mkdir -p "$T/theirs"; printf 'keep\n' > "$T/theirs/precious"
+  bash "$SHMUTANT" run "$T/toy/plan-clobber.sh" --workdir "$T/theirs" > /dev/null 2>&1; rc_is $? 1 'the clobbering plan still loads and runs'
+  eq "$(cat "$T/theirs/precious" 2>/dev/null)" keep 'a plan assigning made=1 cannot make the CLI delete a supplied workdir'
+  { cat "$T/toy/plan.sh"; printf '_shmutant_cli_made=1\n'; } > "$T/toy/plan-ro.sh"
+  bash "$SHMUTANT" run "$T/toy/plan-ro.sh" --workdir "$T/theirs" > /dev/null 2>&1; rc_is $? 2 'a plan assigning the frozen CLI state is a load failure'
+  eq "$(cat "$T/theirs/precious" 2>/dev/null)" keep 'and the supplied workdir is still there'
+  { printf 'cd "$SHMUTANT_PLAN_DIR"\n'; cat "$T/toy/plan.sh"; } > "$T/toy/plan-cd.sh"
+  mkdir -p "$T/from"
+  ( cd "$T/from" && bash "$SHMUTANT" run "$T/toy/plan-cd.sh" --workdir rel --keep > /dev/null 2>&1 )
+  [ -f "$T/from/rel/mut-0/output" ] || fail_ 'a relative --workdir was resolved after the plan changed directory'
+  [ -e "$T/toy/rel" ] && fail_ 'artifacts landed relative to the plan directory instead'
+  printf 'shmutant_target lib.sh\nshmutant_mut a b c d\n' > "$T/inherit.sh"
+  prepare() { mkdir -p "$1"; printf 'b\n' > "$1/lib.sh"; }; run() { :; }; export -f prepare run
+  bash "$SHMUTANT" run "$T/inherit.sh" > /dev/null 2>&1; rc_is $? 2 'exported prepare/run functions from the environment do not stand in for the plan'"'"'s'
+  unset -f prepare run
   { printf 'set -e\n'; cat "$T/toy/plan.sh"; } > "$T/toy/plan-e.sh"
   kept="$(bash "$SHMUTANT" run "$T/toy/plan-e.sh" --keep 2>&1 >/dev/null | sed -n 's/^shmutant: workdir kept: //p')"
   [ -n "$kept" ] || fail_ 'a plan with set -e made the CLI exit at the pool call before its cleanup and report'

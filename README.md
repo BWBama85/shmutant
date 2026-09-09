@@ -101,7 +101,7 @@ The predecessor of this tool ran the **entire suite for every mutant**. On one p
 118-row table took 4,600 to 5,200 seconds per pass. The coverage map was already there, every
 row declared its witness, but nothing used it to select work. `shmutant` passes the row's
 selector to `run` and ships `shmutant_selected` so a hand-rolled suite can honour it in one line.
-Its own 71-row self-mutation pass finishes in under 60 seconds against a suite that takes 15 seconds to run once.
+Its own 79-row self-mutation pass finishes in under 60 seconds against a suite that takes 15 seconds to run once.
 
 ## Installation
 
@@ -143,13 +143,13 @@ could not run.
 - bash 5.3 or newer. The entry point re-executes itself under a newer bash when it finds one
   (Homebrew paths, then `PATH`) and otherwise fails loudly with the platform's install command.
   macOS ships bash 3.2; put Homebrew's bin directory before `/bin` on `PATH`.
-- coreutils and `awk`. Neither `jq` nor `cmp` is required.
+- coreutils and `awk`. Neither `jq` nor `cmp` is required. POSIX `ps`, when present, lets a timeout reach descendants that left the run's process group.
 - `shellcheck --severity=warning -e SC1091` clean.
 
 ## Testing shmutant
 
 ```sh
-bash test/run.sh                     # the suite, 53 units
+bash test/run.sh                     # the suite, 54 units
 bash shmutant.sh run test/mutants.sh # the suite, mutation-tested by shmutant itself
 ```
 

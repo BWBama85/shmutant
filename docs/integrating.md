@@ -100,7 +100,9 @@ Run with `SHMUTANT_RED_PREFIX='not ok '`, and probe the failure exit status as a
 ## 4. Write the plan
 
 A plan is a bash file. The CLI sources it with `SHMUTANT_PLAN_DIR` set to its directory, then
-runs the table.
+runs the table. A plan that exits, or whose own `set -e` fires while it loads, is a load failure
+(status 2). Its `prepare` and `run` must be defined in the plan; functions exported by the
+invoking environment are discarded first.
 
 ```sh
 # test/mutants.sh
@@ -174,7 +176,7 @@ on every run. A workdir the CLI created for itself is removed unless `--keep`.
 | `SHMUTANT_TIMEOUT` | 300 | Seconds per run before the process group is killed. Raise it for a suite that cannot select; 0 disables. |
 | `SHMUTANT_BASELINE` | 1 | Run every distinct selector once, uninjected, and require green. Set 0 when the suite was proven green in a previous step. |
 | `SHMUTANT_KEEP` | 0 | Keep every clone and the pristine tree. |
-| `SHMUTANT_STREAM` | stdout | Append the verdict stream to a file instead. Its directory must exist and must not lie inside the workdir. |
+| `SHMUTANT_STREAM` | stdout | Append the verdict stream to a file instead. Its directory must exist, it must not be a symlink, and it must not lie inside the workdir. |
 | `SHMUTANT_RED_STATUS` | 1 | The exit status that means red, 1 to 255. |
 | `SHMUTANT_RED_PREFIX` | `FAIL: ` | The prefix of a red line; must not be empty. |
 
