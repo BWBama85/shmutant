@@ -46,6 +46,8 @@ Sweep each of these before opening a pull request.
 - `rewrite-loses-file-shape` — For every place that rewrites a file through a temporary and renames it over the original, check that the mode bits, the final-newline shape, and the symlink status of the original survive the rewrite; test each with a file that has the non-default property, not only the default one.
 - `host-shell-option-leak` — For a library that is sourced into a caller shell, list every shell option or variable that changes the meaning of the constructs it uses (nocasematch for case, noclobber for redirects, CDPATH for cd, IFS, set -e, set -u, extglob) and either neutralise each one inside a subshell or make the construct immune; test each with the option deliberately turned on around the call.
 - `path-escapes-root` — For every path built as <root>/<caller-supplied relative path>, resolve the result physically (cd -P, pwd -P) and require it to stay at or below <root> before reading or writing it; test with a .. component, an absolute symlink, and a symlinked parent directory, not only a plain file.
+- `caller-owned-path-deleted` — For every rm -rf, list the paths it can reach and prove each one was created by this code in this run; anything the caller could have supplied or written into (a --workdir, an output file, a stream path) is either refused when it overlaps the removal, or excluded from it. Test with a caller file placed inside the removal target.
+- `config-value-unvalidated` — For every environment variable or option the code reads, validate its domain before the first use (numeric range, non-empty, existing directory, not inside a disposable tree) and exit 2 on a violation; a value outside the domain must never reach a comparison that changes a verdict. Test each with 0, empty, non-numeric and out-of-range.
 <!-- adb:checklist:end -->
 
 ## Hits
@@ -73,4 +75,16 @@ One line per resolved review thread, newest last.
 - `host-shell-option-leak` `shmutant.sh:148` `3095609` `PRRT_kwDOUT7q9s6g1ZJX` PR #1 2026-09-09 — CDPATH made cd print a second line from the path resolver; unset inside the subshell
 - `self-referential-copy` `shmutant.sh:167` `3095609` `PRRT_kwDOUT7q9s6g1ZJe` PR #1 2026-09-09 — a destination inside the source was copied into itself; now refused with a message
 - `undeclared-dependency` `shmutant.sh:199` `3095609` `PRRT_kwDOUT7q9s6g1ZJk` PR #1 2026-09-09 — cmp (diffutils) was used and its absence read as files differ; awk now reports the miss by exit status
+- `rewrite-loses-file-shape` `shmutant.sh:212` `a380a98` `PRRT_kwDOUT7q9s6g16Bp` PR #1 2026-09-09 — cp -p made the temp read-only before the write so 0444 targets failed; now chmod u+w for the write and u-w restored after
+- `rewrite-loses-file-shape` `shmutant.sh:212` `a380a98` `PRRT_kwDOUT7q9s6g16B2` PR #1 2026-09-09 — duplicate of the read-only target finding
+- `host-shell-option-leak` `shmutant.sh:186` `a380a98` `PRRT_kwDOUT7q9s6g16Br` PR #1 2026-09-09 — set -f, failglob, GLOBIGNORE, dotglob changed what copy_tree enumerated; now neutralised in a subshell
+- `host-shell-option-leak` `shmutant.sh:190` `a380a98` `PRRT_kwDOUT7q9s6g16B5` PR #1 2026-09-09 — duplicate of the glob-settings finding
+- `host-shell-option-leak` `shmutant.sh:190` `a380a98` `PRRT_kwDOUT7q9s6g16CP` PR #1 2026-09-09 — duplicate of the glob-settings finding
+- `config-value-unvalidated` `shmutant.sh:360` `a380a98` `PRRT_kwDOUT7q9s6g16Bw` PR #1 2026-09-09 — SHMUTANT_RED_STATUS=0 or non-numeric changed verdict semantics silently; now validated 1..255 and prefix non-empty
+- `config-value-unvalidated` `shmutant.sh:360` `a380a98` `PRRT_kwDOUT7q9s6g16B-` PR #1 2026-09-09 — duplicate of the red-status validation finding
+- `config-value-unvalidated` `shmutant.sh:360` `a380a98` `PRRT_kwDOUT7q9s6g16CV` PR #1 2026-09-09 — duplicate of the red-status validation finding
+- `host-shell-option-leak` `shmutant.sh:611` `a380a98` `PRRT_kwDOUT7q9s6g16CE` PR #1 2026-09-09 — a plan preamble set -e aborted the CLI at the pool call before cleanup; errexit is now turned off after sourcing
+- `host-shell-option-leak` `shmutant.sh:611` `a380a98` `PRRT_kwDOUT7q9s6g16CZ` PR #1 2026-09-09 — duplicate of the plan errexit finding
+- `caller-owned-path-deleted` `shmutant.sh:542` `a380a98` `PRRT_kwDOUT7q9s6g16CJ` PR #1 2026-09-09 — a stream inside the workdir was deleted by pristine cleanup; stream paths inside the workdir are now refused
+- `caller-owned-path-deleted` `shmutant.sh:542` `a380a98` `PRRT_kwDOUT7q9s6g16Cg` PR #1 2026-09-09 — duplicate of the stream-under-pristine finding
 <!-- adb:hits:end -->
