@@ -44,6 +44,8 @@ Sweep each of these before opening a pull request.
 
 <!-- adb:checklist:begin -->
 - `rewrite-loses-file-shape` — For every place that rewrites a file through a temporary and renames it over the original, check that the mode bits, the final-newline shape, and the symlink status of the original survive the rewrite; test each with a file that has the non-default property, not only the default one.
+- `host-shell-option-leak` — For a library that is sourced into a caller shell, list every shell option or variable that changes the meaning of the constructs it uses (nocasematch for case, noclobber for redirects, CDPATH for cd, IFS, set -e, set -u, extglob) and either neutralise each one inside a subshell or make the construct immune; test each with the option deliberately turned on around the call.
+- `path-escapes-root` — For every path built as <root>/<caller-supplied relative path>, resolve the result physically (cd -P, pwd -P) and require it to stay at or below <root> before reading or writing it; test with a .. component, an absolute symlink, and a symlinked parent directory, not only a plain file.
 <!-- adb:checklist:end -->
 
 ## Hits
@@ -66,4 +68,9 @@ One line per resolved review thread, newest last.
 - `path-lookup-ambiguity` `shmutant.sh:575` `ddc2655` `PRRT_kwDOUT7q9s6g07QK` PR #1 2026-09-09 — a bare plan name was sourced via PATH lookup; now sourced by its resolved directory path
 - `option-surface-mismatch` `shmutant.sh:586` `ddc2655` `PRRT_kwDOUT7q9s6g07QQ` PR #1 2026-09-09 — SHMUTANT_KEEP=1 kept clones but the CLI still deleted its created workdir; the env form now sets keep
 - `pipeline-status-lost` `README.md:132` `ddc2655` `PRRT_kwDOUT7q9s6g07Qa` PR #1 2026-09-09 — documented CI pipeline returned awk status not shmutant; docs now capture rc before the awk
+- `path-escapes-root` `shmutant.sh:465` `3095609` `PRRT_kwDOUT7q9s6g1ZJM` PR #1 2026-09-09 — a symlinked parent component let a relative target resolve outside the clone; the target directory is now resolved physically and required under root
+- `host-shell-option-leak` `shmutant.sh:241` `3095609` `PRRT_kwDOUT7q9s6g1ZJR` PR #1 2026-09-09 — the caller nocasematch made witness case patterns case-insensitive; workers now unset it
+- `host-shell-option-leak` `shmutant.sh:148` `3095609` `PRRT_kwDOUT7q9s6g1ZJX` PR #1 2026-09-09 — CDPATH made cd print a second line from the path resolver; unset inside the subshell
+- `self-referential-copy` `shmutant.sh:167` `3095609` `PRRT_kwDOUT7q9s6g1ZJe` PR #1 2026-09-09 — a destination inside the source was copied into itself; now refused with a message
+- `undeclared-dependency` `shmutant.sh:199` `3095609` `PRRT_kwDOUT7q9s6g1ZJk` PR #1 2026-09-09 — cmp (diffutils) was used and its absence read as files differ; awk now reports the miss by exit status
 <!-- adb:hits:end -->
