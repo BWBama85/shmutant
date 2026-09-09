@@ -117,6 +117,17 @@ t_mutate_preserves_mode() {
   eq "$(cat "$T/f")" $'#!/bin/sh\necho newer' 'content rewritten'
 }
 
+t_mutate_rewrites_a_read_only_target() {
+  printf 'x=1\n' > "$T/f"; chmod 444 "$T/f"
+  shmutant_mutate "$T/f" 'x=1' 'x=2'; rc_is $? 0 'a 0444 target is rewritten'
+  eq "$(cat "$T/f")" 'x=2' 'content changed'
+  case "$(ls -l "$T/f")" in -r--r--r--*) ;; *) fail_ "mode not preserved: $(ls -l "$T/f")" ;; esac
+  printf '#!/bin/sh\necho old\n' > "$T/g"; chmod 555 "$T/g"
+  shmutant_mutate "$T/g" 'old' 'new'; rc_is $? 0 'a 0555 target is rewritten'
+  case "$(ls -l "$T/g")" in -r-xr-xr-x*) ;; *) fail_ "mode not preserved: $(ls -l "$T/g")" ;; esac
+  chmod 644 "$T/f" "$T/g"
+}
+
 t_mutate_preserves_missing_final_newline() {
   printf 'a=1\nb=1' > "$T/f"
   shmutant_mutate "$T/f" 'b=1' 'b=2'; rc_is $? 0 'applies'
@@ -554,10 +565,31 @@ t_stream_write_failure_is_a_harness_error() {
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
   shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
-  SHMUTANT_STREAM="$T/no/such/dir/stream" pool lbl "$T/wd" toy_prepare toy_run
+  : > "$T/stream"; chmod 444 "$T/stream"
+  SHMUTANT_STREAM="$T/stream" pool lbl "$T/wd" toy_prepare toy_run
   rc_is "$RC" 2 'an unwritable stream is exit 2 even though every row was killed'
   has "$ERR" 'could not be written' 'says the stream was lost'
   has "$ERR" '1/1 mutation(s) killed' 'the human summary still reports the verdicts'
+  SHMUTANT_STREAM="$T/no/such/dir/stream" pool lbl "$T/wd" toy_prepare toy_run
+  rc_is "$RC" 2 'a stream in a missing directory is refused up front'
+  SHMUTANT_STREAM="$T/wd/stream" pool lbl "$T/wd" toy_prepare toy_run
+  rc_is "$RC" 2 'a stream inside the workdir is refused: cleanup would delete it'
+  has "$ERR" 'inside the workdir' 'says why'
+}
+
+t_pool_validates_red_status_and_prefix() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  SHMUTANT_RED_STATUS=0 pool lbl "$T/wd" toy_prepare toy_run
+  rc_is "$RC" 2 'red status 0 is refused: 0 is green'
+  SHMUTANT_RED_STATUS=256 pool lbl "$T/wd" toy_prepare toy_run
+  rc_is "$RC" 2 'red status 256 is refused'
+  SHMUTANT_RED_STATUS=foo pool lbl "$T/wd" toy_prepare toy_run
+  rc_is "$RC" 2 'a non-numeric red status is refused'
+  SHMUTANT_RED_PREFIX='' pool lbl "$T/wd" toy_prepare toy_run
+  rc_is "$RC" 2 'an empty red prefix is refused'
+  has "$ERR" 'every line' 'says why'
 }
 
 t_stream_to_file() {
@@ -594,6 +626,15 @@ t_copy_tree_excludes_git() {
   shmutant_copy_tree "$T/src" "$T/src/.work/pristine" 2>"$T/e"; rc_is $? 1 'a destination inside the source is refused'
   has "$(cat "$T/e")" 'inside the source' 'says why'
   [ -e "$T/src/.work/pristine/sub" ] && fail_ 'the self-copy started anyway'
+}
+
+t_copy_tree_ignores_caller_glob_settings() {
+  mkdir -p "$T/src/sub"; printf 'a' > "$T/src/sub/f"; printf 'b' > "$T/src/.hidden"; printf 'c' > "$T/src/top"
+  ( set -f; shopt -s failglob dotglob; GLOBIGNORE='*/sub'; shmutant_copy_tree "$T/src" "$T/dst" ); rc_is $? 0 'copies under set -f, failglob, dotglob and GLOBIGNORE'
+  eq "$(cat "$T/dst/sub/f" "$T/dst/.hidden" "$T/dst/top" 2>&1)" 'abc' 'every entry arrived exactly once'
+  [ -e "$T/dst/.hidden/.hidden" ] && fail_ 'a hidden entry was copied twice (dotglob leaked)'
+  mkdir -p "$T/bare/only"; printf 'd' > "$T/bare/only/f"
+  ( shopt -s failglob; shmutant_copy_tree "$T/bare" "$T/dst2" ); rc_is $? 0 'a source with no hidden entries copies under failglob'
 }
 
 t_bash_floor() {
@@ -652,6 +693,10 @@ EOF
   [ -n "$kept" ] && rm -rf -- "$kept"
   mkdir -p "$T/decoy"; printf 'exit 3\n' > "$T/decoy/plan.sh"
   ( cd "$T/toy" && PATH="$T/decoy:$PATH" bash "$SHMUTANT" run plan.sh > /dev/null 2>&1 ); rc_is $? 1 'a bare plan name is sourced from its own directory, not from PATH (1: the survivor row, not the decoy'"'"'s 3)'
+  { printf 'set -e\n'; cat "$T/toy/plan.sh"; } > "$T/toy/plan-e.sh"
+  kept="$(bash "$SHMUTANT" run "$T/toy/plan-e.sh" --keep 2>&1 >/dev/null | sed -n 's/^shmutant: workdir kept: //p')"
+  [ -n "$kept" ] || fail_ 'a plan with set -e made the CLI exit at the pool call before its cleanup and report'
+  [ -n "$kept" ] && rm -rf -- "$kept"
   printf "shmutant_mut 'broken' '' 'x' 'add-works'\nshmutant_mut 'fine' '+' '-' 'add-works'\n" >> "$T/toy/plan.sh"
   bash "$SHMUTANT" run "$T/toy/plan.sh" > /dev/null 2>&1; rc_is $? 2 'a refused row followed by a valid one fails the plan'
   bash "$SHMUTANT" run "$T/toy/plan.sh" --bogus > /dev/null 2>&1; rc_is $? 2 'an unknown option is refused'

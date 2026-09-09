@@ -183,13 +183,19 @@ shmutant_copy_tree() {
   case "$adst" in
     "$asrc"|"$asrc/"*) _shmutant_err "copy_tree: destination $dst lies inside the source $src — it would copy itself; use a workdir outside the tree"; return 1 ;;
   esac
-  for entry in "$src"/* "$src"/.[!.]* "$src"/..?*; do
-    [ -e "$entry" ] || [ -L "$entry" ] || continue
-    name="${entry##*/}"
-    [ "$name" = .git ] && continue
-    cp -RP -- "$entry" "$dst/" || rc=1
-  done
-  return "$rc"
+  # The enumeration runs with the caller's expansion settings neutralised: `set -f` would hand
+  # the loop three literal patterns, failglob would abort on an unmatched one, GLOBIGNORE would
+  # drop entries, dotglob would list hidden entries twice.
+  (
+    set +f; shopt -u failglob dotglob; shopt -s nullglob; unset GLOBIGNORE
+    for entry in "$src"/* "$src"/.[!.]* "$src"/..?*; do
+      [ -e "$entry" ] || [ -L "$entry" ] || continue
+      name="${entry##*/}"
+      [ "$name" = .git ] && continue
+      cp -RP -- "$entry" "$dst/" || rc=1
+    done
+    exit "$rc"
+  )
 }
 
 # shmutant_mutate <file> <old> <new> — replace the FIRST occurrence of literal <old> with <new>,
@@ -204,12 +210,16 @@ shmutant_copy_tree() {
 # `sed -i` (BSD and GNU differ), so a failed rewrite cannot half-write. A target whose last line
 # has no newline keeps that shape: the only change is the literal.
 shmutant_mutate() {
-  local f="$1" tmp nl=1 rc
+  local f="$1" tmp nl=1 rc uw=1
   [ -n "$2" ] && [ "$2" != "$3" ] || return 2
   [ -f "$f" ] && [ ! -L "$f" ] || return 1
   tmp="$(mktemp "$(dirname -- "$f")/.shmutant.XXXXXX" 2>/dev/null)" || return 1
   [ -n "$(tail -c 1 -- "$f" 2>/dev/null)" ] && nl=0
-  { cp -p -- "$f" "$tmp" && SHMUTANT_MUT_OLD="$2" SHMUTANT_MUT_NEW="$3" SHMUTANT_MUT_NL="$nl" awk '
+  # Owner-write from `ls -l` column 3, the one mode read POSIX specifies the same way everywhere.
+  case "$(ls -ld -- "$f" 2>/dev/null)" in ??w*) uw=1 ;; *) uw=0 ;; esac
+  # The mode is carried over by cp -p and then re-opened for writing, so a read-only target
+  # (0444, 0555) can still be rewritten; owner-write is taken back after the write.
+  { cp -p -- "$f" "$tmp" && chmod -- u+w "$tmp" && SHMUTANT_MUT_OLD="$2" SHMUTANT_MUT_NEW="$3" SHMUTANT_MUT_NL="$nl" awk '
     BEGIN { old = ENVIRON["SHMUTANT_MUT_OLD"]; new = ENVIRON["SHMUTANT_MUT_NEW"] }
     !hit { i = index($0, old); if (i) { $0 = substr($0, 1, i - 1) new substr($0, i + length(old)); hit = 1 } }
     NR > 1 { printf "\n" }
@@ -221,6 +231,7 @@ shmutant_mutate() {
     3) rm -f "$tmp"; return 2 ;;
     *) rm -f "$tmp"; return 1 ;;
   esac
+  [ "$uw" = 1 ] || chmod -- u-w "$tmp" 2>/dev/null
   mv -f "$tmp" "$f" 2>/dev/null || { rm -f "$tmp"; return 1; }
   return 0
 }
@@ -466,7 +477,25 @@ shmutant_pool() {
   case "${SHMUTANT_TIMEOUT:-300}" in
     *[!0-9]*|'') _shmutant_err "$label: SHMUTANT_TIMEOUT must be a non-negative integer, got [${SHMUTANT_TIMEOUT:-}]"; return 2 ;;
   esac
+  case "${SHMUTANT_RED_STATUS:-1}" in
+    *[!0-9]*|'') _shmutant_err "$label: SHMUTANT_RED_STATUS must be an exit status from 1 to 255, got [${SHMUTANT_RED_STATUS:-}]"; return 2 ;;
+  esac
+  if [ "${SHMUTANT_RED_STATUS:-1}" -lt 1 ] || [ "${SHMUTANT_RED_STATUS:-1}" -gt 255 ]; then
+    _shmutant_err "$label: SHMUTANT_RED_STATUS must be an exit status from 1 to 255, got [${SHMUTANT_RED_STATUS:-}] — 0 is green by definition"; return 2
+  fi
+  if [ -n "${SHMUTANT_RED_PREFIX+x}" ] && [ -z "$SHMUTANT_RED_PREFIX" ]; then
+    _shmutant_err "$label: SHMUTANT_RED_PREFIX is empty — every line would count as a red line"; return 2
+  fi
   jobs="$(_shmutant_jobs "$cap")"
+  if [ -n "${SHMUTANT_STREAM:-}" ]; then
+    local sdir
+    if ! sdir="$(_shmutant_abs "$(dirname -- "$SHMUTANT_STREAM")")"; then
+      _shmutant_err "$label: SHMUTANT_STREAM points into a directory that does not exist: $SHMUTANT_STREAM"; return 2
+    fi
+    case "$sdir" in
+      "$wd"|"$wd/"*) _shmutant_err "$label: SHMUTANT_STREAM lies inside the workdir ($SHMUTANT_STREAM) — the pool recreates and removes what is in there"; return 2 ;;
+    esac
+  fi
 
   rm -rf -- "$wd/pristine"
   mkdir -p -- "$wd/pristine" || { _shmutant_err "$label: cannot create $wd/pristine"; return 2; }
@@ -608,6 +637,9 @@ _shmutant_cli_run() {
     wd="$(mktemp -d "${TMPDIR:-/tmp}/shmutant.XXXXXX")" || { _shmutant_err "run: cannot create a workdir"; return 2; }
     made=1
   fi
+  # The plan may have turned errexit on for its own preamble; the pool's non-zero returns are
+  # answers, not errors, and the cleanup below must run for every one of them.
+  set +o errexit
   shmutant_pool "$(basename -- "$plan")" "$wd" prepare run; rc=$?
   # Only a workdir this run created is removed. A caller-supplied one is theirs: the pool's own
   # artifacts stay in it and nothing else in it is touched.

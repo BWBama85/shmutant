@@ -297,3 +297,33 @@ shmutant_mut 'identical literals are rewritten as applied' \
   '[ -n "$2" ] && [ "$2" != "$3" ] || return 2' \
   '[ -n "$2" ] || return 2' \
   't_mutate_reports_unapplied'
+
+# --- guards added for the fourth review round ---
+shmutant_mut 'the temp file is not made writable before the rewrite' \
+  'chmod -- u+w "$tmp" &&' \
+  'true &&' \
+  't_mutate_rewrites_a_read_only_target'
+shmutant_mut 'owner-write is not taken back after the rewrite' \
+  '[ "$uw" = 1 ] || chmod -- u-w "$tmp" 2>/dev/null' \
+  ': "$uw"' \
+  't_mutate_rewrites_a_read_only_target'
+shmutant_mut 'copy_tree runs under the caller glob settings' \
+  'set +f; shopt -u failglob dotglob; shopt -s nullglob; unset GLOBIGNORE' \
+  ':' \
+  't_copy_tree_ignores_caller_glob_settings'
+shmutant_mut 'a red status of 0 is accepted' \
+  'if [ "${SHMUTANT_RED_STATUS:-1}" -lt 1 ] ||' \
+  'if [ "${SHMUTANT_RED_STATUS:-1}" -lt 0 ] ||' \
+  't_pool_validates_red_status_and_prefix'
+shmutant_mut 'an empty red prefix is accepted' \
+  'if [ -n "${SHMUTANT_RED_PREFIX+x}" ] && [ -z "$SHMUTANT_RED_PREFIX" ]; then' \
+  'if false; then' \
+  't_pool_validates_red_status_and_prefix'
+shmutant_mut 'a stream inside the workdir is accepted' \
+  '"$wd"|"$wd/"*) _shmutant_err "$label: SHMUTANT_STREAM lies inside' \
+  'never-matches) _shmutant_err "$label: SHMUTANT_STREAM lies inside' \
+  't_stream_write_failure_is_a_harness_error'
+shmutant_mut 'the plan errexit is left on across the pool call' \
+  'set +o errexit' \
+  ':' \
+  't_cli_run'
