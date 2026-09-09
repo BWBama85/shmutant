@@ -76,6 +76,8 @@ t_mutate_reports_unapplied() {
   eq "$(cat "$T/f")" 'keep me' 'file untouched on no match'
   [ -e "$T/f.shmutant-tmp" ] && fail_ 'temp file left behind'
   shmutant_mutate "$T/f" '' 'x'; rc_is $? 2 'an empty old literal is rc 2, not a rewrite'
+  shmutant_mutate "$T/f" 'keep' 'keep'; rc_is $? 2 'identical literals are rc 2, not a rewrite'
+  eq "$(cat "$T/f")" 'keep me' 'file untouched by identical literals'
 }
 
 t_mutate_keeps_backslashes() {
@@ -223,7 +225,39 @@ t_pool_refuses_symlink_target() {
   mk_toy "$T/toy"; TOY="$T/toy"; ln -s lib.sh "$T/toy/link.sh"
   pool lbl "$T/wd" toy_prepare toy_run
   rc_is "$RC" 2 'a symlink target is refused before any run'
-  has "$ERR" 'symlink' 'says why'
+  has "$ERR" 'a symlink' 'says why'
+}
+
+t_pool_refuses_target_under_symlinked_dir() {
+  mkdir -p "$T/outside"; printf 'add() { echo 5; }\n' > "$T/outside/lib.sh"
+  mk_toy "$T/toy"; TOY="$T/toy"; ln -s "$T/outside" "$T/toy/linked"
+  shmutant_reset; shmutant_target linked/lib.sh; shmutant_mut 'r' 'echo 5' 'echo 6' 'add-works'
+  pool lbl "$T/wd" toy_prepare toy_run
+  rc_is "$RC" 2 'a target under a symlinked directory is refused before any run'
+  has "$ERR" 'under one' 'says why'
+  eq "$(cat "$T/outside/lib.sh")" 'add() { echo 5; }' 'the file outside the tree was never touched'
+  _shmutant_target_ok "$T/toy" lib.sh; rc_is $? 0 'a plain in-tree file is fine'
+  mkdir -p "$T/toy/sub"; ln -s ../lib.sh "$T/toy/sub/rel"; ln -s .. "$T/toy/sub/up"
+  _shmutant_target_ok "$T/toy" sub/up/lib.sh; rc_is $? 0 'a relative symlink that stays inside the tree is fine'
+  _shmutant_target_ok "$T/toy" linked/lib.sh; rc_is $? 1 'an absolute symlink out of the tree is not'
+  _shmutant_target_ok "$T/toy" sub/rel; rc_is $? 1 'a symlink target itself is not'
+}
+
+t_pool_witness_match_is_case_sensitive() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'ADD-WORKS' 'add-works'
+  shopt -s nocasematch
+  pool lbl "$T/wd" toy_prepare toy_run
+  shopt -u nocasematch
+  eq "$(verdict_of a)" accidental 'a caller with nocasematch on does not make FAIL: add-works satisfy witness ADD-WORKS'
+}
+
+t_abs_ignores_cdpath() {
+  mkdir -p "$T/here/sub" "$T/elsewhere/sub"
+  local got
+  got="$(cd "$T/here" && CDPATH="$T/elsewhere" _shmutant_abs sub)"
+  eq "$got" "$(cd "$T/here/sub" && pwd -P)" 'a relative directory resolves against the cwd, on one line, whatever CDPATH says'
 }
 
 t_pool_reports_failed_prepare() {
@@ -557,6 +591,9 @@ t_copy_tree_excludes_git() {
   eq "$(cat "$T/dst/.dotfile")" w 'dotfile copied'
   [ -L "$T/dst/link" ] || fail_ 'symlink was not kept as a symlink'
   shmutant_copy_tree "$T/missing" "$T/dst2" 2>/dev/null; rc_is $? 1 'a missing source is an error'
+  shmutant_copy_tree "$T/src" "$T/src/.work/pristine" 2>"$T/e"; rc_is $? 1 'a destination inside the source is refused'
+  has "$(cat "$T/e")" 'inside the source' 'says why'
+  [ -e "$T/src/.work/pristine/sub" ] && fail_ 'the self-copy started anyway'
 }
 
 t_bash_floor() {

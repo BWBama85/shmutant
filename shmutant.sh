@@ -41,7 +41,7 @@
 # Row verdicts: killed (the only pass), survived, accidental, aborted, unapplied, unprepared,
 # baseline, timeout, lost.
 #
-# Requires bash >= 5.3 and coreutils, awk, grep, sed. Nothing else.
+# Requires bash >= 5.3 and coreutils plus awk. Nothing else.
 
 SHMUTANT_VERSION=0.1.0
 
@@ -144,8 +144,22 @@ _shmutant_secs() {
 }
 
 # _shmutant_abs <dir> — the physical absolute path of an existing directory, or return 1.
+# CDPATH is dropped: with it set, `cd` prints the directory it matched and the result would be
+# two lines.
 _shmutant_abs() {
-  ( cd -P -- "$1" 2>/dev/null && pwd -P )
+  ( unset CDPATH; cd -P -- "$1" 2>/dev/null && pwd -P )
+}
+
+# _shmutant_target_ok <root> <file> — true when <root>/<file> is a regular file, not a symlink,
+# whose directory resolves physically to <root> or below it. A symlinked parent component is
+# how a relative target reaches a caller-owned file outside the tree.
+_shmutant_target_ok() {
+  local root="$1" f="$1/$2" dir
+  [ ! -L "$f" ] && [ -f "$f" ] || return 1
+  root="$(_shmutant_abs "$root")" || return 1
+  dir="$(_shmutant_abs "$(dirname -- "$f")")" || return 1
+  case "$dir" in "$root"|"$root/"*) return 0 ;; esac
+  return 1
 }
 
 # shmutant_selected <unit> — true when no selection is active or SHMUTANT_SELECT equals <unit>.
@@ -159,11 +173,16 @@ shmutant_selected() {
 }
 
 # shmutant_copy_tree <src> <dst> — copy <src> to <dst> (created), skipping a top-level .git
-# and keeping symlinks as symlinks. Returns 1 when anything fails to copy.
+# and keeping symlinks as symlinks. Returns 1 when anything fails to copy, or when <dst> lies
+# inside <src>.
 shmutant_copy_tree() {
-  local src="$1" dst="$2" entry name rc=0
+  local src="$1" dst="$2" entry name rc=0 asrc adst
   [ -d "$src" ] || { _shmutant_err "copy_tree: not a directory: $src"; return 1; }
   mkdir -p -- "$dst" || return 1
+  asrc="$(_shmutant_abs "$src")" && adst="$(_shmutant_abs "$dst")" || return 1
+  case "$adst" in
+    "$asrc"|"$asrc/"*) _shmutant_err "copy_tree: destination $dst lies inside the source $src — it would copy itself; use a workdir outside the tree"; return 1 ;;
+  esac
   for entry in "$src"/* "$src"/.[!.]* "$src"/..?*; do
     [ -e "$entry" ] || [ -L "$entry" ] || continue
     name="${entry##*/}"
@@ -175,7 +194,8 @@ shmutant_copy_tree() {
 
 # shmutant_mutate <file> <old> <new> — replace the FIRST occurrence of literal <old> with <new>,
 # in place. 0 applied; 1 the rewrite failed (file unreadable, dir unwritable); 2 <old> matched
-# nothing, file unchanged. A symlink is refused (1): renaming over it would swap the link for a
+# nothing, file unchanged (awk reports the miss itself, so no `cmp` is needed). A symlink is
+# refused (1): renaming over it would swap the link for a
 # file and leave the referent, which the tests may read, untouched. A literal spanning two lines
 # never matches: awk sees one record.
 # ENVIRON, not -v: -v processes backslash escapes, so `\$` and `\n` would arrive altered.
@@ -184,8 +204,8 @@ shmutant_copy_tree() {
 # `sed -i` (BSD and GNU differ), so a failed rewrite cannot half-write. A target whose last line
 # has no newline keeps that shape: the only change is the literal.
 shmutant_mutate() {
-  local f="$1" tmp nl=1
-  [ -n "$2" ] || return 2
+  local f="$1" tmp nl=1 rc
+  [ -n "$2" ] && [ "$2" != "$3" ] || return 2
   [ -f "$f" ] && [ ! -L "$f" ] || return 1
   tmp="$(mktemp "$(dirname -- "$f")/.shmutant.XXXXXX" 2>/dev/null)" || return 1
   [ -n "$(tail -c 1 -- "$f" 2>/dev/null)" ] && nl=0
@@ -194,9 +214,13 @@ shmutant_mutate() {
     !hit { i = index($0, old); if (i) { $0 = substr($0, 1, i - 1) new substr($0, i + length(old)); hit = 1 } }
     NR > 1 { printf "\n" }
     { printf "%s", $0 }
-    END { if (NR > 0 && ENVIRON["SHMUTANT_MUT_NL"] == 1) printf "\n" }
-  ' "$f" >| "$tmp"; } 2>/dev/null || { rm -f "$tmp"; return 1; }
-  if cmp -s "$tmp" "$f"; then rm -f "$tmp"; return 2; fi
+    END { if (NR > 0 && ENVIRON["SHMUTANT_MUT_NL"] == 1) printf "\n"; exit (hit ? 0 : 3) }
+  ' "$f" >| "$tmp"; } 2>/dev/null; rc=$?
+  case "$rc" in
+    0) ;;
+    3) rm -f "$tmp"; return 2 ;;
+    *) rm -f "$tmp"; return 1 ;;
+  esac
   mv -f "$tmp" "$f" 2>/dev/null || { rm -f "$tmp"; return 1; }
   return 0
 }
@@ -309,6 +333,7 @@ _shmutant_worker() {
   local kind="$1" i="$2" wd="$3" run="$4" suffix="$5"
   local dir="$3/$1-$2" root sel verdict status t0 t1 target rc
   set +e
+  shopt -u nocasematch
   t0="$(_shmutant_now)"
   root="$dir/tree$suffix"
   if [ "$kind" = mut ]; then sel="${SHMUTANT_ROWS_SEL[$i]}"; else sel="${SHMUTANT_BASE_SEL[$i]}"; fi
@@ -317,9 +342,7 @@ _shmutant_worker() {
   fi
   if [ "$kind" = mut ]; then
     target="$root/${SHMUTANT_ROWS_FILE[$i]}"
-    if [ ! -f "$target" ] || [ -L "$target" ]; then
-      _shmutant_worker_finish "$dir" unprepared 0 missing; return 0
-    fi
+    _shmutant_target_ok "$root" "${SHMUTANT_ROWS_FILE[$i]}" || { _shmutant_worker_finish "$dir" unprepared 0 missing; return 0; }
     shmutant_mutate "$target" "${SHMUTANT_ROWS_OLD[$i]}" "${SHMUTANT_ROWS_NEW[$i]}"; rc=$?
     case "$rc" in
       0) ;;
@@ -376,7 +399,7 @@ _shmutant_detail() {
     unapplied)  printf 'the injection did not apply — the old literal matched nothing, so this row tests NOTHING' ;;
     unprepared) case "$2" in
                   clone)   printf 'could not clone the pristine tree' ;;
-                  missing) printf 'the target is not a regular file in the tree' ;;
+                  missing) printf 'the target is not a regular file inside the tree' ;;
                   *)       printf 'the rewrite failed' ;;
                 esac ;;
     baseline)   printf 'the tests selected by [%s] did not come back green BEFORE any defect was injected — a red result here would prove nothing (see the baseline record)' "$4" ;;
@@ -458,12 +481,8 @@ shmutant_pool() {
   esac
   suffix="${root#"$wd/pristine"}"
   for (( i = 0; i < n; i++ )); do
-    if [ ! -f "$root/${SHMUTANT_ROWS_FILE[$i]}" ]; then
-      _shmutant_err "$label: row '${SHMUTANT_ROWS_NAME[$i]}' targets ${SHMUTANT_ROWS_FILE[$i]}, which the prepared tree does not contain"
-      return 2
-    fi
-    if [ -L "$root/${SHMUTANT_ROWS_FILE[$i]}" ]; then
-      _shmutant_err "$label: row '${SHMUTANT_ROWS_NAME[$i]}' targets ${SHMUTANT_ROWS_FILE[$i]}, which is a symlink — name the file it points at"
+    if ! _shmutant_target_ok "$root" "${SHMUTANT_ROWS_FILE[$i]}"; then
+      _shmutant_err "$label: row '${SHMUTANT_ROWS_NAME[$i]}' targets ${SHMUTANT_ROWS_FILE[$i]}, which the prepared tree does not contain as a regular file (missing, a symlink, or under one)"
       return 2
     fi
   done

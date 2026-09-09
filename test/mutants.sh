@@ -51,14 +51,6 @@ shmutant_mut 'mutate replaces every occurrence' \
   '!hit { i = index($0, old)' \
   '{ i = index($0, old)' \
   't_mutate_applies_first_occurrence_only'
-shmutant_mut 'an unchanged file is reported as applied' \
-  'if cmp -s "$tmp" "$f"; then rm -f "$tmp"; return 2; fi' \
-  'if cmp -s "$tmp" "$f"; then rm -f "$tmp"; return 0; fi' \
-  't_mutate_reports_unapplied'
-shmutant_mut 'an empty old literal is accepted' \
-  '[ -n "$2" ] || return 2' \
-  '[ -n "$2" ] || return 0' \
-  't_mutate_reports_unapplied'
 shmutant_mut 'the new literal goes through -v and loses its backslashes' \
   'new = ENVIRON["SHMUTANT_MUT_NEW"]' \
   'new = ENVIRON["SHMUTANT_MUT_NEW"]; gsub(/\\/, "", new)' \
@@ -92,7 +84,7 @@ shmutant_mut 'a root outside the workdir is mutated' \
   '"$wd/pristine"|*) ;;' \
   't_pool_refuses_root_outside_workdir'
 shmutant_mut 'a missing target is discovered per row instead of refused up front' \
-  'if [ ! -f "$root/${SHMUTANT_ROWS_FILE[$i]}" ]; then' \
+  'if ! _shmutant_target_ok "$root" "${SHMUTANT_ROWS_FILE[$i]}"; then' \
   'if false; then' \
   't_pool_refuses_missing_target'
 shmutant_mut 'a bad SHMUTANT_TIMEOUT is accepted' \
@@ -268,7 +260,7 @@ shmutant_mut 'the temp redirect honours noclobber' \
   ''"'"' "$f" > "$tmp"; }' \
   't_mutate_works_under_noclobber'
 shmutant_mut 'a symlink target passes the pool precheck' \
-  'if [ -L "$root/${SHMUTANT_ROWS_FILE[$i]}" ]; then' \
+  'if ! _shmutant_target_ok "$root" "${SHMUTANT_ROWS_FILE[$i]}"; then' \
   'if false; then' \
   't_pool_refuses_symlink_target'
 shmutant_mut 'the plan is sourced by its bare name' \
@@ -279,3 +271,29 @@ shmutant_mut 'SHMUTANT_KEEP=1 is ignored by the CLI cleanup' \
   '[ "${SHMUTANT_KEEP:-0}" = 1 ] && keep=1' \
   '[ "${SHMUTANT_KEEP:-0}" = 2 ] && keep=1' \
   't_cli_run'
+
+# --- guards added for the third review round ---
+shmutant_mut 'a symlinked parent directory passes the target check' \
+  'case "$dir" in "$root"|"$root/"*) return 0 ;; esac' \
+  'case "$dir" in *) return 0 ;; esac' \
+  't_pool_refuses_target_under_symlinked_dir'
+shmutant_mut 'the caller'"'"'s nocasematch reaches witness matching' \
+  '  shopt -u nocasematch' \
+  '  shopt -s nocasematch' \
+  't_pool_witness_match_is_case_sensitive'
+shmutant_mut 'CDPATH reaches the path resolver' \
+  '( unset CDPATH; cd -P -- "$1"' \
+  '( cd -P -- "$1"' \
+  't_abs_ignores_cdpath'
+shmutant_mut 'a destination inside the source is copied into itself' \
+  '"$asrc"|"$asrc/"*) _shmutant_err "copy_tree: destination' \
+  'never-matches) _shmutant_err "copy_tree: destination' \
+  't_copy_tree_excludes_git'
+shmutant_mut 'awk no longer reports a missed literal' \
+  'exit (hit ? 0 : 3) }' \
+  'exit 0 }' \
+  't_mutate_reports_unapplied'
+shmutant_mut 'identical literals are rewritten as applied' \
+  '[ -n "$2" ] && [ "$2" != "$3" ] || return 2' \
+  '[ -n "$2" ] || return 2' \
+  't_mutate_reports_unapplied'
