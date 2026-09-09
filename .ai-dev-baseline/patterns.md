@@ -51,6 +51,7 @@ Sweep each of these before opening a pull request.
 - `path-lookup-ambiguity` — For every path the caller supplies (a file to source, a workdir, an output), resolve it to an absolute physical path at the moment it is received and before any code that may cd, source, or change PATH runs; never let a bare name reach source, ., or a relative open after that point. Test with a relative path plus a cd, and a bare name plus a decoy on PATH.
 - `timeout-escalation-cancelled` — For every timeout that kills a run, enumerate what can outlive the first signal (a TERM-ignoring child, a descendant in its own process group or session, a watchdog cancelled before its KILL) and test each with a run that does exactly that, asserting a marker the survivor would have written does not appear.
 - `early-return-skips-cleanup` — For every function that creates something it must later remove (a clone, a temp file, a workdir, a trap), list every return, exit and trap path out of it and route each one through a single finish helper; grep the function for return and exit and check each line reaches that helper. Test each early exit by asserting the artifact is gone.
+- `stale-artifact-reuse` — For every directory or file a run reads a result from, prove it was written by this run: recreate it before use and treat a failed removal or creation as an abort, never as a warning. Test by planting a stale result (a marker, a verdict) that the run must not report, and one the run cannot delete.
 <!-- adb:checklist:end -->
 
 ## Hits
@@ -107,4 +108,10 @@ One line per resolved review thread, newest last.
 - `rewrite-loses-file-shape` `shmutant.sh:229` `8757c31` `PRRT_kwDOUT7q9s6g2tVc` PR #1 2026-09-09 — writing cleared setuid/setgid and only owner-write was restored; the full ls -l mode is reapplied
 - `path-lookup-ambiguity` `shmutant.sh:670` `8757c31` `PRRT_kwDOUT7q9s6g2tVf` PR #1 2026-09-09 — a relative TMPDIR gave a relative automatic workdir that a plan cd moved; resolved absolute before sourcing
 - `path-lookup-ambiguity` `shmutant.sh:520` `8757c31` `PRRT_kwDOUT7q9s6g2tVg` PR #1 2026-09-09 — a relative SHMUTANT_STREAM was interpreted after a plan cd; resolved absolute before sourcing
+- `host-shell-option-leak` `shmutant.sh:748` `33bb02b` `PRRT_kwDOUT7q9s6g3Jdp` PR #1 2026-09-09 — a plan could replace the EXIT load-failure trap and exit around it; trap is shadowed to refuse EXIT while the plan loads
+- `host-shell-option-leak` `shmutant.sh:362` `33bb02b` `PRRT_kwDOUT7q9s6g3Jd1` PR #1 2026-09-09 — the descendant pid list was an unquoted string split by the caller IFS; now an array with a local IFS
+- `rewrite-loses-file-shape` `shmutant.sh:237` `33bb02b` `PRRT_kwDOUT7q9s6g3Jd5` PR #1 2026-09-09 — as root the mktemp replacement was root-owned; cp -p now carries owner and group before the rewrite
+- `contract-not-honoured` `shmutant.sh:572` `33bb02b` `PRRT_kwDOUT7q9s6g3JeA` PR #1 2026-09-09 — prepare ran in a command-substitution subshell despite the contract saying the pool shell; now called directly with stdout to a file
+- `config-value-unvalidated` `shmutant.sh:272` `33bb02b` `PRRT_kwDOUT7q9s6g3JeG` PR #1 2026-09-09 — surplus shmutant_mut arguments were silently dropped; more than five is now refused
+- `stale-artifact-reuse` `shmutant.sh:484` `33bb02b` `PRRT_kwDOUT7q9s6g3JeJ` PR #1 2026-09-09 — an unremovable worker dir was ignored and its stale verdict read; recreation failure now aborts with 2
 <!-- adb:hits:end -->
