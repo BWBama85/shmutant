@@ -1,0 +1,4 @@
+# Project manifest read by the shared workflows (see ai-dev-baseline docs/roles-and-agents.md).
+
+[reviewers]
+bots = ["chatgpt-codex-connector"]
