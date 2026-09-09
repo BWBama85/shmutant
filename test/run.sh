@@ -91,6 +91,20 @@ t_mutate_reports_rewrite_failure() {
   shmutant_mutate "$T/nope/f" 'a' 'b'; rc_is $? 1 'unreadable file is rc 1'
 }
 
+t_mutate_refuses_a_symlink_target() {
+  printf 'x=1\n' > "$T/real"
+  ln -s real "$T/link"
+  shmutant_mutate "$T/link" 'x=1' 'x=2'; rc_is $? 1 'a symlink target is refused'
+  [ -L "$T/link" ] || fail_ 'the symlink was replaced by a regular file'
+  eq "$(cat "$T/real")" 'x=1' 'the referent is untouched'
+}
+
+t_mutate_works_under_noclobber() {
+  printf 'x=1\n' > "$T/f"
+  ( set -C; shmutant_mutate "$T/f" 'x=1' 'x=2' ); rc_is $? 0 'set -C in the sourcing shell does not break the rewrite'
+  eq "$(cat "$T/f")" 'x=2' 'rewritten'
+}
+
 t_mutate_preserves_mode() {
   printf '#!/bin/sh\necho old\n' > "$T/f"; chmod 755 "$T/f"
   shmutant_mutate "$T/f" 'old' 'new'; rc_is $? 0 'applies'
@@ -129,6 +143,9 @@ t_mut_validates_rows() {
   shmutant_reset
   shmutant_mut 'no target' 'a' 'b' 'w' 2>/dev/null; rc_is $? 2 'a row without a target is refused'
   shmutant_target /abs 2>/dev/null; rc_is $? 2 'an absolute target is refused'
+  shmutant_target ../escape.sh 2>/dev/null; rc_is $? 2 'a leading .. component is refused'
+  shmutant_target sub/../../escape.sh 2>/dev/null; rc_is $? 2 'an inner .. component is refused'
+  shmutant_target 'sub/..hidden/f' 2>/dev/null; rc_is $? 0 'a name that merely starts with .. is a name'
   shmutant_target lib.sh; rc_is $? 0 'a relative target is accepted'
   shmutant_mut 'empty old' '' 'b' 'w' 2>/dev/null; rc_is $? 2 'empty old literal refused'
   shmutant_mut 'same' 'a' 'a' 'w' 2>/dev/null; rc_is $? 2 'identical literals refused'
@@ -199,6 +216,14 @@ t_pool_refuses_missing_target() {
   pool lbl "$T/wd" toy_prepare toy_run
   rc_is "$RC" 2 'a target the prepared tree lacks is refused before any run'
   has "$ERR" 'absent.sh' 'names the target'
+}
+
+t_pool_refuses_symlink_target() {
+  shmutant_reset; shmutant_target link.sh; shmutant_mut 'r' '$1 + $2' '$1 - $2' 'add-works'
+  mk_toy "$T/toy"; TOY="$T/toy"; ln -s lib.sh "$T/toy/link.sh"
+  pool lbl "$T/wd" toy_prepare toy_run
+  rc_is "$RC" 2 'a symlink target is refused before any run'
+  has "$ERR" 'symlink' 'says why'
 }
 
 t_pool_reports_failed_prepare() {
@@ -585,6 +610,11 @@ EOF
   kept="$(bash "$SHMUTANT" run "$T/toy/plan.sh" --keep 2>&1 >/dev/null | sed -n 's/^shmutant: workdir kept: //p')"
   [ -n "$kept" ] && [ -f "$kept/mut-0/tree/lib.sh" ] || fail_ '--keep did not keep a workdir the run created'
   [ -n "$kept" ] && rm -rf -- "$kept"
+  kept="$(SHMUTANT_KEEP=1 bash "$SHMUTANT" run "$T/toy/plan.sh" 2>&1 >/dev/null | sed -n 's/^shmutant: workdir kept: //p')"
+  [ -n "$kept" ] && [ -f "$kept/mut-0/tree/lib.sh" ] || fail_ 'SHMUTANT_KEEP=1 without --keep did not keep the created workdir'
+  [ -n "$kept" ] && rm -rf -- "$kept"
+  mkdir -p "$T/decoy"; printf 'exit 3\n' > "$T/decoy/plan.sh"
+  ( cd "$T/toy" && PATH="$T/decoy:$PATH" bash "$SHMUTANT" run plan.sh > /dev/null 2>&1 ); rc_is $? 1 'a bare plan name is sourced from its own directory, not from PATH (1: the survivor row, not the decoy'"'"'s 3)'
   printf "shmutant_mut 'broken' '' 'x' 'add-works'\nshmutant_mut 'fine' '+' '-' 'add-works'\n" >> "$T/toy/plan.sh"
   bash "$SHMUTANT" run "$T/toy/plan.sh" > /dev/null 2>&1; rc_is $? 2 'a refused row followed by a valid one fails the plan'
   bash "$SHMUTANT" run "$T/toy/plan.sh" --bogus > /dev/null 2>&1; rc_is $? 2 'an unknown option is refused'

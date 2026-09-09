@@ -101,7 +101,7 @@ The predecessor of this tool ran the **entire suite for every mutant**. On one p
 118-row table took 4,600 to 5,200 seconds per pass. The coverage map was already there, every
 row declared its witness, but nothing used it to select work. `shmutant` passes the row's
 selector to `run` and ships `shmutant_selected` so a hand-rolled suite can honour it in one line.
-Its own 54-row self-mutation pass finishes in under 20 seconds against a suite that takes 15 seconds to run once.
+Its own 60-row self-mutation pass finishes in under 40 seconds against a suite that takes 15 seconds to run once.
 
 ## Installation
 
@@ -126,10 +126,13 @@ shmutant  1  row       <verdict> <name>  <target>  <select>  <seconds>  <detail>
 shmutant  1  summary   <label>   <rows>  <killed>  <jobs>  <seconds>
 ```
 
-The second field is the stream format version. CI can consume it with `awk -F'\t'`:
+The second field is the stream format version. CI can consume it with `awk -F'\t'`. Keep the
+exit status of `shmutant` itself; behind a pipe it would be replaced by `awk`'s:
 
 ```sh
-bash shmutant.sh run test/mutants.sh | awk -F'\t' '$3 == "row" && $4 != "killed"'
+bash shmutant.sh run test/mutants.sh > mutants.tsv; rc=$?
+awk -F'\t' '$3 == "row" && $4 != "killed"' mutants.tsv
+exit "$rc"
 ```
 
 Exit status: 0 when every row was killed, 1 when any row was not, 2 when the harness itself
@@ -146,7 +149,7 @@ could not run.
 ## Testing shmutant
 
 ```sh
-bash test/run.sh                     # the suite, 44 units
+bash test/run.sh                     # the suite, 47 units
 bash shmutant.sh run test/mutants.sh # the suite, mutation-tested by shmutant itself
 ```
 

@@ -175,7 +175,9 @@ shmutant_copy_tree() {
 
 # shmutant_mutate <file> <old> <new> — replace the FIRST occurrence of literal <old> with <new>,
 # in place. 0 applied; 1 the rewrite failed (file unreadable, dir unwritable); 2 <old> matched
-# nothing, file unchanged. A literal spanning two lines never matches: awk sees one record.
+# nothing, file unchanged. A symlink is refused (1): renaming over it would swap the link for a
+# file and leave the referent, which the tests may read, untouched. A literal spanning two lines
+# never matches: awk sees one record.
 # ENVIRON, not -v: -v processes backslash escapes, so `\$` and `\n` would arrive altered.
 # The rewrite lands in a fresh mktemp sibling (never a predictable name, which could be a symlink
 # out of the tree) that carries the target's mode, and is renamed over the target, never
@@ -184,7 +186,7 @@ shmutant_copy_tree() {
 shmutant_mutate() {
   local f="$1" tmp nl=1
   [ -n "$2" ] || return 2
-  [ -f "$f" ] || return 1
+  [ -f "$f" ] && [ ! -L "$f" ] || return 1
   tmp="$(mktemp "$(dirname -- "$f")/.shmutant.XXXXXX" 2>/dev/null)" || return 1
   [ -n "$(tail -c 1 -- "$f" 2>/dev/null)" ] && nl=0
   { cp -p -- "$f" "$tmp" && SHMUTANT_MUT_OLD="$2" SHMUTANT_MUT_NEW="$3" SHMUTANT_MUT_NL="$nl" awk '
@@ -193,7 +195,7 @@ shmutant_mutate() {
     NR > 1 { printf "\n" }
     { printf "%s", $0 }
     END { if (NR > 0 && ENVIRON["SHMUTANT_MUT_NL"] == 1) printf "\n" }
-  ' "$f" > "$tmp"; } 2>/dev/null || { rm -f "$tmp"; return 1; }
+  ' "$f" >| "$tmp"; } 2>/dev/null || { rm -f "$tmp"; return 1; }
   if cmp -s "$tmp" "$f"; then rm -f "$tmp"; return 2; fi
   mv -f "$tmp" "$f" 2>/dev/null || { rm -f "$tmp"; return 1; }
   return 0
@@ -203,6 +205,7 @@ shmutant_mutate() {
 shmutant_target() {
   [ -n "$1" ] || { _shmutant_refuse "target: a file is required"; return 2; }
   case "$1" in /*) _shmutant_refuse "target: must be relative to the tree root: $1"; return 2 ;; esac
+  case "/$1/" in */../*) _shmutant_refuse "target: a .. component could leave the tree: $1"; return 2 ;; esac
   SHMUTANT_TARGET="$1"
 }
 
@@ -314,7 +317,7 @@ _shmutant_worker() {
   fi
   if [ "$kind" = mut ]; then
     target="$root/${SHMUTANT_ROWS_FILE[$i]}"
-    if [ ! -f "$target" ]; then
+    if [ ! -f "$target" ] || [ -L "$target" ]; then
       _shmutant_worker_finish "$dir" unprepared 0 missing; return 0
     fi
     shmutant_mutate "$target" "${SHMUTANT_ROWS_OLD[$i]}" "${SHMUTANT_ROWS_NEW[$i]}"; rc=$?
@@ -373,7 +376,7 @@ _shmutant_detail() {
     unapplied)  printf 'the injection did not apply — the old literal matched nothing, so this row tests NOTHING' ;;
     unprepared) case "$2" in
                   clone)   printf 'could not clone the pristine tree' ;;
-                  missing) printf 'the target file does not exist in the tree' ;;
+                  missing) printf 'the target is not a regular file in the tree' ;;
                   *)       printf 'the rewrite failed' ;;
                 esac ;;
     baseline)   printf 'the tests selected by [%s] did not come back green BEFORE any defect was injected — a red result here would prove nothing (see the baseline record)' "$4" ;;
@@ -459,6 +462,10 @@ shmutant_pool() {
       _shmutant_err "$label: row '${SHMUTANT_ROWS_NAME[$i]}' targets ${SHMUTANT_ROWS_FILE[$i]}, which the prepared tree does not contain"
       return 2
     fi
+    if [ -L "$root/${SHMUTANT_ROWS_FILE[$i]}" ]; then
+      _shmutant_err "$label: row '${SHMUTANT_ROWS_NAME[$i]}' targets ${SHMUTANT_ROWS_FILE[$i]}, which is a symlink — name the file it points at"
+      return 2
+    fi
   done
 
   if [ "${SHMUTANT_BASELINE:-1}" != 0 ]; then
@@ -534,7 +541,7 @@ A plan is a bash file. It defines two functions, `prepare <dir>` and `run <root>
 and declares its rows with `shmutant_target` and `shmutant_mut`. It is sourced with
 SHMUTANT_PLAN_DIR set to its own directory. Exit: 0 every row killed, 1 a row was not,
 2 the plan or the harness could not run. A workdir the run created is removed afterwards
-unless --keep; a --workdir you supplied is never removed.
+unless --keep (or SHMUTANT_KEEP=1); a --workdir you supplied is never removed.
 EOF
 }
 
@@ -549,6 +556,7 @@ _shmutant_checksum() {
 
 _shmutant_cli_run() {
   local plan="" wd="" keep=0 made=0 rc
+  [ "${SHMUTANT_KEEP:-0}" = 1 ] && keep=1
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --jobs)        [ -n "${2:-}" ] || { _shmutant_err "--jobs needs a value"; return 2; }
@@ -572,7 +580,9 @@ _shmutant_cli_run() {
   export SHMUTANT_PLAN_DIR
   shmutant_reset
   # shellcheck disable=SC1090
-  . "$plan" || { _shmutant_err "run: the plan failed while loading"; return 2; }
+  # By its resolved path: a bare name would be looked up on PATH first, not in the directory
+  # the -f check above examined.
+  . "$SHMUTANT_PLAN_DIR/$(basename -- "$plan")" || { _shmutant_err "run: the plan failed while loading"; return 2; }
   declare -F prepare > /dev/null || { _shmutant_err "run: the plan defines no prepare function"; return 2; }
   declare -F run > /dev/null || { _shmutant_err "run: the plan defines no run function"; return 2; }
   if [ -z "$wd" ]; then

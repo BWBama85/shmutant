@@ -125,7 +125,8 @@ Rules a row must satisfy, all enforced when the row is appended or the pool star
 - literals only, never regexes; the **first** occurrence on a **single** line is replaced, and
   the file's mode and final-newline shape are preserved so the literal is the only change;
 - the old literal is non-empty and differs from the new one;
-- the target file is relative to the tree root and exists in the prepared tree;
+- the target file is relative to the tree root, carries no `..` component, and exists in the
+  prepared tree as a regular file (a symlink is refused: name the file it points at);
 - the witness is non-empty.
 
 A refused declaration is counted, and a pool whose table carries one exits 2 rather than running
@@ -150,12 +151,16 @@ shmutant_pool "common-lib" "$work/mut" prepare run 6 || bad "mutation pool faile
 Everything on stdout is a tab-separated record; prose goes to stderr.
 
 ```sh
-bash scripts/shmutant.sh run test/mutants.sh > mutants.tsv
+bash scripts/shmutant.sh run test/mutants.sh > mutants.tsv; rc=$?
 awk -F'\t' '$3 == "row" && $4 != "killed" { print $4 ": " $5 " (" $9 ")" }' mutants.tsv
+exit "$rc"
 ```
 
-Exit 0 means every row was killed; 1 means at least one was not; 2 means the harness did not
-run (empty table, prepare failed, a target missing from the tree, a root outside the workdir).
+Capture the status before the `awk`, and never put `shmutant` on the left of a pipe without
+`pipefail`: the pipeline's status would be `awk`'s. Exit 0 means every row was killed; 1 means
+at least one was not; 2 means the harness did not run (a refused declaration, empty table,
+prepare failed, a target missing from the tree or a symlink, a root outside the workdir, a
+stream write failure).
 Keep `SHMUTANT_KEEP=1` and `--workdir` on a CI failure to upload `mut-<n>/output` as an
 artifact: it is the full output of the run that produced the verdict. A `--workdir` you supply
 is never removed; the pool's `base-<n>`, `mut-<n>` and `pristine` entries inside it are recreated

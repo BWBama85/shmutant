@@ -253,3 +253,29 @@ shmutant_mut 'a caller-supplied workdir is removed' \
   'elif [ "$made" = 1 ]; then rm -rf -- "$wd"' \
   'elif true; then rm -rf -- "$wd"' \
   't_cli_run'
+
+# --- guards added for the second review round ---
+shmutant_mut 'a .. component in a target is accepted' \
+  'case "/$1/" in */../*)' \
+  'case "/$1/" in */.../*)' \
+  't_mut_validates_rows'
+shmutant_mut 'mutate rewrites through a symlink' \
+  '[ -f "$f" ] && [ ! -L "$f" ] || return 1' \
+  '[ -f "$f" ] || return 1' \
+  't_mutate_refuses_a_symlink_target'
+shmutant_mut 'the temp redirect honours noclobber' \
+  ''"'"' "$f" >| "$tmp"; }' \
+  ''"'"' "$f" > "$tmp"; }' \
+  't_mutate_works_under_noclobber'
+shmutant_mut 'a symlink target passes the pool precheck' \
+  'if [ -L "$root/${SHMUTANT_ROWS_FILE[$i]}" ]; then' \
+  'if false; then' \
+  't_pool_refuses_symlink_target'
+shmutant_mut 'the plan is sourced by its bare name' \
+  '. "$SHMUTANT_PLAN_DIR/$(basename -- "$plan")" ||' \
+  '. "$plan" ||' \
+  't_cli_run'
+shmutant_mut 'SHMUTANT_KEEP=1 is ignored by the CLI cleanup' \
+  '[ "${SHMUTANT_KEEP:-0}" = 1 ] && keep=1' \
+  '[ "${SHMUTANT_KEEP:-0}" = 2 ] && keep=1' \
+  't_cli_run'
