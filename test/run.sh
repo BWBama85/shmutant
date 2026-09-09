@@ -128,6 +128,17 @@ t_mutate_rewrites_a_read_only_target() {
   chmod 644 "$T/f" "$T/g"
 }
 
+t_mutate_preserves_setuid() {
+  printf '#!/bin/sh\necho old\n' > "$T/f"; chmod 4755 "$T/f"
+  case "$(ls -l "$T/f")" in -rwsr-xr-x*) ;; *) echo "note: $_unit: this filesystem does not keep setuid ($(ls -l "$T/f" | cut -c1-10)); checking the spec only"; esac
+  shmutant_mutate "$T/f" 'old' 'new'; rc_is $? 0 'a setuid target is rewritten'
+  eq "$(ls -l "$T/f" | cut -c1-10)" "$(chmod 4755 "$T/f"; ls -l "$T/f" | cut -c1-10)" 'the mode after the rewrite equals the mode chmod 4755 gives on this filesystem'
+  eq "$(_shmutant_mode_spec '-rwsr-xr-x')" 'u=rwxs,g=rx,o=rx' 'setuid spec'
+  eq "$(_shmutant_mode_spec '-rw-r-Sr-T')" 'u=rw,g=rs,o=rt' 'setgid and sticky without x'
+  eq "$(_shmutant_mode_spec '-r--------')" 'u=r,g=,o=' 'owner-only read'
+  chmod 644 "$T/f"
+}
+
 t_mutate_preserves_missing_final_newline() {
   printf 'a=1\nb=1' > "$T/f"
   shmutant_mutate "$T/f" 'b=1' 'b=2'; rc_is $? 0 'applies'
@@ -410,6 +421,37 @@ t_verdict_timeout_kills_an_escaped_process_group() {
   kill "$p" 2>/dev/null; wait "$p" 2>/dev/null
 }
 
+t_verdict_timeout_kills_a_reparented_term_ignoring_descendant() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'hangs' '$1 + $2' '$1 - $2' 'add-works'
+  # own process group AND ignores TERM: the leader dies to TERM, this one is reparented, and only
+  # the pid set captured before TERM can still name it for KILL.
+  stubborn_escaping_run() { set -m; bash -c "trap '' TERM; sleep 4; touch '$T/finished'" & wait; }
+  SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=1 pool lbl "$T/wd" toy_prepare stubborn_escaping_run
+  eq "$(verdict_of 'hangs')" timeout 'verdict is timeout'
+  sleep 4
+  [ -e "$T/finished" ] && fail_ 'a reparented TERM-ignoring descendant outlived the KILL escalation'
+}
+
+t_pool_survives_nounset() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  ( set -u; unset SHMUTANT_TIMEOUT SHMUTANT_RED_STATUS SHMUTANT_JOBS SHMUTANT_STREAM SHMUTANT_KEEP SHMUTANT_BASELINE SHMUTANT_RED_PREFIX
+    shmutant_pool lbl "$T/wd" toy_prepare toy_run > /dev/null 2> "$T/err" ); rc_is $? 0 'a caller with set -u and no settings gets the defaults, not an unbound-variable abort'
+  hasnt "$(cat "$T/err")" 'unbound' 'no unbound variable diagnostic'
+}
+
+t_pool_refuses_hard_linked_target() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  linking_prepare() { shmutant_copy_tree "$TOY" "$1" && ln "$1/lib.sh" "$1/alias.sh"; }
+  shmutant_reset; shmutant_target lib.sh; shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  pool lbl "$T/wd" linking_prepare toy_run
+  rc_is "$RC" 2 'a target with a second hard link is refused before any run'
+  has "$ERR" 'hard link' 'says why'
+}
+
 t_pool_recreates_worker_dirs() {
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
@@ -594,6 +636,15 @@ t_stream_write_failure_is_a_harness_error() {
   SHMUTANT_STREAM="$T/link-stream" pool lbl "$T/wd" toy_prepare toy_run
   rc_is "$RC" 2 'a symlink stream is refused: its referent could be anywhere'
   has "$ERR" 'symlink' 'says why'
+  mkfifo "$T/fifo"
+  # Bounded: without the guard the first record blocks on the FIFO forever, and a hang is not
+  # a failed assertion. The watchdog is the unit's own, not the pool's.
+  ( SHMUTANT_STREAM="$T/fifo" shmutant_pool lbl "$T/wd" toy_prepare toy_run > /dev/null 2> "$T/fifo-err" ) &
+  local pp=$!
+  ( sleep 5; kill "$pp" 2>/dev/null ) & local dog=$!
+  wait "$pp"; rc_is $? 2 'a FIFO stream is refused: with no reader the first record would block forever'
+  kill "$dog" 2>/dev/null; wait "$dog" 2>/dev/null
+  has "$(cat "$T/fifo-err")" 'not a regular file' 'says why'
 }
 
 t_pool_validates_red_status_and_prefix() {
@@ -614,6 +665,12 @@ t_pool_validates_red_status_and_prefix() {
   SHMUTANT_TIMEOUT=99999999999999999999999 pool lbl "$T/wd" toy_prepare toy_run
   rc_is "$RC" 2 'a timeout wider than a shell integer is refused'
   has "$ERR" 'too large' 'says why'
+  SHMUTANT_JOBS=0 pool lbl "$T/wd" toy_prepare toy_run
+  rc_is "$RC" 2 'SHMUTANT_JOBS=0 is refused rather than replaced by the CPU count'
+  SHMUTANT_JOBS=abc pool lbl "$T/wd" toy_prepare toy_run
+  rc_is "$RC" 2 'a non-numeric SHMUTANT_JOBS is refused'
+  SHMUTANT_JOBS=99999 pool lbl "$T/wd" toy_prepare toy_run
+  rc_is "$RC" 2 'an absurd SHMUTANT_JOBS is refused'
 }
 
 t_stream_to_file() {
@@ -724,7 +781,7 @@ EOF
   mkdir -p "$T/theirs"; printf 'keep\n' > "$T/theirs/precious"
   bash "$SHMUTANT" run "$T/toy/plan-clobber.sh" --workdir "$T/theirs" > /dev/null 2>&1; rc_is $? 1 'the clobbering plan still loads and runs'
   eq "$(cat "$T/theirs/precious" 2>/dev/null)" keep 'a plan assigning made=1 cannot make the CLI delete a supplied workdir'
-  { cat "$T/toy/plan.sh"; printf '_shmutant_cli_made=1\n'; } > "$T/toy/plan-ro.sh"
+  { cat "$T/toy/plan.sh"; printf 'SHMUTANT_CLI_MADE=1\n'; } > "$T/toy/plan-ro.sh"
   bash "$SHMUTANT" run "$T/toy/plan-ro.sh" --workdir "$T/theirs" > /dev/null 2>&1; rc_is $? 2 'a plan assigning the frozen CLI state is a load failure'
   eq "$(cat "$T/theirs/precious" 2>/dev/null)" keep 'and the supplied workdir is still there'
   { printf 'cd "$SHMUTANT_PLAN_DIR"\n'; cat "$T/toy/plan.sh"; } > "$T/toy/plan-cd.sh"
@@ -749,6 +806,16 @@ EOF
   bash "$SHMUTANT" run "$T/norun.sh" > /dev/null 2>&1; rc_is $? 2 'a plan without callbacks is refused'
   printf 'if\n' > "$T/broken.sh"
   bash "$SHMUTANT" run "$T/broken.sh" > /dev/null 2>&1; rc_is $? 2 'a plan that fails to load is refused'
+  mkdir -p "$T/tmpd"
+  TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/broken.sh" > /dev/null 2>&1; rc_is $? 2 'a broken plan is a load failure'
+  TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/norun.sh" > /dev/null 2>&1; rc_is $? 2 'a plan without callbacks is a load failure'
+  TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-ef.sh" > /dev/null 2>&1; rc_is $? 2 'a plan whose errexit fires is a load failure'
+  eq "$(find "$T/tmpd" -mindepth 1 | wc -l | tr -d ' ')" 0 'no automatic workdir survives a load failure'
+  ( cd "$T" && TMPDIR=tmpd SHMUTANT_STREAM=out.tsv bash "$SHMUTANT" run "$T/toy/plan-cd.sh" > /dev/null 2>&1 )
+  [ -f "$T/out.tsv" ] || fail_ 'a relative SHMUTANT_STREAM was resolved after the plan changed directory'
+  [ -e "$T/toy/out.tsv" ] && fail_ 'the stream landed relative to the plan directory'
+  eq "$(find "$T/tmpd" -mindepth 1 | wc -l | tr -d ' ')" 0 'a relative TMPDIR workdir is resolved before the plan cds, and removed'
+  [ -e "$T/toy/tmpd" ] && fail_ 'a second workdir was created relative to the plan directory'
   bash "$SHMUTANT" > /dev/null 2>&1; rc_is $? 2 'no command is usage'
   bash "$SHMUTANT" bogus > /dev/null 2>&1; rc_is $? 2 'an unknown command is usage'
   has "$(bash "$SHMUTANT" help)" 'usage:' 'help prints usage'

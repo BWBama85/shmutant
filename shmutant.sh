@@ -199,6 +199,26 @@ shmutant_copy_tree() {
   )
 }
 
+# _shmutant_mode_triple <rwx-triple> <u|g|o> — one clause of a chmod symbolic spec.
+_shmutant_mode_triple() {
+  local t="$1" who="$2" out=""
+  case "${t:0:1}" in r) out+=r ;; esac
+  case "${t:1:1}" in w) out+=w ;; esac
+  case "${t:2:1}" in
+    x) out+=x ;;
+    s) out+=xs ;; S) out+=s ;;
+    t) out+=xt ;; T) out+=t ;;
+  esac
+  printf '%s=%s' "$who" "$out"
+}
+
+# _shmutant_mode_spec <ls-l-mode-string> — a chmod symbolic spec equal to the mode in an
+# `ls -l` mode field (`-rwsr-xr-x` -> `u=rwxs,g=rx,o=rx`), setuid, setgid and sticky included.
+_shmutant_mode_spec() {
+  local m="$1"
+  printf '%s,%s,%s' "$(_shmutant_mode_triple "${m:1:3}" u)" "$(_shmutant_mode_triple "${m:4:3}" g)" "$(_shmutant_mode_triple "${m:7:3}" o)"
+}
+
 # shmutant_mutate <file> <old> <new> — replace the FIRST occurrence of literal <old> with <new>,
 # in place. 0 applied; 1 the rewrite failed (file unreadable, dir unwritable); 2 <old> matched
 # nothing, file unchanged (awk reports the miss itself, so no `cmp` is needed). A symlink is
@@ -211,16 +231,16 @@ shmutant_copy_tree() {
 # `sed -i` (BSD and GNU differ), so a failed rewrite cannot half-write. A target whose last line
 # has no newline keeps that shape: the only change is the literal.
 shmutant_mutate() {
-  local f="$1" tmp nl=1 rc uw=1
+  local f="$1" tmp nl=1 rc mode
   [ -n "$2" ] && [ "$2" != "$3" ] || return 2
   [ -f "$f" ] && [ ! -L "$f" ] || return 1
   tmp="$(mktemp "$(dirname -- "$f")/.shmutant.XXXXXX" 2>/dev/null)" || return 1
   [ -n "$(tail -c 1 -- "$f" 2>/dev/null)" ] && nl=0
-  # Owner-write from `ls -l` column 3, the one mode read POSIX specifies the same way everywhere.
-  case "$(ls -ld -- "$f" 2>/dev/null)" in ??w*) uw=1 ;; *) uw=0 ;; esac
-  # The mode is carried over by cp -p and then re-opened for writing, so a read-only target
-  # (0444, 0555) can still be rewritten; owner-write is taken back after the write.
-  { cp -p -- "$f" "$tmp" && chmod -- u+w "$tmp" && SHMUTANT_MUT_OLD="$2" SHMUTANT_MUT_NEW="$3" SHMUTANT_MUT_NL="$nl" awk '
+  # The mode comes from the `ls -l` field, the one mode read POSIX specifies the same way
+  # everywhere, and is reapplied whole after the write: a read-only target (0444, 0555) must be
+  # writable while awk runs, and the kernel clears setuid/setgid on write.
+  mode="$(ls -ld -- "$f" 2>/dev/null)"; mode="${mode%% *}"
+  { chmod -- u+w "$tmp" && SHMUTANT_MUT_OLD="$2" SHMUTANT_MUT_NEW="$3" SHMUTANT_MUT_NL="$nl" awk '
     BEGIN { old = ENVIRON["SHMUTANT_MUT_OLD"]; new = ENVIRON["SHMUTANT_MUT_NEW"] }
     !hit { i = index($0, old); if (i) { $0 = substr($0, 1, i - 1) new substr($0, i + length(old)); hit = 1 } }
     NR > 1 { printf "\n" }
@@ -232,7 +252,7 @@ shmutant_mutate() {
     3) rm -f "$tmp"; return 2 ;;
     *) rm -f "$tmp"; return 1 ;;
   esac
-  [ "$uw" = 1 ] || chmod -- u-w "$tmp" 2>/dev/null
+  chmod -- "$(_shmutant_mode_spec "$mode")" "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
   mv -f "$tmp" "$f" 2>/dev/null || { rm -f "$tmp"; return 1; }
   return 0
 }
@@ -306,11 +326,13 @@ _shmutant_descendants() {
     }'
 }
 
-# _shmutant_kill_tree <signal> <pid> — send <signal> to <pid>'s process group and to every
-# descendant, including ones that moved to a group or session of their own.
+# _shmutant_kill_tree <signal> <pid> <pids…> — send <signal> to <pid>'s process group, to every
+# descendant found now, and to each of <pids…>: the descendants found before an earlier signal,
+# which a leader's death may have reparented out of reach of a fresh walk.
 _shmutant_kill_tree() {
   local sig="$1" pid="$2" p
-  for p in $(_shmutant_descendants "$pid"); do kill "-$sig" "$p" 2>/dev/null; done
+  shift 2
+  for p in "$@" $(_shmutant_descendants "$pid"); do kill "-$sig" "$p" 2>/dev/null; done
   kill "-$sig" -- -"$pid" 2>/dev/null
 }
 
@@ -335,9 +357,12 @@ _shmutant_run_bounded() {
         sleep "$timeout" & s=$!
         wait "$s"
         : > "$dir/timeout"
-        _shmutant_kill_tree TERM "$pid"
+        victims="$(_shmutant_descendants "$pid")"
+        # shellcheck disable=SC2086
+        _shmutant_kill_tree TERM "$pid" $victims
         sleep 1
-        _shmutant_kill_tree KILL "$pid"
+        # shellcheck disable=SC2086
+        _shmutant_kill_tree KILL "$pid" $victims
       ) < /dev/null > /dev/null 2>&1 &
       dog=$!
     fi
@@ -502,16 +527,25 @@ shmutant_pool() {
   fi
   # Digits only AND a bounded width: an all-digit value past bash's integer range fails every
   # numeric test with a diagnostic and would fall through as if it had passed.
-  case "${SHMUTANT_TIMEOUT:-300}" in
-    *[!0-9]*|'') _shmutant_err "$label: SHMUTANT_TIMEOUT must be a non-negative integer, got [${SHMUTANT_TIMEOUT:-}]"; return 2 ;;
+  # Every setting is read through a default first: a caller's `set -u` must not turn an unset
+  # option into an abort.
+  local v_timeout="${SHMUTANT_TIMEOUT:-300}" v_red="${SHMUTANT_RED_STATUS:-1}" v_jobs="${SHMUTANT_JOBS:-}"
+  case "$v_timeout" in
+    *[!0-9]*|'') _shmutant_err "$label: SHMUTANT_TIMEOUT must be a non-negative integer, got [$v_timeout]"; return 2 ;;
   esac
-  [ "${#SHMUTANT_TIMEOUT}" -le 9 ] || { _shmutant_err "$label: SHMUTANT_TIMEOUT is too large, got [${SHMUTANT_TIMEOUT}]"; return 2; }
-  case "${SHMUTANT_RED_STATUS:-1}" in
-    *[!0-9]*|'') _shmutant_err "$label: SHMUTANT_RED_STATUS must be an exit status from 1 to 255, got [${SHMUTANT_RED_STATUS:-}]"; return 2 ;;
+  [ "${#v_timeout}" -le 9 ] || { _shmutant_err "$label: SHMUTANT_TIMEOUT is too large, got [$v_timeout]"; return 2; }
+  case "$v_red" in
+    *[!0-9]*|'') _shmutant_err "$label: SHMUTANT_RED_STATUS must be an exit status from 1 to 255, got [$v_red]"; return 2 ;;
   esac
-  [ "${#SHMUTANT_RED_STATUS}" -le 3 ] || { _shmutant_err "$label: SHMUTANT_RED_STATUS must be an exit status from 1 to 255, got [${SHMUTANT_RED_STATUS}]"; return 2; }
-  if [ "${SHMUTANT_RED_STATUS:-1}" -lt 1 ] || [ "${SHMUTANT_RED_STATUS:-1}" -gt 255 ]; then
-    _shmutant_err "$label: SHMUTANT_RED_STATUS must be an exit status from 1 to 255, got [${SHMUTANT_RED_STATUS:-}] — 0 is green by definition"; return 2
+  [ "${#v_red}" -le 3 ] || { _shmutant_err "$label: SHMUTANT_RED_STATUS must be an exit status from 1 to 255, got [$v_red]"; return 2; }
+  if [ "$v_red" -lt 1 ] || [ "$v_red" -gt 255 ]; then
+    _shmutant_err "$label: SHMUTANT_RED_STATUS must be an exit status from 1 to 255, got [$v_red] — 0 is green by definition"; return 2
+  fi
+  if [ -n "$v_jobs" ]; then
+    case "$v_jobs" in *[!0-9]*) _shmutant_err "$label: SHMUTANT_JOBS must be a positive integer, got [$v_jobs]"; return 2 ;; esac
+    if [ "${#v_jobs}" -gt 4 ] || [ "$v_jobs" -lt 1 ]; then
+      _shmutant_err "$label: SHMUTANT_JOBS must be a positive integer of at most four digits, got [$v_jobs]"; return 2
+    fi
   fi
   if [ -n "${SHMUTANT_RED_PREFIX+x}" ] && [ -z "$SHMUTANT_RED_PREFIX" ]; then
     _shmutant_err "$label: SHMUTANT_RED_PREFIX is empty — every line would count as a red line"; return 2
@@ -521,6 +555,9 @@ shmutant_pool() {
     local sdir
     if [ -L "$SHMUTANT_STREAM" ]; then
       _shmutant_err "$label: SHMUTANT_STREAM is a symlink ($SHMUTANT_STREAM) — name the file itself, so where the records land can be checked"; return 2
+    fi
+    if [ -e "$SHMUTANT_STREAM" ] && [ ! -f "$SHMUTANT_STREAM" ]; then
+      _shmutant_err "$label: SHMUTANT_STREAM exists and is not a regular file ($SHMUTANT_STREAM) — a FIFO with no reader would block the pool forever"; return 2
     fi
     if ! sdir="$(_shmutant_abs "$(dirname -- "$SHMUTANT_STREAM")")"; then
       _shmutant_err "$label: SHMUTANT_STREAM points into a directory that does not exist: $SHMUTANT_STREAM"; return 2
@@ -545,6 +582,12 @@ shmutant_pool() {
   for (( i = 0; i < n; i++ )); do
     if ! _shmutant_target_ok "$root" "${SHMUTANT_ROWS_FILE[$i]}"; then
       _shmutant_err "$label: row '${SHMUTANT_ROWS_NAME[$i]}' targets ${SHMUTANT_ROWS_FILE[$i]}, which the prepared tree does not contain as a regular file (missing, a symlink, or under one)"
+      return 2
+    fi
+    # Link count is `ls -l` column 2. A clone gives each hard link its own inode, so a test
+    # reading the alias would see pristine code while the named target carries the defect.
+    if [ "$(ls -ld -- "$root/${SHMUTANT_ROWS_FILE[$i]}" | awk '{ print $2 }')" -gt 1 ]; then
+      _shmutant_err "$label: row '${SHMUTANT_ROWS_NAME[$i]}' targets ${SHMUTANT_ROWS_FILE[$i]}, which has more than one hard link — a clone cannot keep them joined"
       return 2
     fi
   done
@@ -635,9 +678,22 @@ _shmutant_checksum() {
   fi
 }
 
+# _shmutant_cli_finish <status> — the one exit for a run whose workdir exists: keep it and say
+# so, or remove it when this run created it. Returns <status>. Reads the frozen globals.
+_shmutant_cli_finish() {
+  if [ "$SHMUTANT_CLI_KEEP" = 1 ]; then _shmutant_err "workdir kept: $SHMUTANT_CLI_WD"
+  elif [ "$SHMUTANT_CLI_MADE" = 1 ]; then rm -rf -- "$SHMUTANT_CLI_WD"
+  fi
+  return "$1"
+}
+
 # _shmutant_plan_died — EXIT trap armed while the plan is sourced: a plan that exits, or whose own
-# `set -e` fires, still ends this run as a load failure with status 2.
-_shmutant_plan_died() { _shmutant_err "run: the plan failed while loading"; exit 2; }
+# `set -e` fires, still ends this run as a load failure with status 2, workdir handled.
+_shmutant_plan_died() {
+  _shmutant_err "run: the plan failed while loading"
+  _shmutant_cli_finish 2
+  exit 2
+}
 
 _shmutant_cli_run() {
   local plan="" wd="" keep=0 made=0 rc
@@ -645,7 +701,6 @@ _shmutant_cli_run() {
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --jobs)        [ -n "${2:-}" ] || { _shmutant_err "--jobs needs a value"; return 2; }
-                     _shmutant_pos_int "$2" > /dev/null || { _shmutant_err "--jobs: not a positive integer: $2"; return 2; }
                      SHMUTANT_JOBS="$2"; shift 2 ;;
       --workdir)     [ -n "${2:-}" ] || { _shmutant_err "--workdir needs a value"; return 2; }
                      wd="$2"; shift 2 ;;
@@ -663,21 +718,28 @@ _shmutant_cli_run() {
   [ -f "$plan" ] || { _shmutant_err "run: plan not found: $plan"; return 2; }
   SHMUTANT_PLAN_DIR="$(_shmutant_abs "$(dirname -- "$plan")")" || { _shmutant_err "run: cannot resolve $plan"; return 2; }
   export SHMUTANT_PLAN_DIR
-  # The workdir is settled, absolute, BEFORE the plan runs: a plan may cd, and a relative
-  # --workdir must mean the directory the operator named.
+  # Every path is settled, absolute, BEFORE the plan runs: a plan may cd, and a relative
+  # --workdir, TMPDIR or SHMUTANT_STREAM must mean what it meant where the operator typed it.
+  if [ -n "${SHMUTANT_STREAM:-}" ]; then
+    case "$SHMUTANT_STREAM" in
+      /*) ;;
+      *)  SHMUTANT_STREAM="$(_shmutant_abs "$(dirname -- "$SHMUTANT_STREAM")")/$(basename -- "$SHMUTANT_STREAM")" \
+            || { _shmutant_err "run: SHMUTANT_STREAM points into a directory that does not exist: $SHMUTANT_STREAM"; return 2; } ;;
+    esac
+  fi
   if [ -z "$wd" ]; then
     wd="$(mktemp -d "${TMPDIR:-/tmp}/shmutant.XXXXXX")" || { _shmutant_err "run: cannot create a workdir"; return 2; }
     made=1
   else
     mkdir -p -- "$wd" || { _shmutant_err "run: cannot create workdir $wd"; return 2; }
-    wd="$(_shmutant_abs "$wd")" || { _shmutant_err "run: cannot resolve workdir"; return 2; }
   fi
+  wd="$(_shmutant_abs "$wd")" || { _shmutant_err "run: cannot resolve workdir"; return 2; }
   # The plan is sourced INSIDE this function, where bash's dynamic scoping lets it assign any
-  # local by name. The cleanup below decides what to delete, so its inputs are frozen read-only
-  # before the plan runs: a plan that writes `_shmutant_cli_made=1` gets a readonly error, not a
-  # deleted caller directory.
+  # local by name. The cleanup decides what to delete, so its inputs are frozen read-only before
+  # the plan runs: a plan that writes SHMUTANT_CLI_MADE=1 gets a readonly error, not a deleted
+  # caller directory. Globals, because the EXIT trap must read them too.
+  readonly SHMUTANT_CLI_WD="$wd" SHMUTANT_CLI_KEEP="$keep" SHMUTANT_CLI_MADE="$made"
   local -r _shmutant_cli_plan="$SHMUTANT_PLAN_DIR/$(basename -- "$plan")"
-  local -r _shmutant_cli_wd="$wd" _shmutant_cli_keep="$keep" _shmutant_cli_made="$made"
   shmutant_reset
   # Callbacks come from the plan, never from functions exported by the invoking environment.
   unset -f prepare run
@@ -688,19 +750,14 @@ _shmutant_cli_run() {
   . "$_shmutant_cli_plan"
   rc=$?
   trap - EXIT
-  [ "$rc" -eq 0 ] || { _shmutant_err "run: the plan failed while loading (status $rc)"; return 2; }
-  declare -F prepare > /dev/null || { _shmutant_err "run: the plan defines no prepare function"; return 2; }
-  declare -F run > /dev/null || { _shmutant_err "run: the plan defines no run function"; return 2; }
+  [ "$rc" -eq 0 ] || { _shmutant_err "run: the plan failed while loading (status $rc)"; _shmutant_cli_finish 2; return 2; }
+  declare -F prepare > /dev/null || { _shmutant_err "run: the plan defines no prepare function"; _shmutant_cli_finish 2; return 2; }
+  declare -F run > /dev/null || { _shmutant_err "run: the plan defines no run function"; _shmutant_cli_finish 2; return 2; }
   # The plan may have turned errexit on for its own preamble; the pool's non-zero returns are
-  # answers, not errors, and the cleanup below must run for every one of them.
+  # answers, not errors, and the cleanup must run for every one of them.
   set +o errexit
-  shmutant_pool "$(basename -- "$plan")" "$_shmutant_cli_wd" prepare run; rc=$?
-  # Only a workdir this run created is removed. A caller-supplied one is theirs: the pool's own
-  # artifacts stay in it and nothing else in it is touched.
-  if [ "$_shmutant_cli_keep" = 1 ]; then _shmutant_err "workdir kept: $_shmutant_cli_wd"
-  elif [ "$_shmutant_cli_made" = 1 ]; then rm -rf -- "$_shmutant_cli_wd"
-  fi
-  return "$rc"
+  shmutant_pool "$(basename -- "$plan")" "$SHMUTANT_CLI_WD" prepare run; rc=$?
+  _shmutant_cli_finish "$rc"
 }
 
 shmutant_main() {

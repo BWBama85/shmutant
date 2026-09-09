@@ -187,17 +187,13 @@ shmutant_mut 'SHMUTANT_STREAM is ignored' \
   't_stream_to_file'
 
 # --- the CLI ---
-shmutant_mut '--jobs accepts zero' \
-  '_shmutant_pos_int "$2" > /dev/null || { _shmutant_err "--jobs' \
-  'true || { _shmutant_err "--jobs' \
-  't_cli_run'
 shmutant_mut 'the label is not the plan name' \
   'shmutant_pool "$(basename -- "$plan")"' \
   'shmutant_pool "plan"' \
   't_cli_run'
 shmutant_mut '--keep deletes the workdir' \
-  'if [ "$_shmutant_cli_keep" = 1 ]; then' \
-  'if [ "$_shmutant_cli_keep" = 0 ]; then' \
+  'if [ "$SHMUTANT_CLI_KEEP" = 1 ]; then' \
+  'if [ "$SHMUTANT_CLI_KEEP" = 0 ]; then' \
   't_cli_run'
 shmutant_mut 'version prints the wrong marker' \
   '"$SHMUTANT_VERSION"' \
@@ -218,8 +214,8 @@ shmutant_mut 'a stream write failure is swallowed' \
   '2>/dev/null || SHMUTANT_EMIT_FAILED=0' \
   't_stream_write_failure_is_a_harness_error'
 shmutant_mut 'the rewrite drops the target mode' \
-  'cp -p -- "$f" "$tmp" &&' \
-  'true &&' \
+  'mode="$(ls -ld -- "$f" 2>/dev/null)"; mode="${mode%% *}"' \
+  'mode="-rw-r--r--"' \
   't_mutate_preserves_mode'
 shmutant_mut 'the rewrite always appends a final newline' \
   'ENVIRON["SHMUTANT_MUT_NL"] == 1) printf' \
@@ -242,8 +238,8 @@ shmutant_mut 'an unapplied row keeps its clone' \
   '2) printf '"'"'unapplied\n0\n0\n'"'"' > "$dir/verdict"; return 0 ;;' \
   't_verdict_unapplied'
 shmutant_mut 'a caller-supplied workdir is removed' \
-  'elif [ "$_shmutant_cli_made" = 1 ]; then rm -rf -- "$_shmutant_cli_wd"' \
-  'elif true; then rm -rf -- "$_shmutant_cli_wd"' \
+  'elif [ "$SHMUTANT_CLI_MADE" = 1 ]; then rm -rf -- "$SHMUTANT_CLI_WD"' \
+  'elif true; then rm -rf -- "$SHMUTANT_CLI_WD"' \
   't_cli_run'
 
 # --- guards added for the second review round ---
@@ -299,21 +295,17 @@ shmutant_mut 'identical literals are rewritten as applied' \
   't_mutate_reports_unapplied'
 
 # --- guards added for the fourth review round ---
-shmutant_mut 'the temp file is not made writable before the rewrite' \
-  'chmod -- u+w "$tmp" &&' \
-  'true &&' \
-  't_mutate_rewrites_a_read_only_target'
-shmutant_mut 'owner-write is not taken back after the rewrite' \
-  '[ "$uw" = 1 ] || chmod -- u-w "$tmp" 2>/dev/null' \
-  ': "$uw"' \
+shmutant_mut 'the full mode is not reapplied after the rewrite' \
+  'chmod -- "$(_shmutant_mode_spec "$mode")" "$tmp" 2>/dev/null ||' \
+  'true ||' \
   't_mutate_rewrites_a_read_only_target'
 shmutant_mut 'copy_tree runs under the caller glob settings' \
   'set +f; shopt -u failglob dotglob; shopt -s nullglob; unset GLOBIGNORE' \
   ':' \
   't_copy_tree_ignores_caller_glob_settings'
 shmutant_mut 'a red status of 0 is accepted' \
-  'if [ "${SHMUTANT_RED_STATUS:-1}" -lt 1 ] ||' \
-  'if [ "${SHMUTANT_RED_STATUS:-1}" -lt 0 ] ||' \
+  'if [ "$v_red" -lt 1 ] ||' \
+  'if [ "$v_red" -lt 0 ] ||' \
   't_pool_validates_red_status_and_prefix'
 shmutant_mut 'an empty red prefix is accepted' \
   'if [ -n "${SHMUTANT_RED_PREFIX+x}" ] && [ -z "$SHMUTANT_RED_PREFIX" ]; then' \
@@ -334,12 +326,12 @@ shmutant_mut 'the plan is sourced inside an || list, muting its errexit' \
   '  :' \
   't_cli_run'
 shmutant_mut 'the CLI cleanup reads the clobberable local' \
-  'elif [ "$_shmutant_cli_made" = 1 ]; then rm -rf -- "$_shmutant_cli_wd"' \
-  'elif [ "$made" = 1 ]; then rm -rf -- "$_shmutant_cli_wd"' \
+  'elif [ "$SHMUTANT_CLI_MADE" = 1 ]; then rm -rf -- "$SHMUTANT_CLI_WD"' \
+  'elif [ "$made" = 1 ]; then rm -rf -- "$SHMUTANT_CLI_WD"' \
   't_cli_run'
 shmutant_mut 'a relative --workdir is resolved after the plan may have moved' \
-  '    wd="$(_shmutant_abs "$wd")" || { _shmutant_err "run: cannot resolve workdir"; return 2; }' \
-  '    :' \
+  '  wd="$(_shmutant_abs "$wd")" || { _shmutant_err "run: cannot resolve workdir"; return 2; }' \
+  '  :' \
   't_cli_run'
 shmutant_mut 'inherited prepare/run functions are accepted' \
   '  unset -f prepare run' \
@@ -350,14 +342,48 @@ shmutant_mut 'a symlink stream is accepted' \
   '    if false; then' \
   't_stream_write_failure_is_a_harness_error'
 shmutant_mut 'an overflow-length red status passes' \
-  '[ "${#SHMUTANT_RED_STATUS}" -le 3 ] ||' \
-  '[ "${#SHMUTANT_RED_STATUS}" -le 300 ] ||' \
+  '[ "${#v_red}" -le 3 ] ||' \
+  '[ "${#v_red}" -le 300 ] ||' \
   't_pool_validates_red_status_and_prefix'
 shmutant_mut 'an overflow-length timeout passes' \
-  '[ "${#SHMUTANT_TIMEOUT}" -le 9 ] ||' \
-  '[ "${#SHMUTANT_TIMEOUT}" -le 300 ] ||' \
+  '[ "${#v_timeout}" -le 9 ] ||' \
+  '[ "${#v_timeout}" -le 300 ] ||' \
   't_pool_validates_red_status_and_prefix'
 shmutant_mut 'descendants outside the process group are not killed' \
-  'for p in $(_shmutant_descendants "$pid"); do kill "-$sig" "$p" 2>/dev/null; done' \
+  'for p in "$@" $(_shmutant_descendants "$pid"); do kill "-$sig" "$p" 2>/dev/null; done' \
   ':' \
   't_verdict_timeout_kills_an_escaped_process_group'
+
+# --- guards added for the sixth review round ---
+shmutant_mut 'the KILL escalation forgets the descendants found before TERM' \
+  '_shmutant_kill_tree KILL "$pid" $victims' \
+  '_shmutant_kill_tree KILL "$pid"' \
+  't_verdict_timeout_kills_a_reparented_term_ignoring_descendant'
+shmutant_mut 'the timeout is read bare, so nounset aborts the pool' \
+  'local v_timeout="${SHMUTANT_TIMEOUT:-300}"' \
+  'local v_timeout="$SHMUTANT_TIMEOUT"' \
+  't_pool_survives_nounset'
+shmutant_mut 'a hard-linked target is accepted' \
+  '| awk '"'"'{ print $2 }'"'"')" -gt 1 ]; then' \
+  '| awk '"'"'{ print $2 }'"'"')" -gt 99 ]; then' \
+  't_pool_refuses_hard_linked_target'
+shmutant_mut 'SHMUTANT_JOBS=0 falls back to the CPU count' \
+  'if [ "${#v_jobs}" -gt 4 ] || [ "$v_jobs" -lt 1 ]; then' \
+  'if [ "${#v_jobs}" -gt 4 ] || [ "$v_jobs" -lt 0 ]; then' \
+  't_pool_validates_red_status_and_prefix'
+shmutant_mut 'a FIFO stream is accepted' \
+  'if [ -e "$SHMUTANT_STREAM" ] && [ ! -f "$SHMUTANT_STREAM" ]; then' \
+  'if false; then' \
+  't_stream_write_failure_is_a_harness_error'
+shmutant_mut 'the setuid bit is dropped by the rewrite' \
+  's) out+=xs ;; S) out+=s ;;' \
+  's) out+=x ;; S) out+= ;;' \
+  't_mutate_preserves_setuid'
+shmutant_mut 'a load failure leaves the automatic workdir behind' \
+  '  _shmutant_cli_finish 2' \
+  '  :' \
+  't_cli_run'
+shmutant_mut 'a relative SHMUTANT_STREAM is resolved after the plan may have moved' \
+  '      *)  SHMUTANT_STREAM="$(_shmutant_abs "$(dirname -- "$SHMUTANT_STREAM")")/$(basename -- "$SHMUTANT_STREAM")" \' \
+  '      *)  SHMUTANT_STREAM="$SHMUTANT_STREAM" \' \
+  't_cli_run'

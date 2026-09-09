@@ -128,7 +128,8 @@ Rules a row must satisfy, all enforced when the row is appended or the pool star
   the file's mode and final-newline shape are preserved so the literal is the only change;
 - the old literal is non-empty and differs from the new one;
 - the target file is relative to the tree root, carries no `..` component, and exists in the
-  prepared tree as a regular file (a symlink is refused: name the file it points at);
+  prepared tree as a regular file with one hard link (a symlink, a path under a symlinked
+  directory, or a multiply linked file is refused);
 - the witness is non-empty.
 
 A refused declaration is counted, and a pool whose table carries one exits 2 rather than running
@@ -172,11 +173,11 @@ on every run. A workdir the CLI created for itself is removed unless `--keep`.
 
 | Variable | Default | Use |
 |---|---|---|
-| `SHMUTANT_JOBS` | CPU count | Worker budget. The pool's cap (argument 5, default 8) still applies. |
+| `SHMUTANT_JOBS` | CPU count | Worker budget, a positive integer. The pool's cap (argument 5, default 8) still applies. |
 | `SHMUTANT_TIMEOUT` | 300 | Seconds per run before the process group is killed. Raise it for a suite that cannot select; 0 disables. |
 | `SHMUTANT_BASELINE` | 1 | Run every distinct selector once, uninjected, and require green. Set 0 when the suite was proven green in a previous step. |
 | `SHMUTANT_KEEP` | 0 | Keep every clone and the pristine tree. |
-| `SHMUTANT_STREAM` | stdout | Append the verdict stream to a file instead. Its directory must exist, it must not be a symlink, and it must not lie inside the workdir. |
+| `SHMUTANT_STREAM` | stdout | Append the verdict stream to a file instead. Its directory must exist; it must be a regular file or absent (no symlink, no FIFO), outside the workdir. A relative path is resolved where the CLI was invoked. |
 | `SHMUTANT_RED_STATUS` | 1 | The exit status that means red, 1 to 255. |
 | `SHMUTANT_RED_PREFIX` | `FAIL: ` | The prefix of a red line; must not be empty. |
 
