@@ -1,0 +1,63 @@
+# Pattern ledger
+
+**What this project has already learned from its own review threads.** Every entry below was a
+review finding somebody fixed: the class of defect, where it was found, and the commit that closed
+it. It is written automatically by `/resolve-pr-threads` as each thread is resolved, and read
+automatically by `/implement-issue` — the gap-analysis dispatch and the pre-PR self-review sweep
+both receive the promoted checklist.
+
+**The checklist is the operative half.** A class seen more than once is a pattern rather than an
+incident, and is owed a rule: a sweep to run before the next pull request opens. Rules land here
+through the normal pull-request path, so a rule only takes effect once a change carrying it has
+been merged — which takes repository write access, and is reviewable in the diff like any other
+change. (Write access is what the guarantee actually rests on; whether a human read the diff is up
+to the project's own review settings.)
+
+**Editing by hand is fine.** Reword a rule that reads badly, delete one that stopped being true.
+The only lines with a machine-read grammar are the ones between the markers below; the prose
+around them is yours.
+
+**Resolving a `fix` sha after the pull request merged.** On a squash-merging repo the per-thread
+commits never become ancestors of the default branch, so a bare `git show <fix>` fails once the
+branch is gone. GitHub keeps the pull request's own commits, so fetch them by PR number — which is
+why every entry carries one:
+
+```sh
+git fetch origin "refs/pull/<pr>/head" && git show <fix>
+```
+
+**Two branches can both append here, and that is handled by ordinary means.** Git may report a
+conflict when two pull requests add hits at the same point — take both sides; the entries are
+independent and are keyed on their review-thread ids, so nothing is lost by keeping them. Promotion
+is decided by *reading this file*, never by a counter carried in a branch: two branches that each
+recorded a class's first hit merge into a file holding two, and the class is then due.
+
+**What makes that converge is a check on the CLEAN-PASS path**, not the ordinary one. A resolver run
+that finds nothing to fix exits before it would ever ask which classes are due, so "the next run
+promotes it" was only true of a run that happened to have other findings. `/resolve-pr-threads`
+therefore reconciles due promotions before exiting on a clean pass — the one thing a clean run still
+does.
+
+## Promoted checklist
+
+Sweep each of these before opening a pull request.
+
+<!-- adb:checklist:begin -->
+- `rewrite-loses-file-shape` — For every place that rewrites a file through a temporary and renames it over the original, check that the mode bits, the final-newline shape, and the symlink status of the original survive the rewrite; test each with a file that has the non-default property, not only the default one.
+<!-- adb:checklist:end -->
+
+## Hits
+
+One line per resolved review thread, newest last.
+
+<!-- adb:hits:begin -->
+- `caller-owned-path-deleted` `shmutant.sh:535` `1ffd64f` `PRRT_kwDOUT7q9s6gzb0G` PR #1 2026-09-09 — CLI removed a caller-supplied --workdir; now only a workdir the run created is removed
+- `stale-artifact-reuse` `shmutant.sh:361` `1ffd64f` `PRRT_kwDOUT7q9s6gzb0M` PR #1 2026-09-09 — worker dirs were reused with a stale timeout marker; now recreated per run and the marker cleared
+- `rewrite-loses-file-shape` `shmutant.sh:179` `1ffd64f` `PRRT_kwDOUT7q9s6gzb0R` PR #1 2026-09-09 — mutate rewrote through a fresh temp file and dropped the mode bits; now cp -p carries them
+- `rewrite-loses-file-shape` `shmutant.sh:176` `1ffd64f` `PRRT_kwDOUT7q9s6gzb0Z` PR #1 2026-09-09 — awk print appended a final newline the target lacked; now preserved via a NL flag
+- `timeout-escalation-cancelled` `shmutant.sh:260` `1ffd64f` `PRRT_kwDOUT7q9s6gzb0f` PR #1 2026-09-09 — watchdog killed after the leader died so TERM-ignoring descendants survived; now allowed to reach KILL
+- `early-return-skips-cleanup` `shmutant.sh:290` `1ffd64f` `PRRT_kwDOUT7q9s6gzb0i` PR #1 2026-09-09 — early worker verdicts returned before clone removal; now every exit goes through one finish helper
+- `aggregate-status-lost` `shmutant.sh:528` `1ffd64f` `PRRT_kwDOUT7q9s6gzb0l` PR #1 2026-09-09 — sourcing a plan returned the last command status so a refused row was skipped; refusals are now counted and fail the pool
+- `predictable-temp-path` `shmutant.sh:177` `1ffd64f` `PRRT_kwDOUT7q9s6gzb0t` PR #1 2026-09-09 — mutate wrote to file.shmutant-tmp which could be a symlink out of the tree; now mktemp in the target dir
+- `write-failure-swallowed` `shmutant.sh:96` `1ffd64f` `PRRT_kwDOUT7q9s6gzb0w` PR #1 2026-09-09 — stream write failures were ignored and the pool could return 0; now tracked and exit 2
+<!-- adb:hits:end -->
