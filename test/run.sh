@@ -91,6 +91,38 @@ t_mutate_reports_rewrite_failure() {
   shmutant_mutate "$T/nope/f" 'a' 'b'; rc_is $? 1 'unreadable file is rc 1'
 }
 
+t_mutate_preserves_mode() {
+  printf '#!/bin/sh\necho old\n' > "$T/f"; chmod 755 "$T/f"
+  shmutant_mutate "$T/f" 'old' 'new'; rc_is $? 0 'applies'
+  [ -x "$T/f" ] || fail_ 'the executable bit was lost by the rewrite'
+  chmod 600 "$T/f"
+  shmutant_mutate "$T/f" 'new' 'newer'; rc_is $? 0 'applies again'
+  [ -x "$T/f" ] && fail_ 'a mode the file did not have was added'
+  eq "$(cat "$T/f")" $'#!/bin/sh\necho newer' 'content rewritten'
+}
+
+t_mutate_preserves_missing_final_newline() {
+  printf 'a=1\nb=1' > "$T/f"
+  shmutant_mutate "$T/f" 'b=1' 'b=2'; rc_is $? 0 'applies'
+  eq "$(od -An -c "$T/f" | tr -s ' \n' ' ')" ' a = 1 \n b = 2 ' 'no newline was appended'
+  printf 'a=1\n' > "$T/g"
+  shmutant_mutate "$T/g" 'a=1' 'a=2'; rc_is $? 0 'applies'
+  eq "$(od -An -c "$T/g" | tr -s ' \n' ' ')" ' a = 2 \n ' 'a final newline is kept'
+}
+
+t_mutate_never_follows_a_stale_temp_link() {
+  mkdir -p "$T/out" "$T/tree"
+  printf 'precious\n' > "$T/out/victim"
+  printf 'x=1\n' > "$T/tree/f"
+  ln -s "$T/out/victim" "$T/tree/f.shmutant-tmp"
+  shmutant_mutate "$T/tree/f" 'x=1' 'x=2'; rc_is $? 0 'applies'
+  eq "$(cat "$T/out/victim")" 'precious' 'a symlink at the old predictable temp name is never written through'
+  eq "$(cat "$T/tree/f")" 'x=2' 'the target was rewritten'
+  local left; left=("$T/tree"/.shmutant.*)
+  [ -e "${left[0]}" ] && fail_ 'a temp file was left behind'
+  eq "$(cat "$T/tree/f.shmutant-tmp")" 'precious' 'the stale link itself is untouched'
+}
+
 # --- units: the table -----------------------------------------------------------------------------
 
 t_mut_validates_rows() {
@@ -109,6 +141,19 @@ t_mut_validates_rows() {
   eq "${SHMUTANT_ROWS_SEL[0]}" 'wit' 'select defaults to the witness'
   eq "${SHMUTANT_ROWS_SEL[1]}" 'unit' 'an explicit select is kept'
   eq "${SHMUTANT_ROWS_FILE[1]}" 'lib.sh' 'the row carries the current target'
+}
+
+t_refused_declarations_fail_the_pool() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'typo' '' 'b' 'add-works' 2>/dev/null
+  shmutant_mut 'good' '$1 + $2' '$1 - $2' 'add-works'
+  eq "$SHMUTANT_DECL_ERRORS" 1 'the refusal was counted'
+  pool lbl "$T/wd" toy_prepare toy_run
+  rc_is "$RC" 2 'a table with a refused row does not run'
+  has "$ERR" 'refused' 'says why'
+  shmutant_reset
+  eq "$SHMUTANT_DECL_ERRORS" 0 'reset clears the count'
 }
 
 t_reset_clears_table() {
@@ -237,6 +282,7 @@ t_verdict_unapplied() {
   rc_is "$RC" 1 'an unapplied row fails the pool'
   eq "$(verdict_of 'literal absent')" unapplied 'verdict is unapplied'
   has "$ERR" 'tests NOTHING' 'says the row tests nothing'
+  [ -e "$T/wd/mut-0/tree" ] && fail_ 'an unapplied row left its clone behind'
 }
 
 t_verdict_baseline_red() {
@@ -266,6 +312,30 @@ t_verdict_timeout() {
   has "$ERR" 'within 1s' 'reports the bound'
   sleep 3
   [ -e "$T/finished" ] && fail_ 'the run outlived its timeout — the process tree was not killed'
+}
+
+t_verdict_timeout_kills_a_term_ignoring_descendant() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'hangs' '$1 + $2' '$1 - $2' 'add-works'
+  stubborn_run() { bash -c "trap '' TERM; sleep 4; touch '$T/finished'"; }
+  SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=1 pool lbl "$T/wd" toy_prepare stubborn_run
+  eq "$(verdict_of 'hangs')" timeout 'verdict is timeout'
+  sleep 4
+  [ -e "$T/finished" ] && fail_ 'a descendant that ignores TERM outlived the timeout — the watchdog never reached KILL'
+}
+
+t_pool_recreates_worker_dirs() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  mkdir -p "$T/wd/mut-0/tree/stale" "$T/wd/base-0"
+  : > "$T/wd/mut-0/timeout"; : > "$T/wd/base-0/timeout"
+  pool lbl "$T/wd" toy_prepare toy_run
+  rc_is "$RC" 0 'a stale timeout marker from an earlier pool does not poison the verdict'
+  eq "$(verdict_of a)" killed 'killed, not timeout'
+  eq "$(field baseline 5)" green 'baseline green, not timeout'
+  [ -e "$T/wd/mut-0/tree/stale" ] && fail_ 'stale clone content survived into the new run'
 }
 
 t_read_verdict_fails_closed() {
@@ -421,6 +491,16 @@ t_stream_format() {
   eq "$(_shmutant_secs 2500000)" '2.500' 'seconds render with three decimals'
 }
 
+t_stream_write_failure_is_a_harness_error() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  SHMUTANT_STREAM="$T/no/such/dir/stream" pool lbl "$T/wd" toy_prepare toy_run
+  rc_is "$RC" 2 'an unwritable stream is exit 2 even though every row was killed'
+  has "$ERR" 'could not be written' 'says the stream was lost'
+  has "$ERR" '1/1 mutation(s) killed' 'the human summary still reports the verdicts'
+}
+
 t_stream_to_file() {
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
@@ -497,6 +577,16 @@ EOF
   bash "$SHMUTANT" run "$T/toy/plan.sh" --jobs 1 --no-baseline --timeout 30 --workdir "$T/w" --keep > /dev/null 2>&1; rc_is $? 1 'options are accepted'
   [ -d "$T/w/mut-1/tree" ] || fail_ '--keep --workdir left the clone in place'
   bash "$SHMUTANT" run "$T/toy/plan.sh" --jobs 0 > /dev/null 2>&1; rc_is $? 2 '--jobs 0 is refused'
+  mkdir -p "$T/mine"; printf 'keep\n' > "$T/mine/precious"
+  bash "$SHMUTANT" run "$T/toy/plan.sh" --workdir "$T/mine" > /dev/null 2>&1; rc_is $? 1 'runs in a caller-supplied workdir'
+  eq "$(cat "$T/mine/precious" 2>/dev/null)" keep 'a caller-supplied --workdir is never removed'
+  [ -f "$T/mine/mut-0/output" ] || fail_ 'the pool artifacts landed in the supplied workdir'
+  local kept
+  kept="$(bash "$SHMUTANT" run "$T/toy/plan.sh" --keep 2>&1 >/dev/null | sed -n 's/^shmutant: workdir kept: //p')"
+  [ -n "$kept" ] && [ -f "$kept/mut-0/tree/lib.sh" ] || fail_ '--keep did not keep a workdir the run created'
+  [ -n "$kept" ] && rm -rf -- "$kept"
+  printf "shmutant_mut 'broken' '' 'x' 'add-works'\nshmutant_mut 'fine' '+' '-' 'add-works'\n" >> "$T/toy/plan.sh"
+  bash "$SHMUTANT" run "$T/toy/plan.sh" > /dev/null 2>&1; rc_is $? 2 'a refused row followed by a valid one fails the plan'
   bash "$SHMUTANT" run "$T/toy/plan.sh" --bogus > /dev/null 2>&1; rc_is $? 2 'an unknown option is refused'
   bash "$SHMUTANT" run > /dev/null 2>&1; rc_is $? 2 'run without a plan is usage'
   bash "$SHMUTANT" run "$T/nope.sh" > /dev/null 2>&1; rc_is $? 2 'a missing plan is refused'

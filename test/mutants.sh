@@ -137,10 +137,10 @@ shmutant_mut 'a timeout is reported as an abort' \
   ': > "$dir/timeout"' \
   ': > "$dir/timeout-never"' \
   't_verdict_timeout'
-shmutant_mut 'a timeout kills the run but not its process tree' \
-  'kill -TERM -- -"$pid" 2>/dev/null' \
-  'kill -TERM -- "$pid" 2>/dev/null' \
-  't_verdict_timeout'
+shmutant_mut 'a timeout escalates to KILL on the leader only, not its process group' \
+  'kill -KILL -- -"$pid" 2>/dev/null' \
+  'kill -KILL -- "$pid" 2>/dev/null' \
+  't_verdict_timeout_kills_a_term_ignoring_descendant'
 shmutant_mut 'a blank verdict file reads as a verdict' \
   '[ -n "$SHMUTANT_V_VERDICT" ] || SHMUTANT_V_VERDICT=lost' \
   '[ -n "$SHMUTANT_V_VERDICT" ] || true' \
@@ -172,8 +172,8 @@ shmutant_mut 'baseline runs once per row instead of once per selector' \
   '[ "$k" = "$sel" ] && continue; done' \
   't_pool_runs_baseline_once_per_selector'
 shmutant_mut 'SHMUTANT_KEEP=1 removes the clone' \
-  '[ "${SHMUTANT_KEEP:-0}" = 1 ] || rm -rf -- "$dir/tree"' \
-  '[ "${SHMUTANT_KEEP:-0}" = 0 ] || rm -rf -- "$dir/tree"' \
+  '[ "${SHMUTANT_KEEP:-0}" = 1 ] || rm -rf -- "$1/tree"' \
+  '[ "${SHMUTANT_KEEP:-0}" = 0 ] || rm -rf -- "$1/tree"' \
   't_pool_keep_retains_clones'
 shmutant_mut 'a nested root is not carried into the clone' \
   'root="$dir/tree$suffix"' \
@@ -214,4 +214,42 @@ shmutant_mut 'version prints the wrong marker' \
 shmutant_mut 'checksum prints the file name instead of the digest' \
   "sha256sum -- \"\$1\" | awk '{print \$1}'" \
   "sha256sum -- \"\$1\" | awk '{print \$2}'" \
+  't_cli_run'
+
+# --- guards added for the first review round ---
+shmutant_mut 'a refused declaration is not counted' \
+  'SHMUTANT_DECL_ERRORS=$((SHMUTANT_DECL_ERRORS + 1)); return 2' \
+  'SHMUTANT_DECL_ERRORS=$((SHMUTANT_DECL_ERRORS + 0)); return 2' \
+  't_refused_declarations_fail_the_pool'
+shmutant_mut 'a stream write failure is swallowed' \
+  '2>/dev/null || SHMUTANT_EMIT_FAILED=1' \
+  '2>/dev/null || SHMUTANT_EMIT_FAILED=0' \
+  't_stream_write_failure_is_a_harness_error'
+shmutant_mut 'the rewrite drops the target mode' \
+  'cp -p -- "$f" "$tmp" &&' \
+  'true &&' \
+  't_mutate_preserves_mode'
+shmutant_mut 'the rewrite always appends a final newline' \
+  'ENVIRON["SHMUTANT_MUT_NL"] == 1) printf' \
+  'ENVIRON["SHMUTANT_MUT_NL"] != 2) printf' \
+  't_mutate_preserves_missing_final_newline'
+shmutant_mut 'the temp file is a predictable sibling name again' \
+  'tmp="$(mktemp "$(dirname -- "$f")/.shmutant.XXXXXX" 2>/dev/null)" || return 1' \
+  'tmp="$f.shmutant-tmp"' \
+  't_mutate_never_follows_a_stale_temp_link'
+shmutant_mut 'the watchdog is cancelled before it can escalate to KILL' \
+  '[ -e "$dir/timeout" ] || kill -TERM "$dog" 2>/dev/null' \
+  'kill -TERM "$dog" 2>/dev/null' \
+  't_verdict_timeout_kills_a_term_ignoring_descendant'
+shmutant_mut 'worker directories are reused with their stale contents' \
+  'rm -rf -- "$wd/$kind-$i"' \
+  ': "$wd/$kind-$i"' \
+  't_pool_recreates_worker_dirs'
+shmutant_mut 'an unapplied row keeps its clone' \
+  '2) _shmutant_worker_finish "$dir" unapplied 0 0; return 0 ;;' \
+  '2) printf '"'"'unapplied\n0\n0\n'"'"' > "$dir/verdict"; return 0 ;;' \
+  't_verdict_unapplied'
+shmutant_mut 'a caller-supplied workdir is removed' \
+  'elif [ "$made" = 1 ]; then rm -rf -- "$wd"' \
+  'elif true; then rm -rf -- "$wd"' \
   't_cli_run'

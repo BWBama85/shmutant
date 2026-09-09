@@ -77,9 +77,14 @@ SHMUTANT_ROWS_NAME=(); SHMUTANT_ROWS_FILE=(); SHMUTANT_ROWS_OLD=(); SHMUTANT_ROW
 SHMUTANT_ROWS_WIT=(); SHMUTANT_ROWS_SEL=()
 SHMUTANT_TARGET=""
 SHMUTANT_SELECTED_N=0
+SHMUTANT_DECL_ERRORS=0
 
 # _shmutant_err <msg…> — a harness diagnostic on stderr.
 _shmutant_err() { printf 'shmutant: %s\n' "$*" >&2; }
+
+# _shmutant_refuse <msg…> — a refused declaration: report it, count it, return 2. The count is
+# what lets a plan fail as a whole: sourcing returns only the LAST command's status.
+_shmutant_refuse() { _shmutant_err "$@"; SHMUTANT_DECL_ERRORS=$((SHMUTANT_DECL_ERRORS + 1)); return 2; }
 
 # _shmutant_esc <string> — print <string> with backslash, tab and newline escaped for the stream.
 _shmutant_esc() {
@@ -88,12 +93,18 @@ _shmutant_esc() {
   printf '%s' "$s"
 }
 
-# _shmutant_emit <field>… — append one tab-separated record to the verdict stream.
+# _shmutant_emit <field>… — append one tab-separated record to the verdict stream. A write that
+# fails sets SHMUTANT_EMIT_FAILED, which the pool turns into exit 2: a lost record is a lost
+# verdict, and CI reading the stream must never take silence for a pass.
 _shmutant_emit() {
   local out="" f
   for f in "$@"; do out+="$(_shmutant_esc "$f")"$'\t'; done
   out="${out%$'\t'}"
-  if [ -n "${SHMUTANT_STREAM:-}" ]; then printf '%s\n' "$out" >> "$SHMUTANT_STREAM"; else printf '%s\n' "$out"; fi
+  if [ -n "${SHMUTANT_STREAM:-}" ]; then
+    { printf '%s\n' "$out" >> "$SHMUTANT_STREAM"; } 2>/dev/null || SHMUTANT_EMIT_FAILED=1
+  else
+    printf '%s\n' "$out" 2>/dev/null || SHMUTANT_EMIT_FAILED=1
+  fi
 }
 
 # _shmutant_pos_int <value> — print <value> when it is a positive integer, else return 1.
@@ -166,14 +177,22 @@ shmutant_copy_tree() {
 # in place. 0 applied; 1 the rewrite failed (file unreadable, dir unwritable); 2 <old> matched
 # nothing, file unchanged. A literal spanning two lines never matches: awk sees one record.
 # ENVIRON, not -v: -v processes backslash escapes, so `\$` and `\n` would arrive altered.
-# Sibling-then-rename, never `sed -i` (BSD and GNU differ), so a failed rewrite cannot half-write.
+# The rewrite lands in a fresh mktemp sibling (never a predictable name, which could be a symlink
+# out of the tree) that carries the target's mode, and is renamed over the target, never
+# `sed -i` (BSD and GNU differ), so a failed rewrite cannot half-write. A target whose last line
+# has no newline keeps that shape: the only change is the literal.
 shmutant_mutate() {
-  local f="$1" tmp="$1.shmutant-tmp"
+  local f="$1" tmp nl=1
   [ -n "$2" ] || return 2
-  { SHMUTANT_MUT_OLD="$2" SHMUTANT_MUT_NEW="$3" awk '
+  [ -f "$f" ] || return 1
+  tmp="$(mktemp "$(dirname -- "$f")/.shmutant.XXXXXX" 2>/dev/null)" || return 1
+  [ -n "$(tail -c 1 -- "$f" 2>/dev/null)" ] && nl=0
+  { cp -p -- "$f" "$tmp" && SHMUTANT_MUT_OLD="$2" SHMUTANT_MUT_NEW="$3" SHMUTANT_MUT_NL="$nl" awk '
     BEGIN { old = ENVIRON["SHMUTANT_MUT_OLD"]; new = ENVIRON["SHMUTANT_MUT_NEW"] }
     !hit { i = index($0, old); if (i) { $0 = substr($0, 1, i - 1) new substr($0, i + length(old)); hit = 1 } }
-    { print }
+    NR > 1 { printf "\n" }
+    { printf "%s", $0 }
+    END { if (NR > 0 && ENVIRON["SHMUTANT_MUT_NL"] == 1) printf "\n" }
   ' "$f" > "$tmp"; } 2>/dev/null || { rm -f "$tmp"; return 1; }
   if cmp -s "$tmp" "$f"; then rm -f "$tmp"; return 2; fi
   mv -f "$tmp" "$f" 2>/dev/null || { rm -f "$tmp"; return 1; }
@@ -182,8 +201,8 @@ shmutant_mutate() {
 
 # shmutant_target <file> — the tree-relative file that rows appended after this call mutate.
 shmutant_target() {
-  [ -n "$1" ] || { _shmutant_err "target: a file is required"; return 2; }
-  case "$1" in /*) _shmutant_err "target: must be relative to the tree root: $1"; return 2 ;; esac
+  [ -n "$1" ] || { _shmutant_refuse "target: a file is required"; return 2; }
+  case "$1" in /*) _shmutant_refuse "target: must be relative to the tree root: $1"; return 2 ;; esac
   SHMUTANT_TARGET="$1"
 }
 
@@ -191,21 +210,22 @@ shmutant_target() {
 # <old> and <new> are literals. <witness> is the text a red line must carry. <select> is what
 # `run` receives to narrow the suite; it defaults to <witness>.
 shmutant_mut() {
-  [ "$#" -ge 4 ] || { _shmutant_err "mut: usage: shmutant_mut <name> <old> <new> <witness> [select]"; return 2; }
-  [ -n "$SHMUTANT_TARGET" ] || { _shmutant_err "mut '$1': no target — call shmutant_target first"; return 2; }
-  [ -n "$1" ] || { _shmutant_err "mut: a row needs a name"; return 2; }
-  [ -n "$2" ] || { _shmutant_err "mut '$1': the old literal is empty — it would match nothing"; return 2; }
-  [ "$2" != "$3" ] || { _shmutant_err "mut '$1': old and new are identical — the row would inject nothing"; return 2; }
-  [ -n "$4" ] || { _shmutant_err "mut '$1': a row needs a witness"; return 2; }
+  [ "$#" -ge 4 ] || { _shmutant_refuse "mut: usage: shmutant_mut <name> <old> <new> <witness> [select]"; return 2; }
+  [ -n "$SHMUTANT_TARGET" ] || { _shmutant_refuse "mut '$1': no target — call shmutant_target first"; return 2; }
+  [ -n "$1" ] || { _shmutant_refuse "mut: a row needs a name"; return 2; }
+  [ -n "$2" ] || { _shmutant_refuse "mut '$1': the old literal is empty — it would match nothing"; return 2; }
+  [ "$2" != "$3" ] || { _shmutant_refuse "mut '$1': old and new are identical — the row would inject nothing"; return 2; }
+  [ -n "$4" ] || { _shmutant_refuse "mut '$1': a row needs a witness"; return 2; }
   SHMUTANT_ROWS_NAME+=("$1"); SHMUTANT_ROWS_FILE+=("$SHMUTANT_TARGET"); SHMUTANT_ROWS_OLD+=("$2")
   SHMUTANT_ROWS_NEW+=("$3"); SHMUTANT_ROWS_WIT+=("$4"); SHMUTANT_ROWS_SEL+=("${5:-$4}")
 }
 
-# shmutant_reset — empty the table and forget the current target.
+# shmutant_reset — empty the table, forget the current target and the refusals counted so far.
 shmutant_reset() {
   SHMUTANT_ROWS_NAME=(); SHMUTANT_ROWS_FILE=(); SHMUTANT_ROWS_OLD=(); SHMUTANT_ROWS_NEW=()
   SHMUTANT_ROWS_WIT=(); SHMUTANT_ROWS_SEL=()
   SHMUTANT_TARGET=""
+  SHMUTANT_DECL_ERRORS=0
 }
 
 # _shmutant_witnessed <output-file> <prefix> <witness> — true when some line of the file starts
@@ -239,6 +259,7 @@ _shmutant_has_red_line() {
 _shmutant_run_bounded() {
   local dir="$1" run="$2" root="$3" sel="$4" timeout
   timeout="$(_shmutant_pos_int "${SHMUTANT_TIMEOUT:-300}")" || timeout=0
+  rm -f -- "$dir/timeout"
   (
     set -m
     ( export SHMUTANT_SELECT="$sel"; "$run" "$root" "$sel" ) < /dev/null > "$dir/output" 2>&1 &
@@ -257,10 +278,23 @@ _shmutant_run_bounded() {
       dog=$!
     fi
     wait "$pid"; rc=$?
-    if [ -n "$dog" ]; then kill -TERM "$dog" 2>/dev/null; wait "$dog" 2>/dev/null; fi
+    if [ -n "$dog" ]; then
+      # Once the watchdog has fired, let it reach KILL: the group leader dying to TERM does not
+      # mean a descendant that ignores TERM did.
+      [ -e "$dir/timeout" ] || kill -TERM "$dog" 2>/dev/null
+      wait "$dog" 2>/dev/null
+    fi
     exit "$rc"
   ) 2> /dev/null
   SHMUTANT_RUN_STATUS=$?
+}
+
+# _shmutant_worker_finish <dir> <verdict> <microseconds> <status> — drop the clone unless
+# SHMUTANT_KEEP=1, then write the verdict. Every worker exit goes through here, so an early
+# verdict cannot leave a tree behind.
+_shmutant_worker_finish() {
+  [ "${SHMUTANT_KEEP:-0}" = 1 ] || rm -rf -- "$1/tree"
+  printf '%s\n%s\n%s\n' "$2" "$3" "$4" > "$1/verdict"
 }
 
 # _shmutant_worker <kind> <index> <workdir> <run> <root-suffix> — one job, start to verdict.
@@ -276,24 +310,23 @@ _shmutant_worker() {
   root="$dir/tree$suffix"
   if [ "$kind" = mut ]; then sel="${SHMUTANT_ROWS_SEL[$i]}"; else sel="${SHMUTANT_BASE_SEL[$i]}"; fi
   if ! cp -RP -- "$wd/pristine" "$dir/tree" 2>/dev/null; then
-    printf 'unprepared\n0\nclone\n' > "$dir/verdict"; return 0
+    _shmutant_worker_finish "$dir" unprepared 0 clone; return 0
   fi
   if [ "$kind" = mut ]; then
     target="$root/${SHMUTANT_ROWS_FILE[$i]}"
     if [ ! -f "$target" ]; then
-      printf 'unprepared\n0\nmissing\n' > "$dir/verdict"; return 0
+      _shmutant_worker_finish "$dir" unprepared 0 missing; return 0
     fi
     shmutant_mutate "$target" "${SHMUTANT_ROWS_OLD[$i]}" "${SHMUTANT_ROWS_NEW[$i]}"; rc=$?
     case "$rc" in
       0) ;;
-      2) printf 'unapplied\n0\n0\n' > "$dir/verdict"; return 0 ;;
-      *) printf 'unprepared\n0\nrewrite\n' > "$dir/verdict"; return 0 ;;
+      2) _shmutant_worker_finish "$dir" unapplied 0 0; return 0 ;;
+      *) _shmutant_worker_finish "$dir" unprepared 0 rewrite; return 0 ;;
     esac
   fi
   _shmutant_run_bounded "$dir" "$run" "$root" "$sel"
   status="$SHMUTANT_RUN_STATUS"
   t1="$(_shmutant_now)"
-  [ "${SHMUTANT_KEEP:-0}" = 1 ] || rm -rf -- "$dir/tree"
   if [ -e "$dir/timeout" ]; then
     verdict=timeout
   elif [ "$kind" = base ]; then
@@ -311,7 +344,7 @@ _shmutant_worker() {
   else
     verdict=aborted
   fi
-  printf '%s\n%s\n%s\n' "$verdict" $(( t1 - t0 )) "$status" > "$dir/verdict"
+  _shmutant_worker_finish "$dir" "$verdict" $(( t1 - t0 )) "$status"
   return 0
 }
 
@@ -358,6 +391,9 @@ _shmutant_run_jobs() {
   local -a pids=() rest=()
   for (( i = 0; i < n; i++ )); do
     if [ "$kind" = mut ] && [ "${SHMUTANT_SKIP[$i]:-0}" != 0 ]; then continue; fi
+    # Recreated, never reused: a stale timeout marker or tree from an earlier pool in the same
+    # workdir would be read as this run's.
+    rm -rf -- "$wd/$kind-$i"
     mkdir -p -- "$wd/$kind-$i"
     _shmutant_worker "$kind" "$i" "$wd" "$run" "$suffix" &
     pids+=("$!")
@@ -375,14 +411,19 @@ _shmutant_run_jobs() {
 # tree once, runs each distinct selector uninjected (SHMUTANT_BASELINE), then every row through a
 # pool of min(SHMUTANT_JOBS or CPUs, cap or 8) workers. Emits the verdict stream and one stderr
 # line per row that was not killed. Returns 0 when every row was killed, 1 when any was not,
-# 2 when the harness itself could not run (empty table, bad workdir, prepare failed, root
-# outside the workdir).
+# 2 when the harness itself could not run (a refused declaration, empty table, bad workdir,
+# prepare failed, root outside the workdir, or a verdict-stream write that failed).
 shmutant_pool() {
   local label="$1" wd="$2" prep="$3" run="$4" cap="${5:-}"
   local n jobs root suffix i k sel t0 t1 killed=0 rc=0 verdict detail
   local -a base_sel=() base_verdict=()
   n="${#SHMUTANT_ROWS_NAME[@]}"
   t0="$(_shmutant_now)"
+  SHMUTANT_EMIT_FAILED=0
+  if [ "${SHMUTANT_DECL_ERRORS:-0}" -ne 0 ]; then
+    _shmutant_err "$label: $SHMUTANT_DECL_ERRORS declaration(s) were refused — a table missing rows it was meant to carry proves nothing"
+    return 2
+  fi
   if [ "$n" -eq 0 ]; then
     _shmutant_err "$label: the mutation table is EMPTY — this harness proves nothing"
     return 2
@@ -448,6 +489,7 @@ shmutant_pool() {
     for (( k = 0; k < ${#base_sel[@]}; k++ )); do
       if [ "${base_sel[$k]}" = "${SHMUTANT_ROWS_SEL[$i]}" ] && [ "${base_verdict[$k]}" != green ]; then
         SHMUTANT_SKIP[i]=1
+        rm -rf -- "$wd/mut-$i"
         mkdir -p -- "$wd/mut-$i"
         printf 'baseline\n0\n\n' > "$wd/mut-$i/verdict"
       fi
@@ -472,6 +514,10 @@ shmutant_pool() {
   _shmutant_emit shmutant 1 summary "$label" "$n" "$killed" "$jobs" "$(_shmutant_secs $(( t1 - t0 )))"
   _shmutant_err "$label: $killed/$n mutation(s) killed on their own witness (jobs=$jobs, $(_shmutant_secs $(( t1 - t0 )))s)"
   [ "${SHMUTANT_KEEP:-0}" = 1 ] || rm -rf -- "$wd/pristine"
+  if [ "$SHMUTANT_EMIT_FAILED" -ne 0 ]; then
+    _shmutant_err "$label: the verdict stream could not be written (${SHMUTANT_STREAM:-stdout}) — the records above are incomplete"
+    return 2
+  fi
   return "$rc"
 }
 
@@ -487,7 +533,8 @@ usage: shmutant run <plan.sh> [--jobs N] [--workdir DIR] [--keep] [--no-baseline
 A plan is a bash file. It defines two functions, `prepare <dir>` and `run <root> <select>`,
 and declares its rows with `shmutant_target` and `shmutant_mut`. It is sourced with
 SHMUTANT_PLAN_DIR set to its own directory. Exit: 0 every row killed, 1 a row was not,
-2 the plan or the harness could not run.
+2 the plan or the harness could not run. A workdir the run created is removed afterwards
+unless --keep; a --workdir you supplied is never removed.
 EOF
 }
 
@@ -501,7 +548,7 @@ _shmutant_checksum() {
 }
 
 _shmutant_cli_run() {
-  local plan="" wd="" keep=0 rc
+  local plan="" wd="" keep=0 made=0 rc
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --jobs)        [ -n "${2:-}" ] || { _shmutant_err "--jobs needs a value"; return 2; }
@@ -530,9 +577,14 @@ _shmutant_cli_run() {
   declare -F run > /dev/null || { _shmutant_err "run: the plan defines no run function"; return 2; }
   if [ -z "$wd" ]; then
     wd="$(mktemp -d "${TMPDIR:-/tmp}/shmutant.XXXXXX")" || { _shmutant_err "run: cannot create a workdir"; return 2; }
+    made=1
   fi
   shmutant_pool "$(basename -- "$plan")" "$wd" prepare run; rc=$?
-  if [ "$keep" = 1 ]; then _shmutant_err "workdir kept: $wd"; else rm -rf -- "$wd"; fi
+  # Only a workdir this run created is removed. A caller-supplied one is theirs: the pool's own
+  # artifacts stay in it and nothing else in it is touched.
+  if [ "$keep" = 1 ]; then _shmutant_err "workdir kept: $wd"
+  elif [ "$made" = 1 ]; then rm -rf -- "$wd"
+  fi
   return "$rc"
 }
 

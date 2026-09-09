@@ -122,10 +122,14 @@ shmutant_mut 'a below-floor CLI is written to anyway' \
 
 Rules a row must satisfy, all enforced when the row is appended or the pool starts:
 
-- literals only, never regexes; the **first** occurrence on a **single** line is replaced;
+- literals only, never regexes; the **first** occurrence on a **single** line is replaced, and
+  the file's mode and final-newline shape are preserved so the literal is the only change;
 - the old literal is non-empty and differs from the new one;
 - the target file is relative to the tree root and exists in the prepared tree;
 - the witness is non-empty.
+
+A refused declaration is counted, and a pool whose table carries one exits 2 rather than running
+the rows that happened to be valid.
 
 ```sh
 bash scripts/shmutant.sh run test/mutants.sh                # from the repo root
@@ -153,7 +157,9 @@ awk -F'\t' '$3 == "row" && $4 != "killed" { print $4 ": " $5 " (" $9 ")" }' muta
 Exit 0 means every row was killed; 1 means at least one was not; 2 means the harness did not
 run (empty table, prepare failed, a target missing from the tree, a root outside the workdir).
 Keep `SHMUTANT_KEEP=1` and `--workdir` on a CI failure to upload `mut-<n>/output` as an
-artifact: it is the full output of the run that produced the verdict.
+artifact: it is the full output of the run that produced the verdict. A `--workdir` you supply
+is never removed; the pool's `base-<n>`, `mut-<n>` and `pristine` entries inside it are recreated
+on every run. A workdir the CLI created for itself is removed unless `--keep`.
 
 ## 6. Tuning
 
