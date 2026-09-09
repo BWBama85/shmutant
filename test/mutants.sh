@@ -230,8 +230,8 @@ shmutant_mut 'the watchdog is cancelled before it can escalate to KILL' \
   'kill -TERM "$dog" 2>/dev/null' \
   't_verdict_timeout_kills_a_term_ignoring_descendant'
 shmutant_mut 'worker directories are reused with their stale contents' \
-  'rm -rf -- "$wd/$kind-$i"' \
-  ': "$wd/$kind-$i"' \
+  '  rm -rf -- "$1" 2>/dev/null' \
+  '  :' \
   't_pool_recreates_worker_dirs'
 shmutant_mut 'an unapplied row keeps its clone' \
   '2) _shmutant_worker_finish "$dir" unapplied 0 0; return 0 ;;' \
@@ -321,8 +321,8 @@ shmutant_mut 'the plan errexit is left on across the pool call' \
   't_cli_run'
 
 # --- guards added for the fifth review round ---
-shmutant_mut 'the plan is sourced inside an || list, muting its errexit' \
-  '  trap _shmutant_plan_died EXIT' \
+shmutant_mut 'the load-failure trap is never armed' \
+  '  builtin trap _shmutant_plan_died EXIT' \
   '  :' \
   't_cli_run'
 shmutant_mut 'the CLI cleanup reads the clobberable local' \
@@ -350,13 +350,13 @@ shmutant_mut 'an overflow-length timeout passes' \
   '[ "${#v_timeout}" -le 300 ] ||' \
   't_pool_validates_red_status_and_prefix'
 shmutant_mut 'descendants outside the process group are not killed' \
-  'for p in "$@" $(_shmutant_descendants "$pid"); do kill "-$sig" "$p" 2>/dev/null; done' \
+  'for p in "$@" "${now[@]}"; do [ -n "$p" ] && kill "-$sig" "$p" 2>/dev/null; done' \
   ':' \
   't_verdict_timeout_kills_an_escaped_process_group'
 
 # --- guards added for the sixth review round ---
 shmutant_mut 'the KILL escalation forgets the descendants found before TERM' \
-  '_shmutant_kill_tree KILL "$pid" $victims' \
+  '_shmutant_kill_tree KILL "$pid" "${victims[@]}"' \
   '_shmutant_kill_tree KILL "$pid"' \
   't_verdict_timeout_kills_a_reparented_term_ignoring_descendant'
 shmutant_mut 'the timeout is read bare, so nounset aborts the pool' \
@@ -387,3 +387,25 @@ shmutant_mut 'a relative SHMUTANT_STREAM is resolved after the plan may have mov
   '      *)  SHMUTANT_STREAM="$(_shmutant_abs "$(dirname -- "$SHMUTANT_STREAM")")/$(basename -- "$SHMUTANT_STREAM")" \' \
   '      *)  SHMUTANT_STREAM="$SHMUTANT_STREAM" \' \
   't_cli_run'
+
+# --- guards added for the seventh review round ---
+shmutant_mut 'a plan may replace the EXIT trap' \
+  '*" EXIT "*|*" 0 "*) _shmutant_err "run: a plan may not set an EXIT trap"; return 2 ;;' \
+  'never-matches) return 2 ;;' \
+  't_cli_run'
+shmutant_mut 'the descendant list is split by the caller IFS again' \
+  '_shmutant_kill_tree KILL "$pid" "${victims[@]}"' \
+  '_shmutant_kill_tree KILL "$pid" $(printf "%s\n" "${victims[@]}")' \
+  't_verdict_timeout_kills_a_reparented_term_ignoring_descendant'
+shmutant_mut 'prepare runs in a subshell' \
+  'if ! "$prep" "$wd/pristine" > "$wd/prepare.out"; then' \
+  'if ! ( "$prep" "$wd/pristine" > "$wd/prepare.out" ); then' \
+  't_pool_runs_prepare_in_its_own_shell'
+shmutant_mut 'surplus mutation arguments are accepted' \
+  'if [ "$#" -lt 4 ] || [ "$#" -gt 5 ]; then' \
+  'if [ "$#" -lt 4 ]; then' \
+  't_mut_validates_rows'
+shmutant_mut 'a worker directory that cannot be recreated is used anyway' \
+  '  [ ! -e "$1" ] || return 1' \
+  '  :' \
+  't_pool_refuses_unremovable_worker_dir'

@@ -240,7 +240,9 @@ shmutant_mutate() {
   # everywhere, and is reapplied whole after the write: a read-only target (0444, 0555) must be
   # writable while awk runs, and the kernel clears setuid/setgid on write.
   mode="$(ls -ld -- "$f" 2>/dev/null)"; mode="${mode%% *}"
-  { chmod -- u+w "$tmp" && SHMUTANT_MUT_OLD="$2" SHMUTANT_MUT_NEW="$3" SHMUTANT_MUT_NL="$nl" awk '
+  # cp -p first: run as root it carries the owner and group onto the temp file, which mktemp
+  # created as root; the mode is reapplied whole after the write regardless.
+  { cp -p -- "$f" "$tmp" && chmod -- u+w "$tmp" && SHMUTANT_MUT_OLD="$2" SHMUTANT_MUT_NEW="$3" SHMUTANT_MUT_NL="$nl" awk '
     BEGIN { old = ENVIRON["SHMUTANT_MUT_OLD"]; new = ENVIRON["SHMUTANT_MUT_NEW"] }
     !hit { i = index($0, old); if (i) { $0 = substr($0, 1, i - 1) new substr($0, i + length(old)); hit = 1 } }
     NR > 1 { printf "\n" }
@@ -269,7 +271,7 @@ shmutant_target() {
 # <old> and <new> are literals. <witness> is the text a red line must carry. <select> is what
 # `run` receives to narrow the suite; it defaults to <witness>.
 shmutant_mut() {
-  [ "$#" -ge 4 ] || { _shmutant_refuse "mut: usage: shmutant_mut <name> <old> <new> <witness> [select]"; return 2; }
+  if [ "$#" -lt 4 ] || [ "$#" -gt 5 ]; then _shmutant_refuse "mut: usage: shmutant_mut <name> <old> <new> <witness> [select] (got $# arguments — an unquoted witness?)"; return 2; fi
   [ -n "$SHMUTANT_TARGET" ] || { _shmutant_refuse "mut '$1': no target — call shmutant_target first"; return 2; }
   [ -n "$1" ] || { _shmutant_refuse "mut: a row needs a name"; return 2; }
   [ -n "$2" ] || { _shmutant_refuse "mut '$1': the old literal is empty — it would match nothing"; return 2; }
@@ -331,8 +333,10 @@ _shmutant_descendants() {
 # which a leader's death may have reparented out of reach of a fresh walk.
 _shmutant_kill_tree() {
   local sig="$1" pid="$2" p
+  local -a now=()
   shift 2
-  for p in "$@" $(_shmutant_descendants "$pid"); do kill "-$sig" "$p" 2>/dev/null; done
+  mapfile -t now < <(_shmutant_descendants "$pid")
+  for p in "$@" "${now[@]}"; do [ -n "$p" ] && kill "-$sig" "$p" 2>/dev/null; done
   kill "-$sig" -- -"$pid" 2>/dev/null
 }
 
@@ -357,12 +361,11 @@ _shmutant_run_bounded() {
         sleep "$timeout" & s=$!
         wait "$s"
         : > "$dir/timeout"
-        victims="$(_shmutant_descendants "$pid")"
-        # shellcheck disable=SC2086
-        _shmutant_kill_tree TERM "$pid" $victims
+        # An array, never an unquoted expansion: splitting it would depend on the caller's IFS.
+        mapfile -t victims < <(_shmutant_descendants "$pid")
+        _shmutant_kill_tree TERM "$pid" "${victims[@]}"
         sleep 1
-        # shellcheck disable=SC2086
-        _shmutant_kill_tree KILL "$pid" $victims
+        _shmutant_kill_tree KILL "$pid" "${victims[@]}"
       ) < /dev/null > /dev/null 2>&1 &
       dog=$!
     fi
@@ -471,6 +474,14 @@ _shmutant_detail() {
   esac
 }
 
+# _shmutant_fresh_dir <dir> — remove <dir> and create it empty; false when either step fails or
+# anything is still inside it.
+_shmutant_fresh_dir() {
+  rm -rf -- "$1" 2>/dev/null
+  [ ! -e "$1" ] || return 1
+  mkdir -p -- "$1" 2>/dev/null
+}
+
 # _shmutant_run_jobs <kind> <count> <workdir> <run> <suffix> <jobs> — run <count> workers of
 # <kind> through a bounded pool; a mut index whose SHMUTANT_SKIP entry is 1 is not started.
 # Reaps by pid, so a caller's own background jobs are never consumed by the pool.
@@ -481,8 +492,11 @@ _shmutant_run_jobs() {
     if [ "$kind" = mut ] && [ "${SHMUTANT_SKIP[$i]:-0}" != 0 ]; then continue; fi
     # Recreated, never reused: a stale timeout marker or tree from an earlier pool in the same
     # workdir would be read as this run's.
-    rm -rf -- "$wd/$kind-$i"
-    mkdir -p -- "$wd/$kind-$i"
+    if ! _shmutant_fresh_dir "$wd/$kind-$i"; then
+      _shmutant_err "cannot recreate $wd/$kind-$i — a stale verdict there could be read as this run's; refusing to continue"
+      [ "${#pids[@]}" -eq 0 ] || wait "${pids[@]}" || true
+      return 2
+    fi
     _shmutant_worker "$kind" "$i" "$wd" "$run" "$suffix" &
     pids+=("$!")
     if [ "${#pids[@]}" -ge "$jobs" ]; then
@@ -493,6 +507,7 @@ _shmutant_run_jobs() {
     fi
   done
   [ "${#pids[@]}" -eq 0 ] || wait "${pids[@]}" || true
+  return 0
 }
 
 # shmutant_pool <label> <workdir> <prepare> <run> [cap] — run every table row. Prepares the
@@ -569,9 +584,12 @@ shmutant_pool() {
 
   rm -rf -- "$wd/pristine"
   mkdir -p -- "$wd/pristine" || { _shmutant_err "$label: cannot create $wd/pristine"; return 2; }
-  if ! root="$("$prep" "$wd/pristine")"; then
+  # Called directly, not in a command substitution: state prepare establishes in the pool's
+  # shell (an exported variable the run needs) must still be there when the workers fork.
+  if ! "$prep" "$wd/pristine" > "$wd/prepare.out"; then
     _shmutant_err "$label: prepare failed — no tree to mutate"; return 2
   fi
+  root="$(cat "$wd/prepare.out")"; rm -f -- "$wd/prepare.out"
   [ -n "$root" ] || root="$wd/pristine"
   root="$(_shmutant_abs "$root")" || { _shmutant_err "$label: prepare printed a root that is not a directory"; return 2; }
   case "$root" in
@@ -599,7 +617,7 @@ shmutant_pool() {
       base_sel+=("$sel")
     done
     SHMUTANT_BASE_SEL=("${base_sel[@]}")
-    _shmutant_run_jobs base "${#base_sel[@]}" "$wd" "$run" "$suffix" "$jobs"
+    _shmutant_run_jobs base "${#base_sel[@]}" "$wd" "$run" "$suffix" "$jobs" || return 2
     for (( k = 0; k < ${#base_sel[@]}; k++ )); do
       _shmutant_read_verdict "$wd/base-$k"
       base_verdict+=("$SHMUTANT_V_VERDICT")
@@ -620,13 +638,12 @@ shmutant_pool() {
     for (( k = 0; k < ${#base_sel[@]}; k++ )); do
       if [ "${base_sel[$k]}" = "${SHMUTANT_ROWS_SEL[$i]}" ] && [ "${base_verdict[$k]}" != green ]; then
         SHMUTANT_SKIP[i]=1
-        rm -rf -- "$wd/mut-$i"
-        mkdir -p -- "$wd/mut-$i"
+        _shmutant_fresh_dir "$wd/mut-$i" || { _shmutant_err "$label: cannot recreate $wd/mut-$i"; return 2; }
         printf 'baseline\n0\n\n' > "$wd/mut-$i/verdict"
       fi
     done
   done
-  _shmutant_run_jobs mut "$n" "$wd" "$run" "$suffix" "$jobs"
+  _shmutant_run_jobs mut "$n" "$wd" "$run" "$suffix" "$jobs" || return 2
 
   for (( i = 0; i < n; i++ )); do
     _shmutant_read_verdict "$wd/mut-$i"
@@ -687,12 +704,23 @@ _shmutant_cli_finish() {
   return "$1"
 }
 
+# _shmutant_plan_trap <trap-args…> — stands in for `trap` while the plan loads: the EXIT trap is
+# the load-failure guard and bash keeps only one, so a plan may set any other signal but not
+# that one.
+_shmutant_plan_trap() {
+  case " $* " in
+    *" EXIT "*|*" 0 "*) _shmutant_err "run: a plan may not set an EXIT trap"; return 2 ;;
+  esac
+  # shellcheck disable=SC2064
+  builtin trap "$@"
+}
+
 # _shmutant_plan_died — EXIT trap armed while the plan is sourced: a plan that exits, or whose own
 # `set -e` fires, still ends this run as a load failure with status 2, workdir handled.
 _shmutant_plan_died() {
   _shmutant_err "run: the plan failed while loading"
   _shmutant_cli_finish 2
-  exit 2
+  builtin exit 2
 }
 
 _shmutant_cli_run() {
@@ -744,12 +772,15 @@ _shmutant_cli_run() {
   # Callbacks come from the plan, never from functions exported by the invoking environment.
   unset -f prepare run
   # Sourced bare, not in an || list: an || list would switch the plan's own errexit off for the
-  # whole file. The trap turns an errexit exit, or an explicit exit, into status 2.
-  trap _shmutant_plan_died EXIT
+  # whole file. The trap turns an errexit exit or an explicit exit into status 2; while the plan
+  # loads, `trap` may not replace it, because bash keeps only one EXIT trap.
+  builtin trap _shmutant_plan_died EXIT
+  trap() { _shmutant_plan_trap "$@"; }
   # shellcheck disable=SC1090
   . "$_shmutant_cli_plan"
   rc=$?
-  trap - EXIT
+  unset -f trap
+  builtin trap - EXIT
   [ "$rc" -eq 0 ] || { _shmutant_err "run: the plan failed while loading (status $rc)"; _shmutant_cli_finish 2; return 2; }
   declare -F prepare > /dev/null || { _shmutant_err "run: the plan defines no prepare function"; _shmutant_cli_finish 2; return 2; }
   declare -F run > /dev/null || { _shmutant_err "run: the plan defines no run function"; _shmutant_cli_finish 2; return 2; }

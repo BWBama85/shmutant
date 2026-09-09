@@ -176,6 +176,7 @@ t_mut_validates_rows() {
   shmutant_mut 'no witness' 'a' 'b' '' 2>/dev/null; rc_is $? 2 'empty witness refused'
   shmutant_mut '' 'a' 'b' 'w' 2>/dev/null; rc_is $? 2 'empty name refused'
   shmutant_mut 'three args' 'a' 'b' 2>/dev/null; rc_is $? 2 'too few arguments refused'
+  shmutant_mut 'six args' 'a' 'b' 'w' 'sel' 'extra' 2>/dev/null; rc_is $? 2 'surplus arguments refused (an unquoted witness would land here)'
   eq "${#SHMUTANT_ROWS_NAME[@]}" 0 'nothing was appended by a refused row'
   shmutant_mut 'ok' 'a' 'b' 'wit'; rc_is $? 0 'a valid row is appended'
   shmutant_mut 'ok2' 'a' 'b' 'wit' 'unit'; rc_is $? 0 'a row with a select is appended'
@@ -427,11 +428,16 @@ t_verdict_timeout_kills_a_reparented_term_ignoring_descendant() {
   shmutant_mut 'hangs' '$1 + $2' '$1 - $2' 'add-works'
   # own process group AND ignores TERM: the leader dies to TERM, this one is reparented, and only
   # the pid set captured before TERM can still name it for KILL.
-  stubborn_escaping_run() { set -m; bash -c "trap '' TERM; sleep 4; touch '$T/finished'" & wait; }
+  # Two of them: with one, even an unsplit pid list is still one valid pid.
+  stubborn_escaping_run() { set -m; bash -c "trap '' TERM; sleep 4; touch '$T/finished'" & bash -c "trap '' TERM; sleep 4; touch '$T/finished2'" & wait; }
   SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=1 pool lbl "$T/wd" toy_prepare stubborn_escaping_run
   eq "$(verdict_of 'hangs')" timeout 'verdict is timeout'
   sleep 4
-  [ -e "$T/finished" ] && fail_ 'a reparented TERM-ignoring descendant outlived the KILL escalation'
+  [ -e "$T/finished" ] || [ -e "$T/finished2" ] && fail_ 'a reparented TERM-ignoring descendant outlived the KILL escalation'
+  rm -f "$T/finished" "$T/finished2"
+  ( IFS=''; SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=1 shmutant_pool lbl "$T/wd2" toy_prepare stubborn_escaping_run > /dev/null 2>&1 )
+  sleep 4
+  [ -e "$T/finished" ] || [ -e "$T/finished2" ] && fail_ 'with the caller IFS empty, the descendant pid list was not split and a descendant survived'
 }
 
 t_pool_survives_nounset() {
@@ -509,6 +515,31 @@ t_pool_prepares_once_and_clones_per_row() {
   [ -e "$T/wd/mut-0/tree" ] && fail_ 'the clone was not removed after its run'
   [ -e "$T/wd/pristine" ] && fail_ 'the pristine tree was not removed'
   [ -f "$T/wd/mut-0/output" ] || fail_ 'the run output was not kept'
+}
+
+t_pool_runs_prepare_in_its_own_shell() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  exporting_prepare() { export TOY_MARK=set-by-prepare; shmutant_copy_tree "$TOY" "$1"; }
+  marked_run() { [ "${TOY_MARK:-}" = set-by-prepare ] || exit 3; bash "$1/test.sh"; }
+  unset TOY_MARK
+  pool lbl "$T/wd" exporting_prepare marked_run
+  rc_is "$RC" 0 'state prepare establishes in the pool shell reaches run'
+  eq "$(verdict_of a)" killed 'killed, not aborted'
+  unset TOY_MARK
+}
+
+t_pool_refuses_unremovable_worker_dir() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  mkdir -p "$T/wd/mut-0/held"; printf 'killed\n1\n1\n' > "$T/wd/mut-0/verdict"; chmod 555 "$T/wd/mut-0"
+  SHMUTANT_BASELINE=0 pool lbl "$T/wd" toy_prepare toy_run
+  chmod 755 "$T/wd/mut-0"
+  rc_is "$RC" 2 'a worker directory that cannot be recreated aborts the pool'
+  has "$ERR" 'cannot recreate' 'says why'
+  hasnt "$OUT" $'\trow\tkilled' 'the stale killed verdict was not reported'
 }
 
 t_pool_root_may_be_a_subdirectory() {
@@ -811,6 +842,15 @@ EOF
   TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/norun.sh" > /dev/null 2>&1; rc_is $? 2 'a plan without callbacks is a load failure'
   TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-ef.sh" > /dev/null 2>&1; rc_is $? 2 'a plan whose errexit fires is a load failure'
   eq "$(find "$T/tmpd" -mindepth 1 | wc -l | tr -d ' ')" 0 'no automatic workdir survives a load failure'
+  grep -v "'broken'" "$T/toy/plan.sh" > "$T/toy/plan-base.sh"
+  { cat "$T/toy/plan-base.sh"; printf 'trap "echo bye" EXIT\nexit 0\n'; } > "$T/toy/plan-trap.sh"
+  TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-trap.sh" > /dev/null 2>"$T/err-trap"; rc_is $? 2 'a plan that installs its own EXIT trap and exits is still a load failure'
+  has "$(cat "$T/err-trap")" 'may not set an EXIT trap' 'the trap replacement is refused'
+  { cat "$T/toy/plan-base.sh"; printf 'exit 0\n'; } > "$T/toy/plan-exit.sh"
+  TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-exit.sh" > /dev/null 2>&1; rc_is $? 2 'a plan that exits 0 is a load failure, not a pass'
+  { cat "$T/toy/plan-base.sh"; printf 'trap "echo usr" USR1\n'; } > "$T/toy/plan-usr.sh"
+  TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-usr.sh" > /dev/null 2>&1; rc_is $? 1 'a plan may still trap other signals'
+  eq "$(find "$T/tmpd" -mindepth 1 | wc -l | tr -d ' ')" 0 'no automatic workdir survives those load failures'
   ( cd "$T" && TMPDIR=tmpd SHMUTANT_STREAM=out.tsv bash "$SHMUTANT" run "$T/toy/plan-cd.sh" > /dev/null 2>&1 )
   [ -f "$T/out.tsv" ] || fail_ 'a relative SHMUTANT_STREAM was resolved after the plan changed directory'
   [ -e "$T/toy/out.tsv" ] && fail_ 'the stream landed relative to the plan directory'

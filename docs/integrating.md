@@ -101,8 +101,10 @@ Run with `SHMUTANT_RED_PREFIX='not ok '`, and probe the failure exit status as a
 
 A plan is a bash file. The CLI sources it with `SHMUTANT_PLAN_DIR` set to its directory, then
 runs the table. A plan that exits, or whose own `set -e` fires while it loads, is a load failure
-(status 2). Its `prepare` and `run` must be defined in the plan; functions exported by the
-invoking environment are discarded first.
+(status 2); a plan may not set an `EXIT` trap, since that trap is the load-failure guard. Its
+`prepare` and `run` must be defined in the plan; functions exported by the invoking environment
+are discarded first. `prepare` runs in the pool's own shell, so state it exports is visible to
+`run`.
 
 ```sh
 # test/mutants.sh
