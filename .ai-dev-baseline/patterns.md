@@ -48,6 +48,8 @@ Sweep each of these before opening a pull request.
 - `path-escapes-root` — For every path built as <root>/<caller-supplied relative path>, resolve the result physically (cd -P, pwd -P) and require it to stay at or below <root> before reading or writing it; test with a .. component, an absolute symlink, and a symlinked parent directory, not only a plain file.
 - `caller-owned-path-deleted` — For every rm -rf, list the paths it can reach and prove each one was created by this code in this run; anything the caller could have supplied or written into (a --workdir, an output file, a stream path) is either refused when it overlaps the removal, or excluded from it. Test with a caller file placed inside the removal target.
 - `config-value-unvalidated` — For every environment variable or option the code reads, validate its domain before the first use (numeric range, non-empty, existing directory, not inside a disposable tree) and exit 2 on a violation; a value outside the domain must never reach a comparison that changes a verdict. Test each with 0, empty, non-numeric and out-of-range.
+- `path-lookup-ambiguity` — For every path the caller supplies (a file to source, a workdir, an output), resolve it to an absolute physical path at the moment it is received and before any code that may cd, source, or change PATH runs; never let a bare name reach source, ., or a relative open after that point. Test with a relative path plus a cd, and a bare name plus a decoy on PATH.
+- `timeout-escalation-cancelled` — For every timeout that kills a run, enumerate what can outlive the first signal (a TERM-ignoring child, a descendant in its own process group or session, a watchdog cancelled before its KILL) and test each with a run that does exactly that, asserting a marker the survivor would have written does not appear.
 <!-- adb:checklist:end -->
 
 ## Hits
@@ -87,4 +89,12 @@ One line per resolved review thread, newest last.
 - `host-shell-option-leak` `shmutant.sh:611` `a380a98` `PRRT_kwDOUT7q9s6g16CZ` PR #1 2026-09-09 — duplicate of the plan errexit finding
 - `caller-owned-path-deleted` `shmutant.sh:542` `a380a98` `PRRT_kwDOUT7q9s6g16CJ` PR #1 2026-09-09 — a stream inside the workdir was deleted by pristine cleanup; stream paths inside the workdir are now refused
 - `caller-owned-path-deleted` `shmutant.sh:542` `a380a98` `PRRT_kwDOUT7q9s6g16Cg` PR #1 2026-09-09 — duplicate of the stream-under-pristine finding
+- `host-shell-option-leak` `shmutant.sh:633` `53cf30a` `PRRT_kwDOUT7q9s6g2Wz3` PR #1 2026-09-09 — sourcing the plan in an || list muted its own errexit; now sourced bare under an EXIT trap that normalises failure to 2
+- `path-escapes-root` `shmutant.sh:492` `53cf30a` `PRRT_kwDOUT7q9s6g2Wz7` PR #1 2026-09-09 — a symlink stream outside the workdir could point inside pristine; symlink streams refused
+- `config-value-unvalidated` `shmutant.sh:484` `53cf30a` `PRRT_kwDOUT7q9s6g2W0C` PR #1 2026-09-09 — an all-digit red status past integer range fell through the range check; width bounded to 3 digits
+- `config-value-unvalidated` `shmutant.sh:479` `53cf30a` `PRRT_kwDOUT7q9s6g2W0G` PR #1 2026-09-09 — an all-digit timeout past integer range silently disabled the watchdog; width bounded to 9 digits
+- `path-lookup-ambiguity` `shmutant.sh:614` `53cf30a` `PRRT_kwDOUT7q9s6g2W0L` PR #1 2026-09-09 — a relative --workdir was resolved after a plan cd; now absolute before sourcing
+- `timeout-escalation-cancelled` `shmutant.sh:314` `53cf30a` `PRRT_kwDOUT7q9s6g2W0S` PR #1 2026-09-09 — descendants in their own process group survived the group kill; timeout now also walks descendants via ps
+- `host-shell-option-leak` `shmutant.sh:633` `53cf30a` `PRRT_kwDOUT7q9s6g2W0a` PR #1 2026-09-09 — a sourced plan could assign the CLI cleanup locals by dynamic scope; cleanup inputs frozen read-only before sourcing
+- `host-shell-option-leak` `shmutant.sh:635` `53cf30a` `PRRT_kwDOUT7q9s6g2W0c` PR #1 2026-09-09 — exported prepare/run functions from the environment satisfied the callback check; unset before sourcing
 <!-- adb:hits:end -->
