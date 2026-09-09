@@ -60,4 +60,10 @@ One line per resolved review thread, newest last.
 - `aggregate-status-lost` `shmutant.sh:528` `1ffd64f` `PRRT_kwDOUT7q9s6gzb0l` PR #1 2026-09-09 — sourcing a plan returned the last command status so a refused row was skipped; refusals are now counted and fail the pool
 - `predictable-temp-path` `shmutant.sh:177` `1ffd64f` `PRRT_kwDOUT7q9s6gzb0t` PR #1 2026-09-09 — mutate wrote to file.shmutant-tmp which could be a symlink out of the tree; now mktemp in the target dir
 - `write-failure-swallowed` `shmutant.sh:96` `1ffd64f` `PRRT_kwDOUT7q9s6gzb0w` PR #1 2026-09-09 — stream write failures were ignored and the pool could return 0; now tracked and exit 2
+- `path-escapes-root` `shmutant.sh:205` `ddc2655` `PRRT_kwDOUT7q9s6g07P5` PR #1 2026-09-09 — a target with .. components could resolve outside the clone; .. components are now refused at declaration
+- `rewrite-loses-file-shape` `shmutant.sh:198` `ddc2655` `PRRT_kwDOUT7q9s6g07P-` PR #1 2026-09-09 — renaming over a symlink target swapped the link for a file and left the referent; symlink targets are now refused
+- `host-shell-option-leak` `shmutant.sh:196` `ddc2655` `PRRT_kwDOUT7q9s6g07QE` PR #1 2026-09-09 — a sourcing shell with set -C made the temp redirect fail; now a forced >| redirect
+- `path-lookup-ambiguity` `shmutant.sh:575` `ddc2655` `PRRT_kwDOUT7q9s6g07QK` PR #1 2026-09-09 — a bare plan name was sourced via PATH lookup; now sourced by its resolved directory path
+- `option-surface-mismatch` `shmutant.sh:586` `ddc2655` `PRRT_kwDOUT7q9s6g07QQ` PR #1 2026-09-09 — SHMUTANT_KEEP=1 kept clones but the CLI still deleted its created workdir; the env form now sets keep
+- `pipeline-status-lost` `README.md:132` `ddc2655` `PRRT_kwDOUT7q9s6g07Qa` PR #1 2026-09-09 — documented CI pipeline returned awk status not shmutant; docs now capture rc before the awk
 <!-- adb:hits:end -->
