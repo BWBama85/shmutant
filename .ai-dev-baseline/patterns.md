@@ -54,6 +54,7 @@ Sweep each of these before opening a pull request.
 - `stale-artifact-reuse` — For every directory or file a run reads a result from, prove it was written by this run: recreate it before use and treat a failed removal or creation as an abort, never as a warning. Test by planting a stale result (a marker, a verdict) that the run must not report, and one the run cannot delete.
 - `predictable-temp-path` — For every file the code opens for writing under a directory it does not fully own (a workdir, a target directory), grep for redirections and cp/mv targets built from a fixed name and replace each with a mktemp file in that directory; test by planting a symlink at the old fixed name pointing at a file outside and asserting it is untouched.
 - `contract-not-honoured` — For every statement in a contract header (which shell a callback runs in, which statuses mean what, what a record field can contain), find the line of code that implements it and write the unit that would fail if the code did the nearest plausible other thing; a contract line with no such unit is either untested or false.
+- `option-surface-mismatch` — For every setting that has two surfaces (a flag and an environment variable, a value the caller sets and one a callback sets), trace both to the single place that consumes it and test each surface separately; a value that one surface honours and the other silently drops is a defect in whichever reads it too early.
 <!-- adb:checklist:end -->
 
 ## Hits
@@ -140,4 +141,12 @@ One line per resolved review thread, newest last.
 - `early-return-skips-cleanup` `shmutant.sh:182` `883f690` `PRRT_kwDOUT7q9s6g8O53` PR #1 2026-09-10 — a refused nested copy left the directory mkdir created; the first created component is removed on refusal
 - `config-value-unvalidated` `shmutant.sh:398` `883f690` `PRRT_kwDOUT7q9s6g8O56` PR #1 2026-09-10 — a leading-zero timeout like 08 was octal to arithmetic and disarmed the watchdog; forced base 10
 - `timeout-escalation-cancelled` `shmutant.sh:554` `883f690` `PRRT_kwDOUT7q9s6g8O58` PR #1 2026-09-10 — an interrupted pool left its workers running; INT and TERM now kill every active worker tree and re-deliver the signal
+- `timeout-escalation-cancelled` `shmutant.sh:922` `5392317` `PRRT_kwDOUT7q9s6g8uTT` PR #1 2026-09-10 — a signal to the CLI parent orphaned the plan subshell and workers; the parent now traps INT/TERM, kills the child tree, cleans up and re-delivers
+- `host-shell-option-leak` `shmutant.sh:736` `5392317` `PRRT_kwDOUT7q9s6g8uTW` PR #1 2026-09-10 — the documented pool || bad pattern put the whole pool in an errexit-ignored context; docs now capture the status on its own line and state the bash limit
+- `contract-not-honoured` `shmutant.sh:590` `5392317` `PRRT_kwDOUT7q9s6g8uTb` PR #1 2026-09-10 — restoring a saved trap re-spelled it and appended SIGTERM to the handler; the trap -p declaration is now restored verbatim
+- `config-value-unvalidated` `shmutant.sh:269` `5392317` `PRRT_kwDOUT7q9s6g8uTc` PR #1 2026-09-10 — shmutant_target accepted surplus arguments; exactly one is required
+- `option-surface-mismatch` `shmutant.sh:939` `5392317` `PRRT_kwDOUT7q9s6g8uTe` PR #1 2026-09-10 — SHMUTANT_KEEP=1 set inside the plan was honoured by the pool but not the CLI cleanup; carried back through the marker
+- `host-shell-option-leak` `shmutant.sh:751` `5392317` `PRRT_kwDOUT7q9s6g8uTg` PR #1 2026-09-10 — root containment used case under the caller nocasematch; containment now runs with it off
+- `predictable-temp-path` `shmutant.sh:493` `5392317` `PRRT_kwDOUT7q9s6g8uTj` PR #1 2026-09-10 — the timeout marker was a predictable name a callback could write; now a mktemp name
+- `config-value-unvalidated` `shmutant.sh:285` `5392317` `PRRT_kwDOUT7q9s6g8uTl` PR #1 2026-09-10 — an old literal with a newline could never apply; refused at declaration
 <!-- adb:hits:end -->
