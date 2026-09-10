@@ -52,6 +52,7 @@ Sweep each of these before opening a pull request.
 - `timeout-escalation-cancelled` — For every timeout that kills a run, enumerate what can outlive the first signal (a TERM-ignoring child, a descendant in its own process group or session, a watchdog cancelled before its KILL) and test each with a run that does exactly that, asserting a marker the survivor would have written does not appear.
 - `early-return-skips-cleanup` — For every function that creates something it must later remove (a clone, a temp file, a workdir, a trap), list every return, exit and trap path out of it and route each one through a single finish helper; grep the function for return and exit and check each line reaches that helper. Test each early exit by asserting the artifact is gone.
 - `stale-artifact-reuse` — For every directory or file a run reads a result from, prove it was written by this run: recreate it before use and treat a failed removal or creation as an abort, never as a warning. Test by planting a stale result (a marker, a verdict) that the run must not report, and one the run cannot delete.
+- `predictable-temp-path` — For every file the code opens for writing under a directory it does not fully own (a workdir, a target directory), grep for redirections and cp/mv targets built from a fixed name and replace each with a mktemp file in that directory; test by planting a symlink at the old fixed name pointing at a file outside and asserting it is untouched.
 <!-- adb:checklist:end -->
 
 ## Hits
@@ -114,4 +115,12 @@ One line per resolved review thread, newest last.
 - `contract-not-honoured` `shmutant.sh:572` `33bb02b` `PRRT_kwDOUT7q9s6g3JeA` PR #1 2026-09-09 — prepare ran in a command-substitution subshell despite the contract saying the pool shell; now called directly with stdout to a file
 - `config-value-unvalidated` `shmutant.sh:272` `33bb02b` `PRRT_kwDOUT7q9s6g3JeG` PR #1 2026-09-09 — surplus shmutant_mut arguments were silently dropped; more than five is now refused
 - `stale-artifact-reuse` `shmutant.sh:484` `33bb02b` `PRRT_kwDOUT7q9s6g3JeJ` PR #1 2026-09-09 — an unremovable worker dir was ignored and its stale verdict read; recreation failure now aborts with 2
+- `path-lookup-ambiguity` `shmutant.sh:577` `56761ce` `PRRT_kwDOUT7q9s6g7D8H` PR #1 2026-09-10 — a relative library SHMUTANT_STREAM stayed relative while prepare could cd; now replaced by the validated absolute path
+- `stale-artifact-reuse` `shmutant.sh:586` `56761ce` `PRRT_kwDOUT7q9s6g7D8M` PR #1 2026-09-10 — pristine was rm -rf then mkdir -p unchecked; now the checked recreation helper
+- `timeout-escalation-cancelled` `shmutant.sh:365` `56761ce` `PRRT_kwDOUT7q9s6g7D8P` PR #1 2026-09-10 — descendants that detached before the deadline were never seen; the watchdog now snapshots twice a second while the run lives (setsid double-fork within a poll remains out of reach)
+- `host-shell-option-leak` `shmutant.sh:778` `56761ce` `PRRT_kwDOUT7q9s6g7D8R` PR #1 2026-09-10 — builtin trap and command trap bypassed the function shadow; a DEBUG trap now re-arms the EXIT guard before every plan command
+- `predictable-temp-path` `shmutant.sh:589` `56761ce` `PRRT_kwDOUT7q9s6g7D8T` PR #1 2026-09-10 — prepare.out was a fixed name that could be a symlink; now mktemp in the workdir
+- `config-value-unvalidated` `shmutant.sh:279` `56761ce` `PRRT_kwDOUT7q9s6g7D8Z` PR #1 2026-09-10 — a witness with a newline could never match a single red line; refused at declaration
+- `host-shell-option-leak` `shmutant.sh:589` `56761ce` `PRRT_kwDOUT7q9s6g7D8b` PR #1 2026-09-10 — prepare ran as an if condition, muting its own errexit; now called bare with status captured and the caller errexit restored, and the CLI arms an EXIT guard around the pool
+- `rewrite-loses-file-shape` `shmutant.sh:405` `56761ce` `PRRT_kwDOUT7q9s6g7D8f` PR #1 2026-09-10 — cp -RP clones dropped ownership and timestamps; now cp -RPp in clones and copy_tree
 <!-- adb:hits:end -->
