@@ -243,11 +243,19 @@ t_reset_clears_table() {
 # --- units: pool preconditions ----------------------------------------------------------------------
 
 t_pool_rejects_empty_table() {
+  mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset
   pool lbl "$T/wd" toy_prepare toy_run
   rc_is "$RC" 2 'an empty table is a harness error'
   has "$ERR" 'EMPTY' 'says the table is empty'
   eq "$OUT" '' 'no stream records for a run that never started'
+  [ -e "$T/wd/pristine" ] && fail_ 'the prepared tree was left behind'
+  # a table declared entirely by prepare is not empty
+  shmutant_reset
+  declaring_prepare() { toy_prepare "$1"; shmutant_target lib.sh; shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'; }
+  SHMUTANT_BASELINE=0 pool lbl "$T/wd" declaring_prepare toy_run
+  rc_is "$RC" 0 'a plan whose every row is declared by prepare runs'
+  eq "$(verdict_of a)" killed 'and its row is scored'
 }
 
 t_pool_checks_its_arity_first() {
@@ -366,6 +374,13 @@ t_pool_refuses_a_workdir_it_did_not_create_entries_in() {
   rc_is "$RC" 0 'and a marked workdir is reused'
 }
 
+t_target_refuses_a_newline() {
+  shmutant_reset; SHMUTANT_DECL_ERRORS=0
+  shmutant_target "d
+/lib.sh" 2>/dev/null; rc_is $? 2 'a target path with a newline is refused at declaration'
+  eq "$SHMUTANT_DECL_ERRORS" 1 'and counted as a refused declaration'
+}
+
 t_pool_refuses_shadowed_builtins_and_posix_mode() {
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
@@ -378,6 +393,14 @@ t_pool_refuses_shadowed_builtins_and_posix_mode() {
   eq "$(cat "$T/rc")" 2 'a function named kill is refused'
   has "$(cat "$T/e")" 'shadows the builtin' 'says why'
   ( set -o posix; shmutant_pool lbl "$T/wd" toy_prepare toy_run > /dev/null 2>"$T/e" ); rc_is $? 2 'POSIX mode is refused'
+  # a shadow prepare introduces is caught before any worker relies on the builtin
+  shadowing_kill_prepare() { toy_prepare "$1"; kill() { :; }; }
+  set -m; ( shmutant_pool lbl "$T/wd" shadowing_kill_prepare toy_run > /dev/null 2>"$T/e4"; echo "$?" > "$T/rc2" ) 2>/dev/null & bg=$!; set +m; i=0
+  until [ -e "$T/rc2" ]; do i=$((i + 1)); [ "$i" -lt 100 ] || break; sleep 0.1; done
+  [ -e "$T/rc2" ] || { kill -KILL -- -"$bg" 2>/dev/null; wait "$bg" 2>/dev/null; fail_ 'a pool whose prepare shadowed kill ran instead of being refused'; return; }
+  wait "$bg" 2>/dev/null
+  eq "$(cat "$T/rc2")" 2 'a kill function defined by prepare is refused after prepare'
+  has "$(cat "$T/e4")" 'shadows the builtin' 'says why'
   has "$(cat "$T/e")" 'POSIX mode' 'says why'
   # utilities are reached through command -p: a plan's function or a PATH prepare set to the
   # tree's bin does not stand in for ps, awk or ls
@@ -619,6 +642,13 @@ t_mode_spec_is_immune_to_nocasematch() {
     shmutant_pool lbl "$T/wd" toy_prepare toy_run > /dev/null 2>&1
     [ -o errexit ] && echo "FAIL: $_unit: a caller with errtrace on came back with errexit on"; exit 0 ) | grep FAIL && _failed=1
   return 0
+}
+
+t_library_sources_under_errexit() {
+  # a caller with set -e and expand_aliases off (the noninteractive default) must be able to
+  # source the library: `shopt -p` returns 1 for an unset option
+  bash -c 'set -e; shopt -u expand_aliases; . "$1"; echo sourced' _ "$SHMUTANT" > "$T/out" 2>&1
+  has "$(cat "$T/out")" sourced 'the library can be sourced by a caller under set -e'
 }
 
 t_library_is_immune_to_aliases_at_parse_time() {
@@ -1076,6 +1106,25 @@ t_run_output_is_published_over_a_planted_directory() {
   eq "$(verdict_of a)" killed 'killed'
   [ -f "$T/wd/mut-0/output" ] || fail_ 'the documented output artifact is not a regular file'
   has "$(cat "$T/wd/mut-0/output")" 'FAIL: add-works' 'and it holds the capture'
+}
+
+# shellcheck disable=SC2034
+t_run_output_publication_failure_is_a_harness_error() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  # the callback locks its worker directory after going red: the capture is still published
+  locking_run() { bash "$1/test.sh"; local rc=$?; chmod 555 "$1/.."; return "$rc"; }
+  SHMUTANT_BASELINE=0 pool lbl "$T/wd" toy_prepare locking_run
+  chmod 755 "$T/wd/mut-0" 2>/dev/null
+  eq "$(verdict_of a)" killed 'killed'
+  rc_is "$RC" 0 'a directory the callback locked is unlocked and the capture published'
+  [ -f "$T/wd/mut-0/output" ] || fail_ 'the output artifact is missing after the callback locked its directory'
+  # and when it truly cannot be published, the pool says so and fails
+  ( _shmutant_run_bounded() { SHMUTANT_RUN_STATUS=1; SHMUTANT_RUN_RED=1; SHMUTANT_RUN_WITNESSED=1; SHMUTANT_RUN_FIRED=0; SHMUTANT_RUN_UNSETTLED=0; SHMUTANT_RUN_PUBLISHED=0; }
+    SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd2" toy_prepare toy_run > "$T/out" 2>"$T/err"; echo "rc=$?" >> "$T/out" )
+  has "$(cat "$T/out")" 'rc=2' 'an output that could not be published is a harness error'
+  has "$(cat "$T/err")" 'could not be published' 'and is named'
 }
 
 t_run_partial_channel_open_is_a_setup_failure() {
@@ -1593,7 +1642,7 @@ t_pool_reports_a_clone_it_could_not_remove() {
   unmake_unremovable "$T/wd/mut-0/tree/pinned"
   rc_is "$RC" 2 'a clone that could not be removed is a harness error, not a pass'
   has "$ERR" 'was not removed' 'names the clone'
-  has "$ERR" 'could not be removed' 'and says the run is unclean'
+  has "$ERR" 'not left as promised' 'and says the run is unclean'
 }
 
 t_pool_refuses_a_worker_dir_under_a_swapped_workdir() {
@@ -1864,6 +1913,8 @@ t_copy_tree_excludes_git() {
   ( set -u; shmutant_copy_tree "$T/src" 2>"$T/e" ); rc_is $? 1 'a missing destination is a copy failure even under set -u'
   ( set -u; shmutant_mutate "$T/src/sub/f" y 2>"$T/e2" ); rc_is $? 1 'a mutate call missing an argument is a failure even under set -u'
   has "$(cat "$T/e2")" 'usage' 'reported as a usage error'
+  ( set -u; SHMUTANT_SELECT=x shmutant_selected 2>"$T/e3" ); rc_is $? 2 'a selected call with no unit is a usage failure even under set -u'
+  has "$(cat "$T/e3")" 'usage' 'reported as a usage error'
   mkdir -p "$T/cwd"
   ( cd "$T/cwd" && shmutant_copy_tree "$T/src" "" 2>/dev/null ); rc_is $? 1 'an empty destination is refused'
   eq "$(find "$T/cwd" -mindepth 1 | wc -l | tr -d ' ')" 0 'and nothing was copied into the current directory'

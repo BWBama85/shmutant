@@ -54,7 +54,7 @@ SHMUTANT_VERSION=0.1.0
 # Aliases expand while a file is PARSED: a sourcing shell whose dotfiles alias `cp` or `mkdir`
 # would otherwise bake those flags into every function below. Off for the rest of this file,
 # and the caller's setting put back at its end.
-_shmutant_alias_state="$(shopt -p expand_aliases)"
+_shmutant_alias_state="$(shopt -p expand_aliases; :)"
 shopt -u expand_aliases
 
 # _shmutant_bash_ok <major> <minor> — is that interpreter version at or above the floor?
@@ -193,6 +193,7 @@ _shmutant_target_ok() {
 # shmutant_selected <unit> — true when no selection is active or SHMUTANT_SELECT equals <unit>.
 # Counts every selected unit in SHMUTANT_SELECTED_N so a suite can refuse to pass on zero.
 shmutant_selected() {
+  if [ "$#" -ne 1 ]; then _shmutant_err "selected: usage: shmutant_selected <unit>"; return 2; fi
   if [ -z "${SHMUTANT_SELECT:-}" ] || [ "$SHMUTANT_SELECT" = "$1" ]; then
     SHMUTANT_SELECTED_N=$((SHMUTANT_SELECTED_N + 1))
     return 0
@@ -374,6 +375,7 @@ shmutant_target() {
   [ -n "$1" ] || { _shmutant_refuse "target: a file is required"; return 2; }
   case "$1" in /*) _shmutant_refuse "target: must be relative to the tree root: $1"; return 2 ;; esac
   case "/$1/" in */../*) _shmutant_refuse "target: a .. component could leave the tree: $1"; return 2 ;; esac
+  case "$1" in *$'\n'*) _shmutant_refuse "target: a path containing a newline is refused: the check of its directory would see the sibling"; return 2 ;; esac
   SHMUTANT_TARGET="$1"
 }
 
@@ -714,7 +716,7 @@ _shmutant_run_bounded() {
   local dir="$1" run="$2" root="$3" sel="$4" wit="${5:-}" timeout mark fifo fd left seen outf line
   local left_w left_r seen_w seen_r fired out_w out_r hold hp go holder holderid err_fd
   timeout="$(_shmutant_pos_int "${SHMUTANT_TIMEOUT:-300}")" || timeout=0
-  SHMUTANT_RUN_FIRED=0; SHMUTANT_RUN_RED=0; SHMUTANT_RUN_WITNESSED=0; SHMUTANT_RUN_UNSETTLED=0
+  SHMUTANT_RUN_FIRED=0; SHMUTANT_RUN_RED=0; SHMUTANT_RUN_WITNESSED=0; SHMUTANT_RUN_UNSETTLED=0; SHMUTANT_RUN_PUBLISHED=1
   SHMUTANT_RUN_STATUS=127
   # Every channel to and from the run is a descriptor opened HERE, before the callback exists,
   # and never reopened by path afterwards: the run's output (written and read back through
@@ -858,10 +860,14 @@ _shmutant_run_bounded() {
   # replaced, never written through.
   # A directory planted there would make mv publish INTO it: it goes first, and the result is
   # checked to be the capture itself.
+  # The directory is this run's; a callback that made it unwritable does not get to keep the
+  # capture from its name. A capture that still cannot be published is a harness error.
+  SHMUTANT_RUN_PUBLISHED=1
+  [ -w "$dir" ] || command -p chmod -- u+rwx "$dir" 2>/dev/null
   [ -d "$dir/output" ] && [ ! -L "$dir/output" ] && command -p rm -rf -- "$dir/output" 2>/dev/null
   if ! command -p mv -f -- "$outf" "$dir/output" 2>/dev/null || [ ! -f "$dir/output" ] || [ -L "$dir/output" ]; then
     command -p rm -f -- "$outf"
-    _shmutant_err "the run's output could not be published as $dir/output" 2>&"$err_fd"
+    SHMUTANT_RUN_PUBLISHED=0
   fi
   exec {left_w}>&- {left_r}<&- {seen_w}>&- {seen_r}<&- {fired}<&- {out_w}>&- {out_r}<&- {hold}<&- {hp}<&- {go}<&- {err_fd}>&-
 }
@@ -902,6 +908,7 @@ _shmutant_worker_finish() {
   # The verdict goes down the channel the pool opened for this worker before it forked, on a
   # file that no longer has a name: nothing planted in the directory can stand in for it.
   { printf 'verdict %s %s %s\n' "$2" "$3" "$4" >&"$SHMUTANT_VERDICT_FD"; } 2>/dev/null
+  [ "${SHMUTANT_RUN_PUBLISHED:-1}" = 1 ] || { printf 'unpublished\n' >&"$SHMUTANT_VERDICT_FD"; } 2>/dev/null
 }
 
 # _shmutant_worker <kind> <index> <workdir> <run> <root-suffix> — one job, start to verdict.
@@ -980,16 +987,18 @@ _shmutant_dir_id() {
 # SHMUTANT_RES_*[key] (and SHMUTANT_V_*): the last `verdict <v> <us> <status>` line, or `lost`
 # when there is none, the line is damaged, or the worker did not exit 0. Closes the channel.
 _shmutant_collect() {
-  local dir="$1" key="$2" wstatus="$3" line fd
+  local dir="$1" key="$2" wstatus="$3" line fd unpublished=0
   SHMUTANT_V_VERDICT=lost; SHMUTANT_V_US=0; SHMUTANT_V_STATUS=""
   fd="${SHMUTANT_VERDICT_R[$key]:-}"
   if [ -n "$fd" ]; then
-    # The last verdict line wins; a `group` line is the runner's, for the abort path.
+    # The last verdict line wins; a `group` line is the runner's, for the abort path; an
+    # `unpublished` line says the documented output artifact could not be put in place.
     while IFS= read -r line <&"$fd"; do
       case "$line" in
         "verdict "*) line="${line#verdict }"
                      SHMUTANT_V_VERDICT="${line%% *}"; line="${line#* }"
                      SHMUTANT_V_US="${line%% *}"; SHMUTANT_V_STATUS="${line#* }" ;;
+        unpublished) unpublished=1 ;;
       esac
     done
     exec {fd}<&-
@@ -1001,6 +1010,9 @@ _shmutant_collect() {
   [ -n "$SHMUTANT_V_VERDICT" ] || SHMUTANT_V_VERDICT=lost
   _shmutant_pos_int "$SHMUTANT_V_US" > /dev/null || SHMUTANT_V_US=0
   SHMUTANT_RES_VERDICT["$key"]="$SHMUTANT_V_VERDICT"; SHMUTANT_RES_US["$key"]="$SHMUTANT_V_US"; SHMUTANT_RES_STATUS["$key"]="$SHMUTANT_V_STATUS"
+  if [ "$unpublished" = 1 ]; then
+    _shmutant_err "$dir/output could not be published — the documented artifact of this run is missing"; SHMUTANT_CLEANUP_FAILED=1
+  fi
   # A clone the worker did not remove is a harness error, whatever it reported: the next run
   # in this workdir would find it. Only the directory the pool created is looked at, by inode.
   if [ -L "$dir" ] || [ "$(_shmutant_dir_id "$dir")" != "${SHMUTANT_DIR_IDS[$key]:-}" ]; then
@@ -1365,10 +1377,6 @@ shmutant_pool() {
     _shmutant_err "$label: $SHMUTANT_DECL_ERRORS declaration(s) were refused — a table missing rows it was meant to carry proves nothing"
     return 2
   fi
-  if [ "$n" -eq 0 ]; then
-    _shmutant_err "$label: the mutation table is EMPTY — this harness proves nothing"
-    return 2
-  fi
   # The pool cannot run in POSIX mode: a failing `exec` redirection would end the caller's shell
   # instead of returning, and the run wrapper's `exit` function would be refused.
   if [ -o posix ]; then _shmutant_err "$label: shmutant does not run with POSIX mode on (set +o posix)"; return 2; fi
@@ -1424,13 +1432,16 @@ shmutant_pool() {
     _shmutant_err "$label: prepare failed (status $prc) — no tree to mutate"; _shmutant_pool_fail "$label" "$wd"; return 2
   fi
   root="$(command -p cat <&"$pout_r")"; exec {pout_w}>&- {pout_r}<&-
+  # prepare may have defined a function under a builtin's name: checked again before any worker
+  # signals or waits with it.
+  _shmutant_no_shadows "$label" || { _shmutant_pool_fail "$label" "$wd"; return 2; }
   # prepare may have declared rows or had one refused: the table is read again here, and a
   # refusal after prepare is the same harness error as one before it.
   if [ "${SHMUTANT_DECL_ERRORS:-0}" -ne 0 ]; then
     _shmutant_err "$label: $SHMUTANT_DECL_ERRORS declaration(s) were refused — a table missing rows it was meant to carry proves nothing"; _shmutant_pool_fail "$label" "$wd"; return 2
   fi
   n="${#SHMUTANT_ROWS_NAME[@]}"
-  if [ "$n" -eq 0 ]; then _shmutant_err "$label: the mutation table is empty after prepare"; _shmutant_pool_fail "$label" "$wd"; return 2; fi
+  if [ "$n" -eq 0 ]; then _shmutant_err "$label: the mutation table is EMPTY — this harness proves nothing"; _shmutant_pool_fail "$label" "$wd"; return 2; fi
   # prepare ran in this shell and may have assigned any setting; the workers read them next.
   _shmutant_validate_settings "$label" "$wd" || { _shmutant_err "$label: a setting changed by prepare is invalid"; _shmutant_pool_fail "$label" "$wd"; return 2; }
   jobs="$(_shmutant_jobs "$cap")"
@@ -1518,7 +1529,7 @@ shmutant_pool() {
   _shmutant_err "$label: $killed/$n mutation(s) killed on their own witness (jobs=$jobs, $(_shmutant_secs "$(( t1 - t0 ))")s)"
   _shmutant_pool_fail "$label" "$wd"
   if [ "${SHMUTANT_CLEANUP_FAILED:-0}" -ne 0 ]; then
-    _shmutant_err "$label: a tree could not be removed — the next run in this workdir would find it"
+    _shmutant_err "$label: a worker directory was not left as promised (a tree not removed, or an output not published) — see above"
     return 2
   fi
   if ! _shmutant_stream_intact; then

@@ -776,8 +776,8 @@ shmutant_mut 'a digest tool that fails yields an empty digest and success' \
   '  :' \
   't_cli_run'
 shmutant_mut 'rows prepare declared are not read' \
-  '  if [ "$n" -eq 0 ]; then _shmutant_err "$label: the mutation table is empty after prepare"' \
-  '  n="$_shmutant_pool_n"; if [ "$n" -eq 0 ]; then _shmutant_err "$label: the mutation table is empty after prepare"' \
+  '  if [ "$n" -eq 0 ]; then _shmutant_err "$label: the mutation table is EMPTY — this harness proves nothing"; _shmutant_pool_fail' \
+  '  n="$_shmutant_pool_n"; if [ "$n" -eq 0 ]; then _shmutant_err "$label: the mutation table is EMPTY — this harness proves nothing"; _shmutant_pool_fail' \
   't_pool_reads_the_table_prepare_declared'
 shmutant_mut 'a declaration refused inside prepare is lost' \
   '    _shmutant_err "$label: $SHMUTANT_DECL_ERRORS declaration(s) were refused — a table missing rows it was meant to carry proves nothing"; _shmutant_pool_fail "$label" "$wd"; return 2' \
@@ -913,3 +913,29 @@ shmutant_mut 'mutate cleanup runs whatever rm the caller defined' \
   '    3) command -p rm -f "$tmp"; _shmutant_mutate_restore "$dir" "$dirmode"; return 2 ;;' \
   '    3) rm -f "$tmp"; _shmutant_mutate_restore "$dir" "$dirmode"; return 2 ;;' \
   't_mutate_applies_first_occurrence_only'
+
+# --- guards added for the twenty-fourth review round ---
+shmutant_mut 'a target path with a newline is declared' \
+  '  case "$1" in *$'"'"'\n'"'"'*) _shmutant_refuse "target: a path containing a newline is refused: the check of its directory would see the sibling"; return 2 ;; esac' \
+  '  :' \
+  't_target_refuses_a_newline'
+shmutant_mut 'an output that could not be published is accepted' \
+  '  [ "${SHMUTANT_RUN_PUBLISHED:-1}" = 1 ] || { printf '"'"'unpublished\n'"'"' >&"$SHMUTANT_VERDICT_FD"; } 2>/dev/null' \
+  '  :' \
+  't_run_output_publication_failure_is_a_harness_error'
+shmutant_mut 'a locked worker directory keeps the capture from its name' \
+  '  [ -w "$dir" ] || command -p chmod -- u+rwx "$dir" 2>/dev/null' \
+  '  :' \
+  't_run_output_publication_failure_is_a_harness_error'
+shmutant_mut 'selected reads its unit before checking it was given' \
+  '  if [ "$#" -ne 1 ]; then _shmutant_err "selected: usage: shmutant_selected <unit>"; return 2; fi' \
+  '  :' \
+  't_copy_tree_excludes_git'
+shmutant_mut 'a shadow prepare introduced is not rechecked' \
+  '  _shmutant_no_shadows "$label" || { _shmutant_pool_fail "$label" "$wd"; return 2; }' \
+  '  :' \
+  't_pool_refuses_shadowed_builtins_and_posix_mode'
+shmutant_mut 'sourcing the library fails a caller under errexit' \
+  '_shmutant_alias_state="$(shopt -p expand_aliases; :)"' \
+  '_shmutant_alias_state="$(shopt -p expand_aliases)"' \
+  't_library_sources_under_errexit'
