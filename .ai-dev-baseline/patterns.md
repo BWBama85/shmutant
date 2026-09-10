@@ -288,4 +288,10 @@ One line per resolved review thread, newest last.
 - `host-shell-option-leak` `shmutant.sh` `12793c4` `PRRT_kwDOUT7q9s6hP9-m` PR #1 2026-09-10
 - `predictable-temp-path` `shmutant.sh` `12793c4` `PRRT_kwDOUT7q9s6hP9-q` PR #1 2026-09-10
 - `path-lookup-ambiguity` `shmutant.sh` `12793c4` `PRRT_kwDOUT7q9s6hP9-v` PR #1 2026-09-10
+- `path-lookup-ambiguity` `shmutant.sh` `5044719` `PRRT_kwDOUT7q9s6hQyby` PR #1 2026-09-10
+- `write-failure-swallowed` `shmutant.sh` `5044719` `PRRT_kwDOUT7q9s6hQyb7` PR #1 2026-09-10
+- `config-value-unvalidated` `shmutant.sh` `5044719` `PRRT_kwDOUT7q9s6hQycD` PR #1 2026-09-10
+- `host-shell-option-leak` `shmutant.sh` `5044719` `PRRT_kwDOUT7q9s6hQycJ` PR #1 2026-09-10
+- `contract-not-honoured` `shmutant.sh` `5044719` `PRRT_kwDOUT7q9s6hQycO` PR #1 2026-09-10
+- `host-shell-option-leak` `shmutant.sh` `5044719` `PRRT_kwDOUT7q9s6hQycQ` PR #1 2026-09-10
 <!-- adb:hits:end -->
