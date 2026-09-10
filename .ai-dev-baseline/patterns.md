@@ -203,4 +203,9 @@ One line per resolved review thread, newest last.
 - `early-return-skips-cleanup` `shmutant.sh` `35a01fa` `PRRT_kwDOUT7q9s6hFRcQ` PR #1 2026-09-10
 - `write-failure-swallowed` `shmutant.sh` `35a01fa` `PRRT_kwDOUT7q9s6hFRcb` PR #1 2026-09-10
 - `config-value-unvalidated` `shmutant.sh` `35a01fa` `PRRT_kwDOUT7q9s6hFRce` PR #1 2026-09-10
+- `host-shell-option-leak` `shmutant.sh` `49f8d05` `PRRT_kwDOUT7q9s6hHkVR` PR #1 2026-09-10
+- `early-return-skips-cleanup` `shmutant.sh` `49f8d05` `PRRT_kwDOUT7q9s6hHkVW` PR #1 2026-09-10
+- `timeout-escalation-cancelled` `shmutant.sh` `49f8d05` `PRRT_kwDOUT7q9s6hHkVa` PR #1 2026-09-10
+- `path-lookup-ambiguity` `shmutant.sh` `49f8d05` `PRRT_kwDOUT7q9s6hHkVf` PR #1 2026-09-10
+- `pipeline-status-lost` `shmutant.sh` `49f8d05` `PRRT_kwDOUT7q9s6hHkVm` PR #1 2026-09-10
 <!-- adb:hits:end -->
