@@ -140,8 +140,8 @@ shmutant_mut 'a blank verdict file reads as a verdict' \
 
 # --- mechanics ---
 shmutant_mut 'run does not receive the selector' \
-  '"$run" "$root" "$sel" )' \
-  '"$run" "$root" )' \
+  '"$run" "$root" "$sel"; rrc=$?' \
+  '"$run" "$root"; rrc=$?' \
   't_pool_passes_select_to_run'
 shmutant_mut 'SHMUTANT_SELECT is exported with the wrong value' \
   'export SHMUTANT_SELECT="$sel";' \
@@ -384,7 +384,7 @@ shmutant_mut 'a newline in a witness is accepted' \
   'case "$4${5:-}" in never-matches)' \
   't_mut_validates_rows'
 shmutant_mut 'descendants are snapshotted only at the deadline' \
-  '          done < <(_shmutant_descendants "$pid")' \
+  '          done < <(_shmutant_snapshot "$pid")' \
   '          done < /dev/null' \
   't_verdict_timeout_kills_a_descendant_seen_before_it_detached'
 shmutant_mut 'clones drop metadata' \
@@ -448,8 +448,8 @@ shmutant_mut 'a non-red baseline exit is scored red' \
   '    elif true; then verdict=red' \
   't_baseline_non_red_exit_is_aborted'
 shmutant_mut 'a reused pid is signalled anyway' \
-  '&& [ "$now_e" -ge "$seen_e" ]' \
-  '&& [ "$now_e" -ge 0 ]' \
+  '  [ "$d" -ge -1 ] && [ "$d" -le 1 ]' \
+  '  true' \
   't_kill_tree_skips_a_reused_pid'
 
 # --- guards added for the tenth review round ---
@@ -481,10 +481,6 @@ shmutant_mut 'an interrupted pool leaves its workers running' \
   "  trap '_shmutant_abort_workers TERM' TERM" \
   '  :' \
   't_pool_interrupted_kills_its_workers'
-shmutant_mut 'pid identity ignores the command line and group' \
-  '  [ "$now_rest" = "$seen_rest" ] && [ "$now_e" -ge "$seen_e" ]' \
-  '  [ "$now_e" -ge "$seen_e" ]' \
-  't_kill_tree_skips_a_reused_pid'
 shmutant_mut 'no-trap is restored as ignore, so the caller cannot be interrupted afterwards' \
   'else trap - TERM; fi' \
   'else trap -- "" TERM; fi' \
@@ -508,8 +504,8 @@ shmutant_mut 'KEEP set inside the plan is not carried back to the CLI' \
   '    :' \
   't_cli_run'
 shmutant_mut 'containment honours the caller nocasematch' \
-  '  ( shopt -u nocasematch; case "$2" in' \
-  '  ( case "$2" in' \
+  '  ( shopt -u nocasematch' \
+  '  ( :' \
   't_inside_ignores_nocasematch'
 shmutant_mut 'the timeout marker is the predictable name timeout again' \
   '  mark="$(mktemp "$dir/.fired.XXXXXX")" || { SHMUTANT_RUN_STATUS=127; return; }' \
@@ -519,7 +515,37 @@ shmutant_mut 'an old literal with a newline is accepted' \
   '  case "$2" in *$'"'"'\n'"'"'*) _shmutant_refuse "mut' \
   '  case "$2" in never-matches) _shmutant_refuse "mut' \
   't_mut_validates_rows'
-shmutant_mut 'SHMUTANT_KEEP=1 from the environment is ignored when the CLI is interrupted' \
-  '[ "${SHMUTANT_KEEP:-0}" = 1 ] && keep=1' \
-  '[ "${SHMUTANT_KEEP:-0}" = 2 ] && keep=1' \
+
+# --- guards added for the twelfth review round ---
+shmutant_mut 'the abort handlers do not retain TERM victims for KILL' \
+  '  _shmutant_kill_tree KILL "$pid" "$@" "${victims[@]}"' \
+  '  _shmutant_kill_tree KILL "$pid" "$@"' \
+  't_pool_interrupted_kills_its_workers'
+shmutant_mut 'a callback that returned normally leaves its helpers running' \
+  '      _shmutant_kill_tree_twice "$pid" "${leftovers[@]}"' \
+  '      :' \
+  't_run_leftovers_are_killed_after_a_normal_return'
+shmutant_mut 'the verdict is written straight to its fixed name' \
+  'printf '"'"'%s\n%s\n%s\n'"'"' "$2" "$3" "$4" >| "$tmp" && mv -f -- "$tmp" "$1/verdict"' \
+  'printf '"'"'%s\n%s\n%s\n'"'"' "$2" "$3" "$4" > "$1/verdict"; rm -f -- "$tmp"' \
+  't_worker_verdict_cannot_be_forged_through_a_link'
+shmutant_mut 'the filesystem root contains nothing' \
+  '    if [ "$1" = / ]; then case "$2" in /*) exit 0 ;; esac; exit 1; fi' \
+  '    :' \
+  't_inside_ignores_nocasematch'
+shmutant_mut 'copy_tree copies a hard-linked source' \
+  '  if [ -n "$linked" ]; then' \
+  '  if false; then' \
+  't_copy_tree_excludes_git'
+shmutant_mut 'rc and killed are not reset after prepare' \
+  '  killed=0; rc=0' \
+  '  :' \
+  't_pool_bookkeeping_survives_prepare_assignments'
+shmutant_mut 'the settled KEEP is not recorded for the CLI abort path' \
+  '[ -n "${SHMUTANT_CLI_KEEPFILE:-}" ] && printf '"'"'%s\n'"'"' "${SHMUTANT_KEEP:-0}" >| "$SHMUTANT_CLI_KEEPFILE"' \
+  ':' \
   't_cli_run'
+shmutant_mut 'the row pool runs as a condition, muting callback errexit' \
+  '  _shmutant_run_jobs mut "$n" "$wd" "$run" "$suffix" "$jobs"; rjrc=$?' \
+  '  _shmutant_run_jobs mut "$n" "$wd" "$run" "$suffix" "$jobs" || rjrc=2; rjrc=${rjrc:-0}' \
+  't_run_errexit_is_honoured_in_workers'
