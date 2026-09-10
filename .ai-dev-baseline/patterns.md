@@ -177,4 +177,10 @@ One line per resolved review thread, newest last.
 - `timeout-escalation-cancelled` `shmutant.sh:694` `94ab7d5` `PRRT_kwDOUT7q9s6g_9Z5` PR #1 2026-09-10 — a directory recreation failure waited on running workers; they are now ended, and the kill freezes the tree first
 - `option-surface-mismatch` `shmutant.sh:1045` `94ab7d5` `PRRT_kwDOUT7q9s6g_9Z9` PR #1 2026-09-10 — SHMUTANT_KEEP=1 in the environment was not honoured by an interrupt before the pool settled it; seeded in the parent
 - `path-escapes-root` `shmutant.sh:203` `94ab7d5` `PRRT_kwDOUT7q9s6g_9aF` PR #1 2026-09-10 — a symlink at the copy destination was written through; refused
+- `write-failure-swallowed` `shmutant.sh:492` `3535839` `PRRT_kwDOUT7q9s6hBFNc` PR #1 2026-09-10 — the leftover record was written by path after the callback could lock its dir; channels are descriptors opened before the callback
+- `contract-not-honoured` `shmutant.sh:715` `3535839` `PRRT_kwDOUT7q9s6hBFNn` PR #1 2026-09-10 — the directory-failure abort waited on roots not its kill helpers; helper pids are waited for
+- `path-escapes-root` `shmutant.sh:553` `3535839` `PRRT_kwDOUT7q9s6hBFNs` PR #1 2026-09-10 — cleanup followed a worker directory a callback replaced with a symlink; the directory is verified before removing beneath it
+- `early-return-skips-cleanup` `shmutant.sh:806` `3535839` `PRRT_kwDOUT7q9s6hBFNy` PR #1 2026-09-10 — a preserved read-only root defeated rm -rf silently; trees are made writable first and a failed removal is a harness error
+- `timeout-escalation-cancelled` `shmutant.sh:524` `3535839` `PRRT_kwDOUT7q9s6hBFN2` PR #1 2026-09-10 — the watchdog sent raw signals without freezing; it uses the freezing kill, which now stops in bulk before any identity work
+- `timeout-escalation-cancelled` `shmutant.sh:432` `3535839` `PRRT_kwDOUT7q9s6hBFN5` PR #1 2026-09-10 — retained victims were not frozen or searched from; they are stopped and used as discovery roots
 <!-- adb:hits:end -->
