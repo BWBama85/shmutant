@@ -64,7 +64,7 @@ make_unremovable() {
 unmake_unremovable() {
   case "${UNREMOVABLE_HOW:-}" in
     chflags) chflags nouchg "$1" 2>/dev/null ;;
-    sudo)    sudo -n rm -rf "$1" 2>/dev/null ;;
+    sudo)    sudo -n command rm -rf "$1" 2>/dev/null ;;
   esac
 }
 
@@ -84,6 +84,14 @@ t_mutate_applies_first_occurrence_only() {
   printf 'a=1\nb=1\na=1\n' > "$T/f"
   shmutant_mutate "$T/f" 'a=1' 'a=2'; rc_is $? 0 'applies'
   eq "$(cat "$T/f")" $'a=2\nb=1\na=1' 'only the first occurrence changed'
+  # an unapplied rewrite cleans up through the real rm, whatever function the caller defined
+  printf 'abc\n' > "$T/shadow-f"
+  # shellcheck disable=SC2033
+  rm() { echo SHADOWED-RM; }
+  local got; got="$(shmutant_mutate "$T/shadow-f" zzz y; echo "rc=$?")"
+  unset -f rm
+  eq "$got" 'rc=2' 'a miss returns 2 and prints nothing from a caller-defined rm'
+  eq "$(find "$T" -maxdepth 1 -name '.shmutant.*' | wc -l | tr -d ' ')" 0 'the temporary rewrite was removed by the real rm'
 }
 
 t_mutate_within_one_line_only() {
@@ -290,7 +298,7 @@ t_pool_refuses_target_under_symlinked_dir() {
   shmutant_reset; shmutant_target linked/lib.sh; shmutant_mut 'r' 'echo 5' 'echo 6' 'add-works'
   pool lbl "$T/wd" toy_prepare toy_run
   rc_is "$RC" 2 'a target under a symlinked directory is refused before any run'
-  has "$ERR" 'under one' 'says why'
+  has "$ERR" 'reached through one' 'says why'
   eq "$(cat "$T/outside/lib.sh")" 'add() { echo 5; }' 'the file outside the tree was never touched'
   _shmutant_target_ok "$T/toy" lib.sh; rc_is $? 0 'a plain in-tree file is fine'
   mkdir -p "$T/toy/sub"; ln -s ../lib.sh "$T/toy/sub/rel"; ln -s .. "$T/toy/sub/up"
@@ -321,6 +329,18 @@ t_abs_ignores_cdpath() {
 "
   ( cd "$T/nl" && _shmutant_abs "x
 " ); rc_is $? 1 'a name ending in a newline is refused rather than resolved to its sibling'
+  mkdir -p "$T/nl/src"; printf 'x\n' > "$T/nl/src/f"; mkdir -p "$T/nl/dst"; printf 'keep\n' > "$T/nl/dst/g"
+  shmutant_copy_tree "$T/nl/src" "$T/nl/dst
+" 2>/dev/null; rc_is $? 1 'a copy destination ending in a newline is refused'
+  [ -e "$T/nl/dst/f" ] && fail_ 'the copy landed on the sibling without the newline'
+  shmutant_copy_tree "$T/nl/src
+" "$T/nl/dst2" 2>/dev/null; rc_is $? 1 'a copy source ending in a newline is refused'
+  mk_toy "$T/toy"; TOY="$T/toy"; shmutant_reset; shmutant_target lib.sh; shmutant_mut 'a' 'a' 'b' 'w'
+  printf 'sibling\n' > "$T/stream"
+  ( SHMUTANT_STREAM="$T/stream
+" shmutant_pool lbl "$T/wd" toy_prepare toy_run > /dev/null 2>"$T/e" ); rc_is $? 2 'a stream path ending in a newline is refused'
+  has "$(cat "$T/e")" 'newline' 'says why'
+  eq "$(cat "$T/stream")" sibling 'and the sibling stream was not written to'
   cd() { builtin cd "$@" && echo LISTING; }; pwd() { echo SHADOW; }
   got="$(_shmutant_abs "$T/here/sub")"; unset -f cd pwd
   eq "$got" "$(cd "$T/here/sub" && pwd -P)" 'a caller'"'"'s cd or pwd function does not stand in for the builtins'
@@ -392,6 +412,16 @@ t_pool_validates_timeout() {
 }
 
 # --- units: one verdict each -----------------------------------------------------------------------------
+
+t_verdict_scan_takes_literals_as_bytes() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  # a witness and a prefix that carry backslash escapes must match the bytes, not the escape
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add\nworks'
+  escaping_run() { bash "$1/test.sh" > /dev/null 2>&1; echo 'RED\t: add\nworks here'; return 1; }
+  SHMUTANT_BASELINE=0 SHMUTANT_RED_PREFIX='RED\t: ' pool lbl "$T/wd" toy_prepare escaping_run
+  eq "$(verdict_of a)" killed 'a prefix and witness holding a literal backslash-t and backslash-n match the same bytes in the output'
+}
 
 t_verdict_scans_a_large_output() {
   mk_toy "$T/toy"; TOY="$T/toy"
@@ -1027,6 +1057,27 @@ t_abort_during_spawn_is_deferred() {
     exit 0 ) || _failed=1
 }
 
+# shellcheck disable=SC2034
+t_run_publishes_its_group_before_the_callback_runs() {
+  mkdir -p "$T/d"
+  # the callback sees, on its own channel, the group record already written by the runner
+  ( exec {vf}>|"$T/chan"; SHMUTANT_VERDICT_FD="$vf"
+    cb() { cat "$T/chan" > "$T/seen"; }
+    SHMUTANT_TIMEOUT=0 _shmutant_run_bounded "$T/d" cb "$T/d" sel 2>/dev/null )
+  has "$(cat "$T/seen")" 'group ' 'the group and holder are on the channel before plan code runs'
+}
+
+t_run_output_is_published_over_a_planted_directory() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  dir_planting_run() { mkdir -p "$1/../output"; bash "$1/test.sh"; }
+  SHMUTANT_BASELINE=0 pool lbl "$T/wd" toy_prepare dir_planting_run
+  eq "$(verdict_of a)" killed 'killed'
+  [ -f "$T/wd/mut-0/output" ] || fail_ 'the documented output artifact is not a regular file'
+  has "$(cat "$T/wd/mut-0/output")" 'FAIL: add-works' 'and it holds the capture'
+}
+
 t_run_partial_channel_open_is_a_setup_failure() {
   mkdir -p "$T/d"
   # The descriptor limit is lowered to one below the smallest value at which a run succeeds:
@@ -1043,6 +1094,32 @@ t_run_partial_channel_open_is_a_setup_failure() {
   eq "$(cat "$T/status")" 127 'a channel that could not be opened is a setup failure'
   [ -e "$T/ran" ] && fail_ 'the callback ran without its channels'
   eq "$(find "$T/d" -name '.*' | wc -l | tr -d ' ')" 0 'no channel file was left behind'
+}
+
+# shellcheck disable=SC2034
+t_pool_survives_a_caller_chld_trap() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  shmutant_mut 'b' '$1 + $2' '$2 + $1' 'add-works'
+  # a caller whose CHLD trap reaps every child: the pool must neither spin nor lose verdicts,
+  # and the trap must be back afterwards
+  ( trap 'wait 2>/dev/null' CHLD; SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd" toy_prepare toy_run > "$T/out" 2>"$T/err"; echo "rc=$?" >> "$T/out"; trap -p CHLD > "$T/trap" ) &
+  local bg=$! i=0
+  until grep -q '^rc=' "$T/out" 2>/dev/null || [ "$i" -ge 300 ]; do i=$((i + 1)); sleep 0.1; done
+  grep -q '^rc=' "$T/out" || { kill -KILL "$bg" 2>/dev/null; wait "$bg" 2>/dev/null; fail_ 'the pool spun forever under a caller CHLD trap'; return; }
+  wait "$bg" 2>/dev/null
+  has "$(cat "$T/out")" $'\trow\tkilled\ta\t' 'row a killed under a caller CHLD trap'
+  has "$(cat "$T/out")" $'\trow\tsurvived\tb\t' 'row b survived under a caller CHLD trap'
+  has "$(cat "$T/out")" 'rc=1' 'the pool status is its own'
+  has "$(cat "$T/trap")" 'CHLD' 'the caller'"'"'s CHLD trap was put back'
+  # and the residue: workers already reaped by someone else are scored lost, not spun on
+  ( declare -gA SHMUTANT_ACTIVE_KEY=([12345]=mut-0) SHMUTANT_ACTIVE_ID=() SHMUTANT_VERDICT_R=() SHMUTANT_RES_VERDICT=() SHMUTANT_RES_US=() SHMUTANT_RES_STATUS=() SHMUTANT_DIR_IDS=()
+    pids=(12345); SHMUTANT_ACTIVE=(12345)
+    _shmutant_reap_one "$T/wd" 2>/dev/null
+    [ "${#pids[@]}" -eq 0 ] || { echo "FAIL: $_unit: a pid nothing could wait for stayed in the list"; exit 1; }
+    [ "${SHMUTANT_RES_VERDICT[mut-0]:-}" = lost ] || { echo "FAIL: $_unit: a worker reaped by someone else is not scored lost"; exit 1; }
+    exit 0 ) || _failed=1
 }
 
 t_pool_abort_waits_only_for_its_helpers() {
@@ -1785,6 +1862,8 @@ t_copy_tree_excludes_git() {
   [ -L "$T/dst/link" ] || fail_ 'symlink was not kept as a symlink'
   shmutant_copy_tree "$T/missing" "$T/dst2" 2>/dev/null; rc_is $? 1 'a missing source is an error'
   ( set -u; shmutant_copy_tree "$T/src" 2>"$T/e" ); rc_is $? 1 'a missing destination is a copy failure even under set -u'
+  ( set -u; shmutant_mutate "$T/src/sub/f" y 2>"$T/e2" ); rc_is $? 1 'a mutate call missing an argument is a failure even under set -u'
+  has "$(cat "$T/e2")" 'usage' 'reported as a usage error'
   mkdir -p "$T/cwd"
   ( cd "$T/cwd" && shmutant_copy_tree "$T/src" "" 2>/dev/null ); rc_is $? 1 'an empty destination is refused'
   eq "$(find "$T/cwd" -mindepth 1 | wc -l | tr -d ' ')" 0 'and nothing was copied into the current directory'
@@ -1869,6 +1948,15 @@ EOF
   has "$out" $'shmutant\t1\trow\tkilled' 'the stream reaches stdout'
   has "$(cat "$T/err")" 'plan.sh: 1/1' 'the label is the plan file name'
   TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan.sh" --workdir --keep > /dev/null 2>"$T/e"; rc_is $? 2 'a flag where a value was expected is refused'
+  cp "$T/toy/plan.sh" "$T/toy/plan.sh
+"; printf 'exit 7\n' > "$T/toy/plan.sh
+"
+  TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan.sh
+" > /dev/null 2>"$T/e"; rc_is $? 2 'a plan path ending in a newline is refused, not resolved to its sibling'
+  has "$(cat "$T/e")" 'newline' 'says why'
+  rm -f "$T/toy/plan.sh
+"
+  TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan.sh" --workdir --keep > /dev/null 2>"$T/e"
   has "$(cat "$T/e")" 'needs a value' 'says so'
   [ -e "./--keep" ] && fail_ 'a directory named --keep was created'
   printf 'touch "$SHMUTANT_PLAN_DIR/loaded"\n' >> "$T/toy/plan.sh"

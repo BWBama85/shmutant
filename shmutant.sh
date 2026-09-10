@@ -205,6 +205,9 @@ shmutant_selected() {
 # fails to copy, or when <dst> lies inside <src>.
 shmutant_copy_tree() {
   if [ "$#" -ne 2 ] || [ -z "$1" ] || [ -z "$2" ]; then _shmutant_err "copy_tree: usage: shmutant_copy_tree <src> <dst> (neither empty)"; return 1; fi
+  # A newline in either name would be stripped by the substitutions that split it, and the
+  # copy would land on the sibling.
+  case "$1$2" in *$'\n'*) _shmutant_err "copy_tree: a path containing a newline is refused"; return 1 ;; esac
   local src="$1" dst="$2" entry name rc=0 asrc adst
   [ -d "$src" ] || { _shmutant_err "copy_tree: not a directory: $src"; return 1; }
   # Resolved first, so the scan below and the copy walk the same tree; find would not follow a
@@ -328,6 +331,7 @@ _shmutant_mutate_restore() {
 # `sed -i` (BSD and GNU differ), so a failed rewrite cannot half-write. A target whose last line
 # has no newline keeps that shape: the only change is the literal.
 shmutant_mutate() {
+  if [ "$#" -ne 3 ]; then _shmutant_err "mutate: usage: shmutant_mutate <file> <old> <new>"; return 1; fi
   local f="$1" tmp nl=1 rc mode dir dirmode=""
   [ -n "$2" ] && [ "$2" != "$3" ] || return 2
   [ -f "$f" ] && [ ! -L "$f" ] || return 1
@@ -355,8 +359,8 @@ shmutant_mutate() {
   ' "$f" >| "$tmp"; } 2>/dev/null; rc=$?
   case "$rc" in
     0) ;;
-    3) rm -f "$tmp"; _shmutant_mutate_restore "$dir" "$dirmode"; return 2 ;;
-    *) rm -f "$tmp"; _shmutant_mutate_restore "$dir" "$dirmode"; return 1 ;;
+    3) command -p rm -f "$tmp"; _shmutant_mutate_restore "$dir" "$dirmode"; return 2 ;;
+    *) command -p rm -f "$tmp"; _shmutant_mutate_restore "$dir" "$dirmode"; return 1 ;;
   esac
   command -p chmod -- "$(_shmutant_mode_spec "$mode")" "$tmp" 2>/dev/null || { command -p rm -f "$tmp"; _shmutant_mutate_restore "$dir" "$dirmode"; return 1; }
   command -p mv -f "$tmp" "$f" 2>/dev/null || { command -p rm -f "$tmp"; _shmutant_mutate_restore "$dir" "$dirmode"; return 1; }
@@ -406,7 +410,9 @@ shmutant_reset() {
 _shmutant_scan_output() {
   local got
   SHMUTANT_RUN_RED=0; SHMUTANT_RUN_WITNESSED=0
-  got="$(command -p awk -v p="$2" -v w="$3" '
+  # Through ENVIRON, never -v: awk would read a backslash escape in the prefix or witness.
+  got="$(SHMUTANT_SCAN_P="$2" SHMUTANT_SCAN_W="$3" command -p awk '
+    BEGIN { p = ENVIRON["SHMUTANT_SCAN_P"]; w = ENVIRON["SHMUTANT_SCAN_W"] }
     index($0, p) == 1 { red = 1; if (w != "" && index($0, w)) { wit = 1; exit } }
     END { print red + 0, wit + 0 }' <&"$1" 2>/dev/null)"
   case "$got" in
@@ -706,7 +712,7 @@ _shmutant_snapshot() {
 # control on, bash reports the reaped job there when the pool itself runs under `$(...)`.
 _shmutant_run_bounded() {
   local dir="$1" run="$2" root="$3" sel="$4" wit="${5:-}" timeout mark fifo fd left seen outf line
-  local left_w left_r seen_w seen_r fired out_w out_r hold hp holder holderid err_fd
+  local left_w left_r seen_w seen_r fired out_w out_r hold hp go holder holderid err_fd
   timeout="$(_shmutant_pos_int "${SHMUTANT_TIMEOUT:-300}")" || timeout=0
   SHMUTANT_RUN_FIRED=0; SHMUTANT_RUN_RED=0; SHMUTANT_RUN_WITNESSED=0; SHMUTANT_RUN_UNSETTLED=0
   SHMUTANT_RUN_STATUS=127
@@ -722,14 +728,14 @@ _shmutant_run_bounded() {
   seen="$(command -p mktemp "$dir/.seen.XXXXXX")" || { command -p rm -f -- "$mark" "$left"; return 0; }
   outf="$(command -p mktemp "$dir/.output.XXXXXX")" || { command -p rm -f -- "$mark" "$left" "$seen"; return 0; }
   fifo="$mark.fired"
-  { command -p mkfifo -- "$fifo" "$mark.hold" "$mark.hp"; } 2>/dev/null \
-    || { command -p rm -f -- "$mark" "$left" "$seen" "$outf" "$fifo" "$mark.hold" "$mark.hp"; return 0; }
-  if ! exec {left_w}>|"$left" {left_r}<"$left" {seen_w}>|"$seen" {seen_r}<"$seen" {fired}<>"$fifo" {out_w}>|"$outf" {out_r}<"$outf" {hold}<>"$mark.hold" {hp}<>"$mark.hp" {err_fd}>&2; then
+  { command -p mkfifo -- "$fifo" "$mark.hold" "$mark.hp" "$mark.go"; } 2>/dev/null \
+    || { command -p rm -f -- "$mark" "$left" "$seen" "$outf" "$fifo" "$mark.hold" "$mark.hp" "$mark.go"; return 0; }
+  if ! exec {left_w}>|"$left" {left_r}<"$left" {seen_w}>|"$seen" {seen_r}<"$seen" {fired}<>"$fifo" {out_w}>|"$outf" {out_r}<"$outf" {hold}<>"$mark.hold" {hp}<>"$mark.hp" {go}<>"$mark.go" {err_fd}>&2; then
     # A partial open (a descriptor limit) is a setup failure, not a run: close what did open.
-    for fd in "${left_w:-}" "${left_r:-}" "${seen_w:-}" "${seen_r:-}" "${fired:-}" "${out_w:-}" "${out_r:-}" "${hold:-}" "${hp:-}" "${err_fd:-}"; do [ -n "$fd" ] && exec {fd}>&-; done
-    command -p rm -f -- "$mark" "$left" "$seen" "$outf" "$fifo" "$mark.hold" "$mark.hp"; return 0
+    for fd in "${left_w:-}" "${left_r:-}" "${seen_w:-}" "${seen_r:-}" "${fired:-}" "${out_w:-}" "${out_r:-}" "${hold:-}" "${hp:-}" "${go:-}" "${err_fd:-}"; do [ -n "$fd" ] && exec {fd}>&-; done
+    command -p rm -f -- "$mark" "$left" "$seen" "$outf" "$fifo" "$mark.hold" "$mark.hp" "$mark.go"; return 0
   fi
-  command -p rm -f -- "$mark" "$left" "$seen" "$fifo" "$mark.hold" "$mark.hp"
+  command -p rm -f -- "$mark" "$left" "$seen" "$fifo" "$mark.hold" "$mark.hp" "$mark.go"
   # An unsettled freeze, from this shell or the watchdog, is reported on the sightings channel.
   local SHMUTANT_UNSETTLED_FD="$seen_w"
   (
@@ -749,6 +755,9 @@ _shmutant_run_bounded() {
     # replace it.
     ( _shmutant_wrap_left="$left_w"
       ( ( read -r _ <&"$hold" ) < /dev/null > /dev/null 2>&1 & printf '%s\n' "$!" >&"$hp" )
+      # No plan code until the runner has published this run's group and holder for the abort
+      # path: an interrupt before that would find a run it could not name.
+      read -t 30 -r _ <&"$go" || builtin exit 127
       trap '_shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"' EXIT
       exit() { local s=$?; _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; if [ "$#" -eq 0 ]; then builtin exit "$s"; else builtin exit "$@"; fi; }
       export SHMUTANT_SELECT="$sel"; "$run" "$root" "$sel"; rrc=$?
@@ -764,6 +773,7 @@ _shmutant_run_bounded() {
     # a reaped root by number.
     rootid="$(_shmutant_identity "$pid")" || rootid=""
     [ -z "${SHMUTANT_VERDICT_FD:-}" ] || { printf 'group %s %s %s\n' "$pid" "$holder" "$holderid" >&"$SHMUTANT_VERDICT_FD"; } 2>/dev/null
+    printf 'go\n' >&"$go"
     dog=""
     if [ "$timeout" -gt 0 ]; then
       (
@@ -846,8 +856,14 @@ _shmutant_run_bounded() {
   _shmutant_scan_output "$out_r" "${SHMUTANT_RED_PREFIX:-FAIL: }" "$wit"
   # The capture takes its documented name by rename: a symlink a callback planted there is
   # replaced, never written through.
-  command -p mv -f -- "$outf" "$dir/output" 2>/dev/null || command -p rm -f -- "$outf"
-  exec {left_w}>&- {left_r}<&- {seen_w}>&- {seen_r}<&- {fired}<&- {out_w}>&- {out_r}<&- {hold}<&- {hp}<&- {err_fd}>&-
+  # A directory planted there would make mv publish INTO it: it goes first, and the result is
+  # checked to be the capture itself.
+  [ -d "$dir/output" ] && [ ! -L "$dir/output" ] && command -p rm -rf -- "$dir/output" 2>/dev/null
+  if ! command -p mv -f -- "$outf" "$dir/output" 2>/dev/null || [ ! -f "$dir/output" ] || [ -L "$dir/output" ]; then
+    command -p rm -f -- "$outf"
+    _shmutant_err "the run's output could not be published as $dir/output" 2>&"$err_fd"
+  fi
+  exec {left_w}>&- {left_r}<&- {seen_w}>&- {seen_r}<&- {fired}<&- {out_w}>&- {out_r}<&- {hold}<&- {hp}<&- {go}<&- {err_fd}>&-
 }
 
 # _shmutant_held_group <pgid> — set SHMUTANT_HELD to `-g <pgid>` when the run's holder is still
@@ -1114,6 +1130,7 @@ _shmutant_restore_traps() {
   # back verbatim; re-spelling it by hand is how a handler once came back as `echo mineSIGTERM`.
   if [ -n "${SHMUTANT_TRAP_INT:-}" ]; then eval "$SHMUTANT_TRAP_INT"; else trap - INT; fi
   if [ -n "${SHMUTANT_TRAP_TERM:-}" ]; then eval "$SHMUTANT_TRAP_TERM"; else trap - TERM; fi
+  if [ -n "${SHMUTANT_TRAP_CHLD:-}" ]; then eval "$SHMUTANT_TRAP_CHLD"; else trap - CHLD; fi
 }
 
 # _shmutant_saved_trap <signal> — the caller's current trap declaration for <signal> as
@@ -1126,6 +1143,10 @@ _shmutant_run_jobs() {
   local rc=0
   SHMUTANT_ACTIVE=(); SHMUTANT_SPAWNING=0; SHMUTANT_ABORT_PENDING=""
   SHMUTANT_TRAP_INT="$(_shmutant_saved_trap INT)"; SHMUTANT_TRAP_TERM="$(_shmutant_saved_trap TERM)"
+  # A caller's CHLD trap that waits would reap the workers before the pool can: off while the
+  # pool owns them, put back after.
+  SHMUTANT_TRAP_CHLD="$(_shmutant_saved_trap CHLD)"
+  trap - CHLD
   trap '_shmutant_abort_workers INT' INT
   trap '_shmutant_abort_workers TERM' TERM
   _shmutant_run_jobs_loop "$@"; rc=$?
@@ -1171,7 +1192,16 @@ _shmutant_reap_one() {
   local wd="$1" done_pid wrc p key
   local -a rest=()
   wait -n -p done_pid "${pids[@]}"; wrc=$?
-  [ -n "${done_pid:-}" ] || return 0
+  if [ -z "${done_pid:-}" ]; then
+    # Nothing of ours to wait for: every listed worker was reaped by someone else (a caller's
+    # CHLD trap is neutralised, so this is the residue). None has a verdict; none is spun on.
+    for p in "${pids[@]}"; do
+      key="${SHMUTANT_ACTIVE_KEY[$p]:-}"; [ -n "$key" ] && _shmutant_collect "$wd/$key" "$key" 127
+      unset "SHMUTANT_ACTIVE_KEY[$p]" "SHMUTANT_ACTIVE_ID[$p]"
+    done
+    pids=(); SHMUTANT_ACTIVE=()
+    return 0
+  fi
   key="${SHMUTANT_ACTIVE_KEY[$done_pid]:-}"
   [ -n "$key" ] && _shmutant_collect "$wd/$key" "$key" "$wrc"
   unset "SHMUTANT_ACTIVE_KEY[$done_pid]" "SHMUTANT_ACTIVE_ID[$done_pid]"
@@ -1222,6 +1252,9 @@ _shmutant_validate_settings() {
   case "${SHMUTANT_RED_PREFIX:-}" in *$'\n'*) _shmutant_err "$label: SHMUTANT_RED_PREFIX contains a newline — no single line could ever start with it"; return 2 ;; esac
   if [ -n "${SHMUTANT_STREAM:-}" ]; then
     local sdir
+    # A newline anywhere: the substitutions that split the path would strip a trailing one and
+    # name the sibling, past the checks below.
+    case "$SHMUTANT_STREAM" in *$'\n'*) _shmutant_err "$label: SHMUTANT_STREAM contains a newline"; return 2 ;; esac
     if [ -L "$SHMUTANT_STREAM" ]; then
       _shmutant_err "$label: SHMUTANT_STREAM is a symlink ($SHMUTANT_STREAM) — name the file itself, so where the records land can be checked"; return 2
     fi
@@ -1630,6 +1663,7 @@ _shmutant_cli_run() {
     esac
   done
   [ -n "$plan" ] || { _shmutant_err "run: a plan file is required"; _shmutant_usage >&2; return 2; }
+  case "$plan$wd" in *$'\n'*) _shmutant_err "run: a path containing a newline is refused"; return 2 ;; esac
   [ -f "$plan" ] || { _shmutant_err "run: plan not found: $plan"; return 2; }
   SHMUTANT_PLAN_DIR="$(_shmutant_abs "$(command -p dirname -- "$plan")")" || { _shmutant_err "run: cannot resolve $plan"; return 2; }
   export SHMUTANT_PLAN_DIR

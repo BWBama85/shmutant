@@ -816,8 +816,8 @@ shmutant_mut 'POSIX mode is not refused' \
   '  :' \
   't_pool_refuses_shadowed_builtins_and_posix_mode'
 shmutant_mut 'the output scan runs whatever awk the caller resolves' \
-  '  got="$(command -p awk -v p="$2" -v w="$3" '"'"'' \
-  '  got="$(awk -v p="$2" -v w="$3" '"'"'' \
+  '  got="$(SHMUTANT_SCAN_P="$2" SHMUTANT_SCAN_W="$3" command -p awk '"'"'' \
+  '  got="$(SHMUTANT_SCAN_P="$2" SHMUTANT_SCAN_W="$3" awk '"'"'' \
   't_pool_refuses_shadowed_builtins_and_posix_mode'
 shmutant_mut 'a red status of 08 stays 08' \
   '  [ -n "${SHMUTANT_RED_STATUS+x}" ] && SHMUTANT_RED_STATUS="$(( 10#$v_red ))"' \
@@ -871,3 +871,45 @@ shmutant_mut 'the plan subshell keeps the phantom trap trap -p reports' \
   '    readonly SHMUTANT_CLI_WD="$wd" SHMUTANT_CLI_KEEP_FD="$keep_w"' \
   '    trap "_shmutant_cli_abort TERM" TERM; readonly SHMUTANT_CLI_WD="$wd" SHMUTANT_CLI_KEEP_FD="$keep_w"' \
   't_cli_run'
+
+# --- guards added for the twenty-third review round ---
+shmutant_mut 'the scan literals go through -v and lose their backslashes' \
+  '    BEGIN { p = ENVIRON["SHMUTANT_SCAN_P"]; w = ENVIRON["SHMUTANT_SCAN_W"] }' \
+  '    BEGIN { p = "RED\t: "; w = "add\nworks" }' \
+  't_verdict_scan_takes_literals_as_bytes'
+shmutant_mut 'the callback runs before its group is published' \
+  '      read -t 30 -r _ <&"$go" || builtin exit 127' \
+  '      :' \
+  't_run_publishes_its_group_before_the_callback_runs'
+shmutant_mut 'a stream path with a newline passes validation' \
+  '    case "$SHMUTANT_STREAM" in *$'"'"'\n'"'"'*) _shmutant_err "$label: SHMUTANT_STREAM contains a newline"; return 2 ;; esac' \
+  '    :' \
+  't_abs_ignores_cdpath'
+shmutant_mut 'a copy path with a newline is accepted' \
+  '  case "$1$2" in *$'"'"'\n'"'"'*) _shmutant_err "copy_tree: a path containing a newline is refused"; return 1 ;; esac' \
+  '  :' \
+  't_abs_ignores_cdpath'
+shmutant_mut 'a plan path with a newline is accepted' \
+  '  case "$plan$wd" in *$'"'"'\n'"'"'*) _shmutant_err "run: a path containing a newline is refused"; return 2 ;; esac' \
+  '  :' \
+  't_cli_run'
+shmutant_mut 'mutate reads its positionals before checking their count' \
+  '  if [ "$#" -ne 3 ]; then _shmutant_err "mutate: usage: shmutant_mutate <file> <old> <new>"; return 1; fi' \
+  '  :' \
+  't_copy_tree_excludes_git'
+shmutant_mut 'the caller CHLD trap stays armed while the pool owns its workers' \
+  '  trap - CHLD' \
+  '  :' \
+  't_pool_survives_a_caller_chld_trap'
+shmutant_mut 'a worker reaped by someone else is spun on' \
+  '    pids=(); SHMUTANT_ACTIVE=()' \
+  '    :' \
+  't_pool_survives_a_caller_chld_trap'
+shmutant_mut 'a directory planted at output is published into' \
+  '  [ -d "$dir/output" ] && [ ! -L "$dir/output" ] && command -p rm -rf -- "$dir/output" 2>/dev/null' \
+  '  :' \
+  't_run_output_is_published_over_a_planted_directory'
+shmutant_mut 'mutate cleanup runs whatever rm the caller defined' \
+  '    3) command -p rm -f "$tmp"; _shmutant_mutate_restore "$dir" "$dirmode"; return 2 ;;' \
+  '    3) rm -f "$tmp"; _shmutant_mutate_restore "$dir" "$dirmode"; return 2 ;;' \
+  't_mutate_applies_first_occurrence_only'
