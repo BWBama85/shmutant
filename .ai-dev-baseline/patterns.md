@@ -183,4 +183,14 @@ One line per resolved review thread, newest last.
 - `early-return-skips-cleanup` `shmutant.sh:806` `3535839` `PRRT_kwDOUT7q9s6hBFNy` PR #1 2026-09-10 — a preserved read-only root defeated rm -rf silently; trees are made writable first and a failed removal is a harness error
 - `timeout-escalation-cancelled` `shmutant.sh:524` `3535839` `PRRT_kwDOUT7q9s6hBFN2` PR #1 2026-09-10 — the watchdog sent raw signals without freezing; it uses the freezing kill, which now stops in bulk before any identity work
 - `timeout-escalation-cancelled` `shmutant.sh:432` `3535839` `PRRT_kwDOUT7q9s6hBFN5` PR #1 2026-09-10 — retained victims were not frozen or searched from; they are stopped and used as discovery roots
+- `host-shell-option-leak` `shmutant.sh:565` `aa81620` `PRRT_kwDOUT7q9s6hDYRt` PR #1 2026-09-10 — the channel opens were plain redirections a caller noclobber refused; forced with >|
+- `predictable-temp-path` `shmutant.sh:599` `aa81620` `PRRT_kwDOUT7q9s6hDYR0` PR #1 2026-09-10 — the timeout marker was still created by path after the callback started; now a FIFO opened before it
+- `path-escapes-root` `shmutant.sh:657` `aa81620` `PRRT_kwDOUT7q9s6hDYR6` PR #1 2026-09-10 — after detecting a swapped worker directory the verdict was still written beneath it; now nothing is
+- `stale-artifact-reuse` `shmutant.sh:650` `aa81620` `PRRT_kwDOUT7q9s6hDYR9` PR #1 2026-09-10 — a fresh directory with the worker directory name passed the spelling check; identity is by inode
+- `stale-artifact-reuse` `shmutant.sh:498` `aa81620` `PRRT_kwDOUT7q9s6hDYSA` PR #1 2026-09-10 — the freeze stopped the root by number without identity after it was reaped; identity from spawn is required
+- `contract-not-honoured` `shmutant.sh:838` `aa81620` `PRRT_kwDOUT7q9s6hDYSF` PR #1 2026-09-10 — with no worker started the failure path issued a bare wait that blocked on caller jobs; guarded
+- `predictable-temp-path` `shmutant.sh:702` `aa81620` `PRRT_kwDOUT7q9s6hDYSJ` PR #1 2026-09-10 — the callback output was reopened by path for scoring; read once through the capturing descriptor
+- `pipeline-status-lost` `docs/integrating.md:192` `aa81620` `PRRT_kwDOUT7q9s6hDYSO` PR #1 2026-09-10 — the timeout doc still claimed TERM then KILL; corrected
+- `path-escapes-root` `shmutant.sh:194` `aa81620` `PRRT_kwDOUT7q9s6hDYSS` PR #1 2026-09-10 — a symlink component in the destination parent was followed; the destination is rebuilt on the physical path of its nearest existing ancestor
+- `host-shell-option-leak` `shmutant.sh:988` `aa81620` `PRRT_kwDOUT7q9s6hDYSV` PR #1 2026-09-10 — prepare could pre-fill the baseline arrays; reset after prepare
 <!-- adb:hits:end -->
