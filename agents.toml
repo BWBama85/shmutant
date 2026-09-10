@@ -2,3 +2,7 @@
 
 [reviewers]
 bots = ["chatgpt-codex-connector"]
+
+# Uncapped re-review rounds: the resolve loop runs until the reviewer passes or another terminal
+# guard fires. Recorded as D1 in .ai-dev-baseline/decisions.md.
+max_rounds = 0
