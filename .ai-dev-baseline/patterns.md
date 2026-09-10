@@ -208,4 +208,13 @@ One line per resolved review thread, newest last.
 - `timeout-escalation-cancelled` `shmutant.sh` `49f8d05` `PRRT_kwDOUT7q9s6hHkVa` PR #1 2026-09-10
 - `path-lookup-ambiguity` `shmutant.sh` `49f8d05` `PRRT_kwDOUT7q9s6hHkVf` PR #1 2026-09-10
 - `pipeline-status-lost` `shmutant.sh` `49f8d05` `PRRT_kwDOUT7q9s6hHkVm` PR #1 2026-09-10
+- `stale-artifact-reuse` `shmutant.sh` `b6ed2e9` `PRRT_kwDOUT7q9s6hIraM` PR #1 2026-09-10
+- `stale-artifact-reuse` `shmutant.sh` `b6ed2e9` `PRRT_kwDOUT7q9s6hIrag` PR #1 2026-09-10
+- `write-failure-swallowed` `shmutant.sh` `b6ed2e9` `PRRT_kwDOUT7q9s6hIraR` PR #1 2026-09-10
+- `write-failure-swallowed` `shmutant.sh` `b6ed2e9` `PRRT_kwDOUT7q9s6hIrap` PR #1 2026-09-10
+- `config-value-unvalidated` `shmutant.sh` `b6ed2e9` `PRRT_kwDOUT7q9s6hIraa` PR #1 2026-09-10
+- `config-value-unvalidated` `shmutant.sh` `b6ed2e9` `PRRT_kwDOUT7q9s6hIray` PR #1 2026-09-10
+- `timeout-escalation-cancelled` `shmutant.sh` `b6ed2e9` `PRRT_kwDOUT7q9s6hIra7` PR #1 2026-09-10
+- `pipeline-status-lost` `shmutant.sh` `b6ed2e9` `PRRT_kwDOUT7q9s6hIrbH` PR #1 2026-09-10
+- `path-escapes-root` `shmutant.sh` `b6ed2e9` `PRRT_kwDOUT7q9s6hIrbN` PR #1 2026-09-10
 <!-- adb:hits:end -->
