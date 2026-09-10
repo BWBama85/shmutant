@@ -294,4 +294,12 @@ One line per resolved review thread, newest last.
 - `host-shell-option-leak` `shmutant.sh` `5044719` `PRRT_kwDOUT7q9s6hQycJ` PR #1 2026-09-10
 - `contract-not-honoured` `shmutant.sh` `5044719` `PRRT_kwDOUT7q9s6hQycO` PR #1 2026-09-10
 - `host-shell-option-leak` `shmutant.sh` `5044719` `PRRT_kwDOUT7q9s6hQycQ` PR #1 2026-09-10
+- `stale-artifact-reuse` `shmutant.sh` `3053e56` `PRRT_kwDOUT7q9s6hRY-W` PR #1 2026-09-10
+- `caller-owned-path-deleted` `shmutant.sh` `3053e56` `PRRT_kwDOUT7q9s6hRY-e` PR #1 2026-09-10
+- `contract-not-honoured` `shmutant.sh` `3053e56` `PRRT_kwDOUT7q9s6hRY-j` PR #1 2026-09-10
+- `caller-owned-path-deleted` `shmutant.sh` `3053e56` `PRRT_kwDOUT7q9s6hRY-n` PR #1 2026-09-10
+- `early-return-skips-cleanup` `shmutant.sh` `3053e56` `PRRT_kwDOUT7q9s6hRY-r` PR #1 2026-09-10
+- `option-surface-mismatch` `shmutant.sh` `3053e56` `PRRT_kwDOUT7q9s6hRY-t` PR #1 2026-09-10
+- `host-shell-option-leak` `shmutant.sh` `3053e56` `PRRT_kwDOUT7q9s6hRY-w` PR #1 2026-09-10
+- `host-shell-option-leak` `shmutant.sh` `3053e56` `PRRT_kwDOUT7q9s6hRY-0` PR #1 2026-09-10
 <!-- adb:hits:end -->
