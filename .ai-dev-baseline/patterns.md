@@ -149,4 +149,14 @@ One line per resolved review thread, newest last.
 - `host-shell-option-leak` `shmutant.sh:751` `5392317` `PRRT_kwDOUT7q9s6g8uTg` PR #1 2026-09-10 — root containment used case under the caller nocasematch; containment now runs with it off
 - `predictable-temp-path` `shmutant.sh:493` `5392317` `PRRT_kwDOUT7q9s6g8uTj` PR #1 2026-09-10 — the timeout marker was a predictable name a callback could write; now a mktemp name
 - `config-value-unvalidated` `shmutant.sh:285` `5392317` `PRRT_kwDOUT7q9s6g8uTl` PR #1 2026-09-10 — an old literal with a newline could never apply; refused at declaration
+- `timeout-escalation-cancelled` `shmutant.sh:580` `e587baf` `PRRT_kwDOUT7q9s6g9Q2D` PR #1 2026-09-10 — abort handlers did not retain TERM victims for KILL; both now snapshot before TERM
+- `timeout-escalation-cancelled` `shmutant.sh:457` `e587baf` `PRRT_kwDOUT7q9s6g9Q2I` PR #1 2026-09-10 — a callback returning normally left its backgrounded helpers running; the wrapper snapshots at return and the runner ends them
+- `predictable-temp-path` `shmutant.sh:469` `e587baf` `PRRT_kwDOUT7q9s6g9Q2L` PR #1 2026-09-10 — the verdict was written straight to a fixed name a callback could pre-link; now temp plus rename
+- `path-escapes-root` `shmutant.sh:157` `e587baf` `PRRT_kwDOUT7q9s6g9Q2N` PR #1 2026-09-10 — root / produced the pattern //* and contained nothing; special-cased
+- `rewrite-loses-file-shape` `shmutant.sh:205` `e587baf` `PRRT_kwDOUT7q9s6g9Q2P` PR #1 2026-09-10 — copy_tree split hard links so the later check could not see them; hard-linked sources are refused
+- `stale-artifact-reuse` `shmutant.sh:378` `e587baf` `PRRT_kwDOUT7q9s6g9Q2V` PR #1 2026-09-10 — pgid and args identity rejected a legitimately daemonised descendant; identity is now the start time
+- `host-shell-option-leak` `shmutant.sh:746` `e587baf` `PRRT_kwDOUT7q9s6g9Q2Y` PR #1 2026-09-10 — prepare could clobber rc and killed; reset after prepare
+- `host-shell-option-leak` `shmutant.sh:411` `e587baf` `PRRT_kwDOUT7q9s6g9Q2b` PR #1 2026-09-10 — a glob under caller failglob aborted the runner; the glob is gone
+- `option-surface-mismatch` `shmutant.sh:947` `e587baf` `PRRT_kwDOUT7q9s6g9Q2f` PR #1 2026-09-10 — KEEP set inside the plan was not known to the CLI interrupt path; the pool now records it in a CLI-provided file
+- `host-shell-option-leak` `shmutant.sh:808` `e587baf` `PRRT_kwDOUT7q9s6g9Q2j` PR #1 2026-09-10 — the worker pools ran as || conditions so callback errexit was ignored; called bare with status captured
 <!-- adb:hits:end -->
