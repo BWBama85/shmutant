@@ -587,8 +587,10 @@ _shmutant_run_bounded() {
   rm -f -- "$mark" "$mark.left" "$mark.seen" "$fifo"
   (
     set -m
-    ( _shmutant_wrap_left="$left_w"; export SHMUTANT_SELECT="$sel"; "$run" "$root" "$sel"; rrc=$?
-      _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; exit "$rrc" ) < /dev/null >> "$dir/output" 2>&1 &
+    # The snapshot is an EXIT trap of the wrapper, so it runs however the callback ends: a
+    # callback that turned errexit on and failed would otherwise leave without it.
+    ( _shmutant_wrap_left="$left_w"; trap '_shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"' EXIT
+      export SHMUTANT_SELECT="$sel"; "$run" "$root" "$sel" ) < /dev/null >> "$dir/output" 2>&1 &
     pid=$!
     # The root's identity while it is certainly alive: the post-run kill must not stop or signal
     # a reaped root by number.
@@ -694,7 +696,7 @@ _shmutant_worker() {
   shopt -u nocasematch
   t0="$(_shmutant_now)"
   # The directory's identity, for a cleanup that must not be fooled by a replacement.
-  SHMUTANT_DIR_ID="$(ls -di -- "$dir" 2>/dev/null | awk '{ print $1 }')"
+  SHMUTANT_DIR_ID="${SHMUTANT_DIR_IDS[$kind-$i]:-}"
   root="$dir/tree$suffix"
   if [ "$kind" = mut ]; then sel="${SHMUTANT_ROWS_SEL[$i]}"; else sel="${SHMUTANT_BASE_SEL[$i]}"; fi
   # -p: a clone keeps mode, ownership and timestamps, so a test sensitive to them sees the
@@ -739,10 +741,22 @@ _shmutant_worker() {
   return 0
 }
 
+# _shmutant_dir_id <dir> — the inode number of <dir>, from POSIX `ls -di`; empty when absent.
+_shmutant_dir_id() {
+  local id
+  id="$(ls -di -- "$1" 2>/dev/null | awk '{ print $1 }')"
+  [ -n "$id" ] && printf '%s' "$id"
+}
+
 # _shmutant_read_verdict <dir> — load <dir>/verdict into SHMUTANT_V_VERDICT, SHMUTANT_V_US,
 # SHMUTANT_V_STATUS; a missing or damaged file reads as `lost`.
 _shmutant_read_verdict() {
   SHMUTANT_V_VERDICT=lost; SHMUTANT_V_US=0; SHMUTANT_V_STATUS=""
+  # Only from the directory the pool created, by inode: a replacement a callback put at the
+  # same name, with a verdict planted in it, is scored lost.
+  if [ -L "$1" ] || [ "$(_shmutant_dir_id "$1")" != "${SHMUTANT_DIR_IDS[${1##*/}]:-}" ]; then
+    _shmutant_err "refusing to read a verdict from $1: it is no longer the directory this run created"; return 0
+  fi
   [ -f "$1/verdict" ] || return 0
   { IFS= read -r SHMUTANT_V_VERDICT && IFS= read -r SHMUTANT_V_US && IFS= read -r SHMUTANT_V_STATUS; } < "$1/verdict" \
     || { SHMUTANT_V_VERDICT=lost; SHMUTANT_V_US=0; SHMUTANT_V_STATUS=""; }
@@ -857,7 +871,7 @@ _shmutant_run_jobs_loop() {
     if [ "$kind" = mut ] && [ "${SHMUTANT_SKIP[$i]:-0}" != 0 ]; then continue; fi
     # Recreated, never reused: a stale timeout marker or tree from an earlier pool in the same
     # workdir would be read as this run's.
-    if ! _shmutant_fresh_dir "$wd/$kind-$i"; then
+    if ! _shmutant_fresh_dir "$wd/$kind-$i" || ! SHMUTANT_DIR_IDS["$kind-$i"]="$(_shmutant_dir_id "$wd/$kind-$i")"; then
       _shmutant_err "cannot recreate $wd/$kind-$i — a stale verdict there could be read as this run's; refusing to continue"
       # The workers already running are ended, not waited for: one of them may be unbounded.
       local -a helpers=()
@@ -943,12 +957,14 @@ _shmutant_open_stream() {
   local label="$1"
   if [ -n "${SHMUTANT_STREAM_OPENED+x}" ] && [ "$SHMUTANT_STREAM_OPENED" = "${SHMUTANT_STREAM:-}" ]; then return 0; fi
   if [ -n "${SHMUTANT_STREAM_FD:-}" ]; then exec {SHMUTANT_STREAM_FD}>&-; unset SHMUTANT_STREAM_FD; fi
-  SHMUTANT_STREAM_OPENED="${SHMUTANT_STREAM:-}"
-  [ -n "${SHMUTANT_STREAM:-}" ] || return 0
+  unset SHMUTANT_STREAM_OPENED
+  [ -n "${SHMUTANT_STREAM:-}" ] || { SHMUTANT_STREAM_OPENED=""; return 0; }
   # shellcheck disable=SC2093
   if ! exec {SHMUTANT_STREAM_FD}>>"$SHMUTANT_STREAM" 2>/dev/null; then
     _shmutant_err "$label: cannot open SHMUTANT_STREAM for appending: $SHMUTANT_STREAM"; unset SHMUTANT_STREAM_FD; return 2
   fi
+  # Cached only once the descriptor exists: a retry after a failed open must open again.
+  SHMUTANT_STREAM_OPENED="$SHMUTANT_STREAM"
 }
 
 # _shmutant_pool_fail <label> <workdir> — the exit for a pool that stops after prepare: the
@@ -974,6 +990,7 @@ shmutant_pool() {
   n="${#SHMUTANT_ROWS_NAME[@]}"
   t0="$(_shmutant_now)"
   SHMUTANT_EMIT_FAILED=0; SHMUTANT_CLEANUP_FAILED=0
+  declare -gA SHMUTANT_DIR_IDS=()
   if [ "${SHMUTANT_DECL_ERRORS:-0}" -ne 0 ]; then
     _shmutant_err "$label: $SHMUTANT_DECL_ERRORS declaration(s) were refused — a table missing rows it was meant to carry proves nothing"
     return 2
@@ -1074,7 +1091,7 @@ shmutant_pool() {
     for (( k = 0; k < ${#base_sel[@]}; k++ )); do
       if [ "${base_sel[$k]}" = "${SHMUTANT_ROWS_SEL[$i]}" ] && [ "${base_verdict[$k]}" != green ]; then
         SHMUTANT_SKIP[i]=1
-        _shmutant_fresh_dir "$wd/mut-$i" || { _shmutant_err "$label: cannot recreate $wd/mut-$i"; _shmutant_pool_fail "$label" "$wd"; return 2; }
+        _shmutant_fresh_dir "$wd/mut-$i" && SHMUTANT_DIR_IDS["mut-$i"]="$(_shmutant_dir_id "$wd/mut-$i")" || { _shmutant_err "$label: cannot recreate $wd/mut-$i"; _shmutant_pool_fail "$label" "$wd"; return 2; }
         printf 'baseline\n0\n\n' > "$wd/mut-$i/verdict"
       fi
     done

@@ -671,6 +671,34 @@ t_run_cannot_forge_its_output_or_the_marker() {
   [ -e "$T/escaped-c" ] && fail_ 'under noclobber the leftover record was not opened and an escaped helper survived'
 }
 
+t_pool_never_trusts_a_verdict_from_a_replaced_directory() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  # a run that is a survivor, but plants a killed verdict in a fresh directory of the same name
+  planting_run() { local d; d="$(cd "$1/.." && pwd -P)"; mv "$d" "$d.moved" && mkdir -p "$d" && printf 'killed\n1\n1\n' > "$d/verdict"; exit 0; }
+  SHMUTANT_BASELINE=0 pool lbl "$T/wd" toy_prepare planting_run
+  rc_is "$RC" 1 'the pool does not return success on a planted verdict'
+  eq "$(verdict_of a)" lost 'a verdict read from a replacement directory is scored lost'
+  rm -rf "$T/wd/mut-0"; mv "$T/wd/mut-0.moved" "$T/wd/mut-0" 2>/dev/null
+}
+
+t_run_errexit_failure_still_snapshots_leftovers() {
+  mk_toy "$T/toy"
+  # In a fresh process: this suite runs each unit on the left of ||, where bash ignores errexit.
+  export TOY="$T/toy" T
+  bash -c '
+    . "$1"
+    toy_prepare() { shmutant_copy_tree "$TOY" "$1"; }
+    strict_leaky_run() { set -e; set -m; bash -c "sleep 4; touch \"$T/escaped\"" & set +m; false; echo "FAIL: add-works: unreachable"; }
+    shmutant_target lib.sh
+    shmutant_mut a "\$1 + \$2" "\$1 - \$2" add-works
+    SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=0 shmutant_pool lbl "$T/wd" toy_prepare strict_leaky_run 2>/dev/null' _ "$SHMUTANT" > "$T/o"
+  eq "$(awk -F'\t' '$3 == "row" { print $4 }' "$T/o")" aborted 'the callback'"'"'s own errexit ended the run: aborted'
+  sleep 5
+  [ -e "$T/escaped" ] && fail_ 'a helper left by a callback that errexit-failed outlived the verdict: the snapshot did not run'
+}
+
 t_worker_cleanup_refuses_a_swapped_directory() {
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
@@ -889,9 +917,15 @@ t_pool_recreates_worker_dirs() {
 }
 
 t_read_verdict_fails_closed() {
+  declare -gA SHMUTANT_DIR_IDS=()
   _shmutant_read_verdict "$T/none"
   eq "$SHMUTANT_V_VERDICT" lost 'missing verdict file reads as lost'
-  mkdir -p "$T/d"; printf '\n0\n1\n' > "$T/d/verdict"
+  mkdir -p "$T/d"; printf 'killed\n1\n1\n' > "$T/d/verdict"
+  _shmutant_read_verdict "$T/d" 2>/dev/null
+  eq "$SHMUTANT_V_VERDICT" lost 'a verdict in a directory the pool did not create reads as lost'
+  # shellcheck disable=SC2034
+  SHMUTANT_DIR_IDS[d]="$(_shmutant_dir_id "$T/d")"
+  printf '\n0\n1\n' > "$T/d/verdict"
   _shmutant_read_verdict "$T/d"
   eq "$SHMUTANT_V_VERDICT" lost 'blank verdict reads as lost'
   printf 'killed\nabc\n1\n' > "$T/d/verdict"
@@ -1179,6 +1213,13 @@ t_stream_write_failure_is_a_harness_error() {
   SHMUTANT_EMIT_FAILED=0
   SHMUTANT_STREAM_FD=199 _shmutant_emit shmutant 1 row x 2>/dev/null
   eq "$SHMUTANT_EMIT_FAILED" 1 'a record that cannot be written to the open descriptor is counted as a lost write'
+  # in this shell, not a subshell: the failed open and the retry must share the cache
+  : > "$T/stream2"; chmod 444 "$T/stream2"
+  SHMUTANT_STREAM="$T/stream2" shmutant_pool lbl "$T/wd" toy_prepare toy_run > "$T/o" 2>/dev/null; rc_is $? 2 'unwritable at first'
+  chmod 644 "$T/stream2"
+  SHMUTANT_STREAM="$T/stream2" shmutant_pool lbl "$T/wd" toy_prepare toy_run > "$T/o" 2>/dev/null; rc_is $? 0 'after the permissions are fixed, a retry with the same path opens it'
+  eq "$(grep -c '^shmutant' "$T/stream2")" 3 'and the records land in the file, not on stdout'
+  eq "$(cat "$T/o")" '' 'nothing went to stdout'
   chmod 644 "$T/stream"
   SHMUTANT_STREAM="$T/no/such/dir/stream" pool lbl "$T/wd" toy_prepare toy_run
   rc_is "$RC" 2 'a stream in a missing directory is refused up front'

@@ -126,8 +126,8 @@ shmutant_mut 'the skip flag is ignored when starting workers' \
   'if false; then continue; fi' \
   't_verdict_baseline_red'
 shmutant_mut 'a timeout is reported as an abort' \
-  '        printf '"'"'fired\n'"'"' >&"$fired"' \
-  '        :' \
+  '  read -t 0 -u "$fired" && SHMUTANT_RUN_FIRED=1' \
+  '  :' \
   't_verdict_timeout'
 shmutant_mut 'a blank verdict file reads as a verdict' \
   '[ -n "$SHMUTANT_V_VERDICT" ] || SHMUTANT_V_VERDICT=lost' \
@@ -136,8 +136,8 @@ shmutant_mut 'a blank verdict file reads as a verdict' \
 
 # --- mechanics ---
 shmutant_mut 'run does not receive the selector' \
-  '"$run" "$root" "$sel"; rrc=$?' \
-  '"$run" "$root"; rrc=$?' \
+  '"$run" "$root" "$sel" )' \
+  '"$run" "$root" )' \
   't_pool_passes_select_to_run'
 shmutant_mut 'SHMUTANT_SELECT is exported with the wrong value' \
   'export SHMUTANT_SELECT="$sel";' \
@@ -532,8 +532,8 @@ shmutant_mut 'the row pool runs as a condition, muting callback errexit' \
 
 # --- guards added for the thirteenth review round ---
 shmutant_mut 'the leftover record path is read after the callback could assign mark' \
-  '_shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; exit "$rrc" )' \
-  '_shmutant_snapshot "$BASHPID" >&"$left_w"; exit "$rrc" )' \
+  '>&"$_shmutant_wrap_left"'"'"' EXIT' \
+  '>&"$left_w"'"'"' EXIT' \
   't_run_cannot_redirect_the_leftover_record'
 shmutant_mut 'the hard-link preflight scans the top-level .git the copy skips' \
   'find "$src" -path "$src/.git" -prune -o -type f -links +1 -print' \
@@ -594,8 +594,8 @@ shmutant_mut 'the CLI ignores SHMUTANT_KEEP=1 before the pool settles it' \
 
 # --- guards added for the sixteenth review round ---
 shmutant_mut 'the leftover record is written by path after the callback' \
-  '_shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; exit "$rrc" )' \
-  '_shmutant_snapshot "$BASHPID" > "$SHMUTANT_RUN_MARK.left" 2>/dev/null; exit "$rrc" )' \
+  '>&"$_shmutant_wrap_left"'"'"' EXIT' \
+  '> "$dir/.left"'"'"' EXIT' \
   't_run_cannot_lose_the_leftover_record_by_locking_its_dir'
 shmutant_mut 'a read-only tree of ours is not made removable' \
   '      find "$path" -type d ! -perm -u+rwx -exec chmod u+rwx {} + 2>/dev/null' \
@@ -639,3 +639,17 @@ shmutant_mut 'the baseline arrays are not reset after prepare' \
   '  killed=0; rc=0; base_sel=(); base_verdict=()' \
   '  killed=0; rc=0' \
   't_pool_bookkeeping_survives_prepare_assignments'
+
+# --- guards added for the eighteenth review round ---
+shmutant_mut 'the wrapper snapshot runs after the callback, not from an EXIT trap' \
+  '>&"$_shmutant_wrap_left"'"'"' EXIT' \
+  '>&"$_shmutant_wrap_left"'"'"' USR2' \
+  't_run_errexit_failure_still_snapshots_leftovers'
+shmutant_mut 'a verdict is read from whatever directory has the name' \
+  '  if [ -L "$1" ] || [ "$(_shmutant_dir_id "$1")" != "${SHMUTANT_DIR_IDS[${1##*/}]:-}" ]; then' \
+  '  if false; then' \
+  't_pool_never_trusts_a_verdict_from_a_replaced_directory'
+shmutant_mut 'the stream cache is set before the open succeeds' \
+  '  unset SHMUTANT_STREAM_OPENED' \
+  '  SHMUTANT_STREAM_OPENED="${SHMUTANT_STREAM:-}"' \
+  't_stream_write_failure_is_a_harness_error'
