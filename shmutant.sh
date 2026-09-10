@@ -179,10 +179,15 @@ shmutant_selected() {
 shmutant_copy_tree() {
   local src="$1" dst="$2" entry name rc=0 asrc adst
   [ -d "$src" ] || { _shmutant_err "copy_tree: not a directory: $src"; return 1; }
+  # The first component mkdir would create is remembered, so a refusal leaves nothing behind.
+  local made="" probe="$dst"
+  while [ ! -e "$probe" ]; do made="$probe"; probe="$(dirname -- "$probe")"; [ "$probe" != "$made" ] || break; done
   mkdir -p -- "$dst" || return 1
   asrc="$(_shmutant_abs "$src")" && adst="$(_shmutant_abs "$dst")" || return 1
   case "$adst" in
-    "$asrc"|"$asrc/"*) _shmutant_err "copy_tree: destination $dst lies inside the source $src — it would copy itself; use a workdir outside the tree"; return 1 ;;
+    "$asrc"|"$asrc/"*)
+      [ -n "$made" ] && rm -rf -- "$made"
+      _shmutant_err "copy_tree: destination $dst lies inside the source $src — it would copy itself; use a workdir outside the tree"; return 1 ;;
   esac
   # The enumeration runs with the caller's expansion settings neutralised: `set -f` would hand
   # the loop three literal patterns, failglob would abort on an unmatched one, GLOBIGNORE would
@@ -343,21 +348,35 @@ _shmutant_etime_secs() {
   printf '%s' $(( 10#$d * 86400 + 10#$h * 3600 + 10#$m * 60 + 10#$sec ))
 }
 
-# _shmutant_alive_since <pid> <seconds-seen> — true when <pid> is the process that was seen
-# <seconds-seen> ago or earlier: its elapsed time now is at least that. A pid that was reused
-# by a newer process has a smaller elapsed time and must not be signalled.
+# _shmutant_identity <pid> — print `<etime-seconds>|<pgid>|<args>` for a live pid, nothing for a
+# dead one. The identity a retained pid must still match before it is signalled: elapsed time
+# that has not shrunk, the same process group, the same command line. All three are POSIX ps
+# columns; a start time is not.
+_shmutant_identity() {
+  local line etime pgid args
+  line="$(ps -o etime= -o pgid= -o args= -p "$1" 2>/dev/null)" || return 1
+  line="${line#"${line%%[! ]*}"}"
+  [ -n "$line" ] || return 1
+  etime="${line%% *}"; line="${line#* }"; line="${line#"${line%%[! ]*}"}"
+  pgid="${line%% *}"; args="${line#* }"
+  printf '%s|%s|%s' "$(_shmutant_etime_secs "$etime")" "$pgid" "$args"
+}
+
+# _shmutant_alive_since <pid> <identity-seen> — true when <pid> is still the process recorded as
+# <identity-seen>. A reused pid is younger, or in another group, or runs something else.
 _shmutant_alive_since() {
-  local now
-  now="$(ps -o etime= -p "$1" 2>/dev/null | tr -d ' ')" || return 1
-  [ -n "$now" ] || return 1
-  [ "$(_shmutant_etime_secs "$now")" -ge "$2" ]
+  local now seen_e seen_rest now_e now_rest
+  now="$(_shmutant_identity "$1")" || return 1
+  seen_e="${2%%|*}"; seen_rest="${2#*|}"
+  now_e="${now%%|*}"; now_rest="${now#*|}"
+  [ "$now_rest" = "$seen_rest" ] && [ "$now_e" -ge "$seen_e" ]
 }
 
 # _shmutant_kill_tree <signal> <pid> <pids…> — send <signal> to <pid>'s process group, to every
 # descendant found now, and to each of <pids…>: the descendants found before an earlier signal,
 # which a leader's death may have reparented out of reach of a fresh walk.
-# <pids…> are `pid:etime-seconds` pairs recorded when each was seen; one whose elapsed time has
-# since shrunk is a reused pid and is left alone. Every target is decided first and signalled in
+# <pids…> are `pid:identity` pairs recorded when each was seen (see _shmutant_identity); one that
+# no longer matches is a reused pid and is left alone. Every target is decided first and signalled in
 # ONE kill: a parent signalled after its child has already run on past the child's death.
 _shmutant_kill_tree() {
   local sig="$1" pid="$2" p
@@ -395,21 +414,22 @@ _shmutant_run_bounded() {
         # not reachable this way; that needs a containment mechanism this file does not use.
         trap 'kill "$s" 2>/dev/null; exit 0' TERM
         declare -A seen=()
-        t_end=$(( $(_shmutant_now) + timeout * 1000000 ))
+        # 10#: a validated value like 08 is still octal to bash arithmetic.
+        t_end=$(( $(_shmutant_now) + 10#$timeout * 1000000 ))
         while [ "$(_shmutant_now)" -lt "$t_end" ]; do
           sleep 0.5 & s=$!
           wait "$s"
-          # Each descendant is remembered with the elapsed time it had when first seen, so a
-          # pid reused by a newer process can be told apart at the kill.
+          # Each descendant is remembered with the identity it had when first seen, so a pid
+          # reused by a newer process can be told apart at the kill.
           while IFS= read -r p; do
             [ -n "$p" ] || continue
             [ -n "${seen[$p]:-}" ] && continue
-            e="$(ps -o etime= -p "$p" 2>/dev/null | tr -d ' ')"
-            seen["$p"]="$(_shmutant_etime_secs "${e:-0}")"
+            e="$(_shmutant_identity "$p")" || continue
+            seen["$p"]="$e"
           done < <(_shmutant_descendants "$pid")
         done
         : > "$dir/timeout"
-        # An array of pid:etime pairs, never an unquoted expansion.
+        # An array of pid:identity pairs, never an unquoted expansion.
         victims=()
         for p in "${!seen[@]}"; do victims+=("$p:${seen[$p]}"); done
         _shmutant_kill_tree TERM "$pid" "${victims[@]}"
@@ -539,7 +559,51 @@ _shmutant_fresh_dir() {
 # _shmutant_run_jobs <kind> <count> <workdir> <run> <suffix> <jobs> — run <count> workers of
 # <kind> through a bounded pool; a mut index whose SHMUTANT_SKIP entry is 1 is not started.
 # Reaps by pid, so a caller's own background jobs are never consumed by the pool.
+# _shmutant_abort_workers <signal> — on INT or TERM while workers run: kill every active
+# worker's process tree, put the caller's own traps back, and deliver the signal again so the
+# caller's handler (or the default) decides what happens to the caller.
+_shmutant_abort_workers() {
+  local sig="$1" p
+  for p in "${SHMUTANT_ACTIVE[@]}"; do _shmutant_kill_tree TERM "$p"; done
+  sleep 1
+  for p in "${SHMUTANT_ACTIVE[@]}"; do _shmutant_kill_tree KILL "$p"; done
+  _shmutant_restore_traps
+  kill "-$sig" "$BASHPID"
+}
+
+# _shmutant_restore_traps — put back the INT and TERM traps saved by _shmutant_run_jobs. An
+# empty saved handler means the caller had none, which is `trap -`, never `trap ""`: the empty
+# string would make the shell IGNORE the signal from then on.
+_shmutant_restore_traps() {
+  # shellcheck disable=SC2064
+  if [ -n "${SHMUTANT_TRAP_INT:-}" ]; then trap -- "$SHMUTANT_TRAP_INT" INT; else trap - INT; fi
+  # shellcheck disable=SC2064
+  if [ -n "${SHMUTANT_TRAP_TERM:-}" ]; then trap -- "$SHMUTANT_TRAP_TERM" TERM; else trap - TERM; fi
+}
+
+# _shmutant_saved_trap <signal> — the caller's current handler for <signal>, or empty.
+_shmutant_saved_trap() {
+  local t
+  t="$(trap -p "$1")"
+  [ -n "$t" ] || { printf ''; return; }
+  t="${t#trap -- }"; t="${t% "$1"}"
+  eval "printf '%s' $t"
+}
+
 _shmutant_run_jobs() {
+  local kind="$1" n="$2" wd="$3" run="$4" suffix="$5" jobs="$6" i done_pid p rc=0
+  local -a pids=() rest=()
+  SHMUTANT_ACTIVE=()
+  SHMUTANT_TRAP_INT="$(_shmutant_saved_trap INT)"; SHMUTANT_TRAP_TERM="$(_shmutant_saved_trap TERM)"
+  trap '_shmutant_abort_workers INT' INT
+  trap '_shmutant_abort_workers TERM' TERM
+  _shmutant_run_jobs_loop "$@"; rc=$?
+  _shmutant_restore_traps
+  SHMUTANT_ACTIVE=()
+  return "$rc"
+}
+
+_shmutant_run_jobs_loop() {
   local kind="$1" n="$2" wd="$3" run="$4" suffix="$5" jobs="$6" i done_pid p
   local -a pids=() rest=()
   for (( i = 0; i < n; i++ )); do
@@ -553,11 +617,13 @@ _shmutant_run_jobs() {
     fi
     _shmutant_worker "$kind" "$i" "$wd" "$run" "$suffix" &
     pids+=("$!")
+    SHMUTANT_ACTIVE=("${pids[@]}")
     if [ "${#pids[@]}" -ge "$jobs" ]; then
       wait -n -p done_pid "${pids[@]}" || true
       rest=()
       for p in "${pids[@]}"; do [ "$p" = "${done_pid:-}" ] || rest+=("$p"); done
       pids=("${rest[@]}")
+      SHMUTANT_ACTIVE=("${pids[@]}")
     fi
   done
   [ "${#pids[@]}" -eq 0 ] || wait "${pids[@]}" || true
@@ -592,6 +658,8 @@ _shmutant_validate_settings() {
       _shmutant_err "$label: SHMUTANT_JOBS must be a positive integer of at most four digits, got [$v_jobs]"; return 2
     fi
   fi
+  case "${SHMUTANT_BASELINE:-1}" in 0|1) ;; *) _shmutant_err "$label: SHMUTANT_BASELINE must be 0 or 1, got [${SHMUTANT_BASELINE:-}]"; return 2 ;; esac
+  case "${SHMUTANT_KEEP:-0}" in 0|1) ;; *) _shmutant_err "$label: SHMUTANT_KEEP must be 0 or 1, got [${SHMUTANT_KEEP:-}]"; return 2 ;; esac
   if [ -n "${SHMUTANT_RED_PREFIX+x}" ] && [ -z "$SHMUTANT_RED_PREFIX" ]; then
     _shmutant_err "$label: SHMUTANT_RED_PREFIX is empty — every line would count as a red line"; return 2
   fi
@@ -653,8 +721,6 @@ shmutant_pool() {
     *[!0-9]*) _shmutant_err "$label: the pool cap must be a positive integer, got [$cap]"; return 2 ;;
     *) if [ "${#cap}" -gt 4 ] || [ "$cap" -lt 1 ]; then _shmutant_err "$label: the pool cap must be a positive integer of at most four digits, got [$cap]"; return 2; fi ;;
   esac
-  jobs="$(_shmutant_jobs "$cap")"
-
   _shmutant_fresh_dir "$wd/pristine" || { _shmutant_err "$label: cannot recreate $wd/pristine — stale contents there would be prepared over"; return 2; }
   local pout prc errexit_before=0
   pout="$(mktemp "$wd/.prepare.XXXXXX" 2>/dev/null)" || { _shmutant_err "$label: cannot create a capture file in $wd"; return 2; }
@@ -662,7 +728,14 @@ shmutant_pool() {
   # establishes in this shell must still be there when the workers fork, and its own errexit
   # must keep meaning what it says. The errexit state it leaves behind is put back afterwards.
   case "$-" in *e*) errexit_before=1 ;; esac
+  # prepare runs in this function's scope, where bash lets it assign any local by name (`n=0`
+  # as its own counter). The bookkeeping still needed afterwards is copied out under names no
+  # ordinary callback uses and copied back when it returns.
+  local _shmutant_pool_label="$label" _shmutant_pool_wd="$wd" _shmutant_pool_run="$run" _shmutant_pool_cap="$cap"
+  local _shmutant_pool_n="$n" _shmutant_pool_t0="$t0" _shmutant_pool_pout="$pout" _shmutant_pool_errexit="$errexit_before"
   "$prep" "$wd/pristine" >| "$pout"; prc=$?
+  label="$_shmutant_pool_label"; wd="$_shmutant_pool_wd"; run="$_shmutant_pool_run"; cap="$_shmutant_pool_cap"
+  n="$_shmutant_pool_n"; t0="$_shmutant_pool_t0"; pout="$_shmutant_pool_pout"; errexit_before="$_shmutant_pool_errexit"
   if [ "$errexit_before" = 1 ]; then set -e; else set +e; fi
   if [ "$prc" -ne 0 ]; then
     rm -f -- "$pout"; _shmutant_err "$label: prepare failed (status $prc) — no tree to mutate"; return 2
@@ -670,6 +743,7 @@ shmutant_pool() {
   root="$(cat "$pout")"; rm -f -- "$pout"
   # prepare ran in this shell and may have assigned any setting; the workers read them next.
   _shmutant_validate_settings "$label" "$wd" || { _shmutant_err "$label: a setting changed by prepare is invalid"; return 2; }
+  jobs="$(_shmutant_jobs "$cap")"
   [ -n "$root" ] || root="$wd/pristine"
   root="$(_shmutant_abs "$root")" || { _shmutant_err "$label: prepare printed a root that is not a directory"; return 2; }
   case "$root" in

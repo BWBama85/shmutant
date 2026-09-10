@@ -475,6 +475,72 @@ t_pool_revalidates_settings_after_prepare() {
   has "$ERR" 'newline' 'says why'
 }
 
+t_pool_bookkeeping_survives_prepare_assignments() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  # shellcheck disable=SC2034
+  clobbering_prepare() { n=0; label=x; wd=/nowhere; run=nothing; pout=/dev/null; cap=abc; SHMUTANT_JOBS=1; shmutant_copy_tree "$TOY" "$1"; }
+  pool lbl "$T/wd" clobbering_prepare toy_run
+  rc_is "$RC" 0 'a prepare that assigns n, label, wd, run, pout and cap as its own variables does not derail the pool'
+  eq "$(verdict_of a)" killed 'the row still ran'
+  eq "$(field summary 4)" lbl 'the label is the pool'"'"'s'
+  eq "$(field summary 7)" 1 'SHMUTANT_JOBS assigned by prepare is honoured, so jobs is recomputed after it'
+}
+
+t_pool_validates_boolean_settings() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  SHMUTANT_KEEP=true pool lbl "$T/wd" toy_prepare toy_run
+  rc_is "$RC" 2 'SHMUTANT_KEEP=true is refused, not read as 0'
+  has "$ERR" 'SHMUTANT_KEEP' 'names it'
+  SHMUTANT_BASELINE=false pool lbl "$T/wd" toy_prepare toy_run
+  rc_is "$RC" 2 'SHMUTANT_BASELINE=false is refused, not read as 1'
+}
+
+t_verdict_timeout_with_a_leading_zero() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'hangs' '$1 + $2' '$1 - $2' 'add-works'
+  # 08: digits only, but not a valid octal constant, which is what bash arithmetic would read.
+  slow_run() { bash -c "sleep 12; touch '$T/finished'"; }
+  SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=08 pool lbl "$T/wd" toy_prepare slow_run
+  eq "$(verdict_of 'hangs')" timeout 'a timeout of 08 is eight seconds, not an octal error that disarms the watchdog'
+  sleep 3
+  [ -e "$T/finished" ] && fail_ 'the run outlived the leading-zero timeout'
+}
+
+t_pool_interrupted_kills_its_workers() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  unbounded_run() { bash -c "sleep 4; touch '$T/finished'"; }
+  ( SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=0 shmutant_pool lbl "$T/wd" toy_prepare unbounded_run > /dev/null 2>&1 ) & local pp=$!
+  sleep 1.5
+  kill -TERM "$pp"; wait "$pp" 2>/dev/null
+  sleep 4
+  [ -e "$T/finished" ] && fail_ 'a worker outlived the pool that was interrupted with TERM'
+}
+
+t_pool_restores_caller_traps() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  ( trap - TERM INT
+    before_term="$(trap -p TERM)"; before_int="$(trap -p INT)"
+    shmutant_pool lbl "$T/wd" toy_prepare toy_run > /dev/null 2>&1
+    [ "$(trap -p TERM)" = "$before_term" ] || { echo "FAIL: $_unit: the TERM trap changed across the pool: [$before_term] -> [$(trap -p TERM)]"; exit 1; }
+    [ "$(trap -p INT)" = "$before_int" ] || { echo "FAIL: $_unit: the INT trap changed across the pool: [$before_int] -> [$(trap -p INT)]"; exit 1; }
+    ( sleep 5 ) & c=$!; kill -TERM "$c"; wait "$c" 2>/dev/null; rc=$?
+    [ "$rc" -ne 0 ] || { echo "FAIL: $_unit: TERM is ignored after the pool"; exit 1; }
+    exit 0 ) || _failed=1
+  ( trap 'echo mine' TERM
+    shmutant_pool lbl "$T/wd2" toy_prepare toy_run > /dev/null 2>&1
+    case "$(trap -p TERM)" in *mine*) ;; *) echo "FAIL: $_unit: the caller's own TERM trap was not restored: $(trap -p TERM)"; exit 1 ;; esac
+    exit 0 ) || _failed=1
+}
+
 t_baseline_non_red_exit_is_aborted() {
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
@@ -493,9 +559,12 @@ t_kill_tree_skips_a_reused_pid() {
   eq "$(_shmutant_etime_secs 'junk')" 0 'garbage reads as zero'
   sleep 5 & local p=$!
   sleep 1.2
-  _shmutant_alive_since "$p" 1; rc_is $? 0 'a process seen one second ago is the same process'
-  _shmutant_alive_since "$p" 100; rc_is $? 1 'a pid whose elapsed time is smaller than when it was recorded is a reused pid'
-  _shmutant_kill_tree TERM 2147483000 "$p:100"; sleep 0.2
+  local id; id="$(_shmutant_identity "$p")"
+  case "$id" in [0-9]*'|'[0-9]*'|'*sleep*) ;; *) fail_ "identity is not etime|pgid|args: [$id]" ;; esac
+  _shmutant_alive_since "$p" "$id"; rc_is $? 0 'a process seen a moment ago with this identity is the same process'
+  _shmutant_alive_since "$p" "100|${id#*|}"; rc_is $? 1 'a pid whose elapsed time is smaller than when it was recorded is a reused pid'
+  _shmutant_alive_since "$p" "${id%%|*}|1|other command"; rc_is $? 1 'a pid now in another group running something else is a reused pid'
+  _shmutant_kill_tree TERM 2147483000 "$p:100|${id#*|}"; sleep 0.2
   kill -0 "$p" 2>/dev/null; rc_is $? 0 'a retained pid that fails the identity check is not signalled'
   kill "$p" 2>/dev/null; wait "$p" 2>/dev/null
 }
@@ -863,7 +932,7 @@ t_copy_tree_excludes_git() {
   shmutant_copy_tree "$T/missing" "$T/dst2" 2>/dev/null; rc_is $? 1 'a missing source is an error'
   shmutant_copy_tree "$T/src" "$T/src/.work/pristine" 2>"$T/e"; rc_is $? 1 'a destination inside the source is refused'
   has "$(cat "$T/e")" 'inside the source' 'says why'
-  [ -e "$T/src/.work/pristine/sub" ] && fail_ 'the self-copy started anyway'
+  [ -e "$T/src/.work" ] && fail_ 'the refusal left the directory it had created inside the source'
 }
 
 t_copy_tree_ignores_caller_glob_settings() {

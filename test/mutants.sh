@@ -266,8 +266,8 @@ shmutant_mut 'CDPATH reaches the path resolver' \
   '( cd -P -- "$1"' \
   't_abs_ignores_cdpath'
 shmutant_mut 'a destination inside the source is copied into itself' \
-  '"$asrc"|"$asrc/"*) _shmutant_err "copy_tree: destination' \
-  'never-matches) _shmutant_err "copy_tree: destination' \
+  '    "$asrc"|"$asrc/"*)' \
+  '    never-matches)' \
   't_copy_tree_excludes_git'
 shmutant_mut 'awk no longer reports a missed literal' \
   'exit (hit ? 0 : 3) }' \
@@ -452,6 +452,44 @@ shmutant_mut 'a non-red baseline exit is scored red' \
   '    elif true; then verdict=red' \
   't_baseline_non_red_exit_is_aborted'
 shmutant_mut 'a reused pid is signalled anyway' \
-  '  [ "$(_shmutant_etime_secs "$now")" -ge "$2" ]' \
-  '  true' \
+  '&& [ "$now_e" -ge "$seen_e" ]' \
+  '&& [ "$now_e" -ge 0 ]' \
   't_kill_tree_skips_a_reused_pid'
+
+# --- guards added for the tenth review round ---
+shmutant_mut 'jobs ignores what prepare assigned to SHMUTANT_JOBS' \
+  '  jobs="$(_shmutant_jobs "$cap")"' \
+  '  jobs="$(SHMUTANT_JOBS= _shmutant_jobs "$cap")"' \
+  't_pool_bookkeeping_survives_prepare_assignments'
+shmutant_mut 'the pool bookkeeping is not restored after prepare' \
+  'n="$_shmutant_pool_n"; t0="$_shmutant_pool_t0"; pout="$_shmutant_pool_pout"; errexit_before="$_shmutant_pool_errexit"' \
+  't0="$_shmutant_pool_t0"; errexit_before="$_shmutant_pool_errexit"' \
+  't_pool_bookkeeping_survives_prepare_assignments'
+shmutant_mut 'SHMUTANT_KEEP is not validated' \
+  'case "${SHMUTANT_KEEP:-0}" in 0|1) ;; *)' \
+  'case "${SHMUTANT_KEEP:-0}" in *) ;; never)' \
+  't_pool_validates_boolean_settings'
+shmutant_mut 'SHMUTANT_BASELINE is not validated' \
+  'case "${SHMUTANT_BASELINE:-1}" in 0|1) ;; *)' \
+  'case "${SHMUTANT_BASELINE:-1}" in *) ;; never)' \
+  't_pool_validates_boolean_settings'
+shmutant_mut 'a leading-zero timeout reaches arithmetic as octal' \
+  't_end=$(( $(_shmutant_now) + 10#$timeout * 1000000 ))' \
+  't_end=$(( $(_shmutant_now) + timeout * 1000000 ))' \
+  't_verdict_timeout_with_a_leading_zero'
+shmutant_mut 'a refused nested copy leaves its directory behind' \
+  '      [ -n "$made" ] && rm -rf -- "$made"' \
+  '      :' \
+  't_copy_tree_excludes_git'
+shmutant_mut 'an interrupted pool leaves its workers running' \
+  "  trap '_shmutant_abort_workers TERM' TERM" \
+  '  :' \
+  't_pool_interrupted_kills_its_workers'
+shmutant_mut 'pid identity ignores the command line and group' \
+  '  [ "$now_rest" = "$seen_rest" ] && [ "$now_e" -ge "$seen_e" ]' \
+  '  [ "$now_e" -ge "$seen_e" ]' \
+  't_kill_tree_skips_a_reused_pid'
+shmutant_mut 'no-trap is restored as ignore, so the caller cannot be interrupted afterwards' \
+  'if [ -n "${SHMUTANT_TRAP_TERM:-}" ]; then trap -- "$SHMUTANT_TRAP_TERM" TERM; else trap - TERM; fi' \
+  'trap -- "${SHMUTANT_TRAP_TERM:-}" TERM' \
+  't_pool_restores_caller_traps'
