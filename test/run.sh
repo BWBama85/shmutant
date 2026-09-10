@@ -537,6 +537,21 @@ t_run_leftovers_are_killed_after_a_normal_return() {
   [ -e "$T/escaped" ] && fail_ 'a helper in its own process group, seen by the watchdog, outlived the verdict'
 }
 
+t_run_cannot_redirect_the_leftover_record() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  printf 'precious\n' > "$T/victim"
+  # shellcheck disable=SC2034
+  meddling_run() { mark="$T/victim"; set -m; bash -c "sleep 4; touch '$T/escaped'" & set +m; bash "$1/test.sh"; }
+  SHMUTANT_BASELINE=0 pool lbl "$T/wd" toy_prepare meddling_run
+  eq "$(verdict_of a)" killed 'the verdict is the callback'"'"'s own'
+  eq "$(cat "$T/victim")" precious 'a callback assigning mark cannot point the leftover record at a caller file'
+  [ -e "$T/victim.left" ] && fail_ 'the leftover record was written beside the caller file'
+  sleep 5
+  [ -e "$T/escaped" ] && fail_ 'the escaped helper survived because the leftover record was lost'
+}
+
 t_worker_verdict_cannot_be_forged_through_a_link() {
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
@@ -565,6 +580,21 @@ t_pool_interrupted_kills_its_workers() {
   kill -TERM "$pp"; wait "$pp" 2>/dev/null
   sleep 5
   [ -e "$T/stubborn" ] && fail_ 'a TERM-ignoring escaped descendant outlived the interrupted pool: the TERM victims were not retained for KILL'
+}
+
+t_pool_abort_waits_only_for_its_helpers() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  unbounded_run() { : > "$T/started"; bash -c "sleep 4; touch '$T/finished'"; }
+  # the caller has a long job of its own; the interrupt must not wait for it
+  ( sleep 30 & SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=0 shmutant_pool lbl "$T/wd" toy_prepare unbounded_run > /dev/null 2>&1 ) & local pp=$!
+  wait_for "$T/started" || fail_ 'the run never started'
+  local t0; t0="$(_shmutant_now)"
+  kill -TERM "$pp"; wait "$pp" 2>/dev/null
+  [ $(( ($(_shmutant_now) - t0) / 1000000 )) -lt 10 ] || fail_ 'the interrupt handler blocked on the caller'"'"'s own background job'
+  sleep 4
+  [ -e "$T/finished" ] && fail_ 'the worker survived the interrupt'
 }
 
 t_pool_survives_failglob() {
@@ -1016,6 +1046,9 @@ t_copy_tree_excludes_git() {
   eq "$(cat "$T/dst/.dotfile")" w 'dotfile copied'
   [ -L "$T/dst/link" ] || fail_ 'symlink was not kept as a symlink'
   shmutant_copy_tree "$T/missing" "$T/dst2" 2>/dev/null; rc_is $? 1 'a missing source is an error'
+  mkdir -p "$T/gl/.git/objects"; printf 'o' > "$T/gl/.git/objects/x"; ln "$T/gl/.git/objects/x" "$T/gl/.git/objects/y"; printf 'f' > "$T/gl/f"
+  shmutant_copy_tree "$T/gl" "$T/gl-copy"; rc_is $? 0 'hard links inside the top-level .git, which the copy skips, do not refuse the copy'
+  eq "$(cat "$T/gl-copy/f")" f 'the rest arrived'
   mkdir -p "$T/hl"; printf 'x' > "$T/hl/a"; ln "$T/hl/a" "$T/hl/b"
   shmutant_copy_tree "$T/hl" "$T/hl-copy" 2>"$T/e"; rc_is $? 1 'a source with a hard-linked file is refused: a copy cannot keep the links joined'
   has "$(cat "$T/e")" 'hard link' 'says why'
@@ -1170,6 +1203,19 @@ EOF
   rm -f "$T/toy/finished"
   [ "$(find "$T/tmpd" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" -ge 1 ] || fail_ 'with SHMUTANT_KEEP=1 the interrupted CLI still removed its workdir'
   rm -rf "$T/tmpd"/*
+  { cat "$T/toy/plan-base.sh"; printf 'echo plan-says-hello\n'; } > "$T/toy/plan-chatty.sh"
+  TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-chatty.sh" > "$T/chatty.out" 2>"$T/chatty.err"
+  hasnt "$(cat "$T/chatty.out")" 'plan-says-hello' 'what a plan prints while loading stays out of the verdict stream'
+  has "$(cat "$T/chatty.err")" 'plan-says-hello' 'and reaches stderr instead'
+  eq "$(grep -vc '^shmutant	1	' "$T/chatty.out")" 0 'every stdout line is a record'
+  { cat "$T/toy/plan-base.sh"; printf 'exec bash -c "sleep 4; touch %s/execd"\n' "$T/toy"; } > "$T/toy/plan-exec-hang.sh"
+  TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-exec-hang.sh" --timeout 0 > /dev/null 2>&1 & cli=$!
+  sleep 1
+  local t0; t0="$(_shmutant_now)"
+  kill -TERM "$cli"; wait "$cli" 2>/dev/null
+  [ $(( ($(_shmutant_now) - t0) / 1000000 )) -lt 10 ] || fail_ 'interrupting a CLI whose plan execd a command blocked instead of killing it'
+  sleep 4
+  [ -e "$T/toy/execd" ] && fail_ 'the command the plan execd into outlived the interrupted CLI'
   { cat "$T/toy/plan-base.sh"; printf 'exec true\n'; } > "$T/toy/plan-exec.sh"
   TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-exec.sh" > /dev/null 2>&1; rc_is $? 2 'a plan that execs cannot become a passing run'
   { printf 'set -e\nroot="$(pwd)"\n( true )\n'; cat "$T/toy/plan-base.sh"; } > "$T/toy/plan-subs.sh"

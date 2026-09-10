@@ -192,7 +192,7 @@ shmutant_copy_tree() {
   # A copy gives each hard link its own inode, and the pool's later check could not tell: a
   # source carrying one is refused here, naming it.
   local linked
-  linked="$(find "$src" -type f -links +1 -print 2>/dev/null | head -n 1)"
+  linked="$(find "$src" -path "$src/.git" -prune -o -type f -links +1 -print 2>/dev/null | head -n 1)"
   if [ -n "$linked" ]; then
     _shmutant_err "copy_tree: $linked has more than one hard link — a copy cannot keep them joined; prepare that tree yourself, or name the file it aliases"; return 1
   fi
@@ -427,7 +427,9 @@ _shmutant_kill_tree() {
   done
   mapfile -t now < <(_shmutant_descendants "$pid")
   for p in "${now[@]}"; do [ -n "$p" ] && targets+=("$p"); done
-  kill "-$sig" -- -"$pid" "${targets[@]}" 2>/dev/null
+  # The root pid itself as well as its group: a worker or the CLI's plan child was started
+  # without job control and shares its parent's group, so `-pid` alone would miss it.
+  kill "-$sig" -- -"$pid" "$pid" "${targets[@]}" 2>/dev/null
 }
 
 # _shmutant_run_bounded <dir> <run> <root> <select> — run the adapter with stdout+stderr in
@@ -449,8 +451,10 @@ _shmutant_run_bounded() {
     # The wrapper records its descendants the moment the callback returns, while it is still
     # their parent: a helper the callback backgrounded is otherwise reparented before anyone
     # could see it.
-    ( export SHMUTANT_SELECT="$sel"; "$run" "$root" "$sel"; rrc=$?
-      _shmutant_snapshot "$BASHPID" > "$mark.left"; exit "$rrc" ) < /dev/null > "$dir/output" 2>&1 &
+    # The marker path is copied under a name no callback would assign: the callback runs in
+    # this scope and could otherwise redirect the record anywhere by assigning `mark`.
+    ( _shmutant_wrap_left="$mark.left"; export SHMUTANT_SELECT="$sel"; "$run" "$root" "$sel"; rrc=$?
+      _shmutant_snapshot "$BASHPID" >| "$_shmutant_wrap_left"; exit "$rrc" ) < /dev/null > "$dir/output" 2>&1 &
     pid=$!
     dog=""
     if [ "$timeout" -gt 0 ]; then
@@ -625,8 +629,10 @@ _shmutant_fresh_dir() {
 # caller's handler (or the default) decides what happens to the caller.
 _shmutant_abort_workers() {
   local sig="$1" p
-  for p in "${SHMUTANT_ACTIVE[@]}"; do _shmutant_kill_tree_twice "$p" & done
-  wait
+  local -a helpers=()
+  for p in "${SHMUTANT_ACTIVE[@]}"; do _shmutant_kill_tree_twice "$p" & helpers+=("$!"); done
+  # Only the helpers: a bare wait would also block on the caller's own background jobs.
+  [ "${#helpers[@]}" -eq 0 ] || wait "${helpers[@]}" 2>/dev/null
   _shmutant_restore_traps
   kill "-$sig" "$BASHPID"
 }
@@ -924,7 +930,9 @@ _shmutant_cli_load() {
   unset -f prepare run
   shmutant_reset
   # shellcheck disable=SC1090
-  . "$plan"
+  # Loaded with stdout on stderr: anything a plan prints while loading is prose, and the CLI's
+  # stdout carries verdict records only.
+  . "$plan" >&2
   rc=$?
   [ "$rc" -eq 0 ] || { _shmutant_err "run: the plan failed while loading (status $rc)"; return 2; }
   declare -F prepare > /dev/null || { _shmutant_err "run: the plan defines no prepare function"; return 2; }

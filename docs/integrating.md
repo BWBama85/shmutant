@@ -102,7 +102,8 @@ Run with `SHMUTANT_RED_PREFIX='not ok '`, and probe the failure exit status as a
 A plan is a bash file. The CLI sources it with `SHMUTANT_PLAN_DIR` set to its directory, then
 runs the table, both in a subshell of the CLI: whatever the plan does there (an `exit`, an
 `exec`, a trap, an assignment) stays there, and the CLI reports status 2 whenever the pool did
-not run to completion. Its `prepare` and `run` must be defined in the plan; functions exported
+not run to completion. Anything the plan prints while loading goes to stderr; the CLI's stdout
+carries verdict records only. Its `prepare` and `run` must be defined in the plan; functions exported
 by the invoking environment are discarded first. `prepare` runs in the pool's own shell, so state it exports is visible to
 `run`, and its own `set -e` is honoured: a prepare that aborts ends the run as a harness error.
 `shmutant_copy_tree` and the per-row clones keep mode, ownership and timestamps; a source with a
@@ -235,8 +236,9 @@ Steps, in the order that keeps the pass green throughout:
    different assertion's echo show up as `accidental`. Each one is a row whose claim was never
    true; fix the witness, not the verdict.
 6. **Drop the counters.** `shmutant_pool` returns 1 when any row was not killed, so the wrapper
-   becomes `shmutant_pool … || bad "…"`, and the stream carries the per-row detail CI used to
-   parse out of prose.
+   becomes `shmutant_pool …; rc=$?` followed by `[ "$rc" -eq 0 ] || bad "…"` (never
+   `shmutant_pool … || bad`, for the errexit reason in section 4), and the stream carries the
+   per-row detail CI used to parse out of prose.
 
 ## 8. What shmutant does not do
 

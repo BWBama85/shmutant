@@ -549,3 +549,25 @@ shmutant_mut 'the row pool runs as a condition, muting callback errexit' \
   '  _shmutant_run_jobs mut "$n" "$wd" "$run" "$suffix" "$jobs"; rjrc=$?' \
   '  _shmutant_run_jobs mut "$n" "$wd" "$run" "$suffix" "$jobs" || rjrc=2; rjrc=${rjrc:-0}' \
   't_run_errexit_is_honoured_in_workers'
+
+# --- guards added for the thirteenth review round ---
+shmutant_mut 'the leftover record path is read after the callback could assign mark' \
+  '_shmutant_snapshot "$BASHPID" >| "$_shmutant_wrap_left"; exit "$rrc" )' \
+  '_shmutant_snapshot "$BASHPID" >| "$mark.left"; exit "$rrc" )' \
+  't_run_cannot_redirect_the_leftover_record'
+shmutant_mut 'the hard-link preflight scans the top-level .git the copy skips' \
+  'find "$src" -path "$src/.git" -prune -o -type f -links +1 -print' \
+  'find "$src" -type f -links +1 -print' \
+  't_copy_tree_excludes_git'
+shmutant_mut 'the root pid is not signalled, only its presumed group' \
+  'kill "-$sig" -- -"$pid" "$pid" "${targets[@]}" 2>/dev/null' \
+  'kill "-$sig" -- -"$pid" "${targets[@]}" 2>/dev/null' \
+  't_cli_run'
+shmutant_mut 'the abort handler waits for every job, the caller included' \
+  '  [ "${#helpers[@]}" -eq 0 ] || wait "${helpers[@]}" 2>/dev/null' \
+  '  wait' \
+  't_pool_abort_waits_only_for_its_helpers'
+shmutant_mut 'plan-load output reaches the verdict stream' \
+  '  . "$plan" >&2' \
+  '  . "$plan"' \
+  't_cli_run'
