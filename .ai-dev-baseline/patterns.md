@@ -193,4 +193,7 @@ One line per resolved review thread, newest last.
 - `pipeline-status-lost` `docs/integrating.md:192` `aa81620` `PRRT_kwDOUT7q9s6hDYSO` PR #1 2026-09-10 — the timeout doc still claimed TERM then KILL; corrected
 - `path-escapes-root` `shmutant.sh:194` `aa81620` `PRRT_kwDOUT7q9s6hDYSS` PR #1 2026-09-10 — a symlink component in the destination parent was followed; the destination is rebuilt on the physical path of its nearest existing ancestor
 - `host-shell-option-leak` `shmutant.sh:988` `aa81620` `PRRT_kwDOUT7q9s6hDYSV` PR #1 2026-09-10 — prepare could pre-fill the baseline arrays; reset after prepare
+- `early-return-skips-cleanup` `shmutant.sh:590` `e269c85` `PRRT_kwDOUT7q9s6hEhsU` PR #1 2026-09-10 — a callback with errexit that failed exited the wrapper before its snapshot; the snapshot is an EXIT trap
+- `stale-artifact-reuse` `shmutant.sh:746` `e269c85` `PRRT_kwDOUT7q9s6hEhsZ` PR #1 2026-09-10 — the pool read a verdict by path from whatever directory had the name; verdicts are bound to the created inode
+- `stale-artifact-reuse` `shmutant.sh:946` `e269c85` `PRRT_kwDOUT7q9s6hEhsf` PR #1 2026-09-10 — the stream cache was set before the open succeeded so a retry skipped the open; set after
 <!-- adb:hits:end -->
