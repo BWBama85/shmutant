@@ -372,6 +372,13 @@ t_pool_refuses_a_workdir_it_did_not_create_entries_in() {
   [ -e "$T/wd3/.shmutant" ] || fail_ 'the marker was not written'
   pool lbl "$T/wd3" toy_prepare toy_run
   rc_is "$RC" 0 'and a marked workdir is reused'
+  mkdir -p "$T/wd4/.shmutant" "$T/wd4/pristine"; printf 'mine\n' > "$T/wd4/pristine/precious"
+  pool lbl "$T/wd4" toy_prepare toy_run
+  rc_is "$RC" 2 'a directory named .shmutant is not the marker'
+  eq "$(cat "$T/wd4/pristine/precious")" mine 'and the caller'"'"'s pristine stayed'
+  mkdir -p "$T/wd5/pristine"; ln -s "$T/nowhere" "$T/wd5/.shmutant"
+  pool lbl "$T/wd5" toy_prepare toy_run
+  rc_is "$RC" 2 'a symlink named .shmutant is not the marker'
 }
 
 t_target_refuses_a_newline() {
@@ -393,6 +400,8 @@ t_pool_refuses_shadowed_builtins_and_posix_mode() {
   eq "$(cat "$T/rc")" 2 'a function named kill is refused'
   has "$(cat "$T/e")" 'shadows the builtin' 'says why'
   ( set -o posix; shmutant_pool lbl "$T/wd" toy_prepare toy_run > /dev/null 2>"$T/e" ); rc_is $? 2 'POSIX mode is refused'
+  ( exit() { :; }; shmutant_pool lbl "$T/wd" toy_prepare toy_run > /dev/null 2>"$T/e5" ); rc_is $? 2 'a function named exit is refused'
+  has "$(cat "$T/e5")" 'shadows the builtin' 'says why'
   # a shadow prepare introduces is caught before any worker relies on the builtin
   shadowing_kill_prepare() { toy_prepare "$1"; kill() { :; }; }
   set -m; ( shmutant_pool lbl "$T/wd" shadowing_kill_prepare toy_run > /dev/null 2>"$T/e4"; echo "$?" > "$T/rc2" ) 2>/dev/null & bg=$!; set +m; i=0
@@ -649,6 +658,13 @@ t_library_sources_under_errexit() {
   # source the library: `shopt -p` returns 1 for an unset option
   bash -c 'set -e; shopt -u expand_aliases; . "$1"; echo sourced' _ "$SHMUTANT" > "$T/out" 2>&1
   has "$(cat "$T/out")" sourced 'the library can be sourced by a caller under set -e'
+}
+
+t_library_restores_alias_state_when_refusing_an_old_bash() {
+  # the floor refusal path, reached through a copy whose version test always fails
+  sed 's/^_shmutant_bash_ok() {$/_shmutant_bash_ok() { return 1; }; _shmutant_bash_ok_never() {/' "$SHMUTANT" > "$T/old.sh"
+  bash -c 'shopt -s expand_aliases; . "$1" 2>/dev/null; rc=$?; shopt -q expand_aliases && echo "rc=$rc aliases=on" || echo "rc=$rc aliases=off"' _ "$T/old.sh" > "$T/out" 2>&1
+  has "$(cat "$T/out")" 'rc=2 aliases=on' 'an old bash is refused with the caller'"'"'s alias setting put back'
 }
 
 t_library_is_immune_to_aliases_at_parse_time() {
@@ -983,13 +999,14 @@ t_worker_cleanup_refuses_a_swapped_directory() {
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
   shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
-  mkdir -p "$T/victim/tree"; printf 'precious\n' > "$T/victim/tree/keep"
+  mkdir -p "$T/victim/tree" "$T/victim/output"; printf 'precious\n' > "$T/victim/tree/keep"; printf 'mine\n' > "$T/victim/output/keep"
   # renames its worker directory away and leaves a symlink to a caller tree in its place
   swapping_run() { local d; d="$(cd "$1/.." && pwd -P)"; bash "$1/test.sh"; local rc=$?; mv "$d" "$d.moved" && ln -s "$T/victim" "$d"; return "$rc"; }
   SHMUTANT_BASELINE=0 pool lbl "$T/wd" toy_prepare swapping_run
   [ -f "$T/victim/tree/keep" ] || fail_ 'cleanup followed the swapped worker directory into a caller tree'
   has "$ERR" 'no longer the worker directory' 'the swap is reported'
   [ -e "$T/victim/verdict" ] && fail_ 'the verdict was written through the swapped directory'
+  [ -f "$T/victim/output/keep" ] || fail_ 'publishing the capture removed a directory named output in the caller tree behind the swap'
   eq "$(verdict_of a)" lost 'no verdict is written beneath a swapped directory'
   rm -f "$T/wd/mut-0"; mv "$T/wd/mut-0.moved" "$T/wd/mut-0" 2>/dev/null
   # a plain directory in place of the worker directory, not a symlink
@@ -1143,6 +1160,13 @@ t_run_partial_channel_open_is_a_setup_failure() {
   eq "$(cat "$T/status")" 127 'a channel that could not be opened is a setup failure'
   [ -e "$T/ran" ] && fail_ 'the callback ran without its channels'
   eq "$(find "$T/d" -name '.*' | wc -l | tr -d ' ')" 0 'no channel file was left behind'
+  # and through the pool it is a harness error, not a verdict on the row
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  ( ulimit -n "$(( ok - 1 ))"; SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd" toy_prepare toy_run > "$T/out" 2>"$T/err"; echo "rc=$?" >> "$T/out" )
+  has "$(cat "$T/out")" 'rc=2' 'a run that could not be set up is a harness error'
+  has "$(cat "$T/err")" 'could not be set up' 'and is named'
 }
 
 # shellcheck disable=SC2034
@@ -1642,7 +1666,7 @@ t_pool_reports_a_clone_it_could_not_remove() {
   unmake_unremovable "$T/wd/mut-0/tree/pinned"
   rc_is "$RC" 2 'a clone that could not be removed is a harness error, not a pass'
   has "$ERR" 'was not removed' 'names the clone'
-  has "$ERR" 'not left as promised' 'and says the run is unclean'
+  has "$ERR" 'as promised' 'and says the run is unclean'
 }
 
 t_pool_refuses_a_worker_dir_under_a_swapped_workdir() {
@@ -1658,6 +1682,14 @@ t_pool_refuses_a_worker_dir_under_a_swapped_workdir() {
   rc_is "$RC" 2 'a workdir replaced by a symlink is a harness error'
   [ -e "$T/elsewhere/mut-1" ] && fail_ 'a worker directory was created through the symlink'
   rm -f "$T/wd"; mv "$T/moved" "$T/wd" 2>/dev/null
+  # the swap two levels up: the workdir's own parent becomes a symlink to a tree holding a
+  # directory of the workdir's name, whose mut-1 is the caller's
+  mkdir -p "$T/nest/wd" "$T/other/wd/mut-1"; printf 'theirs\n' > "$T/other/wd/mut-1/keep"
+  swapping_up_run() { mv "$T/nest" "$T/nest.moved"; ln -s "$T/other" "$T/nest"; bash "$1/test.sh"; }
+  SHMUTANT_JOBS=1 SHMUTANT_BASELINE=0 pool lbl "$T/nest/wd" toy_prepare swapping_up_run
+  rc_is "$RC" 2 'a swap above the workdir'"'"'s parent is a harness error'
+  [ -f "$T/other/wd/mut-1/keep" ] || fail_ 'the caller'"'"'s mut-1 behind an ancestor swap was removed'
+  rm -f "$T/nest"; mv "$T/nest.moved" "$T/nest" 2>/dev/null
 }
 
 t_pool_refuses_unremovable_worker_dir() {
@@ -1940,6 +1972,10 @@ t_copy_tree_excludes_git() {
   [ -e "$T/src/.work" ] && fail_ 'the copy was created through the link'
   [ -e "$T/real-dst/top" ] && fail_ 'the copy went through the destination link'
   shmutant_copy_tree "$T/hl" "$T/hl-copy" 2>"$T/e"; rc_is $? 1 'a source with a hard-linked file is refused: a copy cannot keep the links joined'
+  mkdir -p "$T/pwd-real" "$T/pwd-fake"
+  ( cd "$T/pwd-real" && PWD="$T/pwd-fake" shmutant_copy_tree "$T/src" copy ); rc_is $? 0 'a relative destination copies'
+  [ -e "$T/pwd-real/copy/sub/f" ] || fail_ 'a relative destination was not resolved from the real current directory'
+  [ -e "$T/pwd-fake/copy" ] && fail_ 'a relative destination was resolved from the PWD variable instead'
   mkdir -p "$T/dots/src"; printf 'd' > "$T/dots/src/f"
   shmutant_copy_tree "$T/dots/src" "$T/dots/src/junk/../../copy"; rc_is $? 0 'a destination with dot components that resolves outside the source is accepted'
   [ -e "$T/dots/src/junk" ] && fail_ 'a transient component was created inside the source'
@@ -2119,6 +2155,14 @@ EOF
   rm -f "$T/toy/finished"
   [ "$(find "$T/tmpd" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" -ge 1 ] || fail_ 'SHMUTANT_KEEP=1 set by prepare was not honoured when the CLI was interrupted'
   rm -rf "$T/tmpd"/*
+  # --keep on the command line, settled to 0 by prepare, then interrupted: the workdir the CLI
+  # created is removed, as an uninterrupted run with that settled value would
+  sed 's/^prepare() {/prepare() { SHMUTANT_KEEP=0;/' "$T/toy/plan-hang.sh" > "$T/toy/plan-hang-unkeep.sh"
+  TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-hang-unkeep.sh" --keep --timeout 0 --no-baseline > /dev/null 2>&1 & cli=$!
+  wait_for "$T/toy/started" || fail_ 'the unkeep run never started'; rm -f "$T/toy/started"
+  kill -TERM "$cli"; wait "$cli" 2>/dev/null
+  sleep 4; rm -f "$T/toy/finished"
+  eq "$(find "$T/tmpd" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" 0 'a workdir created under --keep that prepare settled to 0 is removed on an interrupt'
   # SHMUTANT_KEEP=1 in the environment, interrupted while the plan is still loading (before
   # anything could be reported): the decision was the operator's, and the workdir stays
   { printf ': > "$SHMUTANT_PLAN_DIR/loading"; sleep 3\n'; cat "$T/toy/plan-hang.sh"; } > "$T/toy/plan-slow-load.sh"

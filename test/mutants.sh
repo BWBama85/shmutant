@@ -218,7 +218,7 @@ shmutant_mut 'the temp file is a predictable sibling name again' \
   'tmp="$f.shmutant-tmp"' \
   't_mutate_never_follows_a_stale_temp_link'
 shmutant_mut 'worker directories are reused with their stale contents' \
-  '  _shmutant_remove "$1" || return 1' \
+  '  _shmutant_remove "$1" "${2:-}" || return 1' \
   '  :' \
   't_pool_recreates_worker_dirs'
 shmutant_mut 'an unapplied row keeps its clone' \
@@ -340,7 +340,7 @@ shmutant_mut 'a relative library stream is left relative for prepare to move' \
   '    :' \
   't_stream_relative_survives_a_prepare_that_cds'
 shmutant_mut 'pristine is reused when it cannot be recreated' \
-  '_shmutant_fresh_dir "$wd/pristine" ||' \
+  '_shmutant_fresh_dir "$wd/pristine" "$wd" ||' \
   'true ||' \
   't_pool_refuses_unremovable_pristine'
 shmutant_mut 'the prepare capture is a predictable name again' \
@@ -754,8 +754,8 @@ shmutant_mut 'a freeze that never settles is endured in silence' \
   '    if [ "$rounds" -ge 32 ]; then break; fi' \
   't_freeze_that_never_settles_is_reported'
 shmutant_mut 'an unsettled run is scored as a timeout' \
-  '  if [ "$SHMUTANT_RUN_UNSETTLED" = 1 ]; then' \
-  '  if false; then' \
+  '  elif [ "$SHMUTANT_RUN_UNSETTLED" = 1 ]; then' \
+  '  elif false; then' \
   't_freeze_that_never_settles_is_reported'
 shmutant_mut 'a missing path is accepted before its parent is checked' \
   '  parent="$(command -p dirname -- "$path")"' \
@@ -800,7 +800,7 @@ shmutant_mut 'a caller function named cd stands in for the builtin' \
   '  ( cd -P -- "$d" 2>/dev/null && pwd -P )' \
   't_abs_ignores_cdpath'
 shmutant_mut 'a caller workdir holding entries shmutant did not make is emptied' \
-  '  if [ -e "$wd/.shmutant" ]; then return 0; fi' \
+  '  if [ -f "$wd/.shmutant" ] && [ ! -L "$wd/.shmutant" ]; then return 0; fi' \
   '  return 0' \
   't_pool_refuses_a_workdir_it_did_not_create_entries_in'
 shmutant_mut 'the workdir ownership check runs under the caller glob options' \
@@ -808,7 +808,7 @@ shmutant_mut 'the workdir ownership check runs under the caller glob options' \
   '  ( ' \
   't_pool_refuses_a_workdir_it_did_not_create_entries_in'
 shmutant_mut 'a function shadowing kill is not refused' \
-  '  for n in kill wait read trap printf mapfile exec builtin command cd pwd; do' \
+  '  for n in kill wait read trap printf mapfile exec builtin command cd pwd exit return declare local unset set shopt eval readonly export shift true false; do' \
   '  for n in; do' \
   't_pool_refuses_shadowed_builtins_and_posix_mode'
 shmutant_mut 'POSIX mode is not refused' \
@@ -840,8 +840,8 @@ shmutant_mut 'aliases in the sourcing shell are baked into the library' \
   ':' \
   't_library_is_immune_to_aliases_at_parse_time'
 shmutant_mut 'the alias setting of the sourcing shell is not put back' \
-  'eval "$_shmutant_alias_state"; unset _shmutant_alias_state' \
-  'unset _shmutant_alias_state' \
+  'eval "$_shmutant_alias_state"; unset -v _shmutant_alias_state' \
+  'unset -v _shmutant_alias_state' \
   't_library_is_immune_to_aliases_at_parse_time'
 shmutant_mut 'the clone directory is made with -p and follows a planted link' \
   '    || ! command -p mkdir -- "$dir/tree" 2>/dev/null || ! command -p cp -RPp -- "$wd/pristine/." "$dir/tree/" 2>/dev/null; then' \
@@ -860,7 +860,7 @@ shmutant_mut 'a replaced worker directory is not a cleanup failure' \
   '    :' \
   't_collect_fails_closed'
 shmutant_mut 'the runner status is trusted without the channel' \
-  '      "status "*) case "${line#status }" in '"'"''"'"'|*[!0-9]*) ;; *) SHMUTANT_RUN_STATUS="${line#status }" ;; esac ;;' \
+  '      "status "*) case "${line#status }" in '"'"''"'"'|*[!0-9]*) ;; *) SHMUTANT_RUN_STATUS="${line#status }"; SHMUTANT_RUN_SETUP_FAILED=0 ;; esac ;;' \
   '      "status "*) ;;' \
   't_verdict_survived'
 shmutant_mut 'the settled keep is only ever raised by the marker' \
@@ -939,3 +939,37 @@ shmutant_mut 'sourcing the library fails a caller under errexit' \
   '_shmutant_alias_state="$(shopt -p expand_aliases; :)"' \
   '_shmutant_alias_state="$(shopt -p expand_aliases)"' \
   't_library_sources_under_errexit'
+
+# --- guards added for the twenty-fifth review round ---
+shmutant_mut 'the capture is published beneath a replaced worker directory' \
+  '  if [ -L "$dir" ] || { [ -n "${SHMUTANT_DIR_ID:-}" ] && [ "$(_shmutant_dir_id "$dir")" != "$SHMUTANT_DIR_ID" ]; }; then' \
+  '  if false; then' \
+  't_worker_cleanup_refuses_a_swapped_directory'
+shmutant_mut 'only the immediate parent is checked before a removal' \
+  '  if [ -n "${2:-}" ] && [ "$(_shmutant_abs "$parent")" != "$2" ]; then' \
+  '  if false; then' \
+  't_pool_refuses_a_worker_dir_under_a_swapped_workdir'
+shmutant_mut 'a run that could not be set up is scored on the row' \
+  '    { printf '"'"'setup-failed\n'"'"' >&"$SHMUTANT_VERDICT_FD"; } 2>/dev/null' \
+  '    :' \
+  't_run_partial_channel_open_is_a_setup_failure'
+shmutant_mut 'anything named .shmutant marks a workdir as ours' \
+  '  if [ -f "$wd/.shmutant" ] && [ ! -L "$wd/.shmutant" ]; then return 0; fi' \
+  '  if [ -e "$wd/.shmutant" ]; then return 0; fi' \
+  't_pool_refuses_a_workdir_it_did_not_create_entries_in'
+shmutant_mut 'the alias setting is not put back when an old bash is refused' \
+  '  if [ "${BASH_SOURCE[0]}" = "$0" ]; then exit 2; fi' \
+  '  if [ "${BASH_SOURCE[0]}" = "$0" ]; then exit 2; else return 2; fi' \
+  't_library_restores_alias_state_when_refusing_an_old_bash'
+shmutant_mut 'a workdir created under an initial keep is never tracked for removal' \
+  '  [ "$made" = 1 ] && SHMUTANT_CLI_WD_TO_RM="$wd"' \
+  '  [ "$made" = 1 ] && [ "$keep" != 1 ] && SHMUTANT_CLI_WD_TO_RM="$wd"' \
+  't_cli_run'
+shmutant_mut 'a function named exit is not a refused shadow' \
+  '  for n in kill wait read trap printf mapfile exec builtin command cd pwd exit return declare local unset set shopt eval readonly export shift true false; do' \
+  '  for n in kill wait read trap printf mapfile exec builtin command cd pwd; do' \
+  't_pool_refuses_shadowed_builtins_and_posix_mode'
+shmutant_mut 'a relative copy destination is rebased on the PWD variable' \
+  '  case "$probe" in /*) ;; *) probe="$(builtin pwd -P)/$probe" ;; esac' \
+  '  case "$probe" in /*) ;; *) probe="$PWD/$probe" ;; esac' \
+  't_copy_tree_excludes_git'

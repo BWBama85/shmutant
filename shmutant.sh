@@ -82,7 +82,9 @@ if ! _shmutant_bash_ok "${BASH_VERSINFO[0]:-0}" "${BASH_VERSINFO[1]:-0}"; then
   fi
   printf 'shmutant: bash %s is below the 5.3 floor and no newer bash was found; %s\n' \
     "${BASH_VERSION:-unknown}" "$(_shmutant_install_hint)" >&2
-  if [ "${BASH_SOURCE[0]}" = "$0" ]; then exit 2; else return 2; fi
+  if [ "${BASH_SOURCE[0]}" = "$0" ]; then exit 2; fi
+  eval "$_shmutant_alias_state"; unset _shmutant_alias_state
+  return 2
 fi
 
 SHMUTANT_ROWS_NAME=(); SHMUTANT_ROWS_FILE=(); SHMUTANT_ROWS_OLD=(); SHMUTANT_ROWS_NEW=()
@@ -220,7 +222,7 @@ shmutant_copy_tree() {
   # otherwise have hidden; a link into the source tree is then caught, not followed.
   local probe rest=""
   probe="$dst"
-  case "$probe" in /*) ;; *) probe="$PWD/$probe" ;; esac
+  case "$probe" in /*) ;; *) probe="$(builtin pwd -P)/$probe" ;; esac
   while [ ! -d "$probe" ] || [ -L "$probe" ]; do
     [ -L "$probe" ] && [ -d "$probe" ] && break
     rest="$(command -p basename -- "$probe")${rest:+/$rest}"; probe="$(command -p dirname -- "$probe")"
@@ -717,7 +719,9 @@ _shmutant_run_bounded() {
   local left_w left_r seen_w seen_r fired out_w out_r hold hp go holder holderid err_fd
   timeout="$(_shmutant_pos_int "${SHMUTANT_TIMEOUT:-300}")" || timeout=0
   SHMUTANT_RUN_FIRED=0; SHMUTANT_RUN_RED=0; SHMUTANT_RUN_WITNESSED=0; SHMUTANT_RUN_UNSETTLED=0; SHMUTANT_RUN_PUBLISHED=1
-  SHMUTANT_RUN_STATUS=127
+  # Until the runner reports its own status the run has not started: a setup failure (a channel
+  # that could not be made or opened) is a harness error, never a verdict on the row.
+  SHMUTANT_RUN_STATUS=127; SHMUTANT_RUN_SETUP_FAILED=1
   # Every channel to and from the run is a descriptor opened HERE, before the callback exists,
   # and never reopened by path afterwards: the run's output (written and read back through
   # descriptors; the file takes the name `output` by rename at the end), the wrapper's leftover
@@ -851,7 +855,7 @@ _shmutant_run_bounded() {
   read -t 0 -u "$fired" && SHMUTANT_RUN_FIRED=1
   while IFS= read -r line <&"$seen_r"; do
     case "$line" in
-      "status "*) case "${line#status }" in ''|*[!0-9]*) ;; *) SHMUTANT_RUN_STATUS="${line#status }" ;; esac ;;
+      "status "*) case "${line#status }" in ''|*[!0-9]*) ;; *) SHMUTANT_RUN_STATUS="${line#status }"; SHMUTANT_RUN_SETUP_FAILED=0 ;; esac ;;
       unsettled)  SHMUTANT_RUN_UNSETTLED=1 ;;
     esac
   done
@@ -862,12 +866,19 @@ _shmutant_run_bounded() {
   # checked to be the capture itself.
   # The directory is this run's; a callback that made it unwritable does not get to keep the
   # capture from its name. A capture that still cannot be published is a harness error.
+  # Only into the directory this run created, by inode: nothing is changed, removed or renamed
+  # beneath a replacement a callback put at the name.
   SHMUTANT_RUN_PUBLISHED=1
-  [ -w "$dir" ] || command -p chmod -- u+rwx "$dir" 2>/dev/null
-  [ -d "$dir/output" ] && [ ! -L "$dir/output" ] && command -p rm -rf -- "$dir/output" 2>/dev/null
-  if ! command -p mv -f -- "$outf" "$dir/output" 2>/dev/null || [ ! -f "$dir/output" ] || [ -L "$dir/output" ]; then
+  if [ -L "$dir" ] || { [ -n "${SHMUTANT_DIR_ID:-}" ] && [ "$(_shmutant_dir_id "$dir")" != "$SHMUTANT_DIR_ID" ]; }; then
     command -p rm -f -- "$outf"
     SHMUTANT_RUN_PUBLISHED=0
+  else
+    [ -w "$dir" ] || command -p chmod -- u+rwx "$dir" 2>/dev/null
+    [ -d "$dir/output" ] && [ ! -L "$dir/output" ] && command -p rm -rf -- "$dir/output" 2>/dev/null
+    if ! command -p mv -f -- "$outf" "$dir/output" 2>/dev/null || [ ! -f "$dir/output" ] || [ -L "$dir/output" ]; then
+      command -p rm -f -- "$outf"
+      SHMUTANT_RUN_PUBLISHED=0
+    fi
   fi
   exec {left_w}>&- {left_r}<&- {seen_w}>&- {seen_r}<&- {fired}<&- {out_w}>&- {out_r}<&- {hold}<&- {hp}<&- {go}<&- {err_fd}>&-
 }
@@ -950,7 +961,11 @@ _shmutant_worker() {
   else _shmutant_run_bounded "$dir" "$run" "$root" "$sel"; fi
   status="$SHMUTANT_RUN_STATUS"
   t1="$(_shmutant_now)"
-  if [ "$SHMUTANT_RUN_UNSETTLED" = 1 ]; then
+  if [ "${SHMUTANT_RUN_SETUP_FAILED:-0}" = 1 ]; then
+    # The run never started: reported as such, and the pool makes it a harness error.
+    { printf 'setup-failed\n' >&"$SHMUTANT_VERDICT_FD"; } 2>/dev/null
+    verdict=lost
+  elif [ "$SHMUTANT_RUN_UNSETTLED" = 1 ]; then
     verdict=unsettled
   elif [ "$SHMUTANT_RUN_FIRED" = 1 ]; then
     verdict=timeout
@@ -987,7 +1002,7 @@ _shmutant_dir_id() {
 # SHMUTANT_RES_*[key] (and SHMUTANT_V_*): the last `verdict <v> <us> <status>` line, or `lost`
 # when there is none, the line is damaged, or the worker did not exit 0. Closes the channel.
 _shmutant_collect() {
-  local dir="$1" key="$2" wstatus="$3" line fd unpublished=0
+  local dir="$1" key="$2" wstatus="$3" line fd unpublished=0 setup_failed=0
   SHMUTANT_V_VERDICT=lost; SHMUTANT_V_US=0; SHMUTANT_V_STATUS=""
   fd="${SHMUTANT_VERDICT_R[$key]:-}"
   if [ -n "$fd" ]; then
@@ -999,6 +1014,7 @@ _shmutant_collect() {
                      SHMUTANT_V_VERDICT="${line%% *}"; line="${line#* }"
                      SHMUTANT_V_US="${line%% *}"; SHMUTANT_V_STATUS="${line#* }" ;;
         unpublished) unpublished=1 ;;
+        setup-failed) setup_failed=1 ;;
       esac
     done
     exec {fd}<&-
@@ -1010,6 +1026,9 @@ _shmutant_collect() {
   [ -n "$SHMUTANT_V_VERDICT" ] || SHMUTANT_V_VERDICT=lost
   _shmutant_pos_int "$SHMUTANT_V_US" > /dev/null || SHMUTANT_V_US=0
   SHMUTANT_RES_VERDICT["$key"]="$SHMUTANT_V_VERDICT"; SHMUTANT_RES_US["$key"]="$SHMUTANT_V_US"; SHMUTANT_RES_STATUS["$key"]="$SHMUTANT_V_STATUS"
+  if [ "$setup_failed" = 1 ]; then
+    _shmutant_err "$dir: the run could not be set up (a channel could not be made or opened) — the row was never run"; SHMUTANT_CLEANUP_FAILED=1
+  fi
   if [ "$unpublished" = 1 ]; then
     _shmutant_err "$dir/output could not be published — the documented artifact of this run is missing"; SHMUTANT_CLEANUP_FAILED=1
   fi
@@ -1085,7 +1104,7 @@ _shmutant_detail() {
 
 # _shmutant_fresh_dir <dir> — remove <dir> and create it empty; false when either step fails or
 # anything is still inside it.
-# _shmutant_remove <path> — remove a tree this harness created. Directories are made writable
+# _shmutant_remove <path> [<parent-physical>] — remove a tree this harness created. Directories are made writable
 # first (a preserved read-only root would otherwise refuse), and a path whose parent no longer
 # resolves to where it was created is left alone: a callback can rename a worker directory
 # and put a symlink in its place, and rm -rf follows a symlink in an intermediate component.
@@ -1097,6 +1116,11 @@ _shmutant_remove() {
   parent="$(command -p dirname -- "$path")"
   if [ -L "$parent" ]; then
     _shmutant_err "refusing to remove $path: its parent is now a symlink, not the directory it was created in"; return 1
+  fi
+  # With <parent-physical> given, the whole ancestry must still resolve to it: a link swapped
+  # in above the immediate parent would otherwise lead the removal into another tree.
+  if [ -n "${2:-}" ] && [ "$(_shmutant_abs "$parent")" != "$2" ]; then
+    _shmutant_err "refusing to remove $path: its parent no longer resolves to the directory it was created in"; return 1
   fi
   [ -e "$path" ] || [ -L "$path" ] || return 0
   if [ -d "$path" ] && [ ! -L "$path" ]; then
@@ -1112,7 +1136,7 @@ _shmutant_remove() {
 }
 
 _shmutant_fresh_dir() {
-  _shmutant_remove "$1" || return 1
+  _shmutant_remove "$1" "${2:-}" || return 1
   # No -p: a symlink to a directory planted between the removal and here would satisfy -p.
   command -p mkdir -- "$1" 2>/dev/null
 }
@@ -1174,7 +1198,7 @@ _shmutant_run_jobs_loop() {
     if [ "$kind" = mut ] && [ "${SHMUTANT_SKIP[$i]:-0}" != 0 ]; then continue; fi
     # Recreated, never reused: a stale timeout marker or tree from an earlier pool in the same
     # workdir would be read as this run's.
-    if ! _shmutant_fresh_dir "$wd/$kind-$i" || ! SHMUTANT_DIR_IDS["$kind-$i"]="$(_shmutant_dir_id "$wd/$kind-$i")" \
+    if ! _shmutant_fresh_dir "$wd/$kind-$i" "$wd" || ! SHMUTANT_DIR_IDS["$kind-$i"]="$(_shmutant_dir_id "$wd/$kind-$i")" \
       || ! _shmutant_open_channel "$wd" "$kind-$i"; then
       _shmutant_err "cannot recreate $wd/$kind-$i — a stale verdict there could be read as this run's; refusing to continue"
       # The workers already running are ended, not waited for: one of them may be unbounded.
@@ -1318,7 +1342,7 @@ _shmutant_stream_intact() {
 # pristine tree goes unless SHMUTANT_KEEP=1, and the stream descriptor is closed.
 _shmutant_pool_fail() {
   if [ "${SHMUTANT_KEEP:-0}" != 1 ]; then
-    _shmutant_remove "$2/pristine" || { _shmutant_err "$1: could not remove $2/pristine"; SHMUTANT_CLEANUP_FAILED=1; }
+    _shmutant_remove "$2/pristine" "$2" || { _shmutant_err "$1: could not remove $2/pristine"; SHMUTANT_CLEANUP_FAILED=1; }
   fi
   if [ -n "${SHMUTANT_STREAM_FD:-}" ]; then exec {SHMUTANT_STREAM_FD}>&-; unset SHMUTANT_STREAM_FD; fi
   unset SHMUTANT_STREAM_OPENED
@@ -1329,7 +1353,7 @@ _shmutant_pool_fail() {
 # lives. External utilities are already reached through `command -p`.
 _shmutant_no_shadows() {
   local n
-  for n in kill wait read trap printf mapfile exec builtin command cd pwd; do
+  for n in kill wait read trap printf mapfile exec builtin command cd pwd exit return declare local unset set shopt eval readonly export shift true false; do
     if declare -F -- "$n" > /dev/null 2>&1; then _shmutant_err "$1: a function named $n shadows the builtin this harness relies on"; return 2; fi
   done
 }
@@ -1339,7 +1363,8 @@ _shmutant_no_shadows() {
 # directory that happens to carry those names is refused, not emptied.
 _shmutant_workdir_owned() {
   local label="$1" wd="$2"
-  if [ -e "$wd/.shmutant" ]; then return 0; fi
+  if [ -f "$wd/.shmutant" ] && [ ! -L "$wd/.shmutant" ]; then return 0; fi
+  if [ -e "$wd/.shmutant" ] || [ -L "$wd/.shmutant" ]; then _shmutant_err "$label: $wd/.shmutant is not the regular file shmutant writes — refusing to treat the workdir as shmutant's"; return 2; fi
   # The caller's glob settings neutralised in a subshell, as in shmutant_copy_tree.
   ( set +f; shopt -u failglob; shopt -s nullglob; unset GLOBIGNORE
     for e in "$wd"/pristine "$wd"/base-* "$wd"/mut-*; do
@@ -1399,7 +1424,7 @@ shmutant_pool() {
     *) if [ "${#cap}" -gt 4 ] || [ "$cap" -lt 1 ]; then _shmutant_err "$label: the pool cap must be a positive integer of at most four digits, got [$cap]"; return 2; fi ;;
   esac
   _shmutant_open_stream "$label" || return 2
-  _shmutant_fresh_dir "$wd/pristine" || { _shmutant_pool_fail "$label" "$wd"; _shmutant_err "$label: cannot recreate $wd/pristine — stale contents there would be prepared over"; return 2; }
+  _shmutant_fresh_dir "$wd/pristine" "$wd" || { _shmutant_pool_fail "$label" "$wd"; _shmutant_err "$label: cannot recreate $wd/pristine — stale contents there would be prepared over"; return 2; }
   local pout prc errexit_before=0 pout_w pout_r
   # Every exit past this point goes through _shmutant_pool_fail: the stream descriptor is open
   # and pristine exists.
@@ -1529,7 +1554,7 @@ shmutant_pool() {
   _shmutant_err "$label: $killed/$n mutation(s) killed on their own witness (jobs=$jobs, $(_shmutant_secs "$(( t1 - t0 ))")s)"
   _shmutant_pool_fail "$label" "$wd"
   if [ "${SHMUTANT_CLEANUP_FAILED:-0}" -ne 0 ]; then
-    _shmutant_err "$label: a worker directory was not left as promised (a tree not removed, or an output not published) — see above"
+    _shmutant_err "$label: a worker did not run or finish as promised (a run not set up, a tree not removed, or an output not published) — see above"
     return 2
   fi
   if ! _shmutant_stream_intact; then
@@ -1700,7 +1725,7 @@ _shmutant_cli_run() {
   # A signal to this process must not orphan the subshell and its workers: the child's whole
   # tree is killed, the workdir handled, and the signal re-delivered.
   SHMUTANT_CLI_CHILD=""; SHMUTANT_CLI_WD_TO_RM=""
-  [ "$made" = 1 ] && [ "$keep" != 1 ] && SHMUTANT_CLI_WD_TO_RM="$wd"
+  [ "$made" = 1 ] && SHMUTANT_CLI_WD_TO_RM="$wd"
   # The effective SHMUTANT_KEEP travels on a second channel: the plan subshell and the pool
   # append the value each time it may have changed (after the plan loads, before and after
   # prepare), and an interrupt reads the last one. Unlinked at once: no path names it.
@@ -1710,6 +1735,9 @@ _shmutant_cli_run() {
     _shmutant_err "run: cannot open the keep channel"; [ -n "${keep_w:-}" ] && exec {keep_w}>&-; exec {done_r}<&-; command -p rm -f -- "$keep_file" "$done_file"; [ "$made" = 1 ] && command -p rm -rf -- "$wd"; return 2
   fi
   command -p rm -f -- "$keep_file"
+  # Seeded with the operator's own setting: an interrupt before the plan reports anything reads
+  # that, and every later report is what the run settled since.
+  printf '%s\n' "$keep" >&"$keep_w"
   SHMUTANT_CLI_KEEP_R="$keep_r"; SHMUTANT_CLI_DONE_FILE="$done_file"
   # Settings given on the command line or in the environment are checked before the plan's own
   # code runs: a bad --jobs must not first execute a plan.
@@ -1766,7 +1794,7 @@ shmutant_main() {
   esac
 }
 
-eval "$_shmutant_alias_state"; unset _shmutant_alias_state
+eval "$_shmutant_alias_state"; unset -v _shmutant_alias_state
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   shmutant_main "$@"
