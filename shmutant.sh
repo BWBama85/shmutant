@@ -16,7 +16,9 @@
 #   shmutant_selected <unit>                             true when <unit> is selected (or nothing is)
 #   shmutant_copy_tree <src> <dst>                       copy a tree, excluding .git
 #
-# Adapter contract (two callbacks, called with their arguments, in the pool's shell):
+# Adapter contract (two callbacks, called with their arguments; prepare in the pool's shell, run
+# in a subshell of its own with its own process group, stdin from /dev/null, stdout and stderr
+# captured, and errexit off):
 #   prepare <dir>          populate <dir> with the tree under test. Optionally print the tree
 #                          root (default: <dir>); it must lie inside <dir>. Called ONCE per pool.
 #   run <root> <select>    run the tests covering <select> inside <root>. SHMUTANT_SELECT is
@@ -1411,7 +1413,7 @@ shmutant_pool() {
   suffix="${root#"$wd/pristine"}"
   for (( i = 0; i < n; i++ )); do
     if ! _shmutant_target_ok "$root" "${SHMUTANT_ROWS_FILE[$i]}"; then
-      _shmutant_err "$label: row '${SHMUTANT_ROWS_NAME[$i]}' targets ${SHMUTANT_ROWS_FILE[$i]}, which the prepared tree does not contain as a regular file (missing, a symlink, or under one)"
+      _shmutant_err "$label: row '${SHMUTANT_ROWS_NAME[$i]}' targets ${SHMUTANT_ROWS_FILE[$i]}, which the prepared tree does not contain as a regular file (missing, a symlink, or reached through one that leaves the tree)"
       _shmutant_pool_fail "$label" "$wd"; return 2
     fi
     # Link count is `ls -l` column 2. A clone gives each hard link its own inode, so a test

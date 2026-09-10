@@ -148,8 +148,9 @@ Rules a row must satisfy, all enforced when the row is appended or the pool star
   the file's mode and final-newline shape are preserved so the literal is the only change;
 - the old literal is non-empty, contains no newline, and differs from the new one;
 - the target file is relative to the tree root, carries no `..` component, and exists in the
-  prepared tree as a regular file with one hard link (a symlink, a path under a symlinked
-  directory, or a multiply linked file is refused);
+  prepared tree as a regular file with one hard link (a symlink, a path whose physical location
+  lies outside the tree because a directory component is a symlink, or a multiply linked file is
+  refused; a symlinked directory that stays inside the tree resolves to the real file);
 - the witness is non-empty.
 
 A refused declaration is counted, and a pool whose table carries one exits 2 rather than running
