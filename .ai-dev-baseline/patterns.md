@@ -159,4 +159,10 @@ One line per resolved review thread, newest last.
 - `host-shell-option-leak` `shmutant.sh:411` `e587baf` `PRRT_kwDOUT7q9s6g9Q2b` PR #1 2026-09-10 — a glob under caller failglob aborted the runner; the glob is gone
 - `option-surface-mismatch` `shmutant.sh:947` `e587baf` `PRRT_kwDOUT7q9s6g9Q2f` PR #1 2026-09-10 — KEEP set inside the plan was not known to the CLI interrupt path; the pool now records it in a CLI-provided file
 - `host-shell-option-leak` `shmutant.sh:808` `e587baf` `PRRT_kwDOUT7q9s6g9Q2j` PR #1 2026-09-10 — the worker pools ran as || conditions so callback errexit was ignored; called bare with status captured
+- `host-shell-option-leak` `shmutant.sh:453` `2a21cfc` `PRRT_kwDOUT7q9s6g-lEN` PR #1 2026-09-10 — the run callback could assign mark and redirect the leftover record; the wrapper copies the path under a private name first
+- `contract-not-honoured` `shmutant.sh:195` `2a21cfc` `PRRT_kwDOUT7q9s6g-lEZ` PR #1 2026-09-10 — the hard-link preflight scanned the top-level .git the copy skips; now pruned
+- `pipeline-status-lost` `docs/integrating.md:238` `2a21cfc` `PRRT_kwDOUT7q9s6g-lEi` PR #1 2026-09-10 — the migration step still recommended pool || bad; corrected to a bare call with status capture
+- `timeout-escalation-cancelled` `shmutant.sh:430` `2a21cfc` `PRRT_kwDOUT7q9s6g-lEs` PR #1 2026-09-10 — kill_tree signalled only the presumed group, missing a root that shares its parent group; the root pid is now a target
+- `contract-not-honoured` `shmutant.sh:629` `2a21cfc` `PRRT_kwDOUT7q9s6g-lE8` PR #1 2026-09-10 — the abort handler waited for every job including the caller own; now only its helpers
+- `contract-not-honoured` `shmutant.sh:927` `2a21cfc` `PRRT_kwDOUT7q9s6g-lFB` PR #1 2026-09-10 — plan-load stdout reached the verdict stream; redirected to stderr
 <!-- adb:hits:end -->
