@@ -217,4 +217,66 @@ One line per resolved review thread, newest last.
 - `timeout-escalation-cancelled` `shmutant.sh` `b6ed2e9` `PRRT_kwDOUT7q9s6hIra7` PR #1 2026-09-10
 - `pipeline-status-lost` `shmutant.sh` `b6ed2e9` `PRRT_kwDOUT7q9s6hIrbH` PR #1 2026-09-10
 - `path-escapes-root` `shmutant.sh` `b6ed2e9` `PRRT_kwDOUT7q9s6hIrbN` PR #1 2026-09-10
+- `stale-artifact-reuse` `shmutant.sh` `9386146` `PRRT_kwDOUT7q9s6hLggb` PR #1 2026-09-10
+- `write-failure-swallowed` `shmutant.sh` `9386146` `PRRT_kwDOUT7q9s6hLggl` PR #1 2026-09-10
+- `config-value-unvalidated` `shmutant.sh` `9386146` `PRRT_kwDOUT7q9s6hLggp` PR #1 2026-09-10
+- `rewrite-loses-file-shape` `shmutant.sh` `9386146` `PRRT_kwDOUT7q9s6hLggr` PR #1 2026-09-10
+- `timeout-escalation-cancelled` `shmutant.sh` `9386146` `PRRT_kwDOUT7q9s6hLggu` PR #1 2026-09-10
+- `path-escapes-root` `shmutant.sh` `9386146` `PRRT_kwDOUT7q9s6hLggy` PR #1 2026-09-10
+- `rewrite-loses-file-shape` `shmutant.sh` `0b79bbc` `sweep-r22-rewrite-loses-file-shape-1` PR #1 2026-09-10 — mode spec case arms gained an execute bit under nocasematch
+- `host-shell-option-leak` `shmutant.sh` `0b79bbc` `sweep-r22-host-shell-option-leak-1` PR #1 2026-09-10 — errtrace E in $- read as errexit under nocasematch
+- `host-shell-option-leak` `shmutant.sh` `0b79bbc` `sweep-r22-host-shell-option-leak-2` PR #1 2026-09-10 — POSIX mode: exit function refused and failing exec ends the shell; now refused up front
+- `host-shell-option-leak` `shmutant.sh` `0b79bbc` `sweep-r22-host-shell-option-leak-3` PR #1 2026-09-10 — CLI inherited errexit/nounset/noclobber/posix via SHELLOPTS; reset at entry
+- `host-shell-option-leak` `shmutant.sh` `0b79bbc` `sweep-r22-host-shell-option-leak-4` PR #1 2026-09-10 — aliases expanded into function bodies at parse time
+- `host-shell-option-leak` `shmutant.sh` `0b79bbc` `sweep-r22-host-shell-option-leak-5` PR #1 2026-09-10 — cd/pwd and every utility resolved through caller functions and PATH; builtin and command -p
+- `host-shell-option-leak` `shmutant.sh` `0b79bbc` `sweep-r22-host-shell-option-leak-6` PR #1 2026-09-10 — unquoted arithmetic expansions as arguments
+- `host-shell-option-leak` `shmutant.sh` `0b79bbc` `sweep-r22-host-shell-option-leak-7` PR #1 2026-09-10 — worker shell inherited the caller errexit into run callbacks and the pool status
+- `caller-owned-path-deleted` `shmutant.sh` `0b79bbc` `sweep-r22-caller-owned-path-deleted-1` PR #1 2026-09-10 — pristine/base-N/mut-N removed from a caller workdir with no provenance marker
+- `caller-owned-path-deleted` `shmutant.sh` `0b79bbc` `sweep-r22-caller-owned-path-deleted-2` PR #1 2026-09-10 — workdir name ending in a newline resolved to its sibling
+- `config-value-unvalidated` `shmutant.sh` `0b79bbc` `sweep-r22-config-value-unvalidated-1` PR #1 2026-09-10 — leading-zero numeric settings compared as text in messages
+- `config-value-unvalidated` `shmutant.sh` `0b79bbc` `sweep-r22-config-value-unvalidated-2` PR #1 2026-09-10 — rows and refusals declared by prepare never re-read
+- `config-value-unvalidated` `shmutant.sh` `0b79bbc` `sweep-r22-config-value-unvalidated-3` PR #1 2026-09-10 — CLI settings validated only after the plan had run
+- `path-lookup-ambiguity` `shmutant.sh` `0b79bbc` `sweep-r22-path-lookup-ambiguity-1` PR #1 2026-09-10 — a path named - resolved as cd -
+- `path-lookup-ambiguity` `shmutant.sh` `0b79bbc` `sweep-r22-path-lookup-ambiguity-2` PR #1 2026-09-10 — trailing newline stripped by command substitution in _shmutant_abs
+- `path-lookup-ambiguity` `shmutant.sh` `0b79bbc` `sweep-r22-path-lookup-ambiguity-3` PR #1 2026-09-10 — utilities reached through a plan function or a prepare-set PATH
+- `path-lookup-ambiguity` `shmutant.sh` `0b79bbc` `sweep-r22-path-lookup-ambiguity-4` PR #1 2026-09-10 — builtins kill/wait/read shadowed by a plan function; now refused
+- `timeout-escalation-cancelled` `shmutant.sh` `0b79bbc` `sweep-r22-timeout-escalation-cancelled-1` PR #1 2026-09-10 — watchdog TERM trap could cancel a freeze halfway
+- `timeout-escalation-cancelled` `shmutant.sh` `0b79bbc` `sweep-r22-timeout-escalation-cancelled-2` PR #1 2026-09-10 — dog-first path blocked in wait with no ps and no holder
+- `timeout-escalation-cancelled` `shmutant.sh` `0b79bbc` `sweep-r22-timeout-escalation-cancelled-3` PR #1 2026-09-10 — INT/TERM abort reached only the worker pid without ps
+- `timeout-escalation-cancelled` `shmutant.sh` `0b79bbc` `sweep-r22-timeout-escalation-cancelled-4` PR #1 2026-09-10 — active worker pids signalled without identity after auto-reap
+- `early-return-skips-cleanup` `shmutant.sh` `0b79bbc` `sweep-r22-early-return-skips-cleanup-1` PR #1 2026-09-10 — pool returns after stream open skipped _shmutant_pool_fail
+- `early-return-skips-cleanup` `shmutant.sh` `0b79bbc` `sweep-r22-early-return-skips-cleanup-2` PR #1 2026-09-10 — partial capture-channel open left a descriptor
+- `early-return-skips-cleanup` `shmutant.sh` `0b79bbc` `sweep-r22-early-return-skips-cleanup-3` PR #1 2026-09-10 — run_jobs status under caller errexit ended the caller before cleanup
+- `early-return-skips-cleanup` `shmutant.sh` `0b79bbc` `sweep-r22-early-return-skips-cleanup-4` PR #1 2026-09-10 — copy_tree resolve failure left the components mkdir made
+- `early-return-skips-cleanup` `shmutant.sh` `0b79bbc` `sweep-r22-early-return-skips-cleanup-5` PR #1 2026-09-10 — keep marker failure left done_r open and the done file
+- `early-return-skips-cleanup` `shmutant.sh` `0b79bbc` `sweep-r22-early-return-skips-cleanup-6` PR #1 2026-09-10 — CLI abort left done/keep markers in a caller workdir
+- `stale-artifact-reuse` `shmutant.sh` `0b79bbc` `sweep-r22-stale-artifact-reuse-1` PR #1 2026-09-10 — verdict file read by path; a planted file plus a killed worker passed
+- `stale-artifact-reuse` `shmutant.sh` `0b79bbc` `sweep-r22-stale-artifact-reuse-2` PR #1 2026-09-10 — pristine cloned by path without an identity check
+- `stale-artifact-reuse` `shmutant.sh` `0b79bbc` `sweep-r22-stale-artifact-reuse-3` PR #1 2026-09-10 — output capture writable by path from a sibling
+- `stale-artifact-reuse` `shmutant.sh` `0b79bbc` `sweep-r22-stale-artifact-reuse-4` PR #1 2026-09-10 — unsettled marker was an existence test on a fixed name
+- `predictable-temp-path` `shmutant.sh` `0b79bbc` `sweep-r22-predictable-temp-path-1` PR #1 2026-09-10 — run output reopened by fixed name on the write side
+- `predictable-temp-path` `shmutant.sh` `0b79bbc` `sweep-r22-predictable-temp-path-2` PR #1 2026-09-10 — tree clone destination a fixed name; cp copied into a planted link
+- `predictable-temp-path` `shmutant.sh` `0b79bbc` `sweep-r22-predictable-temp-path-3` PR #1 2026-09-10 — channel names derived from one mktemp suffix
+- `predictable-temp-path` `shmutant.sh` `0b79bbc` `sweep-r22-predictable-temp-path-4` PR #1 2026-09-10 — _shmutant_fresh_dir mkdir -p accepted a planted symlink
+- `contract-not-honoured` `shmutant.sh` `0b79bbc` `sweep-r22-contract-not-honoured-1` PR #1 2026-09-10 — header claimed a timeout file that was never written
+- `contract-not-honoured` `shmutant.sh` `0b79bbc` `sweep-r22-contract-not-honoured-2` PR #1 2026-09-10 — verdict lists omitted unsettled and unprepared
+- `contract-not-honoured` `shmutant.sh` `0b79bbc` `sweep-r22-contract-not-honoured-3` PR #1 2026-09-10 — run callback described as running in the pool shell
+- `contract-not-honoured` `shmutant.sh` `0b79bbc` `sweep-r22-contract-not-honoured-4` PR #1 2026-09-10 — abort paths needed ps without saying so
+- `contract-not-honoured` `shmutant.sh` `0b79bbc` `sweep-r22-contract-not-honoured-5` PR #1 2026-09-10 — keep assigned by the plan not honoured before prepare returned
+- `contract-not-honoured` `shmutant.sh` `0b79bbc` `sweep-r22-contract-not-honoured-6` PR #1 2026-09-10 — requirements said coreutils only; find is findutils
+- `contract-not-honoured` `shmutant.sh` `0b79bbc` `sweep-r22-contract-not-honoured-7` PR #1 2026-09-10 — mutate header omitted the empty/equal literal case
+- `contract-not-honoured` `shmutant.sh` `0b79bbc` `sweep-r22-contract-not-honoured-8` PR #1 2026-09-10 — kill_tree_twice header omitted -g
+- `option-surface-mismatch` `shmutant.sh` `0b79bbc` `sweep-r22-option-surface-mismatch-1` PR #1 2026-09-10 — --workdir --keep took the flag as the value
+- `option-surface-mismatch` `shmutant.sh` `0b79bbc` `sweep-r22-option-surface-mismatch-2` PR #1 2026-09-10 — table size and refusal count read before prepare only
+- `option-surface-mismatch` `shmutant.sh` `0b79bbc` `sweep-r22-option-surface-mismatch-3` PR #1 2026-09-10 — keep written only after prepare; interrupt during prepare lost it
+- `option-surface-mismatch` `shmutant.sh` `0b79bbc` `sweep-r22-option-surface-mismatch-4` PR #1 2026-09-10 — --keep and a prepare KEEP=0 decided differently in CLI and workers
+- `pipeline-status-lost` `shmutant.sh` `0b79bbc` `sweep-r22-pipeline-status-lost-1` PR #1 2026-09-10 — checksum digest tool status replaced by awk
+- `pipeline-status-lost` `shmutant.sh` `0b79bbc` `sweep-r22-pipeline-status-lost-2` PR #1 2026-09-10 — ps failing after the run started disabled every by-number kill
+- `pipeline-status-lost` `shmutant.sh` `0b79bbc` `sweep-r22-pipeline-status-lost-3` PR #1 2026-09-10 — empty ps table after a bulk STOP left processes stopped
+- `pipeline-status-lost` `shmutant.sh` `0b79bbc` `sweep-r22-pipeline-status-lost-4` PR #1 2026-09-10 — find failure read as no hard links
+- `write-failure-swallowed` `shmutant.sh` `0b79bbc` `sweep-r22-write-failure-swallowed-1` PR #1 2026-09-10 — unsettled marker write unchecked
+- `write-failure-swallowed` `shmutant.sh` `0b79bbc` `sweep-r22-write-failure-swallowed-2` PR #1 2026-09-10 — kill -STOP refusals recorded as frozen
+- `write-failure-swallowed` `shmutant.sh` `0b79bbc` `sweep-r22-write-failure-swallowed-3` PR #1 2026-09-10 — keep marker written by path with no status check
+- `write-failure-swallowed` `shmutant.sh` `0b79bbc` `sweep-r22-write-failure-swallowed-4` PR #1 2026-09-10 — mutate restore returned 0 over a failed chmod
+- `write-failure-swallowed` `shmutant.sh` `0b79bbc` `sweep-r22-write-failure-swallowed-5` PR #1 2026-09-10 — runner subshell that could not start scored status 0
 <!-- adb:hits:end -->
