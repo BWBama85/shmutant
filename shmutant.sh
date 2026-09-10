@@ -186,6 +186,7 @@ shmutant_selected() {
 # and keeping symlinks as symlinks, modes, ownership and timestamps. Returns 1 when anything
 # fails to copy, or when <dst> lies inside <src>.
 shmutant_copy_tree() {
+  if [ "$#" -ne 2 ]; then _shmutant_err "copy_tree: usage: shmutant_copy_tree <src> <dst>"; return 1; fi
   local src="$1" dst="$2" entry name rc=0 asrc adst
   [ -d "$src" ] || { _shmutant_err "copy_tree: not a directory: $src"; return 1; }
   # Resolved first, so the scan below and the copy walk the same tree; find would not follow a
@@ -204,6 +205,20 @@ shmutant_copy_tree() {
     [ "$probe" != / ] || break
   done
   probe="$(_shmutant_abs "$probe")" || { _shmutant_err "copy_tree: cannot resolve the destination $dst"; return 1; }
+  # The components still to be created are settled lexically first: mkdir -p would otherwise
+  # create a `junk` in `junk/../copy` (inside the source, when that is where it points) and
+  # the copy would then find it there.
+  local comp norm=""
+  while [ -n "$rest" ]; do
+    comp="${rest%%/*}"; case "$rest" in */*) rest="${rest#*/}" ;; *) rest="" ;; esac
+    case "$comp" in
+      ''|.) ;;
+      ..) if [ -n "$norm" ]; then case "$norm" in */*) norm="${norm%/*}" ;; *) norm="" ;; esac
+          else probe="$(dirname -- "$probe")"; fi ;;
+      *)  norm="${norm:+$norm/}$comp" ;;
+    esac
+  done
+  rest="$norm"
   dst="$probe${rest:+/$rest}"
   # A copy gives each hard link its own inode, and the pool's later check could not tell: a
   # source carrying one is refused here, naming it.
@@ -395,6 +410,33 @@ _shmutant_descendants() {
     }'
 }
 
+# _shmutant_descendants_started <pid> — print `pid start` for every descendant of <pid>, from one
+# `ps -A -o pid= -o ppid= -o etime=` pass, so each is carried with the identity it had when found.
+_shmutant_descendants_started() {
+  local table now
+  table="$(ps -A -o pid= -o ppid= -o etime= 2>/dev/null)" || return 0
+  now="$(_shmutant_now)"; now=$(( now / 1000000 ))
+  printf '%s\n' "$table" | awk -v root="$1" -v now="$now" '
+    NF == 3 && $1 ~ /^[0-9]+$/ {
+      child[NR] = $1; parent[NR] = $2
+      e = $3; d = 0
+      if (e ~ /-/) { split(e, a, "-"); d = a[1]; e = a[2] }
+      n = split(e, t, ":")
+      if (n == 3) s = t[1] * 3600 + t[2] * 60 + t[3]
+      else if (n == 2) s = t[1] * 60 + t[2]
+      else s = t[1]
+      start[NR] = now - (d * 86400 + s)
+    }
+    END {
+      want[root] = 1
+      do {
+        added = 0
+        for (i = 1; i <= NR; i++) if ((parent[i] in want) && !(child[i] in want)) { want[child[i]] = 1; added = 1 }
+      } while (added)
+      for (i = 1; i <= NR; i++) if ((child[i] in want) && child[i] != root) print child[i], start[i]
+    }'
+}
+
 # _shmutant_etime_secs <etime> — seconds from a POSIX `ps -o etime` value ([[dd-]hh:]mm:ss).
 _shmutant_etime_secs() {
   local v="$1" d=0 h=0 m=0 sec=0 hms
@@ -431,6 +473,7 @@ _shmutant_identity_table() {
   # awk does the etime arithmetic for every row at once; a bash loop over the whole process
   # table took longer than the tree being frozen had left to live.
   while IFS= read -r line; do
+    # shellcheck disable=SC2034
     [ -n "$line" ] && SHMUTANT_START["${line%% *}"]="${line#* }"
   done < <(ps -A -o pid= -o etime= 2>/dev/null | awk -v now="$now" '
     NF == 2 && $1 ~ /^[0-9]+$/ {
@@ -455,44 +498,48 @@ _shmutant_alive_since() {
   [ "$d" -ge -1 ] && [ "$d" -le 1 ]
 }
 
-# _shmutant_kill_tree <signal> <pid> <pids…> — send <signal> to <pid>'s process group, to every
-# descendant found now, and to each of <pids…>: the descendants found before an earlier signal,
-# which a leader's death may have reparented out of reach of a fresh walk. An empty <pid>
-# signals only <pids…>.
-# <pids…> are `pid:identity` pairs recorded when each was seen (see _shmutant_identity); one that
-# no longer matches is a reused pid and is left alone. `pid:` with no identity is a frozen pid. Every target is decided first and signalled in
-# ONE kill: a parent signalled after its child has already run on past the child's death.
-# _shmutant_snapshot <pid> — print `pid:identity` for every live descendant of <pid> now.
-_shmutant_snapshot() {
-  local p
-  local -A SHMUTANT_START=()
-  _shmutant_identity_table
-  while IFS= read -r p; do
-    [ -n "$p" ] || continue
-    [ -n "${SHMUTANT_START[$p]:-}" ] || continue
-    printf '%s:%s\n' "$p" "${SHMUTANT_START[$p]}"
-  done < <(_shmutant_descendants "$1")
-}
-
 # _shmutant_freeze_from — stop every descendant of the pids in `roots`, repeatedly, until a pass
 # finds nothing new; appends what it stopped to `frozen`/`have`. Shares its caller's arrays.
 _shmutant_freeze_from() {
   local r p new rounds=0
-  local -a found=()
+  local -a found=() pids=()
   while :; do
     new=0
     for r in "${roots[@]}"; do
-      mapfile -t found < <(_shmutant_descendants "$r")
+      mapfile -t found < <(_shmutant_descendants_started "$r")
       [ "${#found[@]}" -gt 0 ] || continue
-      kill -STOP "${found[@]}" 2>/dev/null
-      for p in "${found[@]}"; do
-        [ -n "$p" ] || continue
+      pids=()
+      for p in "${found[@]}"; do [ -n "$p" ] && pids+=("${p%% *}"); done
+      kill -STOP "${pids[@]}" 2>/dev/null
+      # Only a pid that is still the process found is recorded as frozen: one that left between
+      # the listing and the stop may already be someone else's, who is let go again.
+      _shmutant_frozen_only "${found[@]}"
+      for p in "${SHMUTANT_FROZEN_NOW[@]}"; do
         [ -n "${have[$p]:-}" ] && continue
         have["$p"]=1; frozen+=("$p:"); roots+=("$p"); new=1
       done
     done
     rounds=$((rounds + 1))
     [ "$new" = 1 ] && [ "$rounds" -lt 16 ] || break
+  done
+}
+
+# _shmutant_frozen_only <pid start>… — after a bulk stop, SHMUTANT_FROZEN_NOW holds the pids
+# that still carry the start time they were found with; any other was stopped by mistake and
+# is continued.
+_shmutant_frozen_only() {
+  local p d
+  local -A SHMUTANT_START=()
+  SHMUTANT_FROZEN_NOW=()
+  _shmutant_identity_table
+  for p in "$@"; do
+    [ -n "$p" ] || continue
+    case "${p%% *}${p#* }" in *[!0-9]*|'') continue ;; esac
+    if [ -n "${SHMUTANT_START[${p%% *}]:-}" ]; then
+      d=$(( SHMUTANT_START[${p%% *}] - ${p#* } ))
+      if [ "$d" -ge -1 ] && [ "$d" -le 1 ]; then SHMUTANT_FROZEN_NOW+=("${p%% *}"); continue; fi
+      kill -CONT "${p%% *}" 2>/dev/null
+    fi
   done
 }
 
@@ -508,9 +555,12 @@ _shmutant_freeze_from() {
 # the wrapper's), frozen and searched from as well: one that still lived could otherwise fork a
 # child out of reach.
 _shmutant_kill_tree_twice() {
+  local held=""
+  if [ "${1:-}" = -g ]; then held="$2"; shift 2; fi
   local spec="$1" pid rootid p d
   local -a frozen=() roots=()
   local -A have=()
+  local SHMUTANT_KILL_GROUP=""
   shift
   pid="${spec%%:*}"
   # The root is stopped, searched from and later signalled by number only when it is known to
@@ -526,6 +576,13 @@ _shmutant_kill_tree_twice() {
     roots=("$pid")
     kill -STOP "$pid" 2>/dev/null && { frozen+=("$pid:"); have["$pid"]=1; }
   fi
+  # `-g <pgid>` names a process group the caller has verified is still its own (the holder
+  # that leads it is alive): the whole group is stopped now and signalled at the end, whether
+  # or not the root has been reaped, ps or no ps.
+  if [ -n "$held" ]; then
+    kill -STOP -- -"$held" 2>/dev/null
+    SHMUTANT_KILL_GROUP="$held"
+  fi
   # The root's tree first, before any identity work: every pass is one ps and one bulk stop.
   _shmutant_freeze_from
   # Then the retained victims that are still themselves (one table, one bulk stop), and the
@@ -540,12 +597,16 @@ _shmutant_kill_tree_twice() {
     [ -n "${SHMUTANT_START[${p%%:*}]:-}" ] || continue
     d=$(( SHMUTANT_START[${p%%:*}] - ${p#*:} ))
     [ "$d" -ge -1 ] && [ "$d" -le 1 ] || continue
-    have["${p%%:*}"]=1; stillours+=("${p%%:*}")
+    have["${p%%:*}"]=1; stillours+=("${p%%:*} ${p#*:}")
   done
   if [ "${#stillours[@]}" -gt 0 ]; then
-    kill -STOP "${stillours[@]}" 2>/dev/null
-    roots=("${stillours[@]}")
-    for p in "${stillours[@]}"; do frozen+=("$p:"); done
+    local -a stillpids=()
+    for p in "${stillours[@]}"; do stillpids+=("${p%% *}"); done
+    kill -STOP "${stillpids[@]}" 2>/dev/null
+    # Verified again once stopped: one that left between the table and the stop is let go.
+    _shmutant_frozen_only "${stillours[@]}"
+    roots=("${SHMUTANT_FROZEN_NOW[@]}")
+    for p in "${SHMUTANT_FROZEN_NOW[@]}"; do frozen+=("$p:"); done
     _shmutant_freeze_from
   fi
   if [ "$root_ok" = 1 ]; then _shmutant_kill_tree KILL "$pid" "${frozen[@]}"
@@ -554,6 +615,14 @@ _shmutant_kill_tree_twice() {
   return 0
 }
 
+# _shmutant_kill_tree <signal> <pid> <pids…> — send <signal> to every descendant of <pid> found
+# now, to each of <pids…> (the descendants found before an earlier signal, which a leader's
+# death may have reparented out of reach of a fresh walk), and to the process group named by
+# SHMUTANT_KILL_GROUP when set. An empty <pid> means no walk.
+# <pids…> are `pid:identity` pairs recorded when each was seen (see _shmutant_identity); one that
+# no longer matches is a reused pid and is left alone. `pid:` with no identity is a frozen pid.
+# Every target is decided first and signalled in ONE kill: a parent signalled after its child
+# has already run on past the child's death.
 _shmutant_kill_tree() {
   local sig="$1" pid="$2" p
   local -a targets=() now=()
@@ -565,18 +634,28 @@ _shmutant_kill_tree() {
     else _shmutant_alive_since "${p%%:*}" "${p#*:}" && targets+=("${p%%:*}")
     fi
   done
-  # No root (a rejected `pid:identity`, or one already reaped) means no group and no walk: the
-  # number and whatever now sits beneath it belong to someone else.
-  if [ -z "$pid" ]; then
-    [ "${#targets[@]}" -gt 0 ] && kill "-$sig" -- "${targets[@]}" 2>/dev/null
-    return 0
+  # No root (a rejected `pid:identity`, or one already reaped) means no walk: the number and
+  # whatever now sits beneath it belong to someone else.
+  if [ -n "$pid" ]; then
+    mapfile -t now < <(_shmutant_descendants "$pid")
+    for p in "${now[@]}"; do [ -n "$p" ] && targets+=("$p"); done
   fi
-  mapfile -t now < <(_shmutant_descendants "$pid")
-  for p in "${now[@]}"; do [ -n "$p" ] && targets+=("$p"); done
-  # The group, and every identity-checked target: the root is among them when it was alive at
-  # the snapshot (a worker or the CLI's plan child shares its parent's group, so `-pid` alone
-  # would miss it), and absent once it has been reaped.
-  kill "-$sig" -- -"$pid" "${targets[@]}" 2>/dev/null
+  # The group is the run's only while its holder lives, which the caller has checked.
+  [ -n "${SHMUTANT_KILL_GROUP:-}" ] && targets=(-"$SHMUTANT_KILL_GROUP" "${targets[@]}")
+  [ "${#targets[@]}" -gt 0 ] || return 0
+  kill "-$sig" -- "${targets[@]}" 2>/dev/null
+}
+
+# _shmutant_snapshot <pid> — print `pid:identity` for every live descendant of <pid> now.
+_shmutant_snapshot() {
+  local p
+  local -A SHMUTANT_START=()
+  _shmutant_identity_table
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    [ -n "${SHMUTANT_START[$p]:-}" ] || continue
+    printf '%s:%s\n' "$p" "${SHMUTANT_START[$p]}"
+  done < <(_shmutant_descendants "$1")
 }
 
 # _shmutant_run_bounded <dir> <run> <root> <select> — run the adapter with stdout+stderr in
@@ -586,8 +665,8 @@ _shmutant_kill_tree() {
 # and the whole tree it spawned dies with it. That subshell's stderr is discarded: with job
 # control on, bash reports the reaped job there when the pool itself runs under `$(...)`.
 _shmutant_run_bounded() {
-  local dir="$1" run="$2" root="$3" sel="$4" timeout mark fifo fd rootspec
-  local left_w left_r seen_w seen_r fired out_r
+  local dir="$1" run="$2" root="$3" sel="$4" timeout mark fifo fd
+  local left_w left_r seen_w seen_r fired out_r hold hp holder holderid err_fd
   timeout="$(_shmutant_pos_int "${SHMUTANT_TIMEOUT:-300}")" || timeout=0
   SHMUTANT_RUN_FIRED=0; SHMUTANT_RUN_OUTPUT=""
   # Every channel to and from the run is a descriptor opened HERE, before the callback exists,
@@ -597,30 +676,46 @@ _shmutant_run_bounded() {
   # that removes, locks or symlinks any of these names afterwards changes nothing.
   mark="$(mktemp "$dir/.run.XXXXXX")" || { SHMUTANT_RUN_STATUS=127; return; }
   fifo="$mark.fired"
-  { : >| "$mark.left" && : >| "$mark.seen" && : >| "$dir/output" && rm -f -- "$fifo" && mkfifo -- "$fifo"; } 2>/dev/null \
-    || { rm -f -- "$mark" "$mark.left" "$mark.seen"; SHMUTANT_RUN_STATUS=127; return; }
-  if ! exec {left_w}>|"$mark.left" {left_r}<"$mark.left" {seen_w}>|"$mark.seen" {seen_r}<"$mark.seen" {fired}<>"$fifo" {out_r}<"$dir/output"; then
+  { : >| "$mark.left" && : >| "$mark.seen" && : >| "$dir/output" && rm -f -- "$fifo" "$mark.hold" "$mark.hp" && mkfifo -- "$fifo" "$mark.hold" "$mark.hp"; } 2>/dev/null \
+    || { rm -f -- "$mark" "$mark.left" "$mark.seen" "$fifo" "$mark.hold" "$mark.hp"; SHMUTANT_RUN_STATUS=127; return; }
+  if ! exec {left_w}>|"$mark.left" {left_r}<"$mark.left" {seen_w}>|"$mark.seen" {seen_r}<"$mark.seen" {fired}<>"$fifo" {out_r}<"$dir/output" {hold}<>"$mark.hold" {hp}<>"$mark.hp"; then
     # A partial open (a descriptor limit) is a setup failure, not a run: close what did open.
-    for fd in "${left_w:-}" "${left_r:-}" "${seen_w:-}" "${seen_r:-}" "${fired:-}" "${out_r:-}"; do [ -n "$fd" ] && exec {fd}>&-; done
-    rm -f -- "$mark" "$mark.left" "$mark.seen" "$fifo"; SHMUTANT_RUN_STATUS=127; return
+    for fd in "${left_w:-}" "${left_r:-}" "${seen_w:-}" "${seen_r:-}" "${fired:-}" "${out_r:-}" "${hold:-}" "${hp:-}"; do [ -n "$fd" ] && exec {fd}>&-; done
+    rm -f -- "$mark" "$mark.left" "$mark.seen" "$fifo" "$mark.hold" "$mark.hp"; SHMUTANT_RUN_STATUS=127; return
   fi
-  rm -f -- "$mark" "$mark.left" "$mark.seen" "$fifo"
+  rm -f -- "$mark" "$mark.left" "$mark.seen" "$fifo" "$mark.hold" "$mark.hp"
+  exec {err_fd}>&2
   (
     set -m
     # The snapshot is an EXIT trap of the wrapper, so it runs however the callback ends: a
     # callback that turned errexit on and failed would otherwise leave without it. A callback
     # that dropped the trap is still recorded on return, and on `exit`, which the wrapper
     # shadows with a function that snapshots first.
-    ( _shmutant_wrap_left="$left_w"; trap '_shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"' EXIT
-      exit() { _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; builtin exit "$@"; }
+    # The wrapper's first act starts a holder: a member of the wrapper's process group, blocked
+    # on a FIFO nothing writes until the cleanup is over, whose pid is reported before the
+    # callback starts. It is a grandchild, not a job of the wrapper: a callback's bare `wait`
+    # would otherwise block on it. While it lives the group exists and its number cannot be reused, so the group can
+    # be stopped and killed by number after the wrapper has been reaped, with or without ps;
+    # every such kill first checks the holder is still there. (Not a pipeline led by the holder:
+    # `wait` on one member of a job waits for the whole job.)
+    # A bare `exit` keeps the status it would have had: the snapshot runs first and must not
+    # replace it.
+    ( _shmutant_wrap_left="$left_w"
+      ( ( read -r _ <&"$hold" ) < /dev/null > /dev/null 2>&1 & printf '%s\n' "$!" >&"$hp" )
+      trap '_shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"' EXIT
+      exit() { local s=$?; _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; if [ "$#" -eq 0 ]; then builtin exit "$s"; else builtin exit "$@"; fi; }
       export SHMUTANT_SELECT="$sel"; "$run" "$root" "$sel"; rrc=$?
       _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; trap - EXIT; builtin exit "$rrc" ) < /dev/null >> "$dir/output" 2>&1 &
     pid=$!
+    # The holder's pid arrives on the FIFO, or nothing does: a wrapper that died before
+    # starting it ends this read when the runner's own timeout below does.
+    holder=""
+    read -t 30 -r holder <&"$hp" || holder=""
+    case "$holder" in ''|*[!0-9]*) holder="" ;; esac
+    holderid="$(_shmutant_identity "$holder")" || holderid=""
     # The root's identity while it is certainly alive: the post-run kill must not stop or signal
     # a reaped root by number.
-    # Without an identity (no usable ps) the root is passed bare while this shell still holds
-    # it unreaped: `pid:` would read as reaped and leave a live tree running past its timeout.
-    if rootid="$(_shmutant_identity "$pid")"; then rootspec="$pid:$rootid"; else rootid=""; rootspec="$pid"; fi
+    rootid="$(_shmutant_identity "$pid")" || rootid=""
     dog=""
     if [ "$timeout" -gt 0 ]; then
       (
@@ -649,7 +744,7 @@ _shmutant_run_bounded() {
         # An array of pid:identity pairs, never an unquoted expansion.
         victims=()
         for p in "${!seen[@]}"; do victims+=("$p:${seen[$p]}"); done
-        _shmutant_kill_tree_twice "$rootspec" "${victims[@]}"
+        _shmutant_held_group "$pid"; _shmutant_kill_tree_twice "${SHMUTANT_HELD[@]}" "$pid:$rootid" "${victims[@]}"
       ) < /dev/null > /dev/null 2>&1 &
       dog=$!
     fi
@@ -660,7 +755,7 @@ _shmutant_run_bounded() {
       wait -n -p done_first "$pid" "$dog"; rc=$?
       if [ "${done_first:-}" != "$pid" ]; then
         read -t 0 -u "$fired" || printf 'fired\n' >&"$fired"
-        _shmutant_kill_tree_twice "$rootspec"
+        _shmutant_held_group "$pid"; _shmutant_kill_tree_twice "${SHMUTANT_HELD[@]}" "$pid:$rootid"
         wait "$pid"; rc=$?
       else
         # Once the watchdog has fired, let it reach KILL; otherwise cancel it.
@@ -676,14 +771,30 @@ _shmutant_run_bounded() {
       leftovers=()
       mapfile -t leftovers <&"$left_r"
       mapfile -t -O "${#leftovers[@]}" leftovers <&"$seen_r"
-      _shmutant_kill_tree_twice "$pid:$rootid" "${leftovers[@]}"
+      _shmutant_held_group "$pid"
+      [ "${#SHMUTANT_HELD[@]}" -gt 0 ] || _shmutant_err "the run's process group could not be verified as its own; what it left behind is not signalled by number" 2>&"$err_fd"
+      _shmutant_kill_tree_twice "${SHMUTANT_HELD[@]}" "$pid:$rootid" "${leftovers[@]}"
     fi
+    # Release a holder the group kill did not reach.
+    printf 'x\n' >&"$hold"
     exit "$rc"
   ) 2> /dev/null
   SHMUTANT_RUN_STATUS=$?
   read -t 0 -u "$fired" && SHMUTANT_RUN_FIRED=1
   SHMUTANT_RUN_OUTPUT="$(cat <&"$out_r")"
-  exec {left_w}>&- {left_r}<&- {seen_w}>&- {seen_r}<&- {fired}<&- {out_r}<&-
+  exec {left_w}>&- {left_r}<&- {seen_w}>&- {seen_r}<&- {fired}<&- {out_r}<&- {hold}<&- {hp}<&- {err_fd}>&-
+}
+
+# _shmutant_held_group <pgid> — set SHMUTANT_HELD to `-g <pgid>` when the run's holder is still
+# the process it was (or, without ps, still there at all); to nothing when it is not, in which
+# case the group is no longer known to be the run's and is not signalled by number.
+# Globals: holder, holderid (set by _shmutant_run_bounded); SHMUTANT_HELD (written).
+_shmutant_held_group() {
+  SHMUTANT_HELD=()
+  [ -n "${holder:-}" ] || return 0
+  kill -0 "$holder" 2>/dev/null || return 0
+  if [ -n "${holderid:-}" ]; then _shmutant_alive_since "$holder" "$holderid" || return 0; fi
+  SHMUTANT_HELD=(-g "$1")
 }
 
 # _shmutant_worker_finish <dir> <verdict> <microseconds> <status> — drop the clone unless
@@ -788,6 +899,11 @@ _shmutant_read_verdict() {
     || { SHMUTANT_V_VERDICT=lost; SHMUTANT_V_US=0; SHMUTANT_V_STATUS=""; }
   [ -n "$SHMUTANT_V_VERDICT" ] || SHMUTANT_V_VERDICT=lost
   _shmutant_pos_int "$SHMUTANT_V_US" > /dev/null || SHMUTANT_V_US=0
+  # A clone the worker did not remove is a harness error, whatever it reported: the next run
+  # in this workdir would find it.
+  if [ "${SHMUTANT_KEEP:-0}" != 1 ] && { [ -e "$1/tree" ] || [ -L "$1/tree" ]; }; then
+    _shmutant_err "$1/tree was not removed"; SHMUTANT_CLEANUP_FAILED=1
+  fi
 }
 
 # _shmutant_detail <verdict> <status> <witness> <select> — the human sentence for a row verdict.
@@ -1152,7 +1268,7 @@ shmutant_pool() {
   _shmutant_err "$label: $killed/$n mutation(s) killed on their own witness (jobs=$jobs, $(_shmutant_secs $(( t1 - t0 )))s)"
   _shmutant_pool_fail "$label" "$wd"
   if [ "${SHMUTANT_CLEANUP_FAILED:-0}" -ne 0 ]; then
-    _shmutant_err "$label: the prepared tree could not be removed — the next run in this workdir would find it"
+    _shmutant_err "$label: a tree could not be removed — the next run in this workdir would find it"
     return 2
   fi
   if [ "$SHMUTANT_EMIT_FAILED" -ne 0 ]; then

@@ -377,6 +377,11 @@ t_verdict_aborted_status() {
   rc_is "$RC" 1 'an abort fails the pool'
   eq "$(verdict_of 'crashes')" aborted 'verdict is aborted'
   has "$ERR" 'exited 3, not 1' 'reports the status'
+  # a callback leaving by a bare `exit` keeps the status of its last command
+  bare_exit_run() { bash "$1/test.sh"; exit; }
+  pool lbl "$T/wd2" toy_prepare bare_exit_run
+  rc_is "$RC" 1 'the pool still fails'
+  eq "$(verdict_of 'crashes')" aborted 'a bare exit carried the callback'"'"'s own status through the snapshot'
 }
 
 t_verdict_aborted_no_red_line() {
@@ -478,13 +483,13 @@ t_verdict_timeout_kills_a_descendant_seen_before_it_detached() {
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
   shmutant_mut 'hangs' '$1 + $2' '$1 - $2' 'add-works'
-  # The intermediate lives 0.8s then exits, so at the deadline the survivor has ppid 1 and a
-  # process group that is not the leader's; only a snapshot taken while it was still attached
-  # can name it.
-  detaching_run() { set -m; bash -c "bash -c 'sleep 5; touch \"$T/finished\"' & sleep 0.8" & sleep 3; }
+  # The intermediate lives through two watchdog polls then exits, so at the deadline the
+  # survivor has ppid 1 and a process group that is not the leader's; only a snapshot taken
+  # while it was still attached can name it.
+  detaching_run() { set -m; bash -c "bash -c 'sleep 7; touch \"$T/finished\"' & sleep 1.3" & sleep 4; }
   SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=2 pool lbl "$T/wd" toy_prepare detaching_run
   eq "$(verdict_of 'hangs')" timeout 'verdict is timeout'
-  sleep 5
+  sleep 6
   [ -e "$T/finished" ] && fail_ 'a descendant that detached before the deadline outlived the kill'
 }
 
@@ -582,6 +587,25 @@ t_run_cannot_redirect_the_leftover_record() {
   [ -e "$T/victim.left" ] && fail_ 'the leftover record was written beside the caller file'
   sleep 5
   [ -e "$T/escaped" ] && fail_ 'the escaped helper survived because the leftover record was lost'
+}
+
+# shellcheck disable=SC2034
+t_freeze_records_only_what_it_stopped() {
+  # The listing names a child that has already been replaced by the time of the stop: with the
+  # process table stubbed to report a bystander as a descendant, the bystander must be left
+  # running and not appear among the frozen.
+  sleep 5 & local bystander=$!
+  ( sleep 5; : ) & local root=$!
+  sleep 0.3
+  ( _shmutant_descendants_started() { printf '%s %s\n' "$bystander" "$(( $(_shmutant_identity "$bystander") - 100 ))"; }
+    local -a frozen=() roots=("$root"); local -A have=()
+    _shmutant_freeze_from
+    case " ${frozen[*]} " in *" $bystander:"*) echo "FAIL: $_unit: a pid whose process had changed since the listing was recorded as frozen" ;; esac
+    exit 0 )
+  sleep 0.2
+  case "$(ps -o stat= -p "$bystander")" in T*) fail_ 'the bystander was left stopped' ;; esac
+  kill -0 "$bystander" 2>/dev/null; rc_is $? 0 'the bystander is still there'
+  kill "$bystander" "$root" 2>/dev/null; wait "$bystander" "$root" 2>/dev/null
 }
 
 t_post_run_cleanup_never_signals_a_reaped_root_by_number() {
@@ -914,16 +938,61 @@ t_verdict_timeout_without_an_identity() {
   [ -e "$T/finished" ] && fail_ 'the run outlived its timeout'
 }
 
+# shellcheck disable=SC2034
+t_returned_run_without_an_identity_is_still_cleaned_up() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  # The callback returns after backgrounding a helper in its own group, and nothing about the
+  # process table can be read: the group the wrapper ran in must still be ended by number.
+  leaving_run() { bash -c "sleep 4; touch '$T/escaped'" & bash "$1/test.sh"; }
+  ( _shmutant_identity() { return 1; }; _shmutant_identity_table() { SHMUTANT_START=(); }; _shmutant_descendants() { :; }; _shmutant_descendants_started() { :; }
+    SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=0 shmutant_pool lbl "$T/wd" toy_prepare leaving_run > "$T/out" 2>&1 )
+  has "$(cat "$T/out")" 'killed' 'the verdict is the callback'"'"'s own'
+  sleep 5
+  [ -e "$T/escaped" ] && fail_ 'a helper left in the wrapper'"'"'s group survived a normal return when no process could be identified'
+}
+
+# shellcheck disable=SC2034
+t_run_group_is_not_signalled_by_number_without_its_holder() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  # The callback ends the holder, so the group's number is no longer known to be the run's:
+  # with nothing readable from the process table either, what it left behind is not signalled
+  # by number, and the run says so.
+  # the holder is the member of the run's own process group that is neither the run nor its child
+  holder_killing_run() { local me=$BASHPID h; while read -r h; do kill -KILL "$h" 2>/dev/null; done < <(ps -A -o pid= -o ppid= -o pgid= | awk -v g="$me" '$3 == g && $1 != g && $2 != g { print $1 }'); bash -c "sleep 3; touch '$T/survivor'" & bash "$1/test.sh"; }
+  ( _shmutant_identity() { return 1; }; _shmutant_identity_table() { SHMUTANT_START=(); }; _shmutant_descendants() { :; }; _shmutant_descendants_started() { :; }
+    SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=0 shmutant_pool lbl "$T/wd" toy_prepare holder_killing_run > "$T/out" 2> "$T/err" )
+  has "$(cat "$T/out")" 'killed' 'the verdict is the callback'"'"'s own'
+  has "$(cat "$T/err")" 'could not be verified' 'the unverifiable group is reported'
+  sleep 4
+  [ -e "$T/survivor" ] || fail_ 'a group whose holder was gone was still signalled by number'
+}
+
+t_callback_bare_wait_does_not_block_on_the_holder() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  # the job's own status, then a bare wait
+  waiting_run() { bash "$1/test.sh" & local j=$! rc; wait "$j"; rc=$?; wait; return "$rc"; }
+  local t0; t0="$(_shmutant_now)"
+  SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=6 pool lbl "$T/wd" toy_prepare waiting_run
+  eq "$(verdict_of a)" killed 'a callback that backgrounds its suite and waits gets its own verdict'
+  [ $(( ($(_shmutant_now) - t0) / 1000000 )) -lt 5 ] || fail_ 'a bare wait in the callback blocked on the holder until the timeout'
+}
+
 t_verdict_timeout_stops_a_run_that_keeps_forking() {
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
   shmutant_mut 'hangs' '$1 + $2' '$1 - $2' 'add-works'
   # a new escaped child every few milliseconds: one forked between a snapshot and the kill
   # survives unless the tree was frozen first
-  forking_run() { set -m; while :; do bash -c "sleep 2; touch '$T/leak.$RANDOM'" & sleep 0.02; done; }
+  forking_run() { set -m; while :; do bash -c "sleep 4; touch '$T/leak.$RANDOM'" & sleep 0.02; done; }
   SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=1 pool lbl "$T/wd" toy_prepare forking_run
   eq "$(verdict_of 'hangs')" timeout 'verdict is timeout'
-  sleep 3
+  sleep 5
   [ -z "$(find "$T" -maxdepth 1 -name 'leak.*' -print -quit)" ] || fail_ 'a child forked while the tree was being killed outlived the timeout'
   [ -z "$(ps -A -o args= | grep -F "touch '$T/leak" | grep -v grep)" ] || fail_ 'children of the run are still there after the timeout'
 }
@@ -1156,6 +1225,20 @@ t_pool_clone_keeps_metadata() {
     echo "note: $_unit: no directory owned by another user was available, or running as root; the ownership-failure path was not exercised"
   fi
   chmod 755 "$T/toy/lib.sh"
+}
+
+t_pool_reports_a_clone_it_could_not_remove() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  # the callback leaves something in its clone that nobody can delete, then fails its witness
+  pinning_run() { make_unremovable "$1/pinned" || printf 'unavailable\n' > "$T/skip"; bash "$1/test.sh"; }
+  SHMUTANT_BASELINE=0 pool lbl "$T/wd" toy_prepare pinning_run
+  if [ -e "$T/skip" ]; then echo "note: $_unit: no way to make a directory unremovable here; skipped"; return; fi
+  unmake_unremovable "$T/wd/mut-0/tree/pinned"
+  rc_is "$RC" 2 'a clone that could not be removed is a harness error, not a pass'
+  has "$ERR" 'was not removed' 'names the clone'
+  has "$ERR" 'could not be removed' 'and says the run is unclean'
 }
 
 t_pool_refuses_unremovable_worker_dir() {
@@ -1407,6 +1490,8 @@ t_copy_tree_excludes_git() {
   eq "$(cat "$T/dst/.dotfile")" w 'dotfile copied'
   [ -L "$T/dst/link" ] || fail_ 'symlink was not kept as a symlink'
   shmutant_copy_tree "$T/missing" "$T/dst2" 2>/dev/null; rc_is $? 1 'a missing source is an error'
+  ( set -u; shmutant_copy_tree "$T/src" 2>"$T/e" ); rc_is $? 1 'a missing destination is a copy failure even under set -u'
+  has "$(cat "$T/e")" 'usage' 'reported as a usage error, not an unbound-variable abort'
   [ -e "$T/dst2" ] && fail_ 'a missing source was refused only after its destination had been created'
   mkdir -p "$T/gl/.git/objects"; printf 'o' > "$T/gl/.git/objects/x"; ln "$T/gl/.git/objects/x" "$T/gl/.git/objects/y"; printf 'f' > "$T/gl/f"
   shmutant_copy_tree "$T/gl" "$T/gl-copy"; rc_is $? 0 'hard links inside the top-level .git, which the copy skips, do not refuse the copy'
@@ -1428,6 +1513,11 @@ t_copy_tree_excludes_git() {
   [ -e "$T/src/.work" ] && fail_ 'the copy was created through the link'
   [ -e "$T/real-dst/top" ] && fail_ 'the copy went through the destination link'
   shmutant_copy_tree "$T/hl" "$T/hl-copy" 2>"$T/e"; rc_is $? 1 'a source with a hard-linked file is refused: a copy cannot keep the links joined'
+  mkdir -p "$T/dots/src"; printf 'd' > "$T/dots/src/f"
+  shmutant_copy_tree "$T/dots/src" "$T/dots/src/junk/../../copy"; rc_is $? 0 'a destination with dot components that resolves outside the source is accepted'
+  [ -e "$T/dots/src/junk" ] && fail_ 'a transient component was created inside the source'
+  [ -e "$T/dots/copy/junk" ] && fail_ 'the transient component was copied'
+  eq "$(cat "$T/dots/copy/f")" d 'the copy landed where the path resolves'
   has "$(cat "$T/e")" 'hard link' 'says why'
   shmutant_copy_tree "$T/src" "$T/src/.work/pristine" 2>"$T/e"; rc_is $? 1 'a destination inside the source is refused'
   has "$(cat "$T/e")" 'inside the source' 'says why'

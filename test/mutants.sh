@@ -330,8 +330,8 @@ shmutant_mut 'the setuid bit is dropped by the rewrite' \
 
 # --- guards added for the seventh review round ---
 shmutant_mut 'the descendant list is split by the caller IFS again' \
-  '        _shmutant_kill_tree_twice "$rootspec" "${victims[@]}"' \
-  '        _shmutant_kill_tree_twice "$rootspec" $(printf "%s\n" "${victims[@]}")' \
+  '        _shmutant_held_group "$pid"; _shmutant_kill_tree_twice "${SHMUTANT_HELD[@]}" "$pid:$rootid" "${victims[@]}"' \
+  '        _shmutant_held_group "$pid"; _shmutant_kill_tree_twice "${SHMUTANT_HELD[@]}" "$pid:$rootid" $(printf "%s\n" "${victims[@]}")' \
   't_verdict_timeout_kills_a_descendant_seen_then_reparented'
 shmutant_mut 'prepare runs in a subshell' \
   '"$prep" "$wd/pristine" >| "$pout"; prc=$?' \
@@ -502,7 +502,7 @@ shmutant_mut 'an old literal with a newline is accepted' \
 
 # --- guards added for the twelfth review round ---
 shmutant_mut 'a callback that returned normally leaves its helpers running' \
-  '      _shmutant_kill_tree_twice "$pid:$rootid" "${leftovers[@]}"' \
+  '      _shmutant_kill_tree_twice "${SHMUTANT_HELD[@]}" "$pid:$rootid" "${leftovers[@]}"' \
   '      :' \
   't_run_leftovers_are_killed_after_a_normal_return'
 shmutant_mut 'the verdict is written straight to its fixed name' \
@@ -550,8 +550,8 @@ shmutant_mut 'plan-load output reaches the verdict stream' \
 
 # --- guards added for the fourteenth review round ---
 shmutant_mut 'the root pid is signalled by number even after it was reaped' \
-  '  kill "-$sig" -- -"$pid" "${targets[@]}" 2>/dev/null' \
-  '  kill "-$sig" -- -"$pid" "$pid" "${targets[@]}" 2>/dev/null' \
+  '  [ "${#targets[@]}" -gt 0 ] || return 0' \
+  '  [ -n "$pid" ] && targets+=("$pid")' \
   't_post_run_cleanup_never_signals_a_reaped_root_by_number'
 shmutant_mut 'the stream is reopened by path for every record' \
   '{ printf '"'"'%s\n'"'"' "$out" >&"$SHMUTANT_STREAM_FD"; } 2>/dev/null || SHMUTANT_EMIT_FAILED=1' \
@@ -601,12 +601,12 @@ shmutant_mut 'a read-only tree of ours is not made removable' \
   '      find "$path" -type d ! -perm -u+rwx -exec chmod u+rwx {} + 2>/dev/null' \
   '      :' \
   't_pool_removes_a_read_only_pristine_root'
-shmutant_mut 'the watchdog signals without freezing the tree' \
-  '        _shmutant_kill_tree_twice "$rootspec" "${victims[@]}"' \
-  '        _shmutant_kill_tree KILL "$pid" "${victims[@]}"' \
+shmutant_mut 'the tree below the root is signalled without being frozen first' \
+  '  _shmutant_freeze_from' \
+  '  :' \
   't_verdict_timeout_stops_a_run_that_keeps_forking'
 shmutant_mut 'retained victims are neither frozen nor searched from' \
-  '    have["${p%%:*}"]=1; stillours+=("${p%%:*}")' \
+  '    have["${p%%:*}"]=1; stillours+=("${p%%:*} ${p#*:}")' \
   '    :' \
   't_verdict_timeout_kills_a_descendant_seen_then_reparented'
 shmutant_mut 'mutate does not loosen a read-only directory' \
@@ -680,8 +680,8 @@ shmutant_mut 'a signal during a worker spawn is acted on before registration' \
   '  :' \
   't_abort_during_spawn_is_deferred'
 shmutant_mut 'a partial channel open is not a setup failure' \
-  '    rm -f -- "$mark" "$mark.left" "$mark.seen" "$fifo"; SHMUTANT_RUN_STATUS=127; return' \
-  '    rm -f -- "$mark" "$mark.left" "$mark.seen" "$fifo"' \
+  '    rm -f -- "$mark" "$mark.left" "$mark.seen" "$fifo" "$mark.hold" "$mark.hp"; SHMUTANT_RUN_STATUS=127; return' \
+  '    rm -f -- "$mark" "$mark.left" "$mark.seen" "$fifo" "$mark.hold" "$mark.hp"' \
   't_run_partial_channel_open_is_a_setup_failure'
 shmutant_mut 'the pool reads its positionals before checking their count' \
   '  if [ "$#" -lt 4 ] || [ "$#" -gt 5 ]; then _shmutant_err "pool: usage' \
@@ -690,12 +690,12 @@ shmutant_mut 'the pool reads its positionals before checking their count' \
 
 # --- guards added for the twentieth review round ---
 shmutant_mut 'a callback that leaves by exit skips the snapshot' \
-  '      exit() { _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; builtin exit "$@"; }' \
+  '      exit() { local s=$?; _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; if [ "$#" -eq 0 ]; then builtin exit "$s"; else builtin exit "$@"; fi; }' \
   '      :' \
   't_run_cannot_lose_the_leftover_record_by_locking_its_dir'
-shmutant_mut 'a root without an identity is passed as reaped' \
-  'else rootid=""; rootspec="$pid"; fi' \
-  'else rootid=""; rootspec="$pid:"; fi' \
+shmutant_mut 'a verified holder yields no group to signal' \
+  '  SHMUTANT_HELD=(-g "$1")' \
+  '  SHMUTANT_HELD=()' \
   't_verdict_timeout_without_an_identity'
 shmutant_mut 'the .git prune takes the source name as a pattern' \
   '  linked="$(cd "$src" 2>/dev/null && find . -path ./.git -prune' \
@@ -709,3 +709,45 @@ shmutant_mut 'the automatic workdir is removed raw after an incomplete run' \
   '  elif [ "$made" = 1 ]; then _shmutant_remove "$wd" || { _shmutant_err "run: could not remove the workdir $wd"; rc=2; }' \
   '  elif [ "$made" = 1 ]; then rm -rf -- "$wd" 2>/dev/null' \
   't_cli_run'
+
+# --- guards added for the twenty-first review round ---
+shmutant_mut 'a pid listed but gone before the stop is recorded as frozen' \
+  '      _shmutant_frozen_only "${found[@]}"' \
+  '      SHMUTANT_FROZEN_NOW=("${pids[@]}")' \
+  't_freeze_records_only_what_it_stopped'
+shmutant_mut 'a clone left behind by a worker is not a harness error' \
+  '    _shmutant_err "$1/tree was not removed"; SHMUTANT_CLEANUP_FAILED=1' \
+  '    :' \
+  't_pool_reports_a_clone_it_could_not_remove'
+shmutant_mut 'copy_tree reads its positionals before checking their count' \
+  '  if [ "$#" -ne 2 ]; then _shmutant_err "copy_tree: usage' \
+  '  if false; then _shmutant_err "copy_tree: usage' \
+  't_copy_tree_excludes_git'
+shmutant_mut 'no holder keeps the group in being after the wrapper' \
+  '      ( ( read -r _ <&"$hold" ) < /dev/null > /dev/null 2>&1 & printf '"'"'%s\n'"'"' "$!" >&"$hp" )' \
+  '      printf '"'"'\n'"'"' >&"$hp"' \
+  't_returned_run_without_an_identity_is_still_cleaned_up'
+shmutant_mut 'the post-return cleanup does not use the held group' \
+  '      _shmutant_kill_tree_twice "${SHMUTANT_HELD[@]}" "$pid:$rootid" "${leftovers[@]}"' \
+  '      _shmutant_kill_tree_twice "$pid:$rootid" "${leftovers[@]}"' \
+  't_returned_run_without_an_identity_is_still_cleaned_up'
+shmutant_mut 'a held group is neither stopped nor signalled by number' \
+  '  if [ -n "$held" ]; then' \
+  '  if false; then' \
+  't_returned_run_without_an_identity_is_still_cleaned_up'
+shmutant_mut 'a group is signalled by number after its holder is gone' \
+  '  kill -0 "$holder" 2>/dev/null || return 0' \
+  '  :' \
+  't_run_group_is_not_signalled_by_number_without_its_holder'
+shmutant_mut 'a bare exit takes the snapshot status' \
+  '      exit() { local s=$?; _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; if [ "$#" -eq 0 ]; then builtin exit "$s"; else builtin exit "$@"; fi; }' \
+  '      exit() { _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; builtin exit "$@"; }' \
+  't_verdict_aborted_status'
+shmutant_mut 'dot components in the destination are created as typed' \
+  '  rest="$norm"' \
+  '  :' \
+  't_copy_tree_excludes_git'
+shmutant_mut 'the holder is a job of the wrapper' \
+  '      ( ( read -r _ <&"$hold" ) < /dev/null > /dev/null 2>&1 & printf '"'"'%s\n'"'"' "$!" >&"$hp" )' \
+  '      ( read -r _ <&"$hold" ) < /dev/null > /dev/null 2>&1 & printf '"'"'%s\n'"'"' "$!" >&"$hp"' \
+  't_callback_bare_wait_does_not_block_on_the_holder'
