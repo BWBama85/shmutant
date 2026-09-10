@@ -133,4 +133,11 @@ One line per resolved review thread, newest last.
 - `stale-artifact-reuse` `shmutant.sh:340` `73983af` `PRRT_kwDOUT7q9s6g7Y1U` PR #1 2026-09-10 — a retained pid could be reused by an unrelated process; identity checked via elapsed time before signalling
 - `host-shell-option-leak` `shmutant.sh:802` `73983af` `PRRT_kwDOUT7q9s6g7Y1W` PR #1 2026-09-10 — functrace carried the DEBUG guard into plan subshells; the trap machinery is replaced by the subshell and marker design
 - `contract-not-honoured` `shmutant.sh:436` `73983af` `PRRT_kwDOUT7q9s6g7Y1Y` PR #1 2026-09-10 — a baseline exit neither green nor red was labelled red; now aborted
+- `config-value-unvalidated` `shmutant.sh:656` `883f690` `PRRT_kwDOUT7q9s6g8O5q` PR #1 2026-09-10 — jobs was computed before prepare could set SHMUTANT_JOBS; now after the post-prepare validation
+- `config-value-unvalidated` `shmutant.sh:577` `883f690` `PRRT_kwDOUT7q9s6g8O5t` PR #1 2026-09-10 — SHMUTANT_BASELINE and SHMUTANT_KEEP were not validated as 0/1; now they are
+- `stale-artifact-reuse` `shmutant.sh:353` `883f690` `PRRT_kwDOUT7q9s6g8O5y` PR #1 2026-09-10 — a zero-age elapsed time made the pid identity check vacuous; identity is now etime plus pgid plus args
+- `host-shell-option-leak` `shmutant.sh:665` `883f690` `PRRT_kwDOUT7q9s6g8O50` PR #1 2026-09-10 — prepare could clobber pool locals like n by dynamic scope; bookkeeping is copied out and restored around it
+- `early-return-skips-cleanup` `shmutant.sh:182` `883f690` `PRRT_kwDOUT7q9s6g8O53` PR #1 2026-09-10 — a refused nested copy left the directory mkdir created; the first created component is removed on refusal
+- `config-value-unvalidated` `shmutant.sh:398` `883f690` `PRRT_kwDOUT7q9s6g8O56` PR #1 2026-09-10 — a leading-zero timeout like 08 was octal to arithmetic and disarmed the watchdog; forced base 10
+- `timeout-escalation-cancelled` `shmutant.sh:554` `883f690` `PRRT_kwDOUT7q9s6g8O58` PR #1 2026-09-10 — an interrupted pool left its workers running; INT and TERM now kill every active worker tree and re-deliver the signal
 <!-- adb:hits:end -->
