@@ -64,7 +64,7 @@ make_unremovable() {
 unmake_unremovable() {
   case "${UNREMOVABLE_HOW:-}" in
     chflags) chflags nouchg "$1" 2>/dev/null ;;
-    sudo)    sudo -n command rm -rf "$1" 2>/dev/null ;;
+    sudo)    sudo -n /bin/rm -rf "$1" 2>/dev/null ;;
   esac
 }
 
