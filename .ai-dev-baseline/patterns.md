@@ -53,6 +53,7 @@ Sweep each of these before opening a pull request.
 - `early-return-skips-cleanup` — For every function that creates something it must later remove (a clone, a temp file, a workdir, a trap), list every return, exit and trap path out of it and route each one through a single finish helper; grep the function for return and exit and check each line reaches that helper. Test each early exit by asserting the artifact is gone.
 - `stale-artifact-reuse` — For every directory or file a run reads a result from, prove it was written by this run: recreate it before use and treat a failed removal or creation as an abort, never as a warning. Test by planting a stale result (a marker, a verdict) that the run must not report, and one the run cannot delete.
 - `predictable-temp-path` — For every file the code opens for writing under a directory it does not fully own (a workdir, a target directory), grep for redirections and cp/mv targets built from a fixed name and replace each with a mktemp file in that directory; test by planting a symlink at the old fixed name pointing at a file outside and asserting it is untouched.
+- `contract-not-honoured` — For every statement in a contract header (which shell a callback runs in, which statuses mean what, what a record field can contain), find the line of code that implements it and write the unit that would fail if the code did the nearest plausible other thing; a contract line with no such unit is either untested or false.
 <!-- adb:checklist:end -->
 
 ## Hits
@@ -123,4 +124,13 @@ One line per resolved review thread, newest last.
 - `config-value-unvalidated` `shmutant.sh:279` `56761ce` `PRRT_kwDOUT7q9s6g7D8Z` PR #1 2026-09-10 — a witness with a newline could never match a single red line; refused at declaration
 - `host-shell-option-leak` `shmutant.sh:589` `56761ce` `PRRT_kwDOUT7q9s6g7D8b` PR #1 2026-09-10 — prepare ran as an if condition, muting its own errexit; now called bare with status captured and the caller errexit restored, and the CLI arms an EXIT guard around the pool
 - `rewrite-loses-file-shape` `shmutant.sh:405` `56761ce` `PRRT_kwDOUT7q9s6g7D8f` PR #1 2026-09-10 — cp -RP clones dropped ownership and timestamps; now cp -RPp in clones and copy_tree
+- `config-value-unvalidated` `shmutant.sh:606` `73983af` `PRRT_kwDOUT7q9s6g7Y1E` PR #1 2026-09-10 — prepare could reassign a validated setting; settings are revalidated after prepare returns
+- `config-value-unvalidated` `shmutant.sh:606` `73983af` `PRRT_kwDOUT7q9s6g7Y1I` PR #1 2026-09-10 — duplicate of the revalidation finding
+- `host-shell-option-leak` `shmutant.sh:804` `73983af` `PRRT_kwDOUT7q9s6g7Y1G` PR #1 2026-09-10 — exec in a plan replaced the CLI process; the plan and pool now run in a subshell with a completion marker
+- `host-shell-option-leak` `shmutant.sh:804` `73983af` `PRRT_kwDOUT7q9s6g7Y1N` PR #1 2026-09-10 — duplicate of the exec finding
+- `config-value-unvalidated` `shmutant.sh:579` `73983af` `PRRT_kwDOUT7q9s6g7Y1O` PR #1 2026-09-10 — a multiline red prefix could never match; refused
+- `config-value-unvalidated` `shmutant.sh:128` `73983af` `PRRT_kwDOUT7q9s6g7Y1Q` PR #1 2026-09-10 — an invalid pool cap silently became 8; validated
+- `stale-artifact-reuse` `shmutant.sh:340` `73983af` `PRRT_kwDOUT7q9s6g7Y1U` PR #1 2026-09-10 — a retained pid could be reused by an unrelated process; identity checked via elapsed time before signalling
+- `host-shell-option-leak` `shmutant.sh:802` `73983af` `PRRT_kwDOUT7q9s6g7Y1W` PR #1 2026-09-10 — functrace carried the DEBUG guard into plan subshells; the trap machinery is replaced by the subshell and marker design
+- `contract-not-honoured` `shmutant.sh:436` `73983af` `PRRT_kwDOUT7q9s6g7Y1Y` PR #1 2026-09-10 — a baseline exit neither green nor red was labelled red; now aborted
 <!-- adb:hits:end -->
