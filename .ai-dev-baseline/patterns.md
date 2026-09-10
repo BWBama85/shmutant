@@ -279,4 +279,13 @@ One line per resolved review thread, newest last.
 - `write-failure-swallowed` `shmutant.sh` `0b79bbc` `sweep-r22-write-failure-swallowed-3` PR #1 2026-09-10 — keep marker written by path with no status check
 - `write-failure-swallowed` `shmutant.sh` `0b79bbc` `sweep-r22-write-failure-swallowed-4` PR #1 2026-09-10 — mutate restore returned 0 over a failed chmod
 - `write-failure-swallowed` `shmutant.sh` `0b79bbc` `sweep-r22-write-failure-swallowed-5` PR #1 2026-09-10 — runner subshell that could not start scored status 0
+- `host-shell-option-leak` `shmutant.sh` `12793c4` `PRRT_kwDOUT7q9s6hP9-J` PR #1 2026-09-10
+- `timeout-escalation-cancelled` `shmutant.sh` `12793c4` `PRRT_kwDOUT7q9s6hP9-L` PR #1 2026-09-10
+- `path-lookup-ambiguity` `shmutant.sh` `12793c4` `PRRT_kwDOUT7q9s6hP9-Q` PR #1 2026-09-10
+- `path-lookup-ambiguity` `shmutant.sh` `12793c4` `PRRT_kwDOUT7q9s6hP9-U` PR #1 2026-09-10
+- `path-lookup-ambiguity` `shmutant.sh` `12793c4` `PRRT_kwDOUT7q9s6hP9-d` PR #1 2026-09-10
+- `config-value-unvalidated` `shmutant.sh` `12793c4` `PRRT_kwDOUT7q9s6hP9-f` PR #1 2026-09-10
+- `host-shell-option-leak` `shmutant.sh` `12793c4` `PRRT_kwDOUT7q9s6hP9-m` PR #1 2026-09-10
+- `predictable-temp-path` `shmutant.sh` `12793c4` `PRRT_kwDOUT7q9s6hP9-q` PR #1 2026-09-10
+- `path-lookup-ambiguity` `shmutant.sh` `12793c4` `PRRT_kwDOUT7q9s6hP9-v` PR #1 2026-09-10
 <!-- adb:hits:end -->
