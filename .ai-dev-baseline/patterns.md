@@ -196,4 +196,11 @@ One line per resolved review thread, newest last.
 - `early-return-skips-cleanup` `shmutant.sh:590` `e269c85` `PRRT_kwDOUT7q9s6hEhsU` PR #1 2026-09-10 — a callback with errexit that failed exited the wrapper before its snapshot; the snapshot is an EXIT trap
 - `stale-artifact-reuse` `shmutant.sh:746` `e269c85` `PRRT_kwDOUT7q9s6hEhsZ` PR #1 2026-09-10 — the pool read a verdict by path from whatever directory had the name; verdicts are bound to the created inode
 - `stale-artifact-reuse` `shmutant.sh:946` `e269c85` `PRRT_kwDOUT7q9s6hEhsf` PR #1 2026-09-10 — the stream cache was set before the open succeeded so a retry skipped the open; set after
+- `predictable-temp-path` `shmutant.sh` `35a01fa` `PRRT_kwDOUT7q9s6hFRb5` PR #1 2026-09-10
+- `host-shell-option-leak` `shmutant.sh` `35a01fa` `PRRT_kwDOUT7q9s6hFRb_` PR #1 2026-09-10
+- `stale-artifact-reuse` `shmutant.sh` `35a01fa` `PRRT_kwDOUT7q9s6hFRcF` PR #1 2026-09-10
+- `timeout-escalation-cancelled` `shmutant.sh` `35a01fa` `PRRT_kwDOUT7q9s6hFRcK` PR #1 2026-09-10
+- `early-return-skips-cleanup` `shmutant.sh` `35a01fa` `PRRT_kwDOUT7q9s6hFRcQ` PR #1 2026-09-10
+- `write-failure-swallowed` `shmutant.sh` `35a01fa` `PRRT_kwDOUT7q9s6hFRcb` PR #1 2026-09-10
+- `config-value-unvalidated` `shmutant.sh` `35a01fa` `PRRT_kwDOUT7q9s6hFRce` PR #1 2026-09-10
 <!-- adb:hits:end -->
