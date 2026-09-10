@@ -101,7 +101,11 @@ _shmutant_emit() {
   local out="" f
   for f in "$@"; do out+="$(_shmutant_esc "$f")"$'\t'; done
   out="${out%$'\t'}"
-  if [ -n "${SHMUTANT_STREAM:-}" ]; then
+  # Through the descriptor the pool opened after validating the path, never by reopening the
+  # path: a callback could have replaced it with a symlink since.
+  if [ -n "${SHMUTANT_STREAM_FD:-}" ]; then
+    { printf '%s\n' "$out" >&"$SHMUTANT_STREAM_FD"; } 2>/dev/null || SHMUTANT_EMIT_FAILED=1
+  elif [ -n "${SHMUTANT_STREAM:-}" ]; then
     { printf '%s\n' "$out" >> "$SHMUTANT_STREAM"; } 2>/dev/null || SHMUTANT_EMIT_FAILED=1
   else
     printf '%s\n' "$out" 2>/dev/null || SHMUTANT_EMIT_FAILED=1
@@ -214,7 +218,15 @@ shmutant_copy_tree() {
       cp -RPp -- "$entry" "$dst/" || rc=1
     done
     exit "$rc"
-  )
+  ) || rc=1
+  # The root directory's own metadata, which the per-entry copy never touches, applied LAST:
+  # adding entries resets a directory's mtime, and a read-only root would refuse them.
+  local rootls
+  rootls="$(ls -ld -- "$src" 2>/dev/null)"
+  chown -- "$(printf '%s\n' "$rootls" | awk '{ print $3 ":" $4 }')" "$dst" 2>/dev/null
+  chmod -- "$(_shmutant_mode_spec "${rootls%% *}")" "$dst" 2>/dev/null
+  touch -r "$src" -- "$dst" 2>/dev/null
+  return "$rc"
 }
 
 # _shmutant_mode_triple <rwx-triple> <u|g|o> — one clause of a chmod symbolic spec.
@@ -404,10 +416,13 @@ _shmutant_snapshot() {
 # and descendants; the descendants found before TERM (plus <pids…>) are retained for KILL, since
 # the leader's death can reparent a TERM-ignoring one out of a fresh walk's reach.
 _shmutant_kill_tree_twice() {
-  local pid="$1" p alive=0
+  local pid="$1" p alive=0 rootid
   local -a victims=()
   shift
-  mapfile -t victims < <(_shmutant_snapshot "$pid")
+  # The root itself joins the victims with its identity: after a normal return it has been
+  # reaped, and a bare number could by then name an unrelated process.
+  rootid="$(_shmutant_identity "$pid")" && victims+=("$pid:$rootid")
+  mapfile -t -O "${#victims[@]}" victims < <(_shmutant_snapshot "$pid")
   _shmutant_kill_tree TERM "$pid" "$@" "${victims[@]}"
   # The grace second is spent only when something is still there to escalate against.
   kill -0 -- -"$pid" 2>/dev/null && alive=1
@@ -427,9 +442,10 @@ _shmutant_kill_tree() {
   done
   mapfile -t now < <(_shmutant_descendants "$pid")
   for p in "${now[@]}"; do [ -n "$p" ] && targets+=("$p"); done
-  # The root pid itself as well as its group: a worker or the CLI's plan child was started
-  # without job control and shares its parent's group, so `-pid` alone would miss it.
-  kill "-$sig" -- -"$pid" "$pid" "${targets[@]}" 2>/dev/null
+  # The group, and every identity-checked target: the root is among them when it was alive at
+  # the snapshot (a worker or the CLI's plan child shares its parent's group, so `-pid` alone
+  # would miss it), and absent once it has been reaped.
+  kill "-$sig" -- -"$pid" "${targets[@]}" 2>/dev/null
 }
 
 # _shmutant_run_bounded <dir> <run> <root> <select> — run the adapter with stdout+stderr in
@@ -748,6 +764,13 @@ _shmutant_validate_settings() {
   return 0
 }
 
+# _shmutant_pool_fail <label> <workdir> — the exit for a pool that stops after prepare: the
+# pristine tree goes unless SHMUTANT_KEEP=1, and the stream descriptor is closed.
+_shmutant_pool_fail() {
+  [ "${SHMUTANT_KEEP:-0}" = 1 ] || rm -rf -- "$2/pristine"
+  if [ -n "${SHMUTANT_STREAM_FD:-}" ]; then exec {SHMUTANT_STREAM_FD}>&-; unset SHMUTANT_STREAM_FD; fi
+}
+
 # shmutant_pool <label> <workdir> <prepare> <run> [cap] — run every table row. Prepares the
 # tree once, runs each distinct selector uninjected (SHMUTANT_BASELINE), then every row through a
 # pool of min(SHMUTANT_JOBS or CPUs, cap or 8) workers. Emits the verdict stream and one stderr
@@ -784,7 +807,13 @@ shmutant_pool() {
     *[!0-9]*) _shmutant_err "$label: the pool cap must be a positive integer, got [$cap]"; return 2 ;;
     *) if [ "${#cap}" -gt 4 ] || [ "$cap" -lt 1 ]; then _shmutant_err "$label: the pool cap must be a positive integer of at most four digits, got [$cap]"; return 2; fi ;;
   esac
-  _shmutant_fresh_dir "$wd/pristine" || { _shmutant_err "$label: cannot recreate $wd/pristine — stale contents there would be prepared over"; return 2; }
+  if [ -n "${SHMUTANT_STREAM:-}" ]; then
+    # shellcheck disable=SC2093
+    if ! exec {SHMUTANT_STREAM_FD}>>"$SHMUTANT_STREAM" 2>/dev/null; then
+      _shmutant_err "$label: cannot open SHMUTANT_STREAM for appending: $SHMUTANT_STREAM"; unset SHMUTANT_STREAM_FD; return 2
+    fi
+  fi
+  _shmutant_fresh_dir "$wd/pristine" || { _shmutant_pool_fail "$label" "$wd"; _shmutant_err "$label: cannot recreate $wd/pristine — stale contents there would be prepared over"; return 2; }
   local pout prc errexit_before=0
   pout="$(mktemp "$wd/.prepare.XXXXXX" 2>/dev/null)" || { _shmutant_err "$label: cannot create a capture file in $wd"; return 2; }
   # Called directly, not in a command substitution and not as a condition: state prepare
@@ -802,30 +831,30 @@ shmutant_pool() {
   killed=0; rc=0
   if [ "$errexit_before" = 1 ]; then set -e; else set +e; fi
   if [ "$prc" -ne 0 ]; then
-    rm -f -- "$pout"; _shmutant_err "$label: prepare failed (status $prc) — no tree to mutate"; return 2
+    rm -f -- "$pout"; _shmutant_err "$label: prepare failed (status $prc) — no tree to mutate"; _shmutant_pool_fail "$label" "$wd"; return 2
   fi
   root="$(cat "$pout")"; rm -f -- "$pout"
   # prepare ran in this shell and may have assigned any setting; the workers read them next.
-  _shmutant_validate_settings "$label" "$wd" || { _shmutant_err "$label: a setting changed by prepare is invalid"; return 2; }
+  _shmutant_validate_settings "$label" "$wd" || { _shmutant_err "$label: a setting changed by prepare is invalid"; _shmutant_pool_fail "$label" "$wd"; return 2; }
   jobs="$(_shmutant_jobs "$cap")"
   # The settled SHMUTANT_KEEP, for a CLI parent that may have to clean up after an interrupt.
   [ -n "${SHMUTANT_CLI_KEEPFILE:-}" ] && printf '%s\n' "${SHMUTANT_KEEP:-0}" >| "$SHMUTANT_CLI_KEEPFILE"
   [ -n "$root" ] || root="$wd/pristine"
-  root="$(_shmutant_abs "$root")" || { _shmutant_err "$label: prepare printed a root that is not a directory"; return 2; }
+  root="$(_shmutant_abs "$root")" || { _shmutant_err "$label: prepare printed a root that is not a directory"; _shmutant_pool_fail "$label" "$wd"; return 2; }
   if ! _shmutant_inside "$wd/pristine" "$root"; then
-    _shmutant_err "$label: prepare printed a root outside the workdir ($root) — refusing to mutate what may be the working tree"; return 2
+    _shmutant_err "$label: prepare printed a root outside the workdir ($root) — refusing to mutate what may be the working tree"; _shmutant_pool_fail "$label" "$wd"; return 2
   fi
   suffix="${root#"$wd/pristine"}"
   for (( i = 0; i < n; i++ )); do
     if ! _shmutant_target_ok "$root" "${SHMUTANT_ROWS_FILE[$i]}"; then
       _shmutant_err "$label: row '${SHMUTANT_ROWS_NAME[$i]}' targets ${SHMUTANT_ROWS_FILE[$i]}, which the prepared tree does not contain as a regular file (missing, a symlink, or under one)"
-      return 2
+      _shmutant_pool_fail "$label" "$wd"; return 2
     fi
     # Link count is `ls -l` column 2. A clone gives each hard link its own inode, so a test
     # reading the alias would see pristine code while the named target carries the defect.
     if [ "$(ls -ld -- "$root/${SHMUTANT_ROWS_FILE[$i]}" | awk '{ print $2 }')" -gt 1 ]; then
       _shmutant_err "$label: row '${SHMUTANT_ROWS_NAME[$i]}' targets ${SHMUTANT_ROWS_FILE[$i]}, which has more than one hard link — a clone cannot keep them joined"
-      return 2
+      _shmutant_pool_fail "$label" "$wd"; return 2
     fi
   done
 
@@ -837,7 +866,7 @@ shmutant_pool() {
     done
     SHMUTANT_BASE_SEL=("${base_sel[@]}")
     _shmutant_run_jobs base "${#base_sel[@]}" "$wd" "$run" "$suffix" "$jobs"; rjrc=$?
-    [ "$rjrc" -eq 0 ] || return 2
+    [ "$rjrc" -eq 0 ] || { _shmutant_pool_fail "$label" "$wd"; return 2; }
     for (( k = 0; k < ${#base_sel[@]}; k++ )); do
       _shmutant_read_verdict "$wd/base-$k"
       base_verdict+=("$SHMUTANT_V_VERDICT")
@@ -859,7 +888,7 @@ shmutant_pool() {
     for (( k = 0; k < ${#base_sel[@]}; k++ )); do
       if [ "${base_sel[$k]}" = "${SHMUTANT_ROWS_SEL[$i]}" ] && [ "${base_verdict[$k]}" != green ]; then
         SHMUTANT_SKIP[i]=1
-        _shmutant_fresh_dir "$wd/mut-$i" || { _shmutant_err "$label: cannot recreate $wd/mut-$i"; return 2; }
+        _shmutant_fresh_dir "$wd/mut-$i" || { _shmutant_err "$label: cannot recreate $wd/mut-$i"; _shmutant_pool_fail "$label" "$wd"; return 2; }
         printf 'baseline\n0\n\n' > "$wd/mut-$i/verdict"
       fi
     done
@@ -867,7 +896,7 @@ shmutant_pool() {
   # Bare, status captured after: as a condition, every callback the workers fork would run in
   # an errexit-ignored context.
   _shmutant_run_jobs mut "$n" "$wd" "$run" "$suffix" "$jobs"; rjrc=$?
-  [ "$rjrc" -eq 0 ] || return 2
+  [ "$rjrc" -eq 0 ] || { _shmutant_pool_fail "$label" "$wd"; return 2; }
 
   for (( i = 0; i < n; i++ )); do
     _shmutant_read_verdict "$wd/mut-$i"
@@ -885,7 +914,7 @@ shmutant_pool() {
   t1="$(_shmutant_now)"
   _shmutant_emit shmutant 1 summary "$label" "$n" "$killed" "$jobs" "$(_shmutant_secs $(( t1 - t0 )))"
   _shmutant_err "$label: $killed/$n mutation(s) killed on their own witness (jobs=$jobs, $(_shmutant_secs $(( t1 - t0 )))s)"
-  [ "${SHMUTANT_KEEP:-0}" = 1 ] || rm -rf -- "$wd/pristine"
+  _shmutant_pool_fail "$label" "$wd"
   if [ "$SHMUTANT_EMIT_FAILED" -ne 0 ]; then
     _shmutant_err "$label: the verdict stream could not be written (${SHMUTANT_STREAM:-stdout}) — the records above are incomplete"
     return 2

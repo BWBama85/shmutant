@@ -182,8 +182,8 @@ shmutant_mut 'durations truncate instead of rounding' \
   'ms=$(( us / 1000 ))' \
   't_stream_format'
 shmutant_mut 'SHMUTANT_STREAM is ignored' \
-  'if [ -n "${SHMUTANT_STREAM:-}" ]; then' \
-  'if false; then' \
+  '{ printf '"'"'%s\n'"'"' "$out" >&"$SHMUTANT_STREAM_FD"; } 2>/dev/null || SHMUTANT_EMIT_FAILED=1' \
+  'printf '"'"'%s\n'"'"' "$out"' \
   't_stream_to_file'
 
 # --- the CLI ---
@@ -206,8 +206,8 @@ shmutant_mut 'a refused declaration is not counted' \
   'SHMUTANT_DECL_ERRORS=$((SHMUTANT_DECL_ERRORS + 0)); return 2' \
   't_refused_declarations_fail_the_pool'
 shmutant_mut 'a stream write failure is swallowed' \
-  '2>/dev/null || SHMUTANT_EMIT_FAILED=1' \
-  '2>/dev/null || SHMUTANT_EMIT_FAILED=0' \
+  '{ printf '"'"'%s\n'"'"' "$out" >&"$SHMUTANT_STREAM_FD"; } 2>/dev/null || SHMUTANT_EMIT_FAILED=1' \
+  '{ printf '"'"'%s\n'"'"' "$out" >&"$SHMUTANT_STREAM_FD"; } 2>/dev/null || SHMUTANT_EMIT_FAILED=0' \
   't_stream_write_failure_is_a_harness_error'
 shmutant_mut 'the rewrite drops the target mode' \
   'mode="$(ls -ld -- "$f" 2>/dev/null)"; mode="${mode%% *}"' \
@@ -432,7 +432,7 @@ shmutant_mut 'the subshell status is trusted without the completion marker' \
 
 # --- guards added for the ninth review round ---
 shmutant_mut 'settings are not revalidated after prepare' \
-  '_shmutant_validate_settings "$label" "$wd" || { _shmutant_err "$label: a setting changed by prepare is invalid"; return 2; }' \
+  '_shmutant_validate_settings "$label" "$wd" || { _shmutant_err "$label: a setting changed by prepare is invalid"; _shmutant_pool_fail "$label" "$wd"; return 2; }' \
   ':' \
   't_pool_revalidates_settings_after_prepare'
 shmutant_mut 'a pool cap of 0 falls back to the default' \
@@ -559,10 +559,6 @@ shmutant_mut 'the hard-link preflight scans the top-level .git the copy skips' \
   'find "$src" -path "$src/.git" -prune -o -type f -links +1 -print' \
   'find "$src" -type f -links +1 -print' \
   't_copy_tree_excludes_git'
-shmutant_mut 'the root pid is not signalled, only its presumed group' \
-  'kill "-$sig" -- -"$pid" "$pid" "${targets[@]}" 2>/dev/null' \
-  'kill "-$sig" -- -"$pid" "${targets[@]}" 2>/dev/null' \
-  't_cli_run'
 shmutant_mut 'the abort handler waits for every job, the caller included' \
   '  [ "${#helpers[@]}" -eq 0 ] || wait "${helpers[@]}" 2>/dev/null' \
   '  wait' \
@@ -571,3 +567,21 @@ shmutant_mut 'plan-load output reaches the verdict stream' \
   '  . "$plan" >&2' \
   '  . "$plan"' \
   't_cli_run'
+
+# --- guards added for the fourteenth review round ---
+shmutant_mut 'the root pid is signalled by number even after it was reaped' \
+  '  kill "-$sig" -- -"$pid" "${targets[@]}" 2>/dev/null' \
+  '  kill "-$sig" -- -"$pid" "$pid" "${targets[@]}" 2>/dev/null' \
+  't_post_run_cleanup_never_signals_a_reaped_root_by_number'
+shmutant_mut 'the stream is reopened by path for every record' \
+  '  if [ -n "${SHMUTANT_STREAM_FD:-}" ]; then' \
+  '  if false; then' \
+  't_stream_descriptor_survives_a_callback_swapping_the_path'
+shmutant_mut 'a validation failure after prepare keeps the pristine tree' \
+  '      _shmutant_pool_fail "$label" "$wd"; return 2' \
+  '      return 2' \
+  't_pool_failure_after_prepare_removes_pristine'
+shmutant_mut 'the destination root does not get the source root mode' \
+  '  chmod -- "$(_shmutant_mode_spec "${rootls%% *}")" "$dst" 2>/dev/null' \
+  '  :' \
+  't_pool_clone_keeps_metadata'

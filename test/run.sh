@@ -552,6 +552,41 @@ t_run_cannot_redirect_the_leftover_record() {
   [ -e "$T/escaped" ] && fail_ 'the escaped helper survived because the leftover record was lost'
 }
 
+t_post_run_cleanup_never_signals_a_reaped_root_by_number() {
+  # After a normal return the root has been reaped, so its number may already belong to
+  # someone else: _shmutant_kill_tree signals a root only through an identity-checked victim,
+  # never by bare number. A live process handed in as the root without identity must survive.
+  sleep 5 & local bystander=$!
+  _shmutant_kill_tree TERM "$bystander"; sleep 0.2
+  kill -0 "$bystander" 2>/dev/null; rc_is $? 0 'a root given by number alone is not signalled'
+  local id; id="$(_shmutant_identity "$bystander")"
+  _shmutant_kill_tree TERM "$bystander" "$bystander:$id"; sleep 0.2
+  kill -0 "$bystander" 2>/dev/null; rc_is $? 1 'a root given with a matching identity is'
+  wait "$bystander" 2>/dev/null
+  ( sleep 0.1 ) & local dead=$!; wait "$dead"
+  _shmutant_kill_tree_twice "$dead"; rc_is $? 0 'kill_tree_twice on a reaped root is a quiet no-op'
+}
+
+t_stream_descriptor_survives_a_callback_swapping_the_path() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  printf 'precious\n' > "$T/victim"
+  swapping_run() { rm -f "$T/stream"; ln -s "$T/victim" "$T/stream"; bash "$1/test.sh"; }
+  ( SHMUTANT_STREAM="$T/stream" shmutant_pool lbl "$T/wd" toy_prepare swapping_run > /dev/null 2>&1 ); rc_is $? 0 'killed'
+  eq "$(cat "$T/victim")" precious 'records never follow a symlink a callback put at the stream path'
+}
+
+t_pool_failure_after_prepare_removes_pristine() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target absent.sh; shmutant_mut 'r' 'a' 'b' 'add-works'
+  pool lbl "$T/wd" toy_prepare toy_run
+  rc_is "$RC" 2 'a missing target after prepare is a harness error'
+  [ -e "$T/wd/pristine" ] && fail_ 'the prepared tree was left behind by a validation failure'
+  SHMUTANT_KEEP=1 pool lbl "$T/wd2" toy_prepare toy_run
+  [ -d "$T/wd2/pristine" ] || fail_ 'with SHMUTANT_KEEP=1 the prepared tree is kept even on a validation failure'
+}
+
 t_worker_verdict_cannot_be_forged_through_a_link() {
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
@@ -828,6 +863,11 @@ t_pool_clone_keeps_metadata() {
   # Timestamps are what -p alone adds over the mode bits cp copies anyway.
   [ "$T/wd/pristine/test.sh" -nt "$T/toy/test.sh" ] && fail_ 'copy_tree did not keep the timestamp'
   [ "$T/wd/mut-0/tree/test.sh" -nt "$T/toy/test.sh" ] && fail_ 'the clone did not keep the timestamp'
+  mkdir -p "$T/root"; printf 'r\n' > "$T/root/f"; chmod 700 "$T/root"; touch -t 200001010000 "$T/root"
+  shmutant_copy_tree "$T/root" "$T/root-copy"; rc_is $? 0 'copies'
+  eq "$(ls -ld "$T/root-copy" | cut -c1-10)" 'drwx------' 'the destination root carries the source root mode'
+  [ "$T/root-copy" -nt "$T/root" ] && fail_ 'the destination root did not keep the source root timestamp'
+  chmod 755 "$T/root" "$T/root-copy"
   chmod 755 "$T/toy/lib.sh"
 }
 
@@ -956,9 +996,12 @@ t_stream_write_failure_is_a_harness_error() {
   shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
   : > "$T/stream"; chmod 444 "$T/stream"
   SHMUTANT_STREAM="$T/stream" pool lbl "$T/wd" toy_prepare toy_run
-  rc_is "$RC" 2 'an unwritable stream is exit 2 even though every row was killed'
-  has "$ERR" 'could not be written' 'says the stream was lost'
-  has "$ERR" '1/1 mutation(s) killed' 'the human summary still reports the verdicts'
+  rc_is "$RC" 2 'an unwritable stream is exit 2 before any run: it is opened once, up front'
+  has "$ERR" 'cannot open SHMUTANT_STREAM' 'says the stream could not be opened'
+  SHMUTANT_EMIT_FAILED=0
+  SHMUTANT_STREAM_FD=199 _shmutant_emit shmutant 1 row x 2>/dev/null
+  eq "$SHMUTANT_EMIT_FAILED" 1 'a record that cannot be written to the open descriptor is counted as a lost write'
+  chmod 644 "$T/stream"
   SHMUTANT_STREAM="$T/no/such/dir/stream" pool lbl "$T/wd" toy_prepare toy_run
   rc_is "$RC" 2 'a stream in a missing directory is refused up front'
   SHMUTANT_STREAM="$T/wd/stream" pool lbl "$T/wd" toy_prepare toy_run
