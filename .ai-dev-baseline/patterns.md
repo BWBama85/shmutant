@@ -55,6 +55,7 @@ Sweep each of these before opening a pull request.
 - `predictable-temp-path` — For every file the code opens for writing under a directory it does not fully own (a workdir, a target directory), grep for redirections and cp/mv targets built from a fixed name and replace each with a mktemp file in that directory; test by planting a symlink at the old fixed name pointing at a file outside and asserting it is untouched.
 - `contract-not-honoured` — For every statement in a contract header (which shell a callback runs in, which statuses mean what, what a record field can contain), find the line of code that implements it and write the unit that would fail if the code did the nearest plausible other thing; a contract line with no such unit is either untested or false.
 - `option-surface-mismatch` — For every setting that has two surfaces (a flag and an environment variable, a value the caller sets and one a callback sets), trace both to the single place that consumes it and test each surface separately; a value that one surface honours and the other silently drops is a defect in whichever reads it too early.
+- `pipeline-status-lost` — For every documented command that runs the tool (README, guide, migration steps), grep the docs for the tool name followed by | or || and for && and check each example carries the tool exit status to its consumer on its own line; a doc example that loses the status ships the defect to every reader.
 <!-- adb:checklist:end -->
 
 ## Hits
