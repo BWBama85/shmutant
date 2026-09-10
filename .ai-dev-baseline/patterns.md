@@ -166,4 +166,8 @@ One line per resolved review thread, newest last.
 - `timeout-escalation-cancelled` `shmutant.sh:430` `2a21cfc` `PRRT_kwDOUT7q9s6g-lEs` PR #1 2026-09-10 — kill_tree signalled only the presumed group, missing a root that shares its parent group; the root pid is now a target
 - `contract-not-honoured` `shmutant.sh:629` `2a21cfc` `PRRT_kwDOUT7q9s6g-lE8` PR #1 2026-09-10 — the abort handler waited for every job including the caller own; now only its helpers
 - `contract-not-honoured` `shmutant.sh:927` `2a21cfc` `PRRT_kwDOUT7q9s6g-lFB` PR #1 2026-09-10 — plan-load stdout reached the verdict stream; redirected to stderr
+- `stale-artifact-reuse` `shmutant.sh:432` `1e01f36` `PRRT_kwDOUT7q9s6g_IuM` PR #1 2026-09-10 — the reaped root pid was signalled by number after a normal return; the root is now an identity-checked victim
+- `early-return-skips-cleanup` `shmutant.sh:822` `1e01f36` `PRRT_kwDOUT7q9s6g_IuX` PR #1 2026-09-10 — post-prepare validation failures left the pristine tree; every such exit now goes through the pool failure helper
+- `predictable-temp-path` `shmutant.sh:105` `1e01f36` `PRRT_kwDOUT7q9s6g_Iuf` PR #1 2026-09-10 — the stream path was reopened per record and could be swapped for a symlink by a callback; opened once as a descriptor
+- `rewrite-loses-file-shape` `shmutant.sh:200` `1e01f36` `PRRT_kwDOUT7q9s6g_Iuk` PR #1 2026-09-10 — copy_tree left the destination root with default metadata; source root owner, mode and mtime applied after the copy
 <!-- adb:hits:end -->
