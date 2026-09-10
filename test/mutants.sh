@@ -42,8 +42,8 @@ shmutant_mut 'copy_tree copies .git' \
   '[ "$name" = .git-never ] && continue' \
   't_copy_tree_excludes_git'
 shmutant_mut 'copy_tree follows symlinks' \
-  'cp -RP -- "$entry" "$dst/"' \
-  'cp -RL -- "$entry" "$dst/"' \
+  'cp -RPp -- "$entry" "$dst/"' \
+  'cp -RLp -- "$entry" "$dst/"' \
   't_copy_tree_excludes_git'
 
 # --- mutate ---
@@ -321,10 +321,6 @@ shmutant_mut 'the plan errexit is left on across the pool call' \
   't_cli_run'
 
 # --- guards added for the fifth review round ---
-shmutant_mut 'the load-failure trap is never armed' \
-  '  builtin trap _shmutant_plan_died EXIT' \
-  '  :' \
-  't_cli_run'
 shmutant_mut 'the CLI cleanup reads the clobberable local' \
   'elif [ "$SHMUTANT_CLI_MADE" = 1 ]; then rm -rf -- "$SHMUTANT_CLI_WD"' \
   'elif [ "$made" = 1 ]; then rm -rf -- "$SHMUTANT_CLI_WD"' \
@@ -389,17 +385,13 @@ shmutant_mut 'a relative SHMUTANT_STREAM is resolved after the plan may have mov
   't_cli_run'
 
 # --- guards added for the seventh review round ---
-shmutant_mut 'a plan may replace the EXIT trap' \
-  '*" EXIT "*|*" 0 "*) _shmutant_err "run: a plan may not set an EXIT trap"; return 2 ;;' \
-  'never-matches) return 2 ;;' \
-  't_cli_run'
 shmutant_mut 'the descendant list is split by the caller IFS again' \
   '_shmutant_kill_tree KILL "$pid" "${victims[@]}"' \
   '_shmutant_kill_tree KILL "$pid" $(printf "%s\n" "${victims[@]}")' \
   't_verdict_timeout_kills_a_reparented_term_ignoring_descendant'
 shmutant_mut 'prepare runs in a subshell' \
-  'if ! "$prep" "$wd/pristine" > "$wd/prepare.out"; then' \
-  'if ! ( "$prep" "$wd/pristine" > "$wd/prepare.out" ); then' \
+  '"$prep" "$wd/pristine" >| "$pout"; prc=$?' \
+  '( "$prep" "$wd/pristine" >| "$pout" ); prc=$?' \
   't_pool_runs_prepare_in_its_own_shell'
 shmutant_mut 'surplus mutation arguments are accepted' \
   'if [ "$#" -lt 4 ] || [ "$#" -gt 5 ]; then' \
@@ -409,3 +401,49 @@ shmutant_mut 'a worker directory that cannot be recreated is used anyway' \
   '  [ ! -e "$1" ] || return 1' \
   '  :' \
   't_pool_refuses_unremovable_worker_dir'
+
+# --- guards added for the eighth review round ---
+shmutant_mut 'a relative library stream is left relative for prepare to move' \
+  '    SHMUTANT_STREAM="$sdir/$(basename -- "$SHMUTANT_STREAM")"' \
+  '    :' \
+  't_stream_relative_survives_a_prepare_that_cds'
+shmutant_mut 'pristine is reused when it cannot be recreated' \
+  '_shmutant_fresh_dir "$wd/pristine" ||' \
+  'true ||' \
+  't_pool_refuses_unremovable_pristine'
+shmutant_mut 'the prepare capture is a predictable name again' \
+  'pout="$(mktemp "$wd/.prepare.XXXXXX" 2>/dev/null)" ||' \
+  'pout="$wd/prepare.out" ||' \
+  't_pool_prepare_capture_never_follows_a_link'
+shmutant_mut 'prepare runs as a condition, muting its errexit' \
+  '"$prep" "$wd/pristine" >| "$pout"; prc=$?' \
+  'if "$prep" "$wd/pristine" >| "$pout"; then prc=0; else prc=$?; fi' \
+  't_pool_prepare_keeps_its_own_errexit'
+shmutant_mut 'the errexit prepare turned on is left on' \
+  'if [ "$errexit_before" = 1 ]; then set -e; else set +e; fi' \
+  ':' \
+  't_pool_prepare_keeps_its_own_errexit'
+shmutant_mut 'a newline in a witness is accepted' \
+  'case "$4${5:-}" in *$'"'"'\n'"'"'*)' \
+  'case "$4${5:-}" in never-matches)' \
+  't_mut_validates_rows'
+shmutant_mut 'descendants are snapshotted only at the deadline' \
+  'while IFS= read -r p; do [ -n "$p" ] && seen["$p"]=1; done < <(_shmutant_descendants "$pid")' \
+  ':' \
+  't_verdict_timeout_kills_a_descendant_seen_before_it_detached'
+shmutant_mut 'clones drop metadata' \
+  'cp -RPp -- "$wd/pristine" "$dir/tree"' \
+  'cp -RP -- "$wd/pristine" "$dir/tree"' \
+  't_pool_clone_keeps_metadata'
+shmutant_mut 'copy_tree drops metadata' \
+  'cp -RPp -- "$entry" "$dst/"' \
+  'cp -RP -- "$entry" "$dst/"' \
+  't_pool_clone_keeps_metadata'
+shmutant_mut 'the EXIT guard is not re-armed before each plan command' \
+  "builtin trap 'builtin trap _shmutant_plan_died EXIT' DEBUG" \
+  ':' \
+  't_cli_run'
+shmutant_mut 'the pool has no EXIT guard in the CLI' \
+  '  builtin trap _shmutant_pool_died EXIT' \
+  '  :' \
+  't_pool_prepare_keeps_its_own_errexit'

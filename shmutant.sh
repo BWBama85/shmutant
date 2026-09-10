@@ -174,8 +174,8 @@ shmutant_selected() {
 }
 
 # shmutant_copy_tree <src> <dst> — copy <src> to <dst> (created), skipping a top-level .git
-# and keeping symlinks as symlinks. Returns 1 when anything fails to copy, or when <dst> lies
-# inside <src>.
+# and keeping symlinks as symlinks, modes, ownership and timestamps. Returns 1 when anything
+# fails to copy, or when <dst> lies inside <src>.
 shmutant_copy_tree() {
   local src="$1" dst="$2" entry name rc=0 asrc adst
   [ -d "$src" ] || { _shmutant_err "copy_tree: not a directory: $src"; return 1; }
@@ -193,7 +193,7 @@ shmutant_copy_tree() {
       [ -e "$entry" ] || [ -L "$entry" ] || continue
       name="${entry##*/}"
       [ "$name" = .git ] && continue
-      cp -RP -- "$entry" "$dst/" || rc=1
+      cp -RPp -- "$entry" "$dst/" || rc=1
     done
     exit "$rc"
   )
@@ -277,6 +277,7 @@ shmutant_mut() {
   [ -n "$2" ] || { _shmutant_refuse "mut '$1': the old literal is empty — it would match nothing"; return 2; }
   [ "$2" != "$3" ] || { _shmutant_refuse "mut '$1': old and new are identical — the row would inject nothing"; return 2; }
   [ -n "$4" ] || { _shmutant_refuse "mut '$1': a row needs a witness"; return 2; }
+  case "$4${5:-}" in *$'\n'*) _shmutant_refuse "mut '$1': a witness or selector cannot contain a newline — a red line is one line"; return 2 ;; esac
   SHMUTANT_ROWS_NAME+=("$1"); SHMUTANT_ROWS_FILE+=("$SHMUTANT_TARGET"); SHMUTANT_ROWS_OLD+=("$2")
   SHMUTANT_ROWS_NEW+=("$3"); SHMUTANT_ROWS_WIT+=("$4"); SHMUTANT_ROWS_SEL+=("${5:-$4}")
 }
@@ -357,12 +358,21 @@ _shmutant_run_bounded() {
     dog=""
     if [ "$timeout" -gt 0 ]; then
       (
+        # Descendants are snapshotted every half second while the run is alive, so one that
+        # detaches from the leader before the deadline (a new session, a reparented child) is
+        # still named at the kill. A double fork whose intermediate lives less than a poll is
+        # not reachable this way; that needs a containment mechanism this file does not use.
         trap 'kill "$s" 2>/dev/null; exit 0' TERM
-        sleep "$timeout" & s=$!
-        wait "$s"
+        declare -A seen=()
+        t_end=$(( $(_shmutant_now) + timeout * 1000000 ))
+        while [ "$(_shmutant_now)" -lt "$t_end" ]; do
+          sleep 0.5 & s=$!
+          wait "$s"
+          while IFS= read -r p; do [ -n "$p" ] && seen["$p"]=1; done < <(_shmutant_descendants "$pid")
+        done
         : > "$dir/timeout"
         # An array, never an unquoted expansion: splitting it would depend on the caller's IFS.
-        mapfile -t victims < <(_shmutant_descendants "$pid")
+        victims=("${!seen[@]}")
         _shmutant_kill_tree TERM "$pid" "${victims[@]}"
         sleep 1
         _shmutant_kill_tree KILL "$pid" "${victims[@]}"
@@ -402,7 +412,9 @@ _shmutant_worker() {
   t0="$(_shmutant_now)"
   root="$dir/tree$suffix"
   if [ "$kind" = mut ]; then sel="${SHMUTANT_ROWS_SEL[$i]}"; else sel="${SHMUTANT_BASE_SEL[$i]}"; fi
-  if ! cp -RP -- "$wd/pristine" "$dir/tree" 2>/dev/null; then
+  # -p: a clone keeps mode, ownership and timestamps, so a test sensitive to them sees the
+  # prepared tree's values, not the pool's umask.
+  if ! cp -RPp -- "$wd/pristine" "$dir/tree" 2>/dev/null; then
     _shmutant_worker_finish "$dir" unprepared 0 clone; return 0
   fi
   if [ "$kind" = mut ]; then
@@ -580,16 +592,23 @@ shmutant_pool() {
     case "$sdir" in
       "$wd"|"$wd/"*) _shmutant_err "$label: SHMUTANT_STREAM lies inside the workdir ($SHMUTANT_STREAM) — the pool recreates and removes what is in there"; return 2 ;;
     esac
+    # Replaced by its validated absolute form: prepare runs in this shell and may cd.
+    SHMUTANT_STREAM="$sdir/$(basename -- "$SHMUTANT_STREAM")"
   fi
 
-  rm -rf -- "$wd/pristine"
-  mkdir -p -- "$wd/pristine" || { _shmutant_err "$label: cannot create $wd/pristine"; return 2; }
-  # Called directly, not in a command substitution: state prepare establishes in the pool's
-  # shell (an exported variable the run needs) must still be there when the workers fork.
-  if ! "$prep" "$wd/pristine" > "$wd/prepare.out"; then
-    _shmutant_err "$label: prepare failed — no tree to mutate"; return 2
+  _shmutant_fresh_dir "$wd/pristine" || { _shmutant_err "$label: cannot recreate $wd/pristine — stale contents there would be prepared over"; return 2; }
+  local pout prc errexit_before=0
+  pout="$(mktemp "$wd/.prepare.XXXXXX" 2>/dev/null)" || { _shmutant_err "$label: cannot create a capture file in $wd"; return 2; }
+  # Called directly, not in a command substitution and not as a condition: state prepare
+  # establishes in this shell must still be there when the workers fork, and its own errexit
+  # must keep meaning what it says. The errexit state it leaves behind is put back afterwards.
+  case "$-" in *e*) errexit_before=1 ;; esac
+  "$prep" "$wd/pristine" >| "$pout"; prc=$?
+  if [ "$errexit_before" = 1 ]; then set -e; else set +e; fi
+  if [ "$prc" -ne 0 ]; then
+    rm -f -- "$pout"; _shmutant_err "$label: prepare failed (status $prc) — no tree to mutate"; return 2
   fi
-  root="$(cat "$wd/prepare.out")"; rm -f -- "$wd/prepare.out"
+  root="$(cat "$pout")"; rm -f -- "$pout"
   [ -n "$root" ] || root="$wd/pristine"
   root="$(_shmutant_abs "$root")" || { _shmutant_err "$label: prepare printed a root that is not a directory"; return 2; }
   case "$root" in
@@ -709,7 +728,7 @@ _shmutant_cli_finish() {
 # that one.
 _shmutant_plan_trap() {
   case " $* " in
-    *" EXIT "*|*" 0 "*) _shmutant_err "run: a plan may not set an EXIT trap"; return 2 ;;
+    *" EXIT "*|*" 0 "*|*" DEBUG "*) _shmutant_err "run: a plan may not set an EXIT or DEBUG trap"; return 2 ;;
   esac
   # shellcheck disable=SC2064
   builtin trap "$@"
@@ -774,11 +793,18 @@ _shmutant_cli_run() {
   # Sourced bare, not in an || list: an || list would switch the plan's own errexit off for the
   # whole file. The trap turns an errexit exit or an explicit exit into status 2; while the plan
   # loads, `trap` may not replace it, because bash keeps only one EXIT trap.
-  builtin trap _shmutant_plan_died EXIT
   trap() { _shmutant_plan_trap "$@"; }
+  # The load-failure guard is armed before every command the plan runs, so `builtin trap` or
+  # `command trap` cannot leave a replacement in place for the command that follows it.
+  # functrace carries the DEBUG trap into functions the plan calls while loading. The `trap`
+  # shadow above only adds the message; the DEBUG re-arm is the guard.
+  set -o functrace
+  builtin trap 'builtin trap _shmutant_plan_died EXIT' DEBUG
   # shellcheck disable=SC1090
   . "$_shmutant_cli_plan"
   rc=$?
+  builtin trap - DEBUG
+  set +o functrace
   unset -f trap
   builtin trap - EXIT
   [ "$rc" -eq 0 ] || { _shmutant_err "run: the plan failed while loading (status $rc)"; _shmutant_cli_finish 2; return 2; }
@@ -787,8 +813,20 @@ _shmutant_cli_run() {
   # The plan may have turned errexit on for its own preamble; the pool's non-zero returns are
   # answers, not errors, and the cleanup must run for every one of them.
   set +o errexit
+  # prepare runs in this shell with its own errexit honoured; if it takes the shell down, the
+  # workdir is still handled and the status is a harness error.
+  builtin trap _shmutant_pool_died EXIT
   shmutant_pool "$(basename -- "$plan")" "$SHMUTANT_CLI_WD" prepare run; rc=$?
+  builtin trap - EXIT
   _shmutant_cli_finish "$rc"
+}
+
+# _shmutant_pool_died — EXIT trap armed while the pool runs in the CLI: a callback that exits the
+# shell (its own errexit, an explicit exit) still ends the run as a harness error.
+_shmutant_pool_died() {
+  _shmutant_err "run: a callback ended the shell while the pool was running"
+  _shmutant_cli_finish 2
+  builtin exit 2
 }
 
 shmutant_main() {

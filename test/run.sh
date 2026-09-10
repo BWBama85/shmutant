@@ -177,6 +177,8 @@ t_mut_validates_rows() {
   shmutant_mut '' 'a' 'b' 'w' 2>/dev/null; rc_is $? 2 'empty name refused'
   shmutant_mut 'three args' 'a' 'b' 2>/dev/null; rc_is $? 2 'too few arguments refused'
   shmutant_mut 'six args' 'a' 'b' 'w' 'sel' 'extra' 2>/dev/null; rc_is $? 2 'surplus arguments refused (an unquoted witness would land here)'
+  shmutant_mut 'nl witness' 'a' 'b' $'two\nlines' 2>/dev/null; rc_is $? 2 'a witness with a newline can never match one red line'
+  shmutant_mut 'nl select' 'a' 'b' 'w' $'two\nlines' 2>/dev/null; rc_is $? 2 'a selector with a newline is refused too'
   eq "${#SHMUTANT_ROWS_NAME[@]}" 0 'nothing was appended by a refused row'
   shmutant_mut 'ok' 'a' 'b' 'wit'; rc_is $? 0 'a valid row is appended'
   shmutant_mut 'ok2' 'a' 'b' 'wit' 'unit'; rc_is $? 0 'a row with a select is appended'
@@ -440,6 +442,20 @@ t_verdict_timeout_kills_a_reparented_term_ignoring_descendant() {
   [ -e "$T/finished" ] || [ -e "$T/finished2" ] && fail_ 'with the caller IFS empty, the descendant pid list was not split and a descendant survived'
 }
 
+t_verdict_timeout_kills_a_descendant_seen_before_it_detached() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'hangs' '$1 + $2' '$1 - $2' 'add-works'
+  # The intermediate lives 0.8s then exits, so at the deadline the survivor has ppid 1 and a
+  # process group that is not the leader's; only a snapshot taken while it was still attached
+  # can name it.
+  detaching_run() { set -m; bash -c "bash -c 'sleep 5; touch \"$T/finished\"' & sleep 0.8" & sleep 3; }
+  SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=2 pool lbl "$T/wd" toy_prepare detaching_run
+  eq "$(verdict_of 'hangs')" timeout 'verdict is timeout'
+  sleep 5
+  [ -e "$T/finished" ] && fail_ 'a descendant that detached before the deadline outlived the kill'
+}
+
 t_pool_survives_nounset() {
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
@@ -528,6 +544,62 @@ t_pool_runs_prepare_in_its_own_shell() {
   rc_is "$RC" 0 'state prepare establishes in the pool shell reaches run'
   eq "$(verdict_of a)" killed 'killed, not aborted'
   unset TOY_MARK
+}
+
+t_pool_refuses_unremovable_pristine() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  mkdir -p "$T/wd/pristine/held"; chmod 555 "$T/wd/pristine"
+  pool lbl "$T/wd" toy_prepare toy_run
+  chmod 755 "$T/wd/pristine"
+  rc_is "$RC" 2 'a pristine directory that cannot be recreated aborts the pool'
+  has "$ERR" 'cannot recreate' 'says why'
+}
+
+t_pool_prepare_capture_never_follows_a_link() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  printf 'precious\n' > "$T/victim"; mkdir -p "$T/wd"; ln -s "$T/victim" "$T/wd/prepare.out"
+  pool lbl "$T/wd" toy_prepare toy_run
+  rc_is "$RC" 0 'killed'
+  eq "$(cat "$T/victim")" precious 'a symlink at the old capture name is never written through'
+}
+
+t_pool_prepare_keeps_its_own_errexit() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  cat > "$T/toy/plan.sh" <<'EOF'
+prepare() { set -e; false; shmutant_copy_tree "$SHMUTANT_PLAN_DIR" "$1"; }
+run() { bash "$1/test.sh"; }
+shmutant_target lib.sh
+shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+EOF
+  mkdir -p "$T/tmpd"
+  TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan.sh" > /dev/null 2> "$T/e"; rc_is $? 2 'a prepare whose own set -e fires ends the run as a harness error, not a pass over a partial tree'
+  has "$(cat "$T/e")" 'ended the shell' 'says so'
+  eq "$(find "$T/tmpd" -mindepth 1 | wc -l | tr -d ' ')" 0 'and the automatic workdir was still removed'
+  lax_prepare() { set -e; shmutant_copy_tree "$TOY" "$1"; }
+  case "$-" in *e*) fail_ 'precondition: errexit already on' ;; esac
+  shmutant_pool lbl "$T/wd3" lax_prepare toy_run > /dev/null 2>&1; rc_is $? 0 'killed'
+  case "$-" in *e*) fail_ 'the errexit prepare turned on leaked into the caller' ;; esac
+}
+
+t_pool_clone_keeps_metadata() {
+  mk_toy "$T/toy"; TOY="$T/toy"; chmod 555 "$T/toy/lib.sh"
+  touch -t 200001010000 "$T/toy/lib.sh" "$T/toy/test.sh"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  SHMUTANT_KEEP=1 SHMUTANT_BASELINE=0 pool lbl "$T/wd" toy_prepare toy_run
+  rc_is "$RC" 0 'a read-only target is still mutated and killed'
+  eq "$(ls -l "$T/wd/pristine/lib.sh" | cut -c1-10)" '-r-xr-xr-x' 'copy_tree kept the mode'
+  eq "$(ls -l "$T/wd/mut-0/tree/lib.sh" | cut -c1-10)" '-r-xr-xr-x' 'the clone kept the mode through the rewrite'
+  # Timestamps are what -p alone adds over the mode bits cp copies anyway.
+  [ "$T/wd/pristine/test.sh" -nt "$T/toy/test.sh" ] && fail_ 'copy_tree did not keep the timestamp'
+  [ "$T/wd/mut-0/tree/test.sh" -nt "$T/toy/test.sh" ] && fail_ 'the clone did not keep the timestamp'
+  chmod 755 "$T/toy/lib.sh"
 }
 
 t_pool_refuses_unremovable_worker_dir() {
@@ -704,6 +776,16 @@ t_pool_validates_red_status_and_prefix() {
   rc_is "$RC" 2 'an absurd SHMUTANT_JOBS is refused'
 }
 
+t_stream_relative_survives_a_prepare_that_cds() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  wandering_prepare() { shmutant_copy_tree "$TOY" "$1" && cd "$1"; }
+  ( cd "$T" && SHMUTANT_STREAM=rel.tsv shmutant_pool lbl "$T/wd" wandering_prepare toy_run > /dev/null 2>&1 ); rc_is $? 0 'killed'
+  [ -f "$T/rel.tsv" ] || fail_ 'a relative SHMUTANT_STREAM in a library call was re-based by a prepare that changed directory'
+  [ -e "$T/wd/pristine/rel.tsv" ] && fail_ 'the stream was written inside pristine'
+}
+
 t_stream_to_file() {
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
@@ -825,6 +907,7 @@ EOF
   bash "$SHMUTANT" run "$T/inherit.sh" > /dev/null 2>&1; rc_is $? 2 'exported prepare/run functions from the environment do not stand in for the plan'"'"'s'
   unset -f prepare run
   { printf 'set -e\n'; cat "$T/toy/plan.sh"; } > "$T/toy/plan-e.sh"
+  bash "$SHMUTANT" run "$T/toy/plan-e.sh" > /dev/null 2>&1; rc_is $? 1 'a plan with set -e still reports the survivor as 1, not an errexit abort'
   kept="$(bash "$SHMUTANT" run "$T/toy/plan-e.sh" --keep 2>&1 >/dev/null | sed -n 's/^shmutant: workdir kept: //p')"
   [ -n "$kept" ] || fail_ 'a plan with set -e made the CLI exit at the pool call before its cleanup and report'
   [ -n "$kept" ] && rm -rf -- "$kept"
@@ -845,7 +928,13 @@ EOF
   grep -v "'broken'" "$T/toy/plan.sh" > "$T/toy/plan-base.sh"
   { cat "$T/toy/plan-base.sh"; printf 'trap "echo bye" EXIT\nexit 0\n'; } > "$T/toy/plan-trap.sh"
   TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-trap.sh" > /dev/null 2>"$T/err-trap"; rc_is $? 2 'a plan that installs its own EXIT trap and exits is still a load failure'
-  has "$(cat "$T/err-trap")" 'may not set an EXIT trap' 'the trap replacement is refused'
+  has "$(cat "$T/err-trap")" 'may not set an EXIT' 'the trap replacement is refused'
+  { cat "$T/toy/plan-base.sh"; printf 'builtin trap "echo bye" EXIT\nexit 0\n'; } > "$T/toy/plan-btrap.sh"
+  TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-btrap.sh" > /dev/null 2>&1; rc_is $? 2 'builtin trap cannot replace the guard for the exit that follows'
+  { cat "$T/toy/plan-base.sh"; printf 'command trap "echo bye" EXIT; exit 0\n'; } > "$T/toy/plan-ctrap.sh"
+  TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-ctrap.sh" > /dev/null 2>&1; rc_is $? 2 'command trap on the same line cannot either'
+  { cat "$T/toy/plan-base.sh"; printf 'helper() { builtin trap "echo bye" EXIT; }\nhelper\nexit 0\n'; } > "$T/toy/plan-ftrap.sh"
+  TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-ftrap.sh" > /dev/null 2>&1; rc_is $? 2 'nor a trap set inside a helper function'
   { cat "$T/toy/plan-base.sh"; printf 'exit 0\n'; } > "$T/toy/plan-exit.sh"
   TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-exit.sh" > /dev/null 2>&1; rc_is $? 2 'a plan that exits 0 is a load failure, not a pass'
   { cat "$T/toy/plan-base.sh"; printf 'trap "echo usr" USR1\n'; } > "$T/toy/plan-usr.sh"
