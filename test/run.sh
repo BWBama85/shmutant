@@ -52,6 +52,22 @@ wait_for() {
   until [ -e "$1" ]; do i=$((i + 1)); [ "$i" -lt 100 ] || return 1; sleep 0.1; done
 }
 
+# make_unremovable <dir> — make <dir> (with a file inside) something this user cannot delete:
+# the immutable flag where the platform has one, else root ownership through a non-interactive
+# sudo (the CI runners allow it). False when neither is available; undo with unmake_unremovable.
+make_unremovable() {
+  mkdir -p "$1"; : > "$1/held"
+  if chflags uchg "$1" 2>/dev/null; then UNREMOVABLE_HOW=chflags; return 0; fi
+  if sudo -n chown root:root "$1" 2>/dev/null && sudo -n chmod 755 "$1" 2>/dev/null; then UNREMOVABLE_HOW=sudo; return 0; fi
+  return 1
+}
+unmake_unremovable() {
+  case "${UNREMOVABLE_HOW:-}" in
+    chflags) chflags nouchg "$1" 2>/dev/null ;;
+    sudo)    sudo -n rm -rf "$1" 2>/dev/null ;;
+  esac
+}
+
 # pool <args…> — run shmutant_pool with the stream in OUT, stderr in ERR, status in RC.
 pool() {
   OUT="$(shmutant_pool "$@" 2> "$T/err")"; RC=$?
@@ -415,6 +431,7 @@ t_verdict_timeout_kills_a_term_ignoring_descendant() {
   eq "$(verdict_of 'hangs')" timeout 'verdict is timeout'
   sleep 4
   [ -e "$T/finished" ] && fail_ 'a descendant that ignores TERM outlived the timeout — the watchdog never reached KILL'
+  [ -z "$(ps -A -o args= | grep -F "touch '$T/finished'" | grep -v grep)" ] || fail_ 'a process of the run is still there (frozen or alive) after the timeout was scored'
 }
 
 t_verdict_timeout_kills_an_escaped_process_group() {
@@ -520,6 +537,7 @@ t_verdict_timeout_with_a_leading_zero() {
   slow_run() { bash -c "sleep 12; touch '$T/finished'"; }
   SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=08 pool lbl "$T/wd" toy_prepare slow_run
   eq "$(verdict_of 'hangs')" timeout 'a timeout of 08 is eight seconds, not an octal error that disarms the watchdog'
+  [ "${OUT##*$'\t'hangs$'\t'}" != "$OUT" ] && [ "$(field row 8 | cut -d. -f1)" -ge 8 ] || fail_ "the run was cut short of eight seconds: $(field row 8)s"
   sleep 3
   [ -e "$T/finished" ] && fail_ 'the run outlived the leading-zero timeout'
 }
@@ -529,12 +547,13 @@ t_run_leftovers_are_killed_after_a_normal_return() {
   shmutant_reset; shmutant_target lib.sh
   shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
   # returns at once, leaving a helper in its own process group and a plain one in the run's
-  leaky_run() { set -m; bash -c "sleep 4; touch '$T/escaped'" & set +m; bash -c "sleep 4; touch '$T/grouped'" & bash "$1/test.sh"; }
+  leaky_run() { set -m; bash -c "sleep 4; touch '$T/escaped'" & bash -c "bash -c 'sleep 4; touch \"$T/grandchild\"' & wait" & set +m; bash -c "sleep 4; touch '$T/grouped'" & bash "$1/test.sh"; }
   SHMUTANT_BASELINE=0 pool lbl "$T/wd" toy_prepare leaky_run
   eq "$(verdict_of a)" killed 'the verdict is the callback'"'"'s own'
   sleep 5
   [ -e "$T/grouped" ] && fail_ 'a helper left in the run'"'"'s process group outlived the verdict'
   [ -e "$T/escaped" ] && fail_ 'a helper in its own process group, seen by the watchdog, outlived the verdict'
+  [ -e "$T/grandchild" ] && fail_ 'a child of a retained leftover outlived the verdict: retained victims must be searched from too'
 }
 
 t_run_cannot_redirect_the_leftover_record() {
@@ -543,7 +562,7 @@ t_run_cannot_redirect_the_leftover_record() {
   shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
   printf 'precious\n' > "$T/victim"
   # shellcheck disable=SC2034
-  meddling_run() { mark="$T/victim"; set -m; bash -c "sleep 4; touch '$T/escaped'" & set +m; bash "$1/test.sh"; }
+  meddling_run() { mark="$T/victim"; left_w=1; set -m; bash -c "sleep 4; touch '$T/escaped'" & set +m; bash "$1/test.sh"; }
   SHMUTANT_BASELINE=0 pool lbl "$T/wd" toy_prepare meddling_run
   eq "$(verdict_of a)" killed 'the verdict is the callback'"'"'s own'
   eq "$(cat "$T/victim")" precious 'a callback assigning mark cannot point the leftover record at a caller file'
@@ -577,6 +596,24 @@ t_stream_descriptor_survives_a_callback_swapping_the_path() {
   eq "$(cat "$T/victim")" precious 'records never follow a symlink a callback put at the stream path'
 }
 
+t_pool_removes_a_read_only_pristine_root() {
+  mk_toy "$T/toy"; TOY="$T/toy"; chmod 555 "$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  pool lbl "$T/wd" toy_prepare toy_run
+  chmod 755 "$T/toy"
+  rc_is "$RC" 0 'a target inside a read-only directory is still rewritten, and killed'
+  [ -e "$T/wd/pristine" ] && fail_ 'a pristine tree whose preserved root is read-only was not removed'
+  mkdir -p "$T/rod"; printf 'x=1\n' > "$T/rod/f"; chmod 555 "$T/rod"
+  shmutant_mutate "$T/rod/f" 'x=1' 'x=2'; rc_is $? 0 'mutate loosens a read-only directory for the rewrite'
+  eq "$(cat "$T/rod/f")" 'x=2' 'rewritten'
+  eq "$(ls -ld "$T/rod" | cut -c1-10)" 'dr-xr-xr-x' 'and puts the directory mode back'
+  chmod 755 "$T/rod"
+  [ -e "$T/wd/mut-0/tree" ] && fail_ 'a clone whose root is read-only was not removed'
+  mkdir -p "$T/deep/a/b"; : > "$T/deep/a/b/f"; chmod 000 "$T/deep/a"
+  _shmutant_remove "$T/deep"; rc_is $? 0 'a mode-000 directory left inside a tree of ours does not block its removal'
+}
+
 t_pool_failure_after_prepare_removes_pristine() {
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target absent.sh; shmutant_mut 'r' 'a' 'b' 'add-works'
@@ -585,6 +622,32 @@ t_pool_failure_after_prepare_removes_pristine() {
   [ -e "$T/wd/pristine" ] && fail_ 'the prepared tree was left behind by a validation failure'
   SHMUTANT_KEEP=1 pool lbl "$T/wd2" toy_prepare toy_run
   [ -d "$T/wd2/pristine" ] || fail_ 'with SHMUTANT_KEEP=1 the prepared tree is kept even on a validation failure'
+}
+
+t_run_cannot_lose_the_leftover_record_by_locking_its_dir() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  # leaves an escaped helper, then makes its worker directory unwritable before returning
+  locking_run() { set -m; bash -c "sleep 4; touch '$T/escaped'" & set +m; local rc; bash "$1/test.sh"; rc=$?; chmod 555 "$1/.."; return "$rc"; }
+  SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=0 pool lbl "$T/wd" toy_prepare locking_run
+  chmod 755 "$T/wd/mut-0" 2>/dev/null
+  eq "$(verdict_of a)" killed 'the verdict is the callback'"'"'s own'
+  sleep 5
+  [ -e "$T/escaped" ] && fail_ 'the leftover record was lost to a locked directory and the helper survived'
+}
+
+t_worker_cleanup_refuses_a_swapped_directory() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  mkdir -p "$T/victim/tree"; printf 'precious\n' > "$T/victim/tree/keep"
+  # renames its worker directory away and leaves a symlink to a caller tree in its place
+  swapping_run() { local d; d="$(cd "$1/.." && pwd -P)"; bash "$1/test.sh"; local rc=$?; mv "$d" "$d.moved" && ln -s "$T/victim" "$d"; return "$rc"; }
+  SHMUTANT_BASELINE=0 pool lbl "$T/wd" toy_prepare swapping_run
+  [ -f "$T/victim/tree/keep" ] || fail_ 'cleanup followed the swapped worker directory into a caller tree'
+  has "$ERR" 'no longer the worker directory' 'the swap is reported'
+  rm -f "$T/wd/mut-0"; mv "$T/wd/mut-0.moved" "$T/wd/mut-0" 2>/dev/null
 }
 
 t_worker_verdict_cannot_be_forged_through_a_link() {
@@ -679,6 +742,38 @@ t_inside_ignores_nocasematch() {
   ( shopt -s nocasematch; _shmutant_inside /a/b /A/B/c ); rc_is $? 1 'a path that only resembles the root in case is outside, whatever the caller'"'"'s nocasematch says'
   _shmutant_inside / /tmp/work; rc_is $? 0 'the filesystem root contains every absolute path'
   _shmutant_inside / /; rc_is $? 0 'and itself'
+}
+
+t_verdict_timeout_kills_a_descendant_seen_then_reparented() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'hangs' '$1 + $2' '$1 - $2' 'add-works'
+  # A is seen by the watchdog while its parent I is alive, then I exits and A is reparented, so
+  # at the deadline A is reachable only through what the watchdog retained.
+  orphaning_run() { set -m; bash -c "bash -c 'sleep 5; touch \"$T/orphan\"' & sleep 0.7" & sleep 3; }
+  SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=1 pool lbl "$T/wd" toy_prepare orphaning_run
+  eq "$(verdict_of 'hangs')" timeout 'verdict is timeout'
+  sleep 5
+  [ -e "$T/orphan" ] && fail_ 'a descendant seen by the watchdog and then reparented outlived the timeout'
+  [ -z "$(ps -A -o args= | grep -F "touch \"$T/orphan\"" | grep -v grep)" ] || fail_ 'the reparented descendant is still there'
+  rm -f "$T/orphan"
+  ( IFS=''; SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=1 shmutant_pool lbl "$T/wd2" toy_prepare orphaning_run > /dev/null 2>&1 )
+  sleep 5
+  [ -e "$T/orphan" ] && fail_ 'with the caller IFS empty, the retained list was not split and the reparented descendant survived'
+}
+
+t_verdict_timeout_stops_a_run_that_keeps_forking() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'hangs' '$1 + $2' '$1 - $2' 'add-works'
+  # a new escaped child every few milliseconds: one forked between a snapshot and the kill
+  # survives unless the tree was frozen first
+  forking_run() { set -m; while :; do bash -c "sleep 2; touch '$T/leak.$RANDOM'" & sleep 0.02; done; }
+  SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=1 pool lbl "$T/wd" toy_prepare forking_run
+  eq "$(verdict_of 'hangs')" timeout 'verdict is timeout'
+  sleep 3
+  [ -z "$(find "$T" -maxdepth 1 -name 'leak.*' -print -quit)" ] || fail_ 'a child forked while the tree was being killed outlived the timeout'
+  [ -z "$(ps -A -o args= | grep -F "touch '$T/leak" | grep -v grep)" ] || fail_ 'children of the run are still there after the timeout'
 }
 
 t_verdict_timeout_marker_cannot_be_forged() {
@@ -816,23 +911,30 @@ t_pool_aborts_running_workers_when_a_dir_cannot_be_recreated() {
   shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
   shmutant_mut 'b' '$1 + $2' '$1 * $2' 'add-works'
   hanging_run() { : > "$T/started"; bash -c "sleep 30; touch '$T/finished'"; }
-  mkdir -p "$T/wd/mut-1/held"; chmod 555 "$T/wd/mut-1"
+  make_unremovable "$T/wd/mut-1/held" || { echo "note: $_unit: no way to make a directory unremovable here; skipped"; return; }
   local t0; t0="$(_shmutant_now)"
   SHMUTANT_JOBS=2 SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=0 pool lbl "$T/wd" toy_prepare hanging_run
-  chmod 755 "$T/wd/mut-1"
+  unmake_unremovable "$T/wd/mut-1/held"
   rc_is "$RC" 2 'the harness error is reported'
   [ $(( ($(_shmutant_now) - t0) / 1000000 )) -lt 15 ] || fail_ 'the pool waited on the unbounded worker instead of ending it'
   sleep 1
   [ -e "$T/finished" ] && fail_ 'the running worker survived the abort'
+  # with a TERM-ignoring escaped descendant, the abort must not return before it is gone
+  stubborn_hanging_run() { : > "$T/started2"; set -m; bash -c "trap '' TERM; sleep 30; touch '$T/finished2'" & wait; }
+  make_unremovable "$T/wd2/mut-1/held" || return
+  SHMUTANT_JOBS=2 SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=0 pool lbl "$T/wd2" toy_prepare stubborn_hanging_run
+  unmake_unremovable "$T/wd2/mut-1/held"
+  rc_is "$RC" 2 'harness error'
+  [ -z "$(ps -A -o args= | grep -F "touch '$T/finished2'" | grep -v grep)" ] || fail_ 'the abort returned while a TERM-ignoring descendant was still alive'
 }
 
 t_pool_refuses_unremovable_pristine() {
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
   shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
-  mkdir -p "$T/wd/pristine/held"; chmod 555 "$T/wd/pristine"
+  make_unremovable "$T/wd/pristine/held" || { echo "note: $_unit: no way to make a directory unremovable here; skipped"; return; }
   pool lbl "$T/wd" toy_prepare toy_run
-  chmod 755 "$T/wd/pristine"
+  unmake_unremovable "$T/wd/pristine/held"
   rc_is "$RC" 2 'a pristine directory that cannot be recreated aborts the pool'
   has "$ERR" 'cannot recreate' 'says why'
 }
@@ -902,9 +1004,10 @@ t_pool_refuses_unremovable_worker_dir() {
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
   shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
-  mkdir -p "$T/wd/mut-0/held"; printf 'killed\n1\n1\n' > "$T/wd/mut-0/verdict"; chmod 555 "$T/wd/mut-0"
+  mkdir -p "$T/wd/mut-0"; printf 'killed\n1\n1\n' > "$T/wd/mut-0/verdict"
+  make_unremovable "$T/wd/mut-0/held" || { echo "note: $_unit: no way to make a directory unremovable here; skipped"; return; }
   SHMUTANT_BASELINE=0 pool lbl "$T/wd" toy_prepare toy_run
-  chmod 755 "$T/wd/mut-0"
+  unmake_unremovable "$T/wd/mut-0/held"
   rc_is "$RC" 2 'a worker directory that cannot be recreated aborts the pool'
   has "$ERR" 'cannot recreate' 'says why'
   hasnt "$OUT" $'\trow\tkilled' 'the stale killed verdict was not reported'

@@ -252,6 +252,13 @@ _shmutant_mode_spec() {
   printf '%s,%s,%s' "$(_shmutant_mode_triple "${m:1:3}" u)" "$(_shmutant_mode_triple "${m:4:3}" g)" "$(_shmutant_mode_triple "${m:7:3}" o)"
 }
 
+# _shmutant_mutate_restore <dir> <ls-mode-or-empty> — put back a directory mode shmutant_mutate
+# loosened for the rewrite; a no-op when it loosened nothing.
+_shmutant_mutate_restore() {
+  [ -n "$2" ] && chmod -- "$(_shmutant_mode_spec "$2")" "$1" 2>/dev/null
+  return 0
+}
+
 # shmutant_mutate <file> <old> <new> — replace the FIRST occurrence of literal <old> with <new>,
 # in place. 0 applied; 1 the rewrite failed (file unreadable, dir unwritable); 2 <old> matched
 # nothing, file unchanged (awk reports the miss itself, so no `cmp` is needed). A symlink is
@@ -264,10 +271,17 @@ _shmutant_mode_spec() {
 # `sed -i` (BSD and GNU differ), so a failed rewrite cannot half-write. A target whose last line
 # has no newline keeps that shape: the only change is the literal.
 shmutant_mutate() {
-  local f="$1" tmp nl=1 rc mode
+  local f="$1" tmp nl=1 rc mode dir dirmode=""
   [ -n "$2" ] && [ "$2" != "$3" ] || return 2
   [ -f "$f" ] && [ ! -L "$f" ] || return 1
-  tmp="$(mktemp "$(dirname -- "$f")/.shmutant.XXXXXX" 2>/dev/null)" || return 1
+  dir="$(dirname -- "$f")"
+  # A read-only directory (a preserved 0555 root) cannot host the temp file or the rename; it is
+  # made writable for the rewrite and put back afterwards.
+  if [ ! -w "$dir" ]; then
+    dirmode="$(ls -ld -- "$dir" 2>/dev/null)"; dirmode="${dirmode%% *}"
+    chmod -- u+w "$dir" 2>/dev/null || return 1
+  fi
+  tmp="$(mktemp "$dir/.shmutant.XXXXXX" 2>/dev/null)" || { _shmutant_mutate_restore "$dir" "$dirmode"; return 1; }
   [ -n "$(tail -c 1 -- "$f" 2>/dev/null)" ] && nl=0
   # The mode comes from the `ls -l` field, the one mode read POSIX specifies the same way
   # everywhere, and is reapplied whole after the write: a read-only target (0444, 0555) must be
@@ -284,11 +298,12 @@ shmutant_mutate() {
   ' "$f" >| "$tmp"; } 2>/dev/null; rc=$?
   case "$rc" in
     0) ;;
-    3) rm -f "$tmp"; return 2 ;;
-    *) rm -f "$tmp"; return 1 ;;
+    3) rm -f "$tmp"; _shmutant_mutate_restore "$dir" "$dirmode"; return 2 ;;
+    *) rm -f "$tmp"; _shmutant_mutate_restore "$dir" "$dirmode"; return 1 ;;
   esac
-  chmod -- "$(_shmutant_mode_spec "$mode")" "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
-  mv -f "$tmp" "$f" 2>/dev/null || { rm -f "$tmp"; return 1; }
+  chmod -- "$(_shmutant_mode_spec "$mode")" "$tmp" 2>/dev/null || { rm -f "$tmp"; _shmutant_mutate_restore "$dir" "$dirmode"; return 1; }
+  mv -f "$tmp" "$f" 2>/dev/null || { rm -f "$tmp"; _shmutant_mutate_restore "$dir" "$dirmode"; return 1; }
+  _shmutant_mutate_restore "$dir" "$dirmode"
   return 0
 }
 
@@ -390,10 +405,35 @@ _shmutant_identity() {
   printf '%s' $(( now / 1000000 - $(_shmutant_etime_secs "$etime") ))
 }
 
+# _shmutant_identity_table — fill SHMUTANT_START[pid] with the start time of every live process
+# from ONE `ps -A`. A kill that asked per pid spent longer identifying a tree than the tree's
+# earliest members needed to finish.
+_shmutant_identity_table() {
+  local line now
+  SHMUTANT_START=()
+  now="$(_shmutant_now)"; now=$(( now / 1000000 ))
+  # awk does the etime arithmetic for every row at once; a bash loop over the whole process
+  # table took longer than the tree being frozen had left to live.
+  while IFS= read -r line; do
+    [ -n "$line" ] && SHMUTANT_START["${line%% *}"]="${line#* }"
+  done < <(ps -A -o pid= -o etime= 2>/dev/null | awk -v now="$now" '
+    NF == 2 && $1 ~ /^[0-9]+$/ {
+      e = $2; d = 0
+      if (e ~ /-/) { split(e, a, "-"); d = a[1]; e = a[2] }
+      n = split(e, t, ":")
+      if (n == 3) s = t[1] * 3600 + t[2] * 60 + t[3]
+      else if (n == 2) s = t[1] * 60 + t[2]
+      else s = t[1]
+      print $1, now - (d * 86400 + s)
+    }')
+}
+
 # _shmutant_alive_since <pid> <start-seen> — true when <pid> still started when <start-seen>
 # says, within the one-second resolution of etime. A reused pid started later.
 _shmutant_alive_since() {
   local now d
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  case "$2" in ''|*[!0-9]*) return 1 ;; esac
   now="$(_shmutant_identity "$1")" || return 1
   d=$(( now - $2 ))
   [ "$d" -ge -1 ] && [ "$d" -le 1 ]
@@ -403,61 +443,95 @@ _shmutant_alive_since() {
 # descendant found now, and to each of <pids…>: the descendants found before an earlier signal,
 # which a leader's death may have reparented out of reach of a fresh walk.
 # <pids…> are `pid:identity` pairs recorded when each was seen (see _shmutant_identity); one that
-# no longer matches is a reused pid and is left alone. Every target is decided first and signalled in
+# no longer matches is a reused pid and is left alone. `pid:` with no identity is a frozen pid. Every target is decided first and signalled in
 # ONE kill: a parent signalled after its child has already run on past the child's death.
 # _shmutant_snapshot <pid> — print `pid:identity` for every live descendant of <pid> now.
 _shmutant_snapshot() {
-  local p e
+  local p
+  local -A SHMUTANT_START=()
+  _shmutant_identity_table
   while IFS= read -r p; do
     [ -n "$p" ] || continue
-    e="$(_shmutant_identity "$p")" || continue
-    printf '%s:%s\n' "$p" "$e"
+    [ -n "${SHMUTANT_START[$p]:-}" ] || continue
+    printf '%s:%s\n' "$p" "${SHMUTANT_START[$p]}"
   done < <(_shmutant_descendants "$1")
 }
 
-# _shmutant_kill_tree_twice <pid> <pids…> — end <pid>'s tree: freeze it, TERM it, a second of
-# grace, KILL. Freezing first is what closes the window: a snapshot taken while the tree is
-# still forking misses whatever forks next, so the root is stopped, its descendants found and
-# stopped in turn until a pass finds nothing new (a stopped process cannot fork), and only then
-# is anything signalled. <pids…> are identity-checked victims recorded earlier (the watchdog's,
-# the wrapper's) and are handled the same way.
-_shmutant_kill_tree_twice() {
-  local pid="$1" p alive=0 rootid rounds=0 new
-  local -a victims=() found=()
-  local -A have=()
-  shift
-  rootid="$(_shmutant_identity "$pid")" && { victims+=("$pid:$rootid"); kill -STOP "$pid" 2>/dev/null; }
+# _shmutant_freeze_from — stop every descendant of the pids in `roots`, repeatedly, until a pass
+# finds nothing new; appends what it stopped to `frozen`/`have`. Shares its caller's arrays.
+_shmutant_freeze_from() {
+  local r p new rounds=0
+  local -a found=()
   while :; do
     new=0
-    mapfile -t found < <(_shmutant_snapshot "$pid")
-    for p in "${found[@]}"; do
-      [ -n "$p" ] || continue
-      [ -n "${have[${p%%:*}]:-}" ] && continue
-      have["${p%%:*}"]=1; victims+=("$p"); new=1
-      kill -STOP "${p%%:*}" 2>/dev/null
+    for r in "${roots[@]}"; do
+      mapfile -t found < <(_shmutant_descendants "$r")
+      [ "${#found[@]}" -gt 0 ] || continue
+      kill -STOP "${found[@]}" 2>/dev/null
+      for p in "${found[@]}"; do
+        [ -n "$p" ] || continue
+        [ -n "${have[$p]:-}" ] && continue
+        have["$p"]=1; frozen+=("$p:"); roots+=("$p"); new=1
+      done
     done
     rounds=$((rounds + 1))
-    [ "$new" = 1 ] && [ "$rounds" -lt 8 ] || break
+    [ "$new" = 1 ] && [ "$rounds" -lt 16 ] || break
   done
-  _shmutant_kill_tree TERM "$pid" "$@" "${victims[@]}"
-  # Continued after TERM, so a handler or the default action can run.
-  for p in "$@" "${victims[@]}"; do [ -n "$p" ] && kill -CONT "${p%%:*}" 2>/dev/null; done
-  kill -CONT -- -"$pid" 2>/dev/null
-  # The grace second is spent only when something is still there to escalate against.
-  kill -0 -- -"$pid" 2>/dev/null && alive=1
-  for p in "$@" "${victims[@]}"; do [ -n "$p" ] && kill -0 "${p%%:*}" 2>/dev/null && { alive=1; break; }; done
-  [ "$alive" = 1 ] || [ -n "$(_shmutant_descendants "$pid")" ] || return 0
-  sleep 1
-  _shmutant_kill_tree KILL "$pid" "$@" "${victims[@]}"
+}
+
+# _shmutant_kill_tree_twice <pid> <pids…> — end <pid>'s tree: freeze it, then KILL it. Freezing
+# first is what closes the window: a snapshot taken while the tree is still forking misses
+# whatever forks next, so the root is stopped, its descendants found and stopped in turn until a
+# pass finds nothing new (a stopped process cannot fork), and only then is anything signalled.
+# Stopping comes before anything else and in bulk: a pass that spent a `ps` per process let the
+# earliest children finish before their turn. A stopped pid cannot exit, so it cannot be reused
+# either, and frozen pids need no identity. There is no TERM and no grace: continuing a frozen
+# tree to let it handle TERM also lets a handler that ignores it run on, and after a deadline
+# nothing may run at all. <pids…> are identity-checked victims recorded earlier (the watchdog's,
+# the wrapper's), frozen and searched from as well: one that still lived could otherwise fork a
+# child out of reach.
+_shmutant_kill_tree_twice() {
+  local pid="$1" p d
+  local -a frozen=() roots=("$pid")
+  local -A have=()
+  shift
+  kill -STOP "$pid" 2>/dev/null && { frozen+=("$pid:"); have["$pid"]=1; }
+  # The root's tree first, before any identity work: every pass is one ps and one bulk stop.
+  _shmutant_freeze_from
+  # Then the retained victims that are still themselves (one table, one bulk stop), and the
+  # trees below them.
+  local -A SHMUTANT_START=()
+  local -a stillours=()
+  _shmutant_identity_table
+  for p in "$@"; do
+    [ -n "$p" ] || continue
+    [ -n "${have[${p%%:*}]:-}" ] && continue
+    case "${p%%:*}${p#*:}" in *[!0-9]*|'') continue ;; esac
+    [ -n "${SHMUTANT_START[${p%%:*}]:-}" ] || continue
+    d=$(( SHMUTANT_START[${p%%:*}] - ${p#*:} ))
+    [ "$d" -ge -1 ] && [ "$d" -le 1 ] || continue
+    have["${p%%:*}"]=1; stillours+=("${p%%:*}")
+  done
+  if [ "${#stillours[@]}" -gt 0 ]; then
+    kill -STOP "${stillours[@]}" 2>/dev/null
+    roots=("${stillours[@]}")
+    for p in "${stillours[@]}"; do frozen+=("$p:"); done
+    _shmutant_freeze_from
+  fi
+  _shmutant_kill_tree KILL "$pid" "${frozen[@]}"
+  return 0
 }
 
 _shmutant_kill_tree() {
   local sig="$1" pid="$2" p
   local -a targets=() now=()
   shift 2
+  # A victim with an empty identity is frozen, and a frozen pid cannot have been reused.
   for p in "$@"; do
     [ -n "$p" ] || continue
-    _shmutant_alive_since "${p%%:*}" "${p#*:}" && targets+=("${p%%:*}")
+    if [ -z "${p#*:}" ]; then targets+=("${p%%:*}")
+    else _shmutant_alive_since "${p%%:*}" "${p#*:}" && targets+=("${p%%:*}")
+    fi
   done
   mapfile -t now < <(_shmutant_descendants "$pid")
   for p in "${now[@]}"; do [ -n "$p" ] && targets+=("$p"); done
@@ -483,13 +557,20 @@ _shmutant_run_bounded() {
   SHMUTANT_RUN_MARK="$mark"
   (
     set -m
+    # The three channels back from the run (its leftover descendants, the watchdog's sightings,
+    # the timeout marker) are opened HERE, before the callback runs, as descriptors on files
+    # that are then unlinked: a callback that removes or locks its worker directory afterwards
+    # cannot take them away, and the marker on disk is only ever created by the watchdog.
+    : > "$mark.left" && : > "$mark.seen" || exit 127
+    exec {left_w}>"$mark.left" {left_r}<"$mark.left" {seen_w}>"$mark.seen" {seen_r}<"$mark.seen"
+    rm -f -- "$mark.left" "$mark.seen"
     # The wrapper records its descendants the moment the callback returns, while it is still
     # their parent: a helper the callback backgrounded is otherwise reparented before anyone
     # could see it.
     # The marker path is copied under a name no callback would assign: the callback runs in
     # this scope and could otherwise redirect the record anywhere by assigning `mark`.
-    ( _shmutant_wrap_left="$mark.left"; export SHMUTANT_SELECT="$sel"; "$run" "$root" "$sel"; rrc=$?
-      _shmutant_snapshot "$BASHPID" >| "$_shmutant_wrap_left"; exit "$rrc" ) < /dev/null > "$dir/output" 2>&1 &
+    ( _shmutant_wrap_left="$left_w"; export SHMUTANT_SELECT="$sel"; "$run" "$root" "$sel"; rrc=$?
+      _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; exit "$rrc" ) < /dev/null > "$dir/output" 2>&1 &
     pid=$!
     dog=""
     if [ "$timeout" -gt 0 ]; then
@@ -500,7 +581,7 @@ _shmutant_run_bounded() {
         # not reachable this way; that needs a containment mechanism this file does not use.
         # Cancelled (the run returned): what was seen is left for the runner, which still has
         # to clean up whatever the callback left behind.
-        trap 'kill "$s" 2>/dev/null; for p in "${!seen[@]}"; do printf "%s:%s\n" "$p" "${seen[$p]}"; done > "$mark.seen"; exit 0' TERM
+        trap 'kill "$s" 2>/dev/null; for p in "${!seen[@]}"; do printf "%s:%s\n" "$p" "${seen[$p]}"; done >&"$seen_w"; exit 0' TERM
         declare -A seen=()
         # 10#: a validated value like 08 is still octal to bash arithmetic.
         t_end=$(( $(_shmutant_now) + 10#$timeout * 1000000 ))
@@ -519,26 +600,33 @@ _shmutant_run_bounded() {
         # An array of pid:identity pairs, never an unquoted expansion.
         victims=()
         for p in "${!seen[@]}"; do victims+=("$p:${seen[$p]}"); done
-        _shmutant_kill_tree TERM "$pid" "${victims[@]}"
-        sleep 1
-        _shmutant_kill_tree KILL "$pid" "${victims[@]}"
+        _shmutant_kill_tree_twice "$pid" "${victims[@]}"
       ) < /dev/null > /dev/null 2>&1 &
       dog=$!
     fi
-    wait "$pid"; rc=$?
     if [ -n "$dog" ]; then
-      # Once the watchdog has fired, let it reach KILL: the group leader dying to TERM does not
-      # mean a descendant that ignores TERM did.
-      [ -e "$mark" ] || kill -TERM "$dog" 2>/dev/null
-      wait "$dog" 2>/dev/null
+      # Whichever ends first. A watchdog that ends before the leader has fired and failed to
+      # finish (or died): the leader may be frozen, and waiting on it would never return, so
+      # the kill is completed here and the run scored as a timeout.
+      wait -n -p done_first "$pid" "$dog"; rc=$?
+      if [ "${done_first:-}" != "$pid" ]; then
+        : > "$mark"
+        _shmutant_kill_tree_twice "$pid"
+        wait "$pid"; rc=$?
+      else
+        # Once the watchdog has fired, let it reach KILL; otherwise cancel it.
+        [ -e "$mark" ] || kill -TERM "$dog" 2>/dev/null
+        wait "$dog" 2>/dev/null
+      fi
+    else
+      wait "$pid"; rc=$?
     fi
     if [ ! -e "$mark" ]; then
       # The callback returned, which says nothing about what it backgrounded: its process group
       # and every descendant the watchdog saw are ended before the verdict is accepted.
       leftovers=()
-      [ -f "$mark.left" ] && mapfile -t leftovers < "$mark.left"
-      [ -f "$mark.seen" ] && mapfile -t -O "${#leftovers[@]}" leftovers < "$mark.seen"
-      rm -f -- "$mark.seen" "$mark.left"
+      mapfile -t leftovers <&"$left_r"
+      mapfile -t -O "${#leftovers[@]}" leftovers <&"$seen_r"
       _shmutant_kill_tree_twice "$pid" "${leftovers[@]}"
     fi
     exit "$rc"
@@ -550,7 +638,18 @@ _shmutant_run_bounded() {
 # SHMUTANT_KEEP=1, then write the verdict. Every worker exit goes through here, so an early
 # verdict cannot leave a tree behind.
 _shmutant_worker_finish() {
-  [ "${SHMUTANT_KEEP:-0}" = 1 ] || rm -rf -- "$1/tree"
+  # The worker directory is this run's; a callback that made it unwritable does not get to
+  # suppress the verdict.
+  [ -w "$1" ] || chmod -- u+rwx "$1" 2>/dev/null
+  if [ "${SHMUTANT_KEEP:-0}" != 1 ]; then
+    # Only beneath a directory that is still the one this run created: a callback may have
+    # renamed it away and left a symlink to a caller-owned tree in its place.
+    if [ -L "$1" ] || [ "$(_shmutant_abs "$1")" != "$1" ]; then
+      _shmutant_err "refusing to clean $1: it is no longer the worker directory this run created"
+    else
+      _shmutant_remove "$1/tree" || _shmutant_err "could not remove $1/tree"
+    fi
+  fi
   # Written beside and renamed over `verdict`: a callback can reach this directory and plant a
   # symlink under that name, and a rename replaces the link rather than writing through it.
   local tmp
@@ -650,9 +749,32 @@ _shmutant_detail() {
 
 # _shmutant_fresh_dir <dir> — remove <dir> and create it empty; false when either step fails or
 # anything is still inside it.
+# _shmutant_remove <path> — remove a tree this harness created. Directories are made writable
+# first (a preserved read-only root would otherwise refuse), and a path whose parent no longer
+# resolves to where it was created is left alone: a callback can rename a worker directory
+# and put a symlink in its place, and rm -rf follows a symlink in an intermediate component.
+# Returns 1 when something is still there afterwards.
+_shmutant_remove() {
+  local path="$1" parent
+  [ -e "$path" ] || [ -L "$path" ] || return 0
+  parent="$(dirname -- "$path")"
+  if [ -L "$parent" ]; then
+    _shmutant_err "refusing to remove $path: its parent is now a symlink, not the directory it was created in"; return 1
+  fi
+  if [ -d "$path" ] && [ ! -L "$path" ]; then
+    # One pass per level: find cannot enter a directory until the pass before made it readable.
+    local i
+    for (( i = 0; i < 64; i++ )); do
+      [ -n "$(find "$path" -type d ! -perm -u+rwx -print 2>/dev/null | head -n 1)" ] || break
+      find "$path" -type d ! -perm -u+rwx -exec chmod u+rwx {} + 2>/dev/null
+    done
+  fi
+  rm -rf -- "$path" 2>/dev/null
+  [ ! -e "$path" ] && [ ! -L "$path" ]
+}
+
 _shmutant_fresh_dir() {
-  rm -rf -- "$1" 2>/dev/null
-  [ ! -e "$1" ] || return 1
+  _shmutant_remove "$1" || return 1
   mkdir -p -- "$1" 2>/dev/null
 }
 
@@ -711,8 +833,9 @@ _shmutant_run_jobs_loop() {
     if ! _shmutant_fresh_dir "$wd/$kind-$i"; then
       _shmutant_err "cannot recreate $wd/$kind-$i — a stale verdict there could be read as this run's; refusing to continue"
       # The workers already running are ended, not waited for: one of them may be unbounded.
-      for p in "${pids[@]}"; do _shmutant_kill_tree_twice "$p" & done
-      wait "${pids[@]}" 2>/dev/null
+      local -a helpers=()
+      for p in "${pids[@]}"; do _shmutant_kill_tree_twice "$p" & helpers+=("$!"); done
+      wait "${helpers[@]}" "${pids[@]}" 2>/dev/null
       return 2
     fi
     _shmutant_worker "$kind" "$i" "$wd" "$run" "$suffix" &
@@ -803,7 +926,9 @@ _shmutant_open_stream() {
 # _shmutant_pool_fail <label> <workdir> — the exit for a pool that stops after prepare: the
 # pristine tree goes unless SHMUTANT_KEEP=1, and the stream descriptor is closed.
 _shmutant_pool_fail() {
-  [ "${SHMUTANT_KEEP:-0}" = 1 ] || rm -rf -- "$2/pristine"
+  if [ "${SHMUTANT_KEEP:-0}" != 1 ]; then
+    _shmutant_remove "$2/pristine" || { _shmutant_err "$1: could not remove $2/pristine"; SHMUTANT_CLEANUP_FAILED=1; }
+  fi
   if [ -n "${SHMUTANT_STREAM_FD:-}" ]; then exec {SHMUTANT_STREAM_FD}>&-; unset SHMUTANT_STREAM_FD; fi
   unset SHMUTANT_STREAM_OPENED
 }
@@ -820,7 +945,7 @@ shmutant_pool() {
   local -a base_sel=() base_verdict=()
   n="${#SHMUTANT_ROWS_NAME[@]}"
   t0="$(_shmutant_now)"
-  SHMUTANT_EMIT_FAILED=0
+  SHMUTANT_EMIT_FAILED=0; SHMUTANT_CLEANUP_FAILED=0
   if [ "${SHMUTANT_DECL_ERRORS:-0}" -ne 0 ]; then
     _shmutant_err "$label: $SHMUTANT_DECL_ERRORS declaration(s) were refused — a table missing rows it was meant to carry proves nothing"
     return 2
@@ -948,6 +1073,10 @@ shmutant_pool() {
   _shmutant_emit shmutant 1 summary "$label" "$n" "$killed" "$jobs" "$(_shmutant_secs $(( t1 - t0 )))"
   _shmutant_err "$label: $killed/$n mutation(s) killed on their own witness (jobs=$jobs, $(_shmutant_secs $(( t1 - t0 )))s)"
   _shmutant_pool_fail "$label" "$wd"
+  if [ "${SHMUTANT_CLEANUP_FAILED:-0}" -ne 0 ]; then
+    _shmutant_err "$label: the prepared tree could not be removed — the next run in this workdir would find it"
+    return 2
+  fi
   if [ "$SHMUTANT_EMIT_FAILED" -ne 0 ]; then
     _shmutant_err "$label: the verdict stream could not be written (${SHMUTANT_STREAM:-stdout}) — the records above are incomplete"
     return 2

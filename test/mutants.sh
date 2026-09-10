@@ -129,10 +129,6 @@ shmutant_mut 'a timeout is reported as an abort' \
   '        : > "$mark"' \
   '        :' \
   't_verdict_timeout'
-shmutant_mut 'a timeout never escalates to KILL' \
-  '        _shmutant_kill_tree KILL "$pid"' \
-  '        :' \
-  't_verdict_timeout_kills_a_term_ignoring_descendant'
 shmutant_mut 'a blank verdict file reads as a verdict' \
   '[ -n "$SHMUTANT_V_VERDICT" ] || SHMUTANT_V_VERDICT=lost' \
   '[ -n "$SHMUTANT_V_VERDICT" ] || true' \
@@ -164,8 +160,8 @@ shmutant_mut 'baseline runs once per row instead of once per selector' \
   '[ "$k" = "$sel" ] && continue; done' \
   't_pool_runs_baseline_once_per_selector'
 shmutant_mut 'SHMUTANT_KEEP=1 removes the clone' \
-  '[ "${SHMUTANT_KEEP:-0}" = 1 ] || rm -rf -- "$1/tree"' \
-  '[ "${SHMUTANT_KEEP:-0}" = 0 ] || rm -rf -- "$1/tree"' \
+  '  if [ "${SHMUTANT_KEEP:-0}" != 1 ]; then' \
+  '  if true; then' \
   't_pool_keep_retains_clones'
 shmutant_mut 'a nested root is not carried into the clone' \
   'root="$dir/tree$suffix"' \
@@ -218,15 +214,11 @@ shmutant_mut 'the rewrite always appends a final newline' \
   'ENVIRON["SHMUTANT_MUT_NL"] != 2) printf' \
   't_mutate_preserves_missing_final_newline'
 shmutant_mut 'the temp file is a predictable sibling name again' \
-  'tmp="$(mktemp "$(dirname -- "$f")/.shmutant.XXXXXX" 2>/dev/null)" || return 1' \
+  'tmp="$(mktemp "$dir/.shmutant.XXXXXX" 2>/dev/null)" || { _shmutant_mutate_restore "$dir" "$dirmode"; return 1; }' \
   'tmp="$f.shmutant-tmp"' \
   't_mutate_never_follows_a_stale_temp_link'
-shmutant_mut 'the watchdog is cancelled before it can escalate to KILL' \
-  '[ -e "$mark" ] || kill -TERM "$dog" 2>/dev/null' \
-  'kill -TERM "$dog" 2>/dev/null' \
-  't_verdict_timeout_kills_a_term_ignoring_descendant'
 shmutant_mut 'worker directories are reused with their stale contents' \
-  '  rm -rf -- "$1" 2>/dev/null' \
+  '  _shmutant_remove "$1" || return 1' \
   '  :' \
   't_pool_recreates_worker_dirs'
 shmutant_mut 'an unapplied row keeps its clone' \
@@ -315,10 +307,6 @@ shmutant_mut 'an overflow-length timeout passes' \
   't_pool_validates_red_status_and_prefix'
 
 # --- guards added for the sixth review round ---
-shmutant_mut 'the KILL escalation forgets the descendants found before TERM' \
-  '_shmutant_kill_tree KILL "$pid" "${victims[@]}"' \
-  '_shmutant_kill_tree KILL "$pid"' \
-  't_verdict_timeout_kills_a_reparented_term_ignoring_descendant'
 shmutant_mut 'the timeout is read bare, so nounset aborts the pool' \
   'local v_timeout="${SHMUTANT_TIMEOUT:-300}"' \
   'local v_timeout="$SHMUTANT_TIMEOUT"' \
@@ -342,9 +330,9 @@ shmutant_mut 'the setuid bit is dropped by the rewrite' \
 
 # --- guards added for the seventh review round ---
 shmutant_mut 'the descendant list is split by the caller IFS again' \
-  '_shmutant_kill_tree KILL "$pid" "${victims[@]}"' \
-  '_shmutant_kill_tree KILL "$pid" $(printf "%s\n" "${victims[@]}")' \
-  't_verdict_timeout_kills_a_reparented_term_ignoring_descendant'
+  '        _shmutant_kill_tree_twice "$pid" "${victims[@]}"' \
+  '        _shmutant_kill_tree_twice "$pid" $(printf "%s\n" "${victims[@]}")' \
+  't_verdict_timeout_kills_a_descendant_seen_then_reparented'
 shmutant_mut 'prepare runs in a subshell' \
   '"$prep" "$wd/pristine" >| "$pout"; prc=$?' \
   '( "$prep" "$wd/pristine" >| "$pout" ); prc=$?' \
@@ -354,8 +342,8 @@ shmutant_mut 'surplus mutation arguments are accepted' \
   'if [ "$#" -lt 4 ]; then' \
   't_mut_validates_rows'
 shmutant_mut 'a worker directory that cannot be recreated is used anyway' \
-  '  [ ! -e "$1" ] || return 1' \
-  '  :' \
+  '  [ ! -e "$path" ] && [ ! -L "$path" ]' \
+  '  true' \
   't_pool_refuses_unremovable_worker_dir'
 
 # --- guards added for the eighth review round ---
@@ -517,10 +505,6 @@ shmutant_mut 'an old literal with a newline is accepted' \
   't_mut_validates_rows'
 
 # --- guards added for the twelfth review round ---
-shmutant_mut 'the abort handlers do not retain TERM victims for KILL' \
-  '  _shmutant_kill_tree KILL "$pid" "$@" "${victims[@]}"' \
-  '  _shmutant_kill_tree KILL "$pid" "$@"' \
-  't_pool_interrupted_kills_its_workers'
 shmutant_mut 'a callback that returned normally leaves its helpers running' \
   '      _shmutant_kill_tree_twice "$pid" "${leftovers[@]}"' \
   '      :' \
@@ -552,8 +536,8 @@ shmutant_mut 'the row pool runs as a condition, muting callback errexit' \
 
 # --- guards added for the thirteenth review round ---
 shmutant_mut 'the leftover record path is read after the callback could assign mark' \
-  '_shmutant_snapshot "$BASHPID" >| "$_shmutant_wrap_left"; exit "$rrc" )' \
-  '_shmutant_snapshot "$BASHPID" >| "$mark.left"; exit "$rrc" )' \
+  '_shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; exit "$rrc" )' \
+  '_shmutant_snapshot "$BASHPID" >&"$left_w"; exit "$rrc" )' \
   't_run_cannot_redirect_the_leftover_record'
 shmutant_mut 'the hard-link preflight scans the top-level .git the copy skips' \
   'find "$src" -path "$src/.git" -prune -o -type f -links +1 -print' \
@@ -604,10 +588,36 @@ shmutant_mut 'a failed root metadata restore is a silent success' \
   '  rc=0; [ "$rc" -eq 0 ] || _shmutant_err "copy_tree: could not reproduce' \
   't_pool_clone_keeps_metadata'
 shmutant_mut 'a directory that cannot be recreated waits on running workers' \
-  '      for p in "${pids[@]}"; do _shmutant_kill_tree_twice "$p" & done' \
+  '      for p in "${pids[@]}"; do _shmutant_kill_tree_twice "$p" & helpers+=("$!"); done' \
   '      :' \
   't_pool_aborts_running_workers_when_a_dir_cannot_be_recreated'
 shmutant_mut 'the CLI ignores SHMUTANT_KEEP=1 before the pool settles it' \
   '  [ "${SHMUTANT_KEEP:-0}" = 1 ] && keep=1' \
   '  [ "${SHMUTANT_KEEP:-0}" = 2 ] && keep=1' \
   't_cli_run'
+
+# --- guards added for the sixteenth review round ---
+shmutant_mut 'the leftover record is written by path after the callback' \
+  '_shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; exit "$rrc" )' \
+  '_shmutant_snapshot "$BASHPID" > "$SHMUTANT_RUN_MARK.left" 2>/dev/null; exit "$rrc" )' \
+  't_run_cannot_lose_the_leftover_record_by_locking_its_dir'
+shmutant_mut 'cleanup beneath a swapped worker directory proceeds' \
+  '    if [ -L "$1" ] || [ "$(_shmutant_abs "$1")" != "$1" ]; then' \
+  '    if false; then' \
+  't_worker_cleanup_refuses_a_swapped_directory'
+shmutant_mut 'a read-only tree of ours is not made removable' \
+  '      find "$path" -type d ! -perm -u+rwx -exec chmod u+rwx {} + 2>/dev/null' \
+  '      :' \
+  't_pool_removes_a_read_only_pristine_root'
+shmutant_mut 'the watchdog signals without freezing the tree' \
+  '        _shmutant_kill_tree_twice "$pid" "${victims[@]}"' \
+  '        _shmutant_kill_tree KILL "$pid" "${victims[@]}"' \
+  't_verdict_timeout_stops_a_run_that_keeps_forking'
+shmutant_mut 'retained victims are neither frozen nor searched from' \
+  '    have["${p%%:*}"]=1; stillours+=("${p%%:*}")' \
+  '    :' \
+  't_verdict_timeout_kills_a_descendant_seen_then_reparented'
+shmutant_mut 'mutate does not loosen a read-only directory' \
+  '    chmod -- u+w "$dir" 2>/dev/null || return 1' \
+  '    return 1' \
+  't_pool_removes_a_read_only_pristine_root'
