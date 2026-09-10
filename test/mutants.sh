@@ -574,8 +574,8 @@ shmutant_mut 'the root pid is signalled by number even after it was reaped' \
   '  kill "-$sig" -- -"$pid" "$pid" "${targets[@]}" 2>/dev/null' \
   't_post_run_cleanup_never_signals_a_reaped_root_by_number'
 shmutant_mut 'the stream is reopened by path for every record' \
-  '  if [ -n "${SHMUTANT_STREAM_FD:-}" ]; then' \
-  '  if false; then' \
+  '{ printf '"'"'%s\n'"'"' "$out" >&"$SHMUTANT_STREAM_FD"; } 2>/dev/null || SHMUTANT_EMIT_FAILED=1' \
+  '{ printf '"'"'%s\n'"'"' "$out" >> "$SHMUTANT_STREAM"; } 2>/dev/null || SHMUTANT_EMIT_FAILED=1' \
   't_stream_descriptor_survives_a_callback_swapping_the_path'
 shmutant_mut 'a validation failure after prepare keeps the pristine tree' \
   '      _shmutant_pool_fail "$label" "$wd"; return 2' \
@@ -585,3 +585,29 @@ shmutant_mut 'the destination root does not get the source root mode' \
   '  chmod -- "$(_shmutant_mode_spec "${rootls%% *}")" "$dst" 2>/dev/null' \
   '  :' \
   't_pool_clone_keeps_metadata'
+
+# --- guards added for the fifteenth review round ---
+shmutant_mut 'a stream prepare assigned is not opened' \
+  '  _shmutant_open_stream "$label" || { _shmutant_pool_fail "$label" "$wd"; return 2; }' \
+  '  :' \
+  't_stream_assigned_by_prepare_is_honoured'
+shmutant_mut 'a symlinked source root is scanned and copied differently' \
+  '  src="$(_shmutant_abs "$src")" || { _shmutant_err "copy_tree: cannot resolve $1"; return 1; }' \
+  '  :' \
+  't_copy_tree_excludes_git'
+shmutant_mut 'a symlink destination is written through' \
+  '  if [ -L "$dst" ]; then _shmutant_err "copy_tree: destination $dst is a symlink' \
+  '  if false; then _shmutant_err "copy_tree: destination $dst is a symlink' \
+  't_copy_tree_excludes_git'
+shmutant_mut 'a failed root metadata restore is a silent success' \
+  '  [ "$rc" -eq 0 ] || _shmutant_err "copy_tree: could not reproduce' \
+  '  rc=0; [ "$rc" -eq 0 ] || _shmutant_err "copy_tree: could not reproduce' \
+  't_pool_clone_keeps_metadata'
+shmutant_mut 'a directory that cannot be recreated waits on running workers' \
+  '      for p in "${pids[@]}"; do _shmutant_kill_tree_twice "$p" & done' \
+  '      :' \
+  't_pool_aborts_running_workers_when_a_dir_cannot_be_recreated'
+shmutant_mut 'the CLI ignores SHMUTANT_KEEP=1 before the pool settles it' \
+  '  [ "${SHMUTANT_KEEP:-0}" = 1 ] && keep=1' \
+  '  [ "${SHMUTANT_KEEP:-0}" = 2 ] && keep=1' \
+  't_cli_run'

@@ -107,7 +107,8 @@ carries verdict records only. Its `prepare` and `run` must be defined in the pla
 by the invoking environment are discarded first. `prepare` runs in the pool's own shell, so state it exports is visible to
 `run`, and its own `set -e` is honoured: a prepare that aborts ends the run as a harness error.
 `shmutant_copy_tree` and the per-row clones keep mode, ownership and timestamps, the root
-directory included; a source with a multiply linked regular file outside its top-level `.git`
+directory included (a root whose metadata cannot be reproduced is a copy failure); a symlinked
+source root is resolved first and a symlink at the destination is refused; a source with a multiply linked regular file outside its top-level `.git`
 is refused by `shmutant_copy_tree`, since a copy cannot keep the links joined. A pool that
 stops after `prepare` (a target the tree lacks, a setting `prepare` broke) removes the prepared
 tree unless `SHMUTANT_KEEP=1`.
@@ -188,10 +189,10 @@ on every run. A workdir the CLI created for itself is removed unless `--keep`.
 | Variable | Default | Use |
 |---|---|---|
 | `SHMUTANT_JOBS` | CPU count | Worker budget, a positive integer. The pool's cap (argument 5, default 8, validated the same way) still applies. |
-| `SHMUTANT_TIMEOUT` | 300 | Seconds per run before the run is killed: its process group, every descendant seen while it ran (snapshotted twice a second), TERM then KILL. When a run returns normally, whatever it backgrounded is ended the same way before its verdict is accepted. A process that detaches into its own session within half a second of forking is out of reach; that needs cgroups or `setsid`, which this tool does not depend on. Raise the bound for a suite that cannot select; 0 disables. |
+| `SHMUTANT_TIMEOUT` | 300 | Seconds per run before the run is killed: its process group, every descendant seen while it ran (snapshotted twice a second), TERM then KILL. When a run returns normally, whatever it backgrounded is ended the same way before its verdict is accepted. A kill freezes the tree first (SIGSTOP, then the descendants found, until nothing new appears), so a tree still forking cannot slip a process past it. A process that detaches into its own session within half a second of forking is out of reach; that needs cgroups or `setsid`, which this tool does not depend on. Raise the bound for a suite that cannot select; 0 disables. |
 | `SHMUTANT_BASELINE` | 1 | Run every distinct selector once, uninjected, and require green. Set 0 when the suite was proven green in a previous step. 0 or 1 only. |
 | `SHMUTANT_KEEP` | 0 | Keep every clone and the pristine tree. 0 or 1 only. |
-| `SHMUTANT_STREAM` | stdout | Append the verdict stream to a file instead. Its directory must exist; it must be a regular file or absent (no symlink, no FIFO), outside the workdir. It is opened once, before any callback runs, and every record goes to that descriptor. A relative path is resolved where the CLI was invoked. |
+| `SHMUTANT_STREAM` | stdout | Append the verdict stream to a file instead. Its directory must exist; it must be a regular file or absent (no symlink, no FIFO), outside the workdir. It is opened once, before any callback runs, and every record goes to that descriptor; a path `prepare` assigns is validated and opened the same way when it returns. A relative path is resolved where the CLI was invoked. |
 | `SHMUTANT_RED_STATUS` | 1 | The exit status that means red, 1 to 255. |
 | `SHMUTANT_RED_PREFIX` | `FAIL: ` | The prefix of a red line; must not be empty or contain a newline. |
 

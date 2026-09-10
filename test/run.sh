@@ -810,6 +810,22 @@ t_pool_runs_prepare_in_its_own_shell() {
   unset TOY_MARK
 }
 
+t_pool_aborts_running_workers_when_a_dir_cannot_be_recreated() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  shmutant_mut 'b' '$1 + $2' '$1 * $2' 'add-works'
+  hanging_run() { : > "$T/started"; bash -c "sleep 30; touch '$T/finished'"; }
+  mkdir -p "$T/wd/mut-1/held"; chmod 555 "$T/wd/mut-1"
+  local t0; t0="$(_shmutant_now)"
+  SHMUTANT_JOBS=2 SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=0 pool lbl "$T/wd" toy_prepare hanging_run
+  chmod 755 "$T/wd/mut-1"
+  rc_is "$RC" 2 'the harness error is reported'
+  [ $(( ($(_shmutant_now) - t0) / 1000000 )) -lt 15 ] || fail_ 'the pool waited on the unbounded worker instead of ending it'
+  sleep 1
+  [ -e "$T/finished" ] && fail_ 'the running worker survived the abort'
+}
+
 t_pool_refuses_unremovable_pristine() {
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
@@ -868,6 +884,17 @@ t_pool_clone_keeps_metadata() {
   eq "$(ls -ld "$T/root-copy" | cut -c1-10)" 'drwx------' 'the destination root carries the source root mode'
   [ "$T/root-copy" -nt "$T/root" ] && fail_ 'the destination root did not keep the source root timestamp'
   chmod 755 "$T/root" "$T/root-copy"
+  local rootowned
+  for rootowned in /var/empty /var/empty; do
+    [ -d "$rootowned" ] && [ "$(ls -ld "$rootowned" | awk '{ print $3 }')" != "$(id -un)" ] && break
+    rootowned=""
+  done
+  if [ -n "$rootowned" ] && [ "$(id -u)" -ne 0 ]; then
+    shmutant_copy_tree "$rootowned" "$T/owned-copy" 2>"$T/e"; rc_is $? 1 'a root whose owner cannot be reproduced is a copy failure, not a silent success'
+    has "$(cat "$T/e")" 'could not reproduce' 'says why'
+  else
+    echo "note: $_unit: no directory owned by another user was available, or running as root; the ownership-failure path was not exercised"
+  fi
   chmod 755 "$T/toy/lib.sh"
 }
 
@@ -1058,6 +1085,23 @@ t_stream_relative_survives_a_prepare_that_cds() {
   [ -e "$T/wd/pristine/rel.tsv" ] && fail_ 'the stream was written inside pristine'
 }
 
+t_stream_assigned_by_prepare_is_honoured() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  # shellcheck disable=SC2034
+  redirecting_prepare() { SHMUTANT_STREAM="$T/late.tsv"; shmutant_copy_tree "$TOY" "$1"; }
+  pool lbl "$T/wd" toy_prepare toy_run
+  ( shmutant_pool lbl "$T/wd2" redirecting_prepare toy_run > "$T/out" 2>/dev/null ); rc_is $? 0 'killed'
+  eq "$(grep -c '^shmutant' "$T/late.tsv")" 3 'a stream path assigned by prepare receives the records'
+  eq "$(cat "$T/out")" '' 'and nothing went to stdout'
+  ln -sf "$T/victim-late" "$T/late2.tsv"; printf 'precious\n' > "$T/victim-late"
+  # shellcheck disable=SC2034
+  linking_prepare() { SHMUTANT_STREAM="$T/late2.tsv"; shmutant_copy_tree "$TOY" "$1"; }
+  ( shmutant_pool lbl "$T/wd3" linking_prepare toy_run > /dev/null 2>&1 ); rc_is $? 2 'a symlink stream assigned by prepare is refused like one set up front'
+  eq "$(cat "$T/victim-late")" precious 'and never written through'
+}
+
 t_stream_to_file() {
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
@@ -1092,7 +1136,12 @@ t_copy_tree_excludes_git() {
   mkdir -p "$T/gl/.git/objects"; printf 'o' > "$T/gl/.git/objects/x"; ln "$T/gl/.git/objects/x" "$T/gl/.git/objects/y"; printf 'f' > "$T/gl/f"
   shmutant_copy_tree "$T/gl" "$T/gl-copy"; rc_is $? 0 'hard links inside the top-level .git, which the copy skips, do not refuse the copy'
   eq "$(cat "$T/gl-copy/f")" f 'the rest arrived'
-  mkdir -p "$T/hl"; printf 'x' > "$T/hl/a"; ln "$T/hl/a" "$T/hl/b"
+  ln -s "$T/hl" "$T/hl-link"; mkdir -p "$T/hl"; printf 'x' > "$T/hl/a"; ln "$T/hl/a" "$T/hl/b"
+  shmutant_copy_tree "$T/hl-link" "$T/hl-link-copy" 2>/dev/null; rc_is $? 1 'a symlinked source root is resolved first, so its hard links are still seen'
+  mkdir -p "$T/real-dst"; ln -s "$T/real-dst" "$T/dst-link"
+  shmutant_copy_tree "$T/src" "$T/dst-link" 2>"$T/e"; rc_is $? 1 'a symlink at the destination is refused'
+  has "$(cat "$T/e")" 'is a symlink' 'says why'
+  [ -e "$T/real-dst/top" ] && fail_ 'the copy went through the destination link'
   shmutant_copy_tree "$T/hl" "$T/hl-copy" 2>"$T/e"; rc_is $? 1 'a source with a hard-linked file is refused: a copy cannot keep the links joined'
   has "$(cat "$T/e")" 'hard link' 'says why'
   shmutant_copy_tree "$T/src" "$T/src/.work/pristine" 2>"$T/e"; rc_is $? 1 'a destination inside the source is refused'
@@ -1231,6 +1280,12 @@ EOF
   sleep 4
   [ -e "$T/toy/finished" ] && fail_ 'a worker outlived the CLI that was sent TERM'
   eq "$(find "$T/tmpd" -mindepth 1 | wc -l | tr -d ' ')" 0 'the interrupted CLI removed the workdir it created'
+  sed 's/^prepare() {/prepare() { : > "$SHMUTANT_PLAN_DIR\/preparing"; sleep 3;/' "$T/toy/plan-hang.sh" > "$T/toy/plan-slow-prepare.sh"
+  SHMUTANT_KEEP=1 TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-slow-prepare.sh" --timeout 0 --no-baseline > /dev/null 2>&1 & cli=$!
+  wait_for "$T/toy/preparing" || fail_ 'prepare never started'; rm -f "$T/toy/preparing"
+  kill -TERM "$cli"; wait "$cli" 2>/dev/null
+  [ "$(find "$T/tmpd" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" -ge 1 ] || fail_ 'SHMUTANT_KEEP=1 in the environment was not honoured by an interrupt during prepare'
+  rm -rf "$T/tmpd"/*
   sed 's/^prepare() {/prepare() { SHMUTANT_KEEP=1;/' "$T/toy/plan-hang.sh" > "$T/toy/plan-hang-keep.sh"
   TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-hang-keep.sh" --timeout 0 --no-baseline > /dev/null 2>&1 & cli=$!
   wait_for "$T/toy/started" || fail_ 'the keep run never started'; rm -f "$T/toy/started"
