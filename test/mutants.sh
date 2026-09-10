@@ -126,7 +126,7 @@ shmutant_mut 'the skip flag is ignored when starting workers' \
   'if false; then continue; fi' \
   't_verdict_baseline_red'
 shmutant_mut 'a timeout is reported as an abort' \
-  '        : > "$mark"' \
+  '        printf '"'"'fired\n'"'"' >&"$fired"' \
   '        :' \
   't_verdict_timeout'
 shmutant_mut 'a blank verdict file reads as a verdict' \
@@ -330,8 +330,8 @@ shmutant_mut 'the setuid bit is dropped by the rewrite' \
 
 # --- guards added for the seventh review round ---
 shmutant_mut 'the descendant list is split by the caller IFS again' \
-  '        _shmutant_kill_tree_twice "$pid" "${victims[@]}"' \
-  '        _shmutant_kill_tree_twice "$pid" $(printf "%s\n" "${victims[@]}")' \
+  '        _shmutant_kill_tree_twice "$pid:$rootid" "${victims[@]}"' \
+  '        _shmutant_kill_tree_twice "$pid:$rootid" $(printf "%s\n" "${victims[@]}")' \
   't_verdict_timeout_kills_a_descendant_seen_then_reparented'
 shmutant_mut 'prepare runs in a subshell' \
   '"$prep" "$wd/pristine" >| "$pout"; prc=$?' \
@@ -495,10 +495,6 @@ shmutant_mut 'containment honours the caller nocasematch' \
   '  ( shopt -u nocasematch' \
   '  ( :' \
   't_inside_ignores_nocasematch'
-shmutant_mut 'the timeout marker is the predictable name timeout again' \
-  '  mark="$(mktemp "$dir/.fired.XXXXXX")" || { SHMUTANT_RUN_STATUS=127; return; }' \
-  '  mark="$dir/timeout"' \
-  't_verdict_timeout_marker_cannot_be_forged'
 shmutant_mut 'an old literal with a newline is accepted' \
   '  case "$2" in *$'"'"'\n'"'"'*) _shmutant_refuse "mut' \
   '  case "$2" in never-matches) _shmutant_refuse "mut' \
@@ -506,7 +502,7 @@ shmutant_mut 'an old literal with a newline is accepted' \
 
 # --- guards added for the twelfth review round ---
 shmutant_mut 'a callback that returned normally leaves its helpers running' \
-  '      _shmutant_kill_tree_twice "$pid" "${leftovers[@]}"' \
+  '      _shmutant_kill_tree_twice "$pid:$rootid" "${leftovers[@]}"' \
   '      :' \
   't_run_leftovers_are_killed_after_a_normal_return'
 shmutant_mut 'the verdict is written straight to its fixed name' \
@@ -601,16 +597,12 @@ shmutant_mut 'the leftover record is written by path after the callback' \
   '_shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; exit "$rrc" )' \
   '_shmutant_snapshot "$BASHPID" > "$SHMUTANT_RUN_MARK.left" 2>/dev/null; exit "$rrc" )' \
   't_run_cannot_lose_the_leftover_record_by_locking_its_dir'
-shmutant_mut 'cleanup beneath a swapped worker directory proceeds' \
-  '    if [ -L "$1" ] || [ "$(_shmutant_abs "$1")" != "$1" ]; then' \
-  '    if false; then' \
-  't_worker_cleanup_refuses_a_swapped_directory'
 shmutant_mut 'a read-only tree of ours is not made removable' \
   '      find "$path" -type d ! -perm -u+rwx -exec chmod u+rwx {} + 2>/dev/null' \
   '      :' \
   't_pool_removes_a_read_only_pristine_root'
 shmutant_mut 'the watchdog signals without freezing the tree' \
-  '        _shmutant_kill_tree_twice "$pid" "${victims[@]}"' \
+  '        _shmutant_kill_tree_twice "$pid:$rootid" "${victims[@]}"' \
   '        _shmutant_kill_tree KILL "$pid" "${victims[@]}"' \
   't_verdict_timeout_stops_a_run_that_keeps_forking'
 shmutant_mut 'retained victims are neither frozen nor searched from' \
@@ -621,3 +613,29 @@ shmutant_mut 'mutate does not loosen a read-only directory' \
   '    chmod -- u+w "$dir" 2>/dev/null || return 1' \
   '    return 1' \
   't_pool_removes_a_read_only_pristine_root'
+
+# --- guards added for the seventeenth review round ---
+shmutant_mut 'the channel opens are not forced past noclobber' \
+  'exec {left_w}>|"$mark.left" {left_r}<"$mark.left" {seen_w}>|"$mark.seen" {seen_r}<"$mark.seen" {fired}<>"$fifo" {out_r}<"$dir/output"' \
+  'exec {left_w}>"$mark.left" {left_r}<"$mark.left" {seen_w}>"$mark.seen" {seen_r}<"$mark.seen" {fired}<>"$fifo" {out_r}<"$dir/output"' \
+  't_run_cannot_forge_its_output_or_the_marker'
+shmutant_mut 'the verdict is scored from the output path, not the descriptor' \
+  '  SHMUTANT_RUN_OUTPUT="$(cat <&"$out_r")"' \
+  '  SHMUTANT_RUN_OUTPUT="$(cat "$dir/output" 2>/dev/null)"' \
+  't_run_cannot_forge_its_output_or_the_marker'
+shmutant_mut 'a swapped worker directory is cleaned and written beneath' \
+  '  if [ -L "$1" ] || [ "$(ls -di -- "$1" 2>/dev/null | awk '"'"'{ print $1 }'"'"')" != "${SHMUTANT_DIR_ID:-}" ]; then' \
+  '  if false; then' \
+  't_worker_cleanup_refuses_a_swapped_directory'
+shmutant_mut 'a root given with an identity is stopped without checking it' \
+  '  if [ -n "$rootid" ] && _shmutant_alive_since "$pid" "$rootid"; then' \
+  '  if true; then' \
+  't_post_run_cleanup_never_signals_a_reaped_root_by_number'
+shmutant_mut 'a bare wait when no worker has started' \
+  '      [ "${#pids[@]}" -eq 0 ] || wait "${helpers[@]}" "${pids[@]}" 2>/dev/null' \
+  '      wait "${helpers[@]}" "${pids[@]}" 2>/dev/null' \
+  't_pool_refuses_unremovable_worker_dir'
+shmutant_mut 'the baseline arrays are not reset after prepare' \
+  '  killed=0; rc=0; base_sel=(); base_verdict=()' \
+  '  killed=0; rc=0' \
+  't_pool_bookkeeping_survives_prepare_assignments'

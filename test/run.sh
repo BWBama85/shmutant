@@ -516,6 +516,12 @@ t_pool_bookkeeping_survives_prepare_assignments() {
   pool lbl "$T/wd2" accumulating_prepare toy_run
   rc_is "$RC" 0 'a prepare that assigns rc=1 does not make a fully killed pool return 1'
   eq "$(field summary 6)" 1 'a prepare that assigns killed=99 does not inflate the summary'
+  # shellcheck disable=SC2034
+  misaligning_prepare() { base_verdict=(green); shmutant_copy_tree "$TOY" "$1"; }
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'red' '$1 + $2' '$1 - $2' 'nobody'
+  pool lbl "$T/wd3" misaligning_prepare toy_run
+  eq "$(verdict_of red)" baseline 'a prepare that pre-fills the baseline arrays cannot misalign a red baseline with its row'
 }
 
 t_pool_validates_boolean_settings() {
@@ -584,6 +590,12 @@ t_post_run_cleanup_never_signals_a_reaped_root_by_number() {
   wait "$bystander" 2>/dev/null
   ( sleep 0.1 ) & local dead=$!; wait "$dead"
   _shmutant_kill_tree_twice "$dead"; rc_is $? 0 'kill_tree_twice on a reaped root is a quiet no-op'
+  sleep 5 & local b2=$!
+  local id2; id2="$(_shmutant_identity "$b2")"
+  _shmutant_kill_tree_twice "$b2:$(( id2 - 100 ))"; sleep 0.2
+  kill -0 "$b2" 2>/dev/null; rc_is $? 0 'a root whose given identity does not match is neither stopped nor killed'
+  case "$(ps -o stat= -p "$b2")" in T*) fail_ 'the mismatched root was left stopped' ;; esac
+  kill "$b2" 2>/dev/null; wait "$b2" 2>/dev/null
 }
 
 t_stream_descriptor_survives_a_callback_swapping_the_path() {
@@ -637,6 +649,28 @@ t_run_cannot_lose_the_leftover_record_by_locking_its_dir() {
   [ -e "$T/escaped" ] && fail_ 'the leftover record was lost to a locked directory and the helper survived'
 }
 
+leaky_c() { set -m; bash -c "sleep 3; touch '$T/escaped-c'" & set +m; bash "$1/test.sh"; }
+
+t_run_cannot_forge_its_output_or_the_marker() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  printf 'precious\n' > "$T/victim"
+  # replaces its captured output with a file that claims the witness, then exits with a status
+  # that is neither green nor red
+  forging_run() { rm -f "$1/../output"; printf 'FAIL: add-works: forged\n' > "$1/../output"; exit 1; }
+  SHMUTANT_BASELINE=0 pool lbl "$T/wd" toy_prepare forging_run
+  eq "$(verdict_of a)" aborted 'the verdict is scored from the output the harness captured (empty: exit 1 with no red line is aborted), not a file the callback put in its place'
+  linking_output_run() { rm -f "$1/../output"; ln -s "$T/victim" "$1/../output"; echo "FAIL: add-works: real"; exit 1; }
+  SHMUTANT_BASELINE=0 pool lbl "$T/wd2" toy_prepare linking_output_run
+  eq "$(cat "$T/victim")" precious 'a symlink the callback put at output is never written through'
+  ( set -C; SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd3" toy_prepare toy_run > "$T/o" 2>/dev/null ); rc_is $? 0 'the channels open under a caller noclobber'
+  has "$(cat "$T/o")" $'\tkilled\t' 'and the row is scored'
+  ( set -C; SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=0 shmutant_pool lbl "$T/wd4" toy_prepare leaky_c > /dev/null 2>&1 )
+  sleep 4
+  [ -e "$T/escaped-c" ] && fail_ 'under noclobber the leftover record was not opened and an escaped helper survived'
+}
+
 t_worker_cleanup_refuses_a_swapped_directory() {
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
@@ -647,7 +681,15 @@ t_worker_cleanup_refuses_a_swapped_directory() {
   SHMUTANT_BASELINE=0 pool lbl "$T/wd" toy_prepare swapping_run
   [ -f "$T/victim/tree/keep" ] || fail_ 'cleanup followed the swapped worker directory into a caller tree'
   has "$ERR" 'no longer the worker directory' 'the swap is reported'
+  [ -e "$T/victim/verdict" ] && fail_ 'the verdict was written through the swapped directory'
+  eq "$(verdict_of a)" lost 'no verdict is written beneath a swapped directory'
   rm -f "$T/wd/mut-0"; mv "$T/wd/mut-0.moved" "$T/wd/mut-0" 2>/dev/null
+  # a plain directory in place of the worker directory, not a symlink
+  replacing_run() { local d; d="$(cd "$1/.." && pwd -P)"; bash "$1/test.sh"; local rc=$?; mv "$d" "$d.moved" && mkdir -p "$d/tree" && printf 'fake\n' > "$d/tree/keep"; return "$rc"; }
+  SHMUTANT_BASELINE=0 pool lbl "$T/wd2" toy_prepare replacing_run
+  [ -f "$T/wd2/mut-0/tree/keep" ] || fail_ 'cleanup removed beneath a fresh directory that merely has the worker directory'"'"'s name'
+  has "$ERR" 'no longer the worker directory' 'the replacement is detected by inode'
+  rm -rf "$T/wd2/mut-0"; mv "$T/wd2/mut-0.moved" "$T/wd2/mut-0" 2>/dev/null
 }
 
 t_worker_verdict_cannot_be_forged_through_a_link() {
@@ -1006,8 +1048,14 @@ t_pool_refuses_unremovable_worker_dir() {
   shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
   mkdir -p "$T/wd/mut-0"; printf 'killed\n1\n1\n' > "$T/wd/mut-0/verdict"
   make_unremovable "$T/wd/mut-0/held" || { echo "note: $_unit: no way to make a directory unremovable here; skipped"; return; }
-  SHMUTANT_BASELINE=0 pool lbl "$T/wd" toy_prepare toy_run
+  # with a long caller job of its own, so a bare wait in the failure path would block on it
+  sleep 30 & local job=$!
+  local t0; t0="$(_shmutant_now)"
+  SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd" toy_prepare toy_run > "$T/o" 2> "$T/err"; RC=$?
+  OUT="$(cat "$T/o")"; ERR="$(cat "$T/err")"
   unmake_unremovable "$T/wd/mut-0/held"
+  [ $(( ($(_shmutant_now) - t0) / 1000000 )) -lt 10 ] || fail_ 'the failure path waited on the caller'"'"'s own background job'
+  kill "$job" 2>/dev/null; wait "$job" 2>/dev/null
   rc_is "$RC" 2 'a worker directory that cannot be recreated aborts the pool'
   has "$ERR" 'cannot recreate' 'says why'
   hasnt "$OUT" $'\trow\tkilled' 'the stale killed verdict was not reported'
@@ -1244,6 +1292,10 @@ t_copy_tree_excludes_git() {
   mkdir -p "$T/real-dst"; ln -s "$T/real-dst" "$T/dst-link"
   shmutant_copy_tree "$T/src" "$T/dst-link" 2>"$T/e"; rc_is $? 1 'a symlink at the destination is refused'
   has "$(cat "$T/e")" 'is a symlink' 'says why'
+  ln -s "$T/src" "$T/into-src"
+  shmutant_copy_tree "$T/src" "$T/into-src/.work" 2>"$T/e"; rc_is $? 1 'a destination reached through a symlink into the source is caught as a self-copy'
+  has "$(cat "$T/e")" 'inside the source' 'says why'
+  [ -e "$T/src/.work" ] && fail_ 'the copy was created through the link'
   [ -e "$T/real-dst/top" ] && fail_ 'the copy went through the destination link'
   shmutant_copy_tree "$T/hl" "$T/hl-copy" 2>"$T/e"; rc_is $? 1 'a source with a hard-linked file is refused: a copy cannot keep the links joined'
   has "$(cat "$T/e")" 'hard link' 'says why'

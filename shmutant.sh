@@ -192,9 +192,19 @@ shmutant_copy_tree() {
   # symlinked root that the glob does.
   src="$(_shmutant_abs "$src")" || { _shmutant_err "copy_tree: cannot resolve $1"; return 1; }
   if [ -L "$dst" ]; then _shmutant_err "copy_tree: destination $dst is a symlink — it would be written through, not created"; return 1; fi
-  # The first component mkdir would create is remembered, so a refusal leaves nothing behind.
-  local made="" probe="$dst"
-  while [ ! -e "$probe" ]; do made="$probe"; probe="$(dirname -- "$probe")"; [ "$probe" != "$made" ] || break; done
+  # The destination is rebuilt on the physical path of its nearest existing ancestor, so the
+  # containment check below and every write see the directory a symlinked component would
+  # otherwise have hidden; a link into the source tree is then caught, not followed.
+  local probe rest=""
+  probe="$dst"
+  case "$probe" in /*) ;; *) probe="$PWD/$probe" ;; esac
+  while [ ! -d "$probe" ] || [ -L "$probe" ]; do
+    [ -L "$probe" ] && [ -d "$probe" ] && break
+    rest="$(basename -- "$probe")${rest:+/$rest}"; probe="$(dirname -- "$probe")"
+    [ "$probe" != / ] || break
+  done
+  probe="$(_shmutant_abs "$probe")" || { _shmutant_err "copy_tree: cannot resolve the destination $dst"; return 1; }
+  dst="$probe${rest:+/$rest}"
   # A copy gives each hard link its own inode, and the pool's later check could not tell: a
   # source carrying one is refused here, naming it.
   local linked
@@ -202,6 +212,9 @@ shmutant_copy_tree() {
   if [ -n "$linked" ]; then
     _shmutant_err "copy_tree: $linked has more than one hard link — a copy cannot keep them joined; prepare that tree yourself, or name the file it aliases"; return 1
   fi
+  # The first component mkdir would create is remembered, so a refusal leaves nothing behind.
+  local made="" probe2="$dst"
+  while [ ! -e "$probe2" ]; do made="$probe2"; probe2="$(dirname -- "$probe2")"; [ "$probe2" != "$made" ] || break; done
   mkdir -p -- "$dst" || return 1
   asrc="$(_shmutant_abs "$src")" && adst="$(_shmutant_abs "$dst")" || return 1
   if _shmutant_inside "$asrc" "$adst"; then
@@ -340,25 +353,26 @@ shmutant_reset() {
   SHMUTANT_DECL_ERRORS=0
 }
 
-# _shmutant_witnessed <output-file> <prefix> <witness> — true when some line of the file starts
-# with <prefix> and carries <witness>. Per line, so a witness cannot match across a passing
-# assertion's echo. `case`, never `grep -q`: pipefail promotes grep's early exit to a failure.
+# _shmutant_witnessed <output> <prefix> <witness> — true when some line of <output> (the text,
+# not a path: it is read once through the descriptor that captured it) starts with <prefix> and
+# carries <witness>. Per line, so a witness cannot match across a passing assertion's echo.
+# `case`, never `grep -q`: pipefail promotes grep's early exit to a failure.
 _shmutant_witnessed() {
   local line
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       "$2"*) case "$line" in *"$3"*) return 0 ;; esac ;;
     esac
-  done < "$1"
+  done <<< "$1"
   return 1
 }
 
-# _shmutant_has_red_line <output-file> <prefix> — true when any line starts with <prefix>.
+# _shmutant_has_red_line <output> <prefix> — true when any line of the text starts with <prefix>.
 _shmutant_has_red_line() {
   local line
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in "$2"*) return 0 ;; esac
-  done < "$1"
+  done <<< "$1"
   return 1
 }
 
@@ -491,11 +505,19 @@ _shmutant_freeze_from() {
 # the wrapper's), frozen and searched from as well: one that still lived could otherwise fork a
 # child out of reach.
 _shmutant_kill_tree_twice() {
-  local pid="$1" p d
-  local -a frozen=() roots=("$pid")
+  local spec="$1" pid rootid p d
+  local -a frozen=() roots=()
   local -A have=()
   shift
-  kill -STOP "$pid" 2>/dev/null && { frozen+=("$pid:"); have["$pid"]=1; }
+  pid="${spec%%:*}"; roots=("$pid")
+  # The root is stopped and later signalled by number only when it is known to be the process
+  # it was: a bare pid means live at the caller's hands (identity computed now); `pid:identity`
+  # carries what was captured while it lived; `pid:` means reaped, whose number may already be
+  # someone else's.
+  if [ "$spec" = "$pid" ]; then rootid="$(_shmutant_identity "$pid")" || rootid=""; else rootid="${spec#*:}"; fi
+  if [ -n "$rootid" ] && _shmutant_alive_since "$pid" "$rootid"; then
+    kill -STOP "$pid" 2>/dev/null && { frozen+=("$pid:"); have["$pid"]=1; }
+  fi
   # The root's tree first, before any identity work: every pass is one ps and one bulk stop.
   _shmutant_freeze_from
   # Then the retained victims that are still themselves (one table, one bulk stop), and the
@@ -548,30 +570,29 @@ _shmutant_kill_tree() {
 # and the whole tree it spawned dies with it. That subshell's stderr is discarded: with job
 # control on, bash reports the reaped job there when the pool itself runs under `$(...)`.
 _shmutant_run_bounded() {
-  local dir="$1" run="$2" root="$3" sel="$4" timeout mark
+  local dir="$1" run="$2" root="$3" sel="$4" timeout mark fifo
+  local left_w left_r seen_w seen_r fired out_r
   timeout="$(_shmutant_pos_int "${SHMUTANT_TIMEOUT:-300}")" || timeout=0
-  # The marker's name is unpredictable: a callback can reach the worker directory through
-  # ../, and a file it happens to write must never read as a timeout.
-  mark="$(mktemp "$dir/.fired.XXXXXX")" || { SHMUTANT_RUN_STATUS=127; return; }
-  rm -f -- "$mark"
-  SHMUTANT_RUN_MARK="$mark"
+  SHMUTANT_RUN_FIRED=0; SHMUTANT_RUN_OUTPUT=""
+  # Every channel to and from the run is a descriptor opened HERE, before the callback exists,
+  # and never reopened by path afterwards: the run's output (read back through the descriptor
+  # that captured it), the wrapper's leftover record, the watchdog's sightings, and the timeout
+  # signal, which is a FIFO so that `read -t 0` can test it without consuming it. A callback
+  # that removes, locks or symlinks any of these names afterwards changes nothing.
+  mark="$(mktemp "$dir/.run.XXXXXX")" || { SHMUTANT_RUN_STATUS=127; return; }
+  fifo="$mark.fired"
+  { : >| "$mark.left" && : >| "$mark.seen" && : >| "$dir/output" && rm -f -- "$fifo" && mkfifo -- "$fifo"; } 2>/dev/null \
+    || { rm -f -- "$mark" "$mark.left" "$mark.seen"; SHMUTANT_RUN_STATUS=127; return; }
+  exec {left_w}>|"$mark.left" {left_r}<"$mark.left" {seen_w}>|"$mark.seen" {seen_r}<"$mark.seen" {fired}<>"$fifo" {out_r}<"$dir/output"
+  rm -f -- "$mark" "$mark.left" "$mark.seen" "$fifo"
   (
     set -m
-    # The three channels back from the run (its leftover descendants, the watchdog's sightings,
-    # the timeout marker) are opened HERE, before the callback runs, as descriptors on files
-    # that are then unlinked: a callback that removes or locks its worker directory afterwards
-    # cannot take them away, and the marker on disk is only ever created by the watchdog.
-    : > "$mark.left" && : > "$mark.seen" || exit 127
-    exec {left_w}>"$mark.left" {left_r}<"$mark.left" {seen_w}>"$mark.seen" {seen_r}<"$mark.seen"
-    rm -f -- "$mark.left" "$mark.seen"
-    # The wrapper records its descendants the moment the callback returns, while it is still
-    # their parent: a helper the callback backgrounded is otherwise reparented before anyone
-    # could see it.
-    # The marker path is copied under a name no callback would assign: the callback runs in
-    # this scope and could otherwise redirect the record anywhere by assigning `mark`.
     ( _shmutant_wrap_left="$left_w"; export SHMUTANT_SELECT="$sel"; "$run" "$root" "$sel"; rrc=$?
-      _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; exit "$rrc" ) < /dev/null > "$dir/output" 2>&1 &
+      _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; exit "$rrc" ) < /dev/null >> "$dir/output" 2>&1 &
     pid=$!
+    # The root's identity while it is certainly alive: the post-run kill must not stop or signal
+    # a reaped root by number.
+    rootid="$(_shmutant_identity "$pid")" || rootid=""
     dog=""
     if [ "$timeout" -gt 0 ]; then
       (
@@ -596,11 +617,11 @@ _shmutant_run_bounded() {
             seen["${p%%:*}"]="${p#*:}"
           done < <(_shmutant_snapshot "$pid")
         done
-        : > "$mark"
+        printf 'fired\n' >&"$fired"
         # An array of pid:identity pairs, never an unquoted expansion.
         victims=()
         for p in "${!seen[@]}"; do victims+=("$p:${seen[$p]}"); done
-        _shmutant_kill_tree_twice "$pid" "${victims[@]}"
+        _shmutant_kill_tree_twice "$pid:$rootid" "${victims[@]}"
       ) < /dev/null > /dev/null 2>&1 &
       dog=$!
     fi
@@ -610,45 +631,49 @@ _shmutant_run_bounded() {
       # the kill is completed here and the run scored as a timeout.
       wait -n -p done_first "$pid" "$dog"; rc=$?
       if [ "${done_first:-}" != "$pid" ]; then
-        : > "$mark"
-        _shmutant_kill_tree_twice "$pid"
+        read -t 0 -u "$fired" || printf 'fired\n' >&"$fired"
+        _shmutant_kill_tree_twice "$pid:$rootid"
         wait "$pid"; rc=$?
       else
         # Once the watchdog has fired, let it reach KILL; otherwise cancel it.
-        [ -e "$mark" ] || kill -TERM "$dog" 2>/dev/null
+        read -t 0 -u "$fired" || kill -TERM "$dog" 2>/dev/null
         wait "$dog" 2>/dev/null
       fi
     else
       wait "$pid"; rc=$?
     fi
-    if [ ! -e "$mark" ]; then
+    if ! read -t 0 -u "$fired"; then
       # The callback returned, which says nothing about what it backgrounded: its process group
       # and every descendant the watchdog saw are ended before the verdict is accepted.
       leftovers=()
       mapfile -t leftovers <&"$left_r"
       mapfile -t -O "${#leftovers[@]}" leftovers <&"$seen_r"
-      _shmutant_kill_tree_twice "$pid" "${leftovers[@]}"
+      _shmutant_kill_tree_twice "$pid:$rootid" "${leftovers[@]}"
     fi
     exit "$rc"
   ) 2> /dev/null
   SHMUTANT_RUN_STATUS=$?
+  read -t 0 -u "$fired" && SHMUTANT_RUN_FIRED=1
+  SHMUTANT_RUN_OUTPUT="$(cat <&"$out_r")"
+  exec {left_w}>&- {left_r}<&- {seen_w}>&- {seen_r}<&- {fired}<&- {out_r}<&-
 }
 
 # _shmutant_worker_finish <dir> <verdict> <microseconds> <status> — drop the clone unless
 # SHMUTANT_KEEP=1, then write the verdict. Every worker exit goes through here, so an early
 # verdict cannot leave a tree behind.
 _shmutant_worker_finish() {
+  # Only in a directory that is still the one this run created, by inode: a callback may have
+  # renamed it away and put a symlink or a fresh directory in its place, and nothing is written
+  # or removed beneath a replacement.
+  if [ -L "$1" ] || [ "$(ls -di -- "$1" 2>/dev/null | awk '{ print $1 }')" != "${SHMUTANT_DIR_ID:-}" ]; then
+    _shmutant_err "refusing to clean $1: it is no longer the worker directory this run created"
+    return 0
+  fi
   # The worker directory is this run's; a callback that made it unwritable does not get to
   # suppress the verdict.
   [ -w "$1" ] || chmod -- u+rwx "$1" 2>/dev/null
   if [ "${SHMUTANT_KEEP:-0}" != 1 ]; then
-    # Only beneath a directory that is still the one this run created: a callback may have
-    # renamed it away and left a symlink to a caller-owned tree in its place.
-    if [ -L "$1" ] || [ "$(_shmutant_abs "$1")" != "$1" ]; then
-      _shmutant_err "refusing to clean $1: it is no longer the worker directory this run created"
-    else
-      _shmutant_remove "$1/tree" || _shmutant_err "could not remove $1/tree"
-    fi
+    _shmutant_remove "$1/tree" || _shmutant_err "could not remove $1/tree"
   fi
   # Written beside and renamed over `verdict`: a callback can reach this directory and plant a
   # symlink under that name, and a rename replaces the link rather than writing through it.
@@ -668,6 +693,8 @@ _shmutant_worker() {
   set +e
   shopt -u nocasematch
   t0="$(_shmutant_now)"
+  # The directory's identity, for a cleanup that must not be fooled by a replacement.
+  SHMUTANT_DIR_ID="$(ls -di -- "$dir" 2>/dev/null | awk '{ print $1 }')"
   root="$dir/tree$suffix"
   if [ "$kind" = mut ]; then sel="${SHMUTANT_ROWS_SEL[$i]}"; else sel="${SHMUTANT_BASE_SEL[$i]}"; fi
   # -p: a clone keeps mode, ownership and timestamps, so a test sensitive to them sees the
@@ -688,7 +715,7 @@ _shmutant_worker() {
   _shmutant_run_bounded "$dir" "$run" "$root" "$sel"
   status="$SHMUTANT_RUN_STATUS"
   t1="$(_shmutant_now)"
-  if [ -e "$SHMUTANT_RUN_MARK" ]; then
+  if [ "$SHMUTANT_RUN_FIRED" = 1 ]; then
     verdict=timeout
   elif [ "$kind" = base ]; then
     red="${SHMUTANT_RED_STATUS:-1}"
@@ -696,9 +723,9 @@ _shmutant_worker() {
     elif [ "$status" -eq "$red" ]; then verdict=red
     else verdict=aborted; fi
   elif [ "$status" -eq "${SHMUTANT_RED_STATUS:-1}" ]; then
-    if _shmutant_witnessed "$dir/output" "${SHMUTANT_RED_PREFIX:-FAIL: }" "${SHMUTANT_ROWS_WIT[$i]}"; then
+    if _shmutant_witnessed "$SHMUTANT_RUN_OUTPUT" "${SHMUTANT_RED_PREFIX:-FAIL: }" "${SHMUTANT_ROWS_WIT[$i]}"; then
       verdict=killed
-    elif _shmutant_has_red_line "$dir/output" "${SHMUTANT_RED_PREFIX:-FAIL: }"; then
+    elif _shmutant_has_red_line "$SHMUTANT_RUN_OUTPUT" "${SHMUTANT_RED_PREFIX:-FAIL: }"; then
       verdict=accidental
     else
       verdict=aborted
@@ -835,7 +862,8 @@ _shmutant_run_jobs_loop() {
       # The workers already running are ended, not waited for: one of them may be unbounded.
       local -a helpers=()
       for p in "${pids[@]}"; do _shmutant_kill_tree_twice "$p" & helpers+=("$!"); done
-      wait "${helpers[@]}" "${pids[@]}" 2>/dev/null
+      # Never a bare wait: with nothing started it would block on the caller's own jobs.
+      [ "${#pids[@]}" -eq 0 ] || wait "${helpers[@]}" "${pids[@]}" 2>/dev/null
       return 2
     fi
     _shmutant_worker "$kind" "$i" "$wd" "$run" "$suffix" &
@@ -985,7 +1013,7 @@ shmutant_pool() {
   "$prep" "$wd/pristine" >| "$pout"; prc=$?
   label="$_shmutant_pool_label"; wd="$_shmutant_pool_wd"; run="$_shmutant_pool_run"; cap="$_shmutant_pool_cap"
   n="$_shmutant_pool_n"; t0="$_shmutant_pool_t0"; pout="$_shmutant_pool_pout"; errexit_before="$_shmutant_pool_errexit"
-  killed=0; rc=0
+  killed=0; rc=0; base_sel=(); base_verdict=()
   if [ "$errexit_before" = 1 ]; then set -e; else set +e; fi
   if [ "$prc" -ne 0 ]; then
     rm -f -- "$pout"; _shmutant_err "$label: prepare failed (status $prc) — no tree to mutate"; _shmutant_pool_fail "$label" "$wd"; return 2
