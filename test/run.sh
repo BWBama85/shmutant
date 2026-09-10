@@ -456,6 +456,50 @@ t_verdict_timeout_kills_a_descendant_seen_before_it_detached() {
   [ -e "$T/finished" ] && fail_ 'a descendant that detached before the deadline outlived the kill'
 }
 
+t_pool_revalidates_settings_after_prepare() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  # shellcheck disable=SC2034
+  meddling_prepare() { SHMUTANT_TIMEOUT=bogus; shmutant_copy_tree "$TOY" "$1"; }
+  pool lbl "$T/wd" meddling_prepare toy_run
+  rc_is "$RC" 2 'a setting prepare invalidated is caught before any worker reads it'
+  has "$ERR" 'SHMUTANT_TIMEOUT' 'names the setting'
+  unset SHMUTANT_TIMEOUT
+  pool lbl "$T/wd" toy_prepare toy_run 0
+  rc_is "$RC" 2 'a pool cap of 0 is refused, not replaced by the default'
+  pool lbl "$T/wd" toy_prepare toy_run abc
+  rc_is "$RC" 2 'a non-numeric pool cap is refused'
+  SHMUTANT_RED_PREFIX=$'FAIL:\nx' pool lbl "$T/wd" toy_prepare toy_run
+  rc_is "$RC" 2 'a red prefix containing a newline is refused'
+  has "$ERR" 'newline' 'says why'
+}
+
+t_baseline_non_red_exit_is_aborted() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'nobody'
+  pool lbl "$T/wd" toy_prepare toy_run
+  rc_is "$RC" 1 'the row is not killed'
+  eq "$(field baseline 5)" aborted 'a selector that matches nothing (exit 2) is an aborted baseline, not a red one'
+  has "$(field baseline 7)" 'neither green nor red' 'says so'
+  eq "$(verdict_of a)" baseline 'the row is scored baseline'
+}
+
+t_kill_tree_skips_a_reused_pid() {
+  eq "$(_shmutant_etime_secs '00:05')" 5 'mm:ss'
+  eq "$(_shmutant_etime_secs '01:02:03')" 3723 'hh:mm:ss'
+  eq "$(_shmutant_etime_secs '2-01:02:03')" 176523 'dd-hh:mm:ss'
+  eq "$(_shmutant_etime_secs 'junk')" 0 'garbage reads as zero'
+  sleep 5 & local p=$!
+  sleep 1.2
+  _shmutant_alive_since "$p" 1; rc_is $? 0 'a process seen one second ago is the same process'
+  _shmutant_alive_since "$p" 100; rc_is $? 1 'a pid whose elapsed time is smaller than when it was recorded is a reused pid'
+  _shmutant_kill_tree TERM 2147483000 "$p:100"; sleep 0.2
+  kill -0 "$p" 2>/dev/null; rc_is $? 0 'a retained pid that fails the identity check is not signalled'
+  kill "$p" 2>/dev/null; wait "$p" 2>/dev/null
+}
+
 t_pool_survives_nounset() {
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
@@ -579,7 +623,7 @@ shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
 EOF
   mkdir -p "$T/tmpd"
   TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan.sh" > /dev/null 2> "$T/e"; rc_is $? 2 'a prepare whose own set -e fires ends the run as a harness error, not a pass over a partial tree'
-  has "$(cat "$T/e")" 'ended the shell' 'says so'
+  has "$(cat "$T/e")" 'before the pool completed' 'says so'
   eq "$(find "$T/tmpd" -mindepth 1 | wc -l | tr -d ' ')" 0 'and the automatic workdir was still removed'
   lax_prepare() { set -e; shmutant_copy_tree "$TOY" "$1"; }
   case "$-" in *e*) fail_ 'precondition: errexit already on' ;; esac
@@ -889,13 +933,13 @@ EOF
   ( cd "$T/toy" && PATH="$T/decoy:$PATH" bash "$SHMUTANT" run plan.sh > /dev/null 2>&1 ); rc_is $? 1 'a bare plan name is sourced from its own directory, not from PATH (1: the survivor row, not the decoy'"'"'s 3)'
   { printf 'set -e\nfalse\n'; cat "$T/toy/plan.sh"; } > "$T/toy/plan-ef.sh"
   bash "$SHMUTANT" run "$T/toy/plan-ef.sh" > /dev/null 2>"$T/err-ef"; rc_is $? 2 'a plan whose own set -e fires while loading is a load failure'
-  has "$(cat "$T/err-ef")" 'failed while loading' 'says so'
+  has "$(cat "$T/err-ef")" 'before the pool completed' 'says so'
   { cat "$T/toy/plan.sh"; printf 'made=1\nkeep=0\n'; } > "$T/toy/plan-clobber.sh"
   mkdir -p "$T/theirs"; printf 'keep\n' > "$T/theirs/precious"
   bash "$SHMUTANT" run "$T/toy/plan-clobber.sh" --workdir "$T/theirs" > /dev/null 2>&1; rc_is $? 1 'the clobbering plan still loads and runs'
   eq "$(cat "$T/theirs/precious" 2>/dev/null)" keep 'a plan assigning made=1 cannot make the CLI delete a supplied workdir'
   { cat "$T/toy/plan.sh"; printf 'SHMUTANT_CLI_MADE=1\n'; } > "$T/toy/plan-ro.sh"
-  bash "$SHMUTANT" run "$T/toy/plan-ro.sh" --workdir "$T/theirs" > /dev/null 2>&1; rc_is $? 2 'a plan assigning the frozen CLI state is a load failure'
+  bash "$SHMUTANT" run "$T/toy/plan-ro.sh" --workdir "$T/theirs" > /dev/null 2>&1; rc_is $? 1 'a plan assigning the CLI state names changes nothing outside its subshell'
   eq "$(cat "$T/theirs/precious" 2>/dev/null)" keep 'and the supplied workdir is still there'
   { printf 'cd "$SHMUTANT_PLAN_DIR"\n'; cat "$T/toy/plan.sh"; } > "$T/toy/plan-cd.sh"
   mkdir -p "$T/from"
@@ -928,7 +972,7 @@ EOF
   grep -v "'broken'" "$T/toy/plan.sh" > "$T/toy/plan-base.sh"
   { cat "$T/toy/plan-base.sh"; printf 'trap "echo bye" EXIT\nexit 0\n'; } > "$T/toy/plan-trap.sh"
   TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-trap.sh" > /dev/null 2>"$T/err-trap"; rc_is $? 2 'a plan that installs its own EXIT trap and exits is still a load failure'
-  has "$(cat "$T/err-trap")" 'may not set an EXIT' 'the trap replacement is refused'
+  has "$(cat "$T/err-trap")" 'before the pool completed' 'the exit is reported as an incomplete run'
   { cat "$T/toy/plan-base.sh"; printf 'builtin trap "echo bye" EXIT\nexit 0\n'; } > "$T/toy/plan-btrap.sh"
   TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-btrap.sh" > /dev/null 2>&1; rc_is $? 2 'builtin trap cannot replace the guard for the exit that follows'
   { cat "$T/toy/plan-base.sh"; printf 'command trap "echo bye" EXIT; exit 0\n'; } > "$T/toy/plan-ctrap.sh"
@@ -937,6 +981,10 @@ EOF
   TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-ftrap.sh" > /dev/null 2>&1; rc_is $? 2 'nor a trap set inside a helper function'
   { cat "$T/toy/plan-base.sh"; printf 'exit 0\n'; } > "$T/toy/plan-exit.sh"
   TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-exit.sh" > /dev/null 2>&1; rc_is $? 2 'a plan that exits 0 is a load failure, not a pass'
+  { cat "$T/toy/plan-base.sh"; printf 'exec true\n'; } > "$T/toy/plan-exec.sh"
+  TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-exec.sh" > /dev/null 2>&1; rc_is $? 2 'a plan that execs cannot become a passing run'
+  { printf 'set -e\nroot="$(pwd)"\n( true )\n'; cat "$T/toy/plan-base.sh"; } > "$T/toy/plan-subs.sh"
+  TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-subs.sh" > /dev/null 2>&1; rc_is $? 1 'a plan with set -e, a command substitution and a subshell loads and runs normally'
   { cat "$T/toy/plan-base.sh"; printf 'trap "echo usr" USR1\n'; } > "$T/toy/plan-usr.sh"
   TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-usr.sh" > /dev/null 2>&1; rc_is $? 1 'a plan may still trap other signals'
   eq "$(find "$T/tmpd" -mindepth 1 | wc -l | tr -d ' ')" 0 'no automatic workdir survives those load failures'

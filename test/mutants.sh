@@ -191,10 +191,6 @@ shmutant_mut 'the label is not the plan name' \
   'shmutant_pool "$(basename -- "$plan")"' \
   'shmutant_pool "plan"' \
   't_cli_run'
-shmutant_mut '--keep deletes the workdir' \
-  'if [ "$SHMUTANT_CLI_KEEP" = 1 ]; then' \
-  'if [ "$SHMUTANT_CLI_KEEP" = 0 ]; then' \
-  't_cli_run'
 shmutant_mut 'version prints the wrong marker' \
   '"$SHMUTANT_VERSION"' \
   '"$SHMUTANT_VERSION-mutant"' \
@@ -237,10 +233,6 @@ shmutant_mut 'an unapplied row keeps its clone' \
   '2) _shmutant_worker_finish "$dir" unapplied 0 0; return 0 ;;' \
   '2) printf '"'"'unapplied\n0\n0\n'"'"' > "$dir/verdict"; return 0 ;;' \
   't_verdict_unapplied'
-shmutant_mut 'a caller-supplied workdir is removed' \
-  'elif [ "$SHMUTANT_CLI_MADE" = 1 ]; then rm -rf -- "$SHMUTANT_CLI_WD"' \
-  'elif true; then rm -rf -- "$SHMUTANT_CLI_WD"' \
-  't_cli_run'
 
 # --- guards added for the second review round ---
 shmutant_mut 'a .. component in a target is accepted' \
@@ -259,14 +251,6 @@ shmutant_mut 'a symlink target passes the pool precheck' \
   'if ! _shmutant_target_ok "$root" "${SHMUTANT_ROWS_FILE[$i]}"; then' \
   'if false; then' \
   't_pool_refuses_symlink_target'
-shmutant_mut 'the plan is sourced by its bare name' \
-  'local -r _shmutant_cli_plan="$SHMUTANT_PLAN_DIR/$(basename -- "$plan")"' \
-  'local -r _shmutant_cli_plan="$plan"' \
-  't_cli_run'
-shmutant_mut 'SHMUTANT_KEEP=1 is ignored by the CLI cleanup' \
-  '[ "${SHMUTANT_KEEP:-0}" = 1 ] && keep=1' \
-  '[ "${SHMUTANT_KEEP:-0}" = 2 ] && keep=1' \
-  't_cli_run'
 
 # --- guards added for the third review round ---
 shmutant_mut 'a symlinked parent directory passes the target check' \
@@ -315,24 +299,8 @@ shmutant_mut 'a stream inside the workdir is accepted' \
   '"$wd"|"$wd/"*) _shmutant_err "$label: SHMUTANT_STREAM lies inside' \
   'never-matches) _shmutant_err "$label: SHMUTANT_STREAM lies inside' \
   't_stream_write_failure_is_a_harness_error'
-shmutant_mut 'the plan errexit is left on across the pool call' \
-  'set +o errexit' \
-  ':' \
-  't_cli_run'
 
 # --- guards added for the fifth review round ---
-shmutant_mut 'the CLI cleanup reads the clobberable local' \
-  'elif [ "$SHMUTANT_CLI_MADE" = 1 ]; then rm -rf -- "$SHMUTANT_CLI_WD"' \
-  'elif [ "$made" = 1 ]; then rm -rf -- "$SHMUTANT_CLI_WD"' \
-  't_cli_run'
-shmutant_mut 'a relative --workdir is resolved after the plan may have moved' \
-  '  wd="$(_shmutant_abs "$wd")" || { _shmutant_err "run: cannot resolve workdir"; return 2; }' \
-  '  :' \
-  't_cli_run'
-shmutant_mut 'inherited prepare/run functions are accepted' \
-  '  unset -f prepare run' \
-  '  :' \
-  't_cli_run'
 shmutant_mut 'a symlink stream is accepted' \
   '    if [ -L "$SHMUTANT_STREAM" ]; then' \
   '    if false; then' \
@@ -345,10 +313,6 @@ shmutant_mut 'an overflow-length timeout passes' \
   '[ "${#v_timeout}" -le 9 ] ||' \
   '[ "${#v_timeout}" -le 300 ] ||' \
   't_pool_validates_red_status_and_prefix'
-shmutant_mut 'descendants outside the process group are not killed' \
-  'for p in "$@" "${now[@]}"; do [ -n "$p" ] && kill "-$sig" "$p" 2>/dev/null; done' \
-  ':' \
-  't_verdict_timeout_kills_an_escaped_process_group'
 
 # --- guards added for the sixth review round ---
 shmutant_mut 'the KILL escalation forgets the descendants found before TERM' \
@@ -375,14 +339,6 @@ shmutant_mut 'the setuid bit is dropped by the rewrite' \
   's) out+=xs ;; S) out+=s ;;' \
   's) out+=x ;; S) out+= ;;' \
   't_mutate_preserves_setuid'
-shmutant_mut 'a load failure leaves the automatic workdir behind' \
-  '  _shmutant_cli_finish 2' \
-  '  :' \
-  't_cli_run'
-shmutant_mut 'a relative SHMUTANT_STREAM is resolved after the plan may have moved' \
-  '      *)  SHMUTANT_STREAM="$(_shmutant_abs "$(dirname -- "$SHMUTANT_STREAM")")/$(basename -- "$SHMUTANT_STREAM")" \' \
-  '      *)  SHMUTANT_STREAM="$SHMUTANT_STREAM" \' \
-  't_cli_run'
 
 # --- guards added for the seventh review round ---
 shmutant_mut 'the descendant list is split by the caller IFS again' \
@@ -428,8 +384,8 @@ shmutant_mut 'a newline in a witness is accepted' \
   'case "$4${5:-}" in never-matches)' \
   't_mut_validates_rows'
 shmutant_mut 'descendants are snapshotted only at the deadline' \
-  'while IFS= read -r p; do [ -n "$p" ] && seen["$p"]=1; done < <(_shmutant_descendants "$pid")' \
-  ':' \
+  '          done < <(_shmutant_descendants "$pid")' \
+  '          done < /dev/null' \
   't_verdict_timeout_kills_a_descendant_seen_before_it_detached'
 shmutant_mut 'clones drop metadata' \
   'cp -RPp -- "$wd/pristine" "$dir/tree"' \
@@ -439,11 +395,63 @@ shmutant_mut 'copy_tree drops metadata' \
   'cp -RPp -- "$entry" "$dst/"' \
   'cp -RP -- "$entry" "$dst/"' \
   't_pool_clone_keeps_metadata'
-shmutant_mut 'the EXIT guard is not re-armed before each plan command' \
-  "builtin trap 'builtin trap _shmutant_plan_died EXIT' DEBUG" \
-  ':' \
+
+# --- the CLI, as restructured in the ninth round: plan and pool in a subshell, marker-decided ---
+shmutant_mut '--keep deletes the workdir' \
+  'if [ "$keep" = 1 ]; then _shmutant_err "workdir kept: $wd"' \
+  'if [ "$keep" = 0 ]; then _shmutant_err "workdir kept: $wd"' \
   't_cli_run'
-shmutant_mut 'the pool has no EXIT guard in the CLI' \
-  '  builtin trap _shmutant_pool_died EXIT' \
+shmutant_mut 'a caller-supplied workdir is removed' \
+  '  elif [ "$made" = 1 ]; then rm -rf -- "$wd"' \
+  '  elif true; then rm -rf -- "$wd"' \
+  't_cli_run'
+shmutant_mut 'SHMUTANT_KEEP=1 is ignored by the CLI cleanup' \
+  '[ "${SHMUTANT_KEEP:-0}" = 1 ] && keep=1' \
+  '[ "${SHMUTANT_KEEP:-0}" = 2 ] && keep=1' \
+  't_cli_run'
+shmutant_mut 'the plan is sourced by its bare name' \
+  '_shmutant_cli_load "$SHMUTANT_PLAN_DIR/$(basename -- "$plan")"' \
+  '_shmutant_cli_load "$plan"' \
+  't_cli_run'
+shmutant_mut 'a relative --workdir is resolved after the plan may have moved' \
+  '  wd="$(_shmutant_abs "$wd")" || { _shmutant_err "run: cannot resolve workdir"; return 2; }' \
   '  :' \
-  't_pool_prepare_keeps_its_own_errexit'
+  't_cli_run'
+shmutant_mut 'inherited prepare/run functions are accepted' \
+  '  unset -f prepare run' \
+  '  :' \
+  't_cli_run'
+shmutant_mut 'the plan errexit is left on across the pool call' \
+  '  set +o errexit' \
+  '  :' \
+  't_cli_run'
+shmutant_mut 'a relative SHMUTANT_STREAM is resolved after the plan may have moved' \
+  '      *)  SHMUTANT_STREAM="$(_shmutant_abs "$(dirname -- "$SHMUTANT_STREAM")")/$(basename -- "$SHMUTANT_STREAM")" \' \
+  '      *)  SHMUTANT_STREAM="$SHMUTANT_STREAM" \' \
+  't_cli_run'
+shmutant_mut 'the subshell status is trusted without the completion marker' \
+  'if [ -f "$done_file" ] && marker="$(cat "$done_file" 2>/dev/null)" && [ "$marker" = "$rc" ]; then' \
+  'if true; then' \
+  't_cli_run'
+
+# --- guards added for the ninth review round ---
+shmutant_mut 'settings are not revalidated after prepare' \
+  '_shmutant_validate_settings "$label" "$wd" || { _shmutant_err "$label: a setting changed by prepare is invalid"; return 2; }' \
+  ':' \
+  't_pool_revalidates_settings_after_prepare'
+shmutant_mut 'a pool cap of 0 falls back to the default' \
+  '*) if [ "${#cap}" -gt 4 ] || [ "$cap" -lt 1 ]; then' \
+  '*) if [ "${#cap}" -gt 4 ] || [ "$cap" -lt 0 ]; then' \
+  't_pool_revalidates_settings_after_prepare'
+shmutant_mut 'a multiline red prefix is accepted' \
+  'case "${SHMUTANT_RED_PREFIX:-}" in *$'"'"'\n'"'"'*)' \
+  'case "${SHMUTANT_RED_PREFIX:-}" in never-matches)' \
+  't_pool_revalidates_settings_after_prepare'
+shmutant_mut 'a non-red baseline exit is scored red' \
+  '    elif [ "$status" -eq "$red" ]; then verdict=red' \
+  '    elif true; then verdict=red' \
+  't_baseline_non_red_exit_is_aborted'
+shmutant_mut 'a reused pid is signalled anyway' \
+  '  [ "$(_shmutant_etime_secs "$now")" -ge "$2" ]' \
+  '  true' \
+  't_kill_tree_skips_a_reused_pid'

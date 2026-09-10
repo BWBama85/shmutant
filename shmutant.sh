@@ -329,16 +329,47 @@ _shmutant_descendants() {
     }'
 }
 
+# _shmutant_etime_secs <etime> — seconds from a POSIX `ps -o etime` value ([[dd-]hh:]mm:ss).
+_shmutant_etime_secs() {
+  local v="$1" d=0 h=0 m=0 sec=0 hms
+  case "$v" in *-*) d="${v%%-*}"; v="${v#*-}" ;; esac
+  hms="$v"
+  case "$hms" in
+    *:*:*) h="${hms%%:*}"; hms="${hms#*:}"; m="${hms%%:*}"; sec="${hms#*:}" ;;
+    *:*)   m="${hms%%:*}"; sec="${hms#*:}" ;;
+    *)     sec="$hms" ;;
+  esac
+  case "$d$h$m$sec" in *[!0-9]*|'') printf '0'; return ;; esac
+  printf '%s' $(( 10#$d * 86400 + 10#$h * 3600 + 10#$m * 60 + 10#$sec ))
+}
+
+# _shmutant_alive_since <pid> <seconds-seen> — true when <pid> is the process that was seen
+# <seconds-seen> ago or earlier: its elapsed time now is at least that. A pid that was reused
+# by a newer process has a smaller elapsed time and must not be signalled.
+_shmutant_alive_since() {
+  local now
+  now="$(ps -o etime= -p "$1" 2>/dev/null | tr -d ' ')" || return 1
+  [ -n "$now" ] || return 1
+  [ "$(_shmutant_etime_secs "$now")" -ge "$2" ]
+}
+
 # _shmutant_kill_tree <signal> <pid> <pids…> — send <signal> to <pid>'s process group, to every
 # descendant found now, and to each of <pids…>: the descendants found before an earlier signal,
 # which a leader's death may have reparented out of reach of a fresh walk.
+# <pids…> are `pid:etime-seconds` pairs recorded when each was seen; one whose elapsed time has
+# since shrunk is a reused pid and is left alone. Every target is decided first and signalled in
+# ONE kill: a parent signalled after its child has already run on past the child's death.
 _shmutant_kill_tree() {
   local sig="$1" pid="$2" p
-  local -a now=()
+  local -a targets=() now=()
   shift 2
+  for p in "$@"; do
+    [ -n "$p" ] || continue
+    _shmutant_alive_since "${p%%:*}" "${p#*:}" && targets+=("${p%%:*}")
+  done
   mapfile -t now < <(_shmutant_descendants "$pid")
-  for p in "$@" "${now[@]}"; do [ -n "$p" ] && kill "-$sig" "$p" 2>/dev/null; done
-  kill "-$sig" -- -"$pid" 2>/dev/null
+  for p in "${now[@]}"; do [ -n "$p" ] && targets+=("$p"); done
+  kill "-$sig" -- -"$pid" "${targets[@]}" 2>/dev/null
 }
 
 # _shmutant_run_bounded <dir> <run> <root> <select> — run the adapter with stdout+stderr in
@@ -368,11 +399,19 @@ _shmutant_run_bounded() {
         while [ "$(_shmutant_now)" -lt "$t_end" ]; do
           sleep 0.5 & s=$!
           wait "$s"
-          while IFS= read -r p; do [ -n "$p" ] && seen["$p"]=1; done < <(_shmutant_descendants "$pid")
+          # Each descendant is remembered with the elapsed time it had when first seen, so a
+          # pid reused by a newer process can be told apart at the kill.
+          while IFS= read -r p; do
+            [ -n "$p" ] || continue
+            [ -n "${seen[$p]:-}" ] && continue
+            e="$(ps -o etime= -p "$p" 2>/dev/null | tr -d ' ')"
+            seen["$p"]="$(_shmutant_etime_secs "${e:-0}")"
+          done < <(_shmutant_descendants "$pid")
         done
         : > "$dir/timeout"
-        # An array, never an unquoted expansion: splitting it would depend on the caller's IFS.
-        victims=("${!seen[@]}")
+        # An array of pid:etime pairs, never an unquoted expansion.
+        victims=()
+        for p in "${!seen[@]}"; do victims+=("$p:${seen[$p]}"); done
         _shmutant_kill_tree TERM "$pid" "${victims[@]}"
         sleep 1
         _shmutant_kill_tree KILL "$pid" "${victims[@]}"
@@ -406,7 +445,7 @@ _shmutant_worker_finish() {
 # the pool reaps by pid, and a non-zero worker would be mistaken for a lost verdict.
 _shmutant_worker() {
   local kind="$1" i="$2" wd="$3" run="$4" suffix="$5"
-  local dir="$3/$1-$2" root sel verdict status t0 t1 target rc
+  local dir="$3/$1-$2" root sel verdict status t0 t1 target rc red
   set +e
   shopt -u nocasematch
   t0="$(_shmutant_now)"
@@ -433,7 +472,10 @@ _shmutant_worker() {
   if [ -e "$dir/timeout" ]; then
     verdict=timeout
   elif [ "$kind" = base ]; then
-    if [ "$status" -eq 0 ]; then verdict=green; else verdict=red; fi
+    red="${SHMUTANT_RED_STATUS:-1}"
+    if [ "$status" -eq 0 ]; then verdict=green
+    elif [ "$status" -eq "$red" ]; then verdict=red
+    else verdict=aborted; fi
   elif [ "$status" -eq "${SHMUTANT_RED_STATUS:-1}" ]; then
     if _shmutant_witnessed "$dir/output" "${SHMUTANT_RED_PREFIX:-FAIL: }" "${SHMUTANT_ROWS_WIT[$i]}"; then
       verdict=killed
@@ -522,6 +564,59 @@ _shmutant_run_jobs() {
   return 0
 }
 
+# _shmutant_validate_settings <label> <workdir> — every SHMUTANT_* setting the pool and its
+# workers read, checked before the first use and again after prepare (which runs in this shell
+# and can assign any of them). Replaces SHMUTANT_STREAM by its absolute form. Returns 2 on the
+# first violation.
+_shmutant_validate_settings() {
+  local label="$1" wd="$2"
+  # Digits only AND a bounded width: an all-digit value past bash's integer range fails every
+  # numeric test with a diagnostic and would fall through as if it had passed.
+  # Every setting is read through a default first: a caller's `set -u` must not turn an unset
+  # option into an abort.
+  local v_timeout="${SHMUTANT_TIMEOUT:-300}" v_red="${SHMUTANT_RED_STATUS:-1}" v_jobs="${SHMUTANT_JOBS:-}"
+  case "$v_timeout" in
+    *[!0-9]*|'') _shmutant_err "$label: SHMUTANT_TIMEOUT must be a non-negative integer, got [$v_timeout]"; return 2 ;;
+  esac
+  [ "${#v_timeout}" -le 9 ] || { _shmutant_err "$label: SHMUTANT_TIMEOUT is too large, got [$v_timeout]"; return 2; }
+  case "$v_red" in
+    *[!0-9]*|'') _shmutant_err "$label: SHMUTANT_RED_STATUS must be an exit status from 1 to 255, got [$v_red]"; return 2 ;;
+  esac
+  [ "${#v_red}" -le 3 ] || { _shmutant_err "$label: SHMUTANT_RED_STATUS must be an exit status from 1 to 255, got [$v_red]"; return 2; }
+  if [ "$v_red" -lt 1 ] || [ "$v_red" -gt 255 ]; then
+    _shmutant_err "$label: SHMUTANT_RED_STATUS must be an exit status from 1 to 255, got [$v_red] — 0 is green by definition"; return 2
+  fi
+  if [ -n "$v_jobs" ]; then
+    case "$v_jobs" in *[!0-9]*) _shmutant_err "$label: SHMUTANT_JOBS must be a positive integer, got [$v_jobs]"; return 2 ;; esac
+    if [ "${#v_jobs}" -gt 4 ] || [ "$v_jobs" -lt 1 ]; then
+      _shmutant_err "$label: SHMUTANT_JOBS must be a positive integer of at most four digits, got [$v_jobs]"; return 2
+    fi
+  fi
+  if [ -n "${SHMUTANT_RED_PREFIX+x}" ] && [ -z "$SHMUTANT_RED_PREFIX" ]; then
+    _shmutant_err "$label: SHMUTANT_RED_PREFIX is empty — every line would count as a red line"; return 2
+  fi
+  case "${SHMUTANT_RED_PREFIX:-}" in *$'\n'*) _shmutant_err "$label: SHMUTANT_RED_PREFIX contains a newline — no single line could ever start with it"; return 2 ;; esac
+  if [ -n "${SHMUTANT_STREAM:-}" ]; then
+    local sdir
+    if [ -L "$SHMUTANT_STREAM" ]; then
+      _shmutant_err "$label: SHMUTANT_STREAM is a symlink ($SHMUTANT_STREAM) — name the file itself, so where the records land can be checked"; return 2
+    fi
+    if [ -e "$SHMUTANT_STREAM" ] && [ ! -f "$SHMUTANT_STREAM" ]; then
+      _shmutant_err "$label: SHMUTANT_STREAM exists and is not a regular file ($SHMUTANT_STREAM) — a FIFO with no reader would block the pool forever"; return 2
+    fi
+    if ! sdir="$(_shmutant_abs "$(dirname -- "$SHMUTANT_STREAM")")"; then
+      _shmutant_err "$label: SHMUTANT_STREAM points into a directory that does not exist: $SHMUTANT_STREAM"; return 2
+    fi
+    case "$sdir" in
+      "$wd"|"$wd/"*) _shmutant_err "$label: SHMUTANT_STREAM lies inside the workdir ($SHMUTANT_STREAM) — the pool recreates and removes what is in there"; return 2 ;;
+    esac
+    # Replaced by its validated absolute form: prepare runs in this shell and may cd.
+    SHMUTANT_STREAM="$sdir/$(basename -- "$SHMUTANT_STREAM")"
+  fi
+
+  return 0
+}
+
 # shmutant_pool <label> <workdir> <prepare> <run> [cap] — run every table row. Prepares the
 # tree once, runs each distinct selector uninjected (SHMUTANT_BASELINE), then every row through a
 # pool of min(SHMUTANT_JOBS or CPUs, cap or 8) workers. Emits the verdict stream and one stderr
@@ -552,49 +647,13 @@ shmutant_pool() {
   if ! declare -F -- "$run" > /dev/null 2>&1 && ! command -v -- "$run" > /dev/null 2>&1; then
     _shmutant_err "$label: run callback not found: $run"; return 2
   fi
-  # Digits only AND a bounded width: an all-digit value past bash's integer range fails every
-  # numeric test with a diagnostic and would fall through as if it had passed.
-  # Every setting is read through a default first: a caller's `set -u` must not turn an unset
-  # option into an abort.
-  local v_timeout="${SHMUTANT_TIMEOUT:-300}" v_red="${SHMUTANT_RED_STATUS:-1}" v_jobs="${SHMUTANT_JOBS:-}"
-  case "$v_timeout" in
-    *[!0-9]*|'') _shmutant_err "$label: SHMUTANT_TIMEOUT must be a non-negative integer, got [$v_timeout]"; return 2 ;;
+  _shmutant_validate_settings "$label" "$wd" || return 2
+  case "$cap" in
+    '') ;;
+    *[!0-9]*) _shmutant_err "$label: the pool cap must be a positive integer, got [$cap]"; return 2 ;;
+    *) if [ "${#cap}" -gt 4 ] || [ "$cap" -lt 1 ]; then _shmutant_err "$label: the pool cap must be a positive integer of at most four digits, got [$cap]"; return 2; fi ;;
   esac
-  [ "${#v_timeout}" -le 9 ] || { _shmutant_err "$label: SHMUTANT_TIMEOUT is too large, got [$v_timeout]"; return 2; }
-  case "$v_red" in
-    *[!0-9]*|'') _shmutant_err "$label: SHMUTANT_RED_STATUS must be an exit status from 1 to 255, got [$v_red]"; return 2 ;;
-  esac
-  [ "${#v_red}" -le 3 ] || { _shmutant_err "$label: SHMUTANT_RED_STATUS must be an exit status from 1 to 255, got [$v_red]"; return 2; }
-  if [ "$v_red" -lt 1 ] || [ "$v_red" -gt 255 ]; then
-    _shmutant_err "$label: SHMUTANT_RED_STATUS must be an exit status from 1 to 255, got [$v_red] — 0 is green by definition"; return 2
-  fi
-  if [ -n "$v_jobs" ]; then
-    case "$v_jobs" in *[!0-9]*) _shmutant_err "$label: SHMUTANT_JOBS must be a positive integer, got [$v_jobs]"; return 2 ;; esac
-    if [ "${#v_jobs}" -gt 4 ] || [ "$v_jobs" -lt 1 ]; then
-      _shmutant_err "$label: SHMUTANT_JOBS must be a positive integer of at most four digits, got [$v_jobs]"; return 2
-    fi
-  fi
-  if [ -n "${SHMUTANT_RED_PREFIX+x}" ] && [ -z "$SHMUTANT_RED_PREFIX" ]; then
-    _shmutant_err "$label: SHMUTANT_RED_PREFIX is empty — every line would count as a red line"; return 2
-  fi
   jobs="$(_shmutant_jobs "$cap")"
-  if [ -n "${SHMUTANT_STREAM:-}" ]; then
-    local sdir
-    if [ -L "$SHMUTANT_STREAM" ]; then
-      _shmutant_err "$label: SHMUTANT_STREAM is a symlink ($SHMUTANT_STREAM) — name the file itself, so where the records land can be checked"; return 2
-    fi
-    if [ -e "$SHMUTANT_STREAM" ] && [ ! -f "$SHMUTANT_STREAM" ]; then
-      _shmutant_err "$label: SHMUTANT_STREAM exists and is not a regular file ($SHMUTANT_STREAM) — a FIFO with no reader would block the pool forever"; return 2
-    fi
-    if ! sdir="$(_shmutant_abs "$(dirname -- "$SHMUTANT_STREAM")")"; then
-      _shmutant_err "$label: SHMUTANT_STREAM points into a directory that does not exist: $SHMUTANT_STREAM"; return 2
-    fi
-    case "$sdir" in
-      "$wd"|"$wd/"*) _shmutant_err "$label: SHMUTANT_STREAM lies inside the workdir ($SHMUTANT_STREAM) — the pool recreates and removes what is in there"; return 2 ;;
-    esac
-    # Replaced by its validated absolute form: prepare runs in this shell and may cd.
-    SHMUTANT_STREAM="$sdir/$(basename -- "$SHMUTANT_STREAM")"
-  fi
 
   _shmutant_fresh_dir "$wd/pristine" || { _shmutant_err "$label: cannot recreate $wd/pristine — stale contents there would be prepared over"; return 2; }
   local pout prc errexit_before=0
@@ -609,6 +668,8 @@ shmutant_pool() {
     rm -f -- "$pout"; _shmutant_err "$label: prepare failed (status $prc) — no tree to mutate"; return 2
   fi
   root="$(cat "$pout")"; rm -f -- "$pout"
+  # prepare ran in this shell and may have assigned any setting; the workers read them next.
+  _shmutant_validate_settings "$label" "$wd" || { _shmutant_err "$label: a setting changed by prepare is invalid"; return 2; }
   [ -n "$root" ] || root="$wd/pristine"
   root="$(_shmutant_abs "$root")" || { _shmutant_err "$label: prepare printed a root that is not a directory"; return 2; }
   case "$root" in
@@ -643,7 +704,8 @@ shmutant_pool() {
       case "$SHMUTANT_V_VERDICT" in
         green)   detail="green before injection" ;;
         timeout) detail="did not finish within ${SHMUTANT_TIMEOUT:-300}s before any injection" ;;
-        red)     detail="exited $SHMUTANT_V_STATUS before any injection" ;;
+        red)     detail="exited $SHMUTANT_V_STATUS (red) before any injection" ;;
+        aborted) detail="exited $SHMUTANT_V_STATUS, neither green nor red, before any injection — the selector matched nothing, or the suite aborted" ;;
         *)       detail="$(_shmutant_detail "$SHMUTANT_V_VERDICT" "$SHMUTANT_V_STATUS" "" "${base_sel[$k]}")" ;;
       esac
       _shmutant_emit shmutant 1 baseline "${base_sel[$k]}" "$SHMUTANT_V_VERDICT" "$(_shmutant_secs "$SHMUTANT_V_US")" "$detail"
@@ -699,9 +761,10 @@ usage: shmutant run <plan.sh> [--jobs N] [--workdir DIR] [--keep] [--no-baseline
 
 A plan is a bash file. It defines two functions, `prepare <dir>` and `run <root> <select>`,
 and declares its rows with `shmutant_target` and `shmutant_mut`. It is sourced with
-SHMUTANT_PLAN_DIR set to its own directory. Exit: 0 every row killed, 1 a row was not,
-2 the plan or the harness could not run. A workdir the run created is removed afterwards
-unless --keep (or SHMUTANT_KEEP=1); a --workdir you supplied is never removed.
+SHMUTANT_PLAN_DIR set to its own directory, in a subshell: a plan that exits, execs or fails
+to load ends the run with status 2. Exit: 0 every row killed, 1 a row was not, 2 the plan or
+the harness could not run. A workdir the run created is removed afterwards unless --keep (or
+SHMUTANT_KEEP=1); a --workdir you supplied is never removed.
 EOF
 }
 
@@ -714,36 +777,31 @@ _shmutant_checksum() {
   fi
 }
 
-# _shmutant_cli_finish <status> — the one exit for a run whose workdir exists: keep it and say
-# so, or remove it when this run created it. Returns <status>. Reads the frozen globals.
-_shmutant_cli_finish() {
-  if [ "$SHMUTANT_CLI_KEEP" = 1 ]; then _shmutant_err "workdir kept: $SHMUTANT_CLI_WD"
-  elif [ "$SHMUTANT_CLI_MADE" = 1 ]; then rm -rf -- "$SHMUTANT_CLI_WD"
-  fi
-  return "$1"
-}
-
-# _shmutant_plan_trap <trap-args…> — stands in for `trap` while the plan loads: the EXIT trap is
-# the load-failure guard and bash keeps only one, so a plan may set any other signal but not
-# that one.
-_shmutant_plan_trap() {
-  case " $* " in
-    *" EXIT "*|*" 0 "*|*" DEBUG "*) _shmutant_err "run: a plan may not set an EXIT or DEBUG trap"; return 2 ;;
-  esac
-  # shellcheck disable=SC2064
-  builtin trap "$@"
-}
-
-# _shmutant_plan_died — EXIT trap armed while the plan is sourced: a plan that exits, or whose own
-# `set -e` fires, still ends this run as a load failure with status 2, workdir handled.
-_shmutant_plan_died() {
-  _shmutant_err "run: the plan failed while loading"
-  _shmutant_cli_finish 2
-  builtin exit 2
+# _shmutant_cli_load <plan-path> — runs in the CLI's plan subshell: load the plan, check its
+# callbacks, run the pool. The pool's status is the subshell's, and only a completed pool writes
+# the marker the parent reads. Callbacks come from the plan, never from functions exported by the
+# invoking environment; the plan is sourced bare, not in an || list, so its own errexit keeps
+# meaning what it says.
+_shmutant_cli_load() {
+  local plan="$1" rc
+  unset -f prepare run
+  shmutant_reset
+  # shellcheck disable=SC1090
+  . "$plan"
+  rc=$?
+  [ "$rc" -eq 0 ] || { _shmutant_err "run: the plan failed while loading (status $rc)"; return 2; }
+  declare -F prepare > /dev/null || { _shmutant_err "run: the plan defines no prepare function"; return 2; }
+  declare -F run > /dev/null || { _shmutant_err "run: the plan defines no run function"; return 2; }
+  # The plan may have turned errexit on for its own preamble; the pool's non-zero returns are
+  # answers, not errors.
+  set +o errexit
+  shmutant_pool "$(basename -- "$plan")" "$SHMUTANT_CLI_WD" prepare run; rc=$?
+  printf '%s\n' "$rc" >| "$SHMUTANT_CLI_DONE"
+  return "$rc"
 }
 
 _shmutant_cli_run() {
-  local plan="" wd="" keep=0 made=0 rc
+  local plan="" wd="" keep=0 made=0 rc done_file marker
   [ "${SHMUTANT_KEEP:-0}" = 1 ] && keep=1
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -781,52 +839,32 @@ _shmutant_cli_run() {
     mkdir -p -- "$wd" || { _shmutant_err "run: cannot create workdir $wd"; return 2; }
   fi
   wd="$(_shmutant_abs "$wd")" || { _shmutant_err "run: cannot resolve workdir"; return 2; }
-  # The plan is sourced INSIDE this function, where bash's dynamic scoping lets it assign any
-  # local by name. The cleanup decides what to delete, so its inputs are frozen read-only before
-  # the plan runs: a plan that writes SHMUTANT_CLI_MADE=1 gets a readonly error, not a deleted
-  # caller directory. Globals, because the EXIT trap must read them too.
-  readonly SHMUTANT_CLI_WD="$wd" SHMUTANT_CLI_KEEP="$keep" SHMUTANT_CLI_MADE="$made"
-  local -r _shmutant_cli_plan="$SHMUTANT_PLAN_DIR/$(basename -- "$plan")"
-  shmutant_reset
-  # Callbacks come from the plan, never from functions exported by the invoking environment.
-  unset -f prepare run
-  # Sourced bare, not in an || list: an || list would switch the plan's own errexit off for the
-  # whole file. The trap turns an errexit exit or an explicit exit into status 2; while the plan
-  # loads, `trap` may not replace it, because bash keeps only one EXIT trap.
-  trap() { _shmutant_plan_trap "$@"; }
-  # The load-failure guard is armed before every command the plan runs, so `builtin trap` or
-  # `command trap` cannot leave a replacement in place for the command that follows it.
-  # functrace carries the DEBUG trap into functions the plan calls while loading. The `trap`
-  # shadow above only adds the message; the DEBUG re-arm is the guard.
-  set -o functrace
-  builtin trap 'builtin trap _shmutant_plan_died EXIT' DEBUG
-  # shellcheck disable=SC1090
-  . "$_shmutant_cli_plan"
-  rc=$?
-  builtin trap - DEBUG
-  set +o functrace
-  unset -f trap
-  builtin trap - EXIT
-  [ "$rc" -eq 0 ] || { _shmutant_err "run: the plan failed while loading (status $rc)"; _shmutant_cli_finish 2; return 2; }
-  declare -F prepare > /dev/null || { _shmutant_err "run: the plan defines no prepare function"; _shmutant_cli_finish 2; return 2; }
-  declare -F run > /dev/null || { _shmutant_err "run: the plan defines no run function"; _shmutant_cli_finish 2; return 2; }
-  # The plan may have turned errexit on for its own preamble; the pool's non-zero returns are
-  # answers, not errors, and the cleanup must run for every one of them.
-  set +o errexit
-  # prepare runs in this shell with its own errexit honoured; if it takes the shell down, the
-  # workdir is still handled and the status is a harness error.
-  builtin trap _shmutant_pool_died EXIT
-  shmutant_pool "$(basename -- "$plan")" "$SHMUTANT_CLI_WD" prepare run; rc=$?
-  builtin trap - EXIT
-  _shmutant_cli_finish "$rc"
-}
-
-# _shmutant_pool_died — EXIT trap armed while the pool runs in the CLI: a callback that exits the
-# shell (its own errexit, an explicit exit) still ends the run as a harness error.
-_shmutant_pool_died() {
-  _shmutant_err "run: a callback ended the shell while the pool was running"
-  _shmutant_cli_finish 2
-  builtin exit 2
+  # The plan and the pool run in a SUBSHELL. Whatever a plan does there — exec, exit, a trap, an
+  # assignment to any variable — stays there: this shell never executed it, and decides the
+  # outcome from the marker only a completed pool writes. No marker means the plan or a callback
+  # ended the run before the pool finished, whatever status the subshell reports.
+  done_file="$(mktemp "$wd/.done.XXXXXX")" || { _shmutant_err "run: cannot create a marker in $wd"; [ "$made" = 1 ] && rm -rf -- "$wd"; return 2; }
+  rm -f -- "$done_file"
+  (
+    readonly SHMUTANT_CLI_WD="$wd" SHMUTANT_CLI_DONE="$done_file"
+    _shmutant_cli_load "$SHMUTANT_PLAN_DIR/$(basename -- "$plan")"
+  ); rc=$?
+  if [ -f "$done_file" ] && marker="$(cat "$done_file" 2>/dev/null)" && [ "$marker" = "$rc" ]; then
+    rm -f -- "$done_file"
+  else
+    rm -f -- "$done_file"
+    case "$rc" in
+      2) ;;
+      *) _shmutant_err "run: the plan or a callback ended the run before the pool completed (status $rc)" ;;
+    esac
+    rc=2
+  fi
+  # Only a workdir this run created is removed. A caller-supplied one is theirs: the pool's own
+  # artifacts stay in it and nothing else in it is touched.
+  if [ "$keep" = 1 ]; then _shmutant_err "workdir kept: $wd"
+  elif [ "$made" = 1 ]; then rm -rf -- "$wd"
+  fi
+  return "$rc"
 }
 
 shmutant_main() {

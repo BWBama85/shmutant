@@ -100,10 +100,10 @@ Run with `SHMUTANT_RED_PREFIX='not ok '`, and probe the failure exit status as a
 ## 4. Write the plan
 
 A plan is a bash file. The CLI sources it with `SHMUTANT_PLAN_DIR` set to its directory, then
-runs the table. A plan that exits, or whose own `set -e` fires while it loads, is a load failure
-(status 2); a plan may not set an `EXIT` trap, since that trap is the load-failure guard. Its
-`prepare` and `run` must be defined in the plan; functions exported by the invoking environment
-are discarded first. `prepare` runs in the pool's own shell, so state it exports is visible to
+runs the table, both in a subshell of the CLI: whatever the plan does there (an `exit`, an
+`exec`, a trap, an assignment) stays there, and the CLI reports status 2 whenever the pool did
+not run to completion. Its `prepare` and `run` must be defined in the plan; functions exported
+by the invoking environment are discarded first. `prepare` runs in the pool's own shell, so state it exports is visible to
 `run`, and its own `set -e` is honoured: a prepare that aborts ends the run as a harness error.
 `shmutant_copy_tree` and the per-row clones keep mode, ownership and timestamps.
 
@@ -176,13 +176,17 @@ on every run. A workdir the CLI created for itself is removed unless `--keep`.
 
 | Variable | Default | Use |
 |---|---|---|
-| `SHMUTANT_JOBS` | CPU count | Worker budget, a positive integer. The pool's cap (argument 5, default 8) still applies. |
+| `SHMUTANT_JOBS` | CPU count | Worker budget, a positive integer. The pool's cap (argument 5, default 8, validated the same way) still applies. |
 | `SHMUTANT_TIMEOUT` | 300 | Seconds per run before the run is killed: its process group, every descendant seen while it ran (snapshotted twice a second), TERM then KILL. A process that detaches into its own session within half a second of forking is out of reach; that needs cgroups or `setsid`, which this tool does not depend on. Raise the bound for a suite that cannot select; 0 disables. |
 | `SHMUTANT_BASELINE` | 1 | Run every distinct selector once, uninjected, and require green. Set 0 when the suite was proven green in a previous step. |
 | `SHMUTANT_KEEP` | 0 | Keep every clone and the pristine tree. |
 | `SHMUTANT_STREAM` | stdout | Append the verdict stream to a file instead. Its directory must exist; it must be a regular file or absent (no symlink, no FIFO), outside the workdir. A relative path is resolved where the CLI was invoked. |
 | `SHMUTANT_RED_STATUS` | 1 | The exit status that means red, 1 to 255. |
-| `SHMUTANT_RED_PREFIX` | `FAIL: ` | The prefix of a red line; must not be empty. |
+| `SHMUTANT_RED_PREFIX` | `FAIL: ` | The prefix of a red line; must not be empty or contain a newline. |
+
+Every setting is validated before the first run and again after `prepare` returns, since
+`prepare` runs in the pool's shell and can assign any of them. A baseline run that exits with a
+status that is neither green nor red is recorded as `aborted`, not `red`.
 
 ## 7. Migrating a `check-lib.sh`-style harness
 
