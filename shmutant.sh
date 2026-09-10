@@ -208,9 +208,11 @@ shmutant_copy_tree() {
   # A copy gives each hard link its own inode, and the pool's later check could not tell: a
   # source carrying one is refused here, naming it.
   local linked
-  linked="$(find "$src" -path "$src/.git" -prune -o -type f -links +1 -print 2>/dev/null | head -n 1)"
+  # Searched from inside the source: `-path` takes a pattern, and a source whose name holds a
+  # bracket expression would otherwise never match its own .git.
+  linked="$(cd "$src" 2>/dev/null && find . -path ./.git -prune -o -type f -links +1 -print 2>/dev/null | head -n 1)"
   if [ -n "$linked" ]; then
-    _shmutant_err "copy_tree: $linked has more than one hard link — a copy cannot keep them joined; prepare that tree yourself, or name the file it aliases"; return 1
+    _shmutant_err "copy_tree: $src/${linked#./} has more than one hard link — a copy cannot keep them joined; prepare that tree yourself, or name the file it aliases"; return 1
   fi
   # The first component mkdir would create is remembered, so a refusal leaves nothing behind.
   local made="" probe2="$dst"
@@ -584,7 +586,7 @@ _shmutant_kill_tree() {
 # and the whole tree it spawned dies with it. That subshell's stderr is discarded: with job
 # control on, bash reports the reaped job there when the pool itself runs under `$(...)`.
 _shmutant_run_bounded() {
-  local dir="$1" run="$2" root="$3" sel="$4" timeout mark fifo fd
+  local dir="$1" run="$2" root="$3" sel="$4" timeout mark fifo fd rootspec
   local left_w left_r seen_w seen_r fired out_r
   timeout="$(_shmutant_pos_int "${SHMUTANT_TIMEOUT:-300}")" || timeout=0
   SHMUTANT_RUN_FIRED=0; SHMUTANT_RUN_OUTPUT=""
@@ -606,15 +608,19 @@ _shmutant_run_bounded() {
   (
     set -m
     # The snapshot is an EXIT trap of the wrapper, so it runs however the callback ends: a
-    # callback that turned errexit on and failed would otherwise leave without it.
+    # callback that turned errexit on and failed would otherwise leave without it. A callback
+    # that dropped the trap is still recorded on return, and on `exit`, which the wrapper
+    # shadows with a function that snapshots first.
     ( _shmutant_wrap_left="$left_w"; trap '_shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"' EXIT
+      exit() { _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; builtin exit "$@"; }
       export SHMUTANT_SELECT="$sel"; "$run" "$root" "$sel"; rrc=$?
-      # And once more explicitly: a callback that dropped the trap is still recorded on return.
-      _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; trap - EXIT; exit "$rrc" ) < /dev/null >> "$dir/output" 2>&1 &
+      _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; trap - EXIT; builtin exit "$rrc" ) < /dev/null >> "$dir/output" 2>&1 &
     pid=$!
     # The root's identity while it is certainly alive: the post-run kill must not stop or signal
     # a reaped root by number.
-    rootid="$(_shmutant_identity "$pid")" || rootid=""
+    # Without an identity (no usable ps) the root is passed bare while this shell still holds
+    # it unreaped: `pid:` would read as reaped and leave a live tree running past its timeout.
+    if rootid="$(_shmutant_identity "$pid")"; then rootspec="$pid:$rootid"; else rootid=""; rootspec="$pid"; fi
     dog=""
     if [ "$timeout" -gt 0 ]; then
       (
@@ -643,7 +649,7 @@ _shmutant_run_bounded() {
         # An array of pid:identity pairs, never an unquoted expansion.
         victims=()
         for p in "${!seen[@]}"; do victims+=("$p:${seen[$p]}"); done
-        _shmutant_kill_tree_twice "$pid:$rootid" "${victims[@]}"
+        _shmutant_kill_tree_twice "$rootspec" "${victims[@]}"
       ) < /dev/null > /dev/null 2>&1 &
       dog=$!
     fi
@@ -654,7 +660,7 @@ _shmutant_run_bounded() {
       wait -n -p done_first "$pid" "$dog"; rc=$?
       if [ "${done_first:-}" != "$pid" ]; then
         read -t 0 -u "$fired" || printf 'fired\n' >&"$fired"
-        _shmutant_kill_tree_twice "$pid:$rootid"
+        _shmutant_kill_tree_twice "$rootspec"
         wait "$pid"; rc=$?
       else
         # Once the watchdog has fired, let it reach KILL; otherwise cancel it.
@@ -1228,7 +1234,7 @@ _shmutant_cli_abort() {
     if [ -f "${SHMUTANT_CLI_KEEPFILE:-}" ] && [ "$(cat "$SHMUTANT_CLI_KEEPFILE" 2>/dev/null)" = 1 ]; then
       _shmutant_err "workdir kept: $SHMUTANT_CLI_WD_TO_RM"
     else
-      rm -rf -- "$SHMUTANT_CLI_WD_TO_RM"
+      _shmutant_remove "$SHMUTANT_CLI_WD_TO_RM" || _shmutant_err "run: could not remove the workdir $SHMUTANT_CLI_WD_TO_RM"
     fi
   fi
   trap - INT TERM
@@ -1265,8 +1271,10 @@ _shmutant_cli_run() {
   if [ -n "${SHMUTANT_STREAM:-}" ]; then
     case "$SHMUTANT_STREAM" in
       /*) ;;
-      *)  SHMUTANT_STREAM="$(_shmutant_abs "$(dirname -- "$SHMUTANT_STREAM")")/$(basename -- "$SHMUTANT_STREAM")" \
-            || { _shmutant_err "run: SHMUTANT_STREAM points into a directory that does not exist: $SHMUTANT_STREAM"; return 2; } ;;
+      *)  local sdir
+          sdir="$(_shmutant_abs "$(dirname -- "$SHMUTANT_STREAM")")" || sdir=""
+          [ -n "$sdir" ] || { _shmutant_err "run: SHMUTANT_STREAM points into a directory that does not exist: $SHMUTANT_STREAM"; return 2; }
+          SHMUTANT_STREAM="$sdir/$(basename -- "$SHMUTANT_STREAM")" ;;
     esac
   fi
   if [ -z "$wd" ]; then
@@ -1317,7 +1325,7 @@ _shmutant_cli_run() {
   # Only a workdir this run created is removed. A caller-supplied one is theirs: the pool's own
   # artifacts stay in it and nothing else in it is touched.
   if [ "$keep" = 1 ]; then _shmutant_err "workdir kept: $wd"
-  elif [ "$made" = 1 ]; then rm -rf -- "$wd"
+  elif [ "$made" = 1 ]; then _shmutant_remove "$wd" || { _shmutant_err "run: could not remove the workdir $wd"; rc=2; }
   fi
   return "$rc"
 }

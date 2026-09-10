@@ -330,8 +330,8 @@ shmutant_mut 'the setuid bit is dropped by the rewrite' \
 
 # --- guards added for the seventh review round ---
 shmutant_mut 'the descendant list is split by the caller IFS again' \
-  '        _shmutant_kill_tree_twice "$pid:$rootid" "${victims[@]}"' \
-  '        _shmutant_kill_tree_twice "$pid:$rootid" $(printf "%s\n" "${victims[@]}")' \
+  '        _shmutant_kill_tree_twice "$rootspec" "${victims[@]}"' \
+  '        _shmutant_kill_tree_twice "$rootspec" $(printf "%s\n" "${victims[@]}")' \
   't_verdict_timeout_kills_a_descendant_seen_then_reparented'
 shmutant_mut 'prepare runs in a subshell' \
   '"$prep" "$wd/pristine" >| "$pout"; prc=$?' \
@@ -390,8 +390,8 @@ shmutant_mut '--keep deletes the workdir' \
   'if [ "$keep" = 0 ]; then _shmutant_err "workdir kept: $wd"' \
   't_cli_run'
 shmutant_mut 'a caller-supplied workdir is removed' \
-  '  elif [ "$made" = 1 ]; then rm -rf -- "$wd"' \
-  '  elif true; then rm -rf -- "$wd"' \
+  '  elif [ "$made" = 1 ]; then _shmutant_remove "$wd" || {' \
+  '  elif true; then _shmutant_remove "$wd" || {' \
   't_cli_run'
 shmutant_mut 'the plan is sourced by its bare name' \
   '_shmutant_cli_load "$SHMUTANT_PLAN_DIR/$(basename -- "$plan")"' \
@@ -410,8 +410,8 @@ shmutant_mut 'the plan errexit is left on across the pool call' \
   '  :' \
   't_cli_run'
 shmutant_mut 'a relative SHMUTANT_STREAM is resolved after the plan may have moved' \
-  '      *)  SHMUTANT_STREAM="$(_shmutant_abs "$(dirname -- "$SHMUTANT_STREAM")")/$(basename -- "$SHMUTANT_STREAM")" \' \
-  '      *)  SHMUTANT_STREAM="$SHMUTANT_STREAM" \' \
+  '          sdir="$(_shmutant_abs "$(dirname -- "$SHMUTANT_STREAM")")" || sdir=""' \
+  '          sdir="$(dirname -- "$SHMUTANT_STREAM")"' \
   't_cli_run'
 shmutant_mut 'the subshell status is trusted without the completion marker' \
   '  if [ -n "$marker" ] && [ "${marker%% *}" = "$rc" ]; then' \
@@ -532,12 +532,12 @@ shmutant_mut 'the row pool runs as a condition, muting callback errexit' \
 
 # --- guards added for the thirteenth review round ---
 shmutant_mut 'the leftover record descriptor is read after the callback could assign it' \
-  '      _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; trap - EXIT; exit "$rrc" )' \
-  '      _shmutant_snapshot "$BASHPID" >&"$left_w"; trap - EXIT; exit "$rrc" )' \
+  '      _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; trap - EXIT; builtin exit "$rrc" )' \
+  '      _shmutant_snapshot "$BASHPID" >&"$left_w"; trap - EXIT; builtin exit "$rrc" )' \
   't_run_cannot_redirect_the_leftover_record'
 shmutant_mut 'the hard-link preflight scans the top-level .git the copy skips' \
-  'find "$src" -path "$src/.git" -prune -o -type f -links +1 -print' \
-  'find "$src" -type f -links +1 -print' \
+  'find . -path ./.git -prune -o -type f -links +1 -print' \
+  'find . -type f -links +1 -print' \
   't_copy_tree_excludes_git'
 shmutant_mut 'the abort handler waits for every job, the caller included' \
   '  [ "${#helpers[@]}" -eq 0 ] || wait "${helpers[@]}" 2>/dev/null' \
@@ -594,15 +594,15 @@ shmutant_mut 'the CLI ignores SHMUTANT_KEEP=1 before the pool settles it' \
 
 # --- guards added for the sixteenth review round ---
 shmutant_mut 'the leftover record is written by path after the callback' \
-  '      _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; trap - EXIT; exit "$rrc" )' \
-  '      _shmutant_snapshot "$BASHPID" > "$dir/.left"; trap - EXIT; exit "$rrc" )' \
+  '      _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; trap - EXIT; builtin exit "$rrc" )' \
+  '      _shmutant_snapshot "$BASHPID" > "$dir/.left"; trap - EXIT; builtin exit "$rrc" )' \
   't_run_cannot_lose_the_leftover_record_by_locking_its_dir'
 shmutant_mut 'a read-only tree of ours is not made removable' \
   '      find "$path" -type d ! -perm -u+rwx -exec chmod u+rwx {} + 2>/dev/null' \
   '      :' \
   't_pool_removes_a_read_only_pristine_root'
 shmutant_mut 'the watchdog signals without freezing the tree' \
-  '        _shmutant_kill_tree_twice "$pid:$rootid" "${victims[@]}"' \
+  '        _shmutant_kill_tree_twice "$rootspec" "${victims[@]}"' \
   '        _shmutant_kill_tree KILL "$pid" "${victims[@]}"' \
   't_verdict_timeout_stops_a_run_that_keeps_forking'
 shmutant_mut 'retained victims are neither frozen nor searched from' \
@@ -660,8 +660,8 @@ shmutant_mut 'the completion marker keeps its path while the plan loads' \
   '  :' \
   't_cli_run'
 shmutant_mut 'the snapshot on return is dropped, leaving only the trap' \
-  '      _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; trap - EXIT; exit "$rrc" )' \
-  '      trap - EXIT; exit "$rrc" )' \
+  '      _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; trap - EXIT; builtin exit "$rrc" )' \
+  '      trap - EXIT; builtin exit "$rrc" )' \
   't_run_cannot_lose_the_leftover_record_by_locking_its_dir'
 shmutant_mut 'a rejected root is still searched from while freezing' \
   '  if [ "$root_ok" = 1 ]; then' \
@@ -687,3 +687,25 @@ shmutant_mut 'the pool reads its positionals before checking their count' \
   '  if [ "$#" -lt 4 ] || [ "$#" -gt 5 ]; then _shmutant_err "pool: usage' \
   '  if false; then _shmutant_err "pool: usage' \
   't_pool_checks_its_arity_first'
+
+# --- guards added for the twentieth review round ---
+shmutant_mut 'a callback that leaves by exit skips the snapshot' \
+  '      exit() { _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; builtin exit "$@"; }' \
+  '      :' \
+  't_run_cannot_lose_the_leftover_record_by_locking_its_dir'
+shmutant_mut 'a root without an identity is passed as reaped' \
+  'else rootid=""; rootspec="$pid"; fi' \
+  'else rootid=""; rootspec="$pid:"; fi' \
+  't_verdict_timeout_without_an_identity'
+shmutant_mut 'the .git prune takes the source name as a pattern' \
+  '  linked="$(cd "$src" 2>/dev/null && find . -path ./.git -prune' \
+  '  linked="$(cd "$src" 2>/dev/null && find "$src" -path "$src/.git" -prune' \
+  't_copy_tree_excludes_git'
+shmutant_mut 'a relative stream in a missing directory is re-based onto the root' \
+  '          [ -n "$sdir" ] || { _shmutant_err "run: SHMUTANT_STREAM points into a directory that does not exist: $SHMUTANT_STREAM"; return 2; }' \
+  '          :' \
+  't_cli_run'
+shmutant_mut 'the automatic workdir is removed raw after an incomplete run' \
+  '  elif [ "$made" = 1 ]; then _shmutant_remove "$wd" || { _shmutant_err "run: could not remove the workdir $wd"; rc=2; }' \
+  '  elif [ "$made" = 1 ]; then rm -rf -- "$wd" 2>/dev/null' \
+  't_cli_run'

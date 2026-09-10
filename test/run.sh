@@ -671,6 +671,10 @@ t_run_cannot_lose_the_leftover_record_by_locking_its_dir() {
   SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=0 pool lbl "$T/wd2" toy_prepare untrapping_run
   sleep 5
   [ -e "$T/escaped2" ] && fail_ 'a callback that dropped the EXIT trap escaped the snapshot taken on return'
+  exiting_run() { trap - EXIT; set -m; bash -c "sleep 4; touch '$T/escaped3'" & set +m; exit 0; }
+  SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=0 pool lbl "$T/wd3" toy_prepare exiting_run
+  sleep 5
+  [ -e "$T/escaped3" ] && fail_ 'a callback that dropped the EXIT trap and left by exit escaped the snapshot'
 }
 
 leaky_c() { set -m; bash -c "sleep 3; touch '$T/escaped-c'" & set +m; bash "$1/test.sh"; }
@@ -888,6 +892,26 @@ t_verdict_timeout_kills_a_descendant_seen_then_reparented() {
   ( IFS=''; SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=2 shmutant_pool lbl "$T/wd2" toy_prepare orphaning_run > /dev/null 2>&1 )
   sleep 6
   [ -e "$T/orphan" ] && fail_ 'with the caller IFS empty, the retained list was not split and the reparented descendant survived'
+}
+
+# shellcheck disable=SC2034
+t_verdict_timeout_without_an_identity() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'hangs' '$1 + $2' '$1 - $2' 'add-works'
+  slow_run() { bash -c "sleep 6; touch '$T/finished'"; }
+  # No identity can be read for the wrapper (no usable ps): the root is still the runner's own
+  # unreaped child, and the bound must still end it rather than wait forever.
+  ( _shmutant_identity() { return 1; }; _shmutant_identity_table() { SHMUTANT_START=(); }; _shmutant_descendants() { :; }
+    SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=1 shmutant_pool lbl "$T/wd" toy_prepare slow_run > "$T/out" 2>&1
+    touch "$T/pool-done" ) &
+  local bg=$!
+  local i=0; until [ -e "$T/pool-done" ]; do i=$((i + 1)); [ "$i" -lt 150 ] || break; sleep 0.1; done
+  if [ ! -e "$T/pool-done" ]; then kill "$bg" 2>/dev/null; wait "$bg" 2>/dev/null; fail_ 'without an identity the timeout never ended the run'; return; fi
+  wait "$bg" 2>/dev/null
+  has "$(cat "$T/out")" 'timeout' 'the verdict is timeout'
+  sleep 6
+  [ -e "$T/finished" ] && fail_ 'the run outlived its timeout'
 }
 
 t_verdict_timeout_stops_a_run_that_keeps_forking() {
@@ -1383,11 +1407,18 @@ t_copy_tree_excludes_git() {
   eq "$(cat "$T/dst/.dotfile")" w 'dotfile copied'
   [ -L "$T/dst/link" ] || fail_ 'symlink was not kept as a symlink'
   shmutant_copy_tree "$T/missing" "$T/dst2" 2>/dev/null; rc_is $? 1 'a missing source is an error'
+  [ -e "$T/dst2" ] && fail_ 'a missing source was refused only after its destination had been created'
   mkdir -p "$T/gl/.git/objects"; printf 'o' > "$T/gl/.git/objects/x"; ln "$T/gl/.git/objects/x" "$T/gl/.git/objects/y"; printf 'f' > "$T/gl/f"
   shmutant_copy_tree "$T/gl" "$T/gl-copy"; rc_is $? 0 'hard links inside the top-level .git, which the copy skips, do not refuse the copy'
+  mkdir -p "$T/a[1]/.git/objects"; printf 'o' > "$T/a[1]/.git/objects/x"; ln "$T/a[1]/.git/objects/x" "$T/a[1]/.git/objects/y"; printf 'f' > "$T/a[1]/f"
+  shmutant_copy_tree "$T/a[1]" "$T/a1-copy"; rc_is $? 0 'a source whose name is a glob pattern still has its top-level .git skipped'
+  [ -e "$T/a1-copy/.git" ] && fail_ '.git was copied from the bracketed source'
   eq "$(cat "$T/gl-copy/f")" f 'the rest arrived'
   ln -s "$T/hl" "$T/hl-link"; mkdir -p "$T/hl"; printf 'x' > "$T/hl/a"; ln "$T/hl/a" "$T/hl/b"
   shmutant_copy_tree "$T/hl-link" "$T/hl-link-copy" 2>/dev/null; rc_is $? 1 'a symlinked source root is resolved first, so its hard links are still seen'
+  mkdir -p "$T/modsrc"; printf 'm' > "$T/modsrc/f"; chmod 750 "$T/modsrc"; ln -s "$T/modsrc" "$T/modsrc-link"
+  shmutant_copy_tree "$T/modsrc-link" "$T/modsrc-copy"; rc_is $? 0 'copy through a symlinked source root'
+  eq "$(ls -ld "$T/modsrc-copy" | cut -c1-10)" 'drwxr-x---' 'the root mode copied is the directory'"'"'s, not the link'"'"'s'
   mkdir -p "$T/real-dst"; ln -s "$T/real-dst" "$T/dst-link"
   shmutant_copy_tree "$T/src" "$T/dst-link" 2>"$T/e"; rc_is $? 1 'a symlink at the destination is refused'
   has "$(cat "$T/e")" 'is a symlink' 'says why'
@@ -1578,6 +1609,14 @@ EOF
   { cat "$T/toy/plan-base.sh"; printf 'trap "echo usr" USR1\n'; } > "$T/toy/plan-usr.sh"
   TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-usr.sh" > /dev/null 2>&1; rc_is $? 1 'a plan may still trap other signals'
   eq "$(find "$T/tmpd" -mindepth 1 | wc -l | tr -d ' ')" 0 'no automatic workdir survives those load failures'
+  ( cd "$T" && TMPDIR="$T/tmpd" SHMUTANT_STREAM=missing/out.tsv bash "$SHMUTANT" run "$T/toy/plan-base.sh" > /dev/null 2>"$T/e" ); rc_is $? 2 'a relative SHMUTANT_STREAM in a missing directory is refused'
+  has "$(cat "$T/e")" 'does not exist' 'says why'
+  [ -e "$T/out.tsv" ] && fail_ 'the stream was re-based onto the wrong directory'
+  # prepare leaves a read-only tree in the workdir and ends the subshell before the pool could
+  # clean up: the automatic workdir is still removed.
+  { cat "$T/toy/plan-base.sh"; printf 'prepare() { mkdir -p "$1/ro"; : > "$1/ro/f"; chmod 555 "$1/ro"; exit 0; }\n'; } > "$T/toy/plan-roexit.sh"
+  TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-roexit.sh" > /dev/null 2>&1; rc_is $? 2 'a prepare that exits is a harness error'
+  eq "$(find "$T/tmpd" -mindepth 1 | wc -l | tr -d ' ')" 0 'the automatic workdir holding a read-only tree was removed after the early exit'
   ( cd "$T" && TMPDIR=tmpd SHMUTANT_STREAM=out.tsv bash "$SHMUTANT" run "$T/toy/plan-cd.sh" > /dev/null 2>&1 )
   [ -f "$T/out.tsv" ] || fail_ 'a relative SHMUTANT_STREAM was resolved after the plan changed directory'
   [ -e "$T/toy/out.tsv" ] && fail_ 'the stream landed relative to the plan directory'

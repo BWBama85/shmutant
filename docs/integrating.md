@@ -185,14 +185,15 @@ stream write failure).
 Keep `SHMUTANT_KEEP=1` and `--workdir` on a CI failure to upload `mut-<n>/output` as an
 artifact: it is the full output of the run that produced the verdict. A `--workdir` you supply
 is never removed; the pool's `base-<n>`, `mut-<n>` and `pristine` entries inside it are recreated
-on every run. A workdir the CLI created for itself is removed unless `--keep`.
+on every run. A workdir the CLI created for itself is removed unless `--keep`, read-only trees
+included; one that cannot be removed is reported and the run exits 2.
 
 ## 6. Tuning
 
 | Variable | Default | Use |
 |---|---|---|
 | `SHMUTANT_JOBS` | CPU count | Worker budget, a positive integer. The pool's cap (argument 5, default 8, validated the same way) still applies. |
-| `SHMUTANT_TIMEOUT` | 300 | Seconds per run before the run is killed. The kill freezes the tree first (SIGSTOP the root, then every descendant found, until a pass finds nothing new), adds every descendant the watchdog saw while the run was alive (snapshotted twice a second), and then sends KILL. There is no TERM and no grace, so a test runner's TERM handler does not run: after a deadline nothing may run. When a run returns normally, whatever it backgrounded is ended the same way before its verdict is accepted. A process that detached into its own session within half a second of forking is out of reach; that needs cgroups or `setsid`, which this tool does not depend on. Raise the bound for a suite that cannot select; 0 disables. |
+| `SHMUTANT_TIMEOUT` | 300 | Seconds per run before the run is killed. The kill freezes the tree first (SIGSTOP the root, then every descendant found, until a pass finds nothing new), adds every descendant the watchdog saw while the run was alive (snapshotted twice a second), and then sends KILL. There is no TERM and no grace, so a test runner's TERM handler does not run: after a deadline nothing may run. When a run returns normally, whatever it backgrounded is ended the same way before its verdict is accepted: its descendants are recorded on return, on `exit`, and by an EXIT trap of the wrapper the run executes in (a run that removes that trap and leaves through `builtin exit` or a signal to itself has dismantled the wrapper on purpose). When `ps` cannot identify the run's process, the bound still ends it by number while the harness holds it unreaped. A process that detached into its own session within half a second of forking is out of reach; that needs cgroups or `setsid`, which this tool does not depend on. Raise the bound for a suite that cannot select; 0 disables. |
 | `SHMUTANT_BASELINE` | 1 | Run every distinct selector once, uninjected, and require green. Set 0 when the suite was proven green in a previous step. 0 or 1 only. |
 | `SHMUTANT_KEEP` | 0 | Keep every clone and the pristine tree. 0 or 1 only. |
 | `SHMUTANT_STREAM` | stdout | Append the verdict stream to a file instead. Its directory must exist; it must be a regular file or absent (no symlink, no FIFO), outside the workdir. It is opened once, before any callback runs, and every record goes to that descriptor; a path `prepare` assigns is validated and opened the same way when it returns. A relative path is resolved where the CLI was invoked. |
