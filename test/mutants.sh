@@ -80,8 +80,8 @@ shmutant_mut 'an empty table is a pass' \
   'if [ "$n" -lt 0 ]; then' \
   't_pool_rejects_empty_table'
 shmutant_mut 'a root outside the workdir is mutated' \
-  '"$wd/pristine"|"$wd/pristine/"*) ;;' \
-  '"$wd/pristine"|*) ;;' \
+  'if ! _shmutant_inside "$wd/pristine" "$root"; then' \
+  'if false; then' \
   't_pool_refuses_root_outside_workdir'
 shmutant_mut 'a missing target is discovered per row instead of refused up front' \
   'if ! _shmutant_target_ok "$root" "${SHMUTANT_ROWS_FILE[$i]}"; then' \
@@ -126,8 +126,8 @@ shmutant_mut 'the skip flag is ignored when starting workers' \
   'if false; then continue; fi' \
   't_verdict_baseline_red'
 shmutant_mut 'a timeout is reported as an abort' \
-  ': > "$dir/timeout"' \
-  ': > "$dir/timeout-never"' \
+  '        : > "$mark"' \
+  '        :' \
   't_verdict_timeout'
 shmutant_mut 'a timeout never escalates to KILL' \
   '        _shmutant_kill_tree KILL "$pid"' \
@@ -222,7 +222,7 @@ shmutant_mut 'the temp file is a predictable sibling name again' \
   'tmp="$f.shmutant-tmp"' \
   't_mutate_never_follows_a_stale_temp_link'
 shmutant_mut 'the watchdog is cancelled before it can escalate to KILL' \
-  '[ -e "$dir/timeout" ] || kill -TERM "$dog" 2>/dev/null' \
+  '[ -e "$mark" ] || kill -TERM "$dog" 2>/dev/null' \
   'kill -TERM "$dog" 2>/dev/null' \
   't_verdict_timeout_kills_a_term_ignoring_descendant'
 shmutant_mut 'worker directories are reused with their stale contents' \
@@ -254,8 +254,8 @@ shmutant_mut 'a symlink target passes the pool precheck' \
 
 # --- guards added for the third review round ---
 shmutant_mut 'a symlinked parent directory passes the target check' \
-  'case "$dir" in "$root"|"$root/"*) return 0 ;; esac' \
-  'case "$dir" in *) return 0 ;; esac' \
+  '  _shmutant_inside "$root" "$dir"' \
+  '  true' \
   't_pool_refuses_target_under_symlinked_dir'
 shmutant_mut 'the caller'"'"'s nocasematch reaches witness matching' \
   '  shopt -u nocasematch' \
@@ -266,8 +266,8 @@ shmutant_mut 'CDPATH reaches the path resolver' \
   '( cd -P -- "$1"' \
   't_abs_ignores_cdpath'
 shmutant_mut 'a destination inside the source is copied into itself' \
-  '    "$asrc"|"$asrc/"*)' \
-  '    never-matches)' \
+  'if _shmutant_inside "$asrc" "$adst"; then' \
+  'if false; then' \
   't_copy_tree_excludes_git'
 shmutant_mut 'awk no longer reports a missed literal' \
   'exit (hit ? 0 : 3) }' \
@@ -296,8 +296,8 @@ shmutant_mut 'an empty red prefix is accepted' \
   'if false; then' \
   't_pool_validates_red_status_and_prefix'
 shmutant_mut 'a stream inside the workdir is accepted' \
-  '"$wd"|"$wd/"*) _shmutant_err "$label: SHMUTANT_STREAM lies inside' \
-  'never-matches) _shmutant_err "$label: SHMUTANT_STREAM lies inside' \
+  'if _shmutant_inside "$wd" "$sdir"; then' \
+  'if false; then' \
   't_stream_write_failure_is_a_harness_error'
 
 # --- guards added for the fifth review round ---
@@ -405,10 +405,6 @@ shmutant_mut 'a caller-supplied workdir is removed' \
   '  elif [ "$made" = 1 ]; then rm -rf -- "$wd"' \
   '  elif true; then rm -rf -- "$wd"' \
   't_cli_run'
-shmutant_mut 'SHMUTANT_KEEP=1 is ignored by the CLI cleanup' \
-  '[ "${SHMUTANT_KEEP:-0}" = 1 ] && keep=1' \
-  '[ "${SHMUTANT_KEEP:-0}" = 2 ] && keep=1' \
-  't_cli_run'
 shmutant_mut 'the plan is sourced by its bare name' \
   '_shmutant_cli_load "$SHMUTANT_PLAN_DIR/$(basename -- "$plan")"' \
   '_shmutant_cli_load "$plan"' \
@@ -430,8 +426,8 @@ shmutant_mut 'a relative SHMUTANT_STREAM is resolved after the plan may have mov
   '      *)  SHMUTANT_STREAM="$SHMUTANT_STREAM" \' \
   't_cli_run'
 shmutant_mut 'the subshell status is trusted without the completion marker' \
-  'if [ -f "$done_file" ] && marker="$(cat "$done_file" 2>/dev/null)" && [ "$marker" = "$rc" ]; then' \
-  'if true; then' \
+  'if [ -f "$done_file" ] && marker="$(cat "$done_file" 2>/dev/null)" && [ "${marker%% *}" = "$rc" ]; then' \
+  'if marker="$(cat "$done_file" 2>/dev/null)" || true; then' \
   't_cli_run'
 
 # --- guards added for the ninth review round ---
@@ -478,8 +474,8 @@ shmutant_mut 'a leading-zero timeout reaches arithmetic as octal' \
   't_end=$(( $(_shmutant_now) + timeout * 1000000 ))' \
   't_verdict_timeout_with_a_leading_zero'
 shmutant_mut 'a refused nested copy leaves its directory behind' \
-  '      [ -n "$made" ] && rm -rf -- "$made"' \
-  '      :' \
+  '    [ -n "$made" ] && rm -rf -- "$made"' \
+  '    :' \
   't_copy_tree_excludes_git'
 shmutant_mut 'an interrupted pool leaves its workers running' \
   "  trap '_shmutant_abort_workers TERM' TERM" \
@@ -490,6 +486,40 @@ shmutant_mut 'pid identity ignores the command line and group' \
   '  [ "$now_e" -ge "$seen_e" ]' \
   't_kill_tree_skips_a_reused_pid'
 shmutant_mut 'no-trap is restored as ignore, so the caller cannot be interrupted afterwards' \
-  'if [ -n "${SHMUTANT_TRAP_TERM:-}" ]; then trap -- "$SHMUTANT_TRAP_TERM" TERM; else trap - TERM; fi' \
-  'trap -- "${SHMUTANT_TRAP_TERM:-}" TERM' \
+  'else trap - TERM; fi' \
+  'else trap -- "" TERM; fi' \
   't_pool_restores_caller_traps'
+
+# --- guards added for the eleventh review round ---
+shmutant_mut 'the CLI has no signal handler around its plan subshell' \
+  "  trap '_shmutant_cli_abort TERM' TERM" \
+  '  :' \
+  't_cli_run'
+shmutant_mut 'a saved trap declaration is re-spelled instead of restored verbatim' \
+  'if [ -n "${SHMUTANT_TRAP_TERM:-}" ]; then eval "$SHMUTANT_TRAP_TERM"; else trap - TERM; fi' \
+  'if [ -n "${SHMUTANT_TRAP_TERM:-}" ]; then trap -- "${SHMUTANT_TRAP_TERM#trap -- }" TERM; else trap - TERM; fi' \
+  't_pool_restores_caller_traps'
+shmutant_mut 'a target with surplus arguments is accepted' \
+  '[ "$#" -eq 1 ] || { _shmutant_refuse "target: exactly one file' \
+  '[ "$#" -ge 1 ] || { _shmutant_refuse "target: exactly one file' \
+  't_mut_validates_rows'
+shmutant_mut 'KEEP set inside the plan is not carried back to the CLI' \
+  '    [ "${marker#* }" = 1 ] && keep=1' \
+  '    :' \
+  't_cli_run'
+shmutant_mut 'containment honours the caller nocasematch' \
+  '  ( shopt -u nocasematch; case "$2" in' \
+  '  ( case "$2" in' \
+  't_inside_ignores_nocasematch'
+shmutant_mut 'the timeout marker is the predictable name timeout again' \
+  '  mark="$(mktemp "$dir/.fired.XXXXXX")" || { SHMUTANT_RUN_STATUS=127; return; }' \
+  '  mark="$dir/timeout"' \
+  't_verdict_timeout_marker_cannot_be_forged'
+shmutant_mut 'an old literal with a newline is accepted' \
+  '  case "$2" in *$'"'"'\n'"'"'*) _shmutant_refuse "mut' \
+  '  case "$2" in never-matches) _shmutant_refuse "mut' \
+  't_mut_validates_rows'
+shmutant_mut 'SHMUTANT_KEEP=1 from the environment is ignored when the CLI is interrupted' \
+  '[ "${SHMUTANT_KEEP:-0}" = 1 ] && keep=1' \
+  '[ "${SHMUTANT_KEEP:-0}" = 2 ] && keep=1' \
+  't_cli_run'

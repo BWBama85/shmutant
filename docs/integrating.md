@@ -129,7 +129,7 @@ Rules a row must satisfy, all enforced when the row is appended or the pool star
 
 - literals only, never regexes; the **first** occurrence on a **single** line is replaced, and
   the file's mode and final-newline shape are preserved so the literal is the only change;
-- the old literal is non-empty and differs from the new one;
+- the old literal is non-empty, contains no newline, and differs from the new one;
 - the target file is relative to the tree root, carries no `..` component, and exists in the
   prepared tree as a regular file with one hard link (a symlink, a path under a symlinked
   directory, or a multiply linked file is refused);
@@ -149,8 +149,14 @@ Or, as a library inside an existing suite:
 . scripts/shmutant.sh
 shmutant_target lib/common.sh
 shmutant_mut ...
-shmutant_pool "common-lib" "$work/mut" prepare run 6 || bad "mutation pool failed"
+shmutant_pool "common-lib" "$work/mut" prepare run 6; rc=$?
+[ "$rc" -eq 0 ] || bad "mutation pool failed ($rc)"
 ```
+
+Capture the status on its own line, as above. Bash ignores `set -e` everywhere inside a function
+that is the left side of `||` or `&&`, or the condition of `if`, so `shmutant_pool … || bad`
+would also switch off a `set -e` inside your `prepare`; nothing inside the pool can undo that.
+A `prepare` that must not continue past a failure should return non-zero explicitly.
 
 ## 5. Consume the verdicts in CI
 
@@ -189,7 +195,9 @@ Every setting is validated before the first run and again after `prepare` return
 after that second check, so a `SHMUTANT_JOBS` set by `prepare` is honoured. The pool's own
 bookkeeping is protected from a `prepare` that uses ordinary names (`n`, `label`, `wd`) as its
 own variables. While workers run, the pool traps INT and TERM to kill every active worker's
-process tree, then restores the caller's own traps and re-delivers the signal. A baseline run that exits with a
+process tree, then restores the caller's own traps verbatim and re-delivers the signal. The CLI
+does the same around its plan subshell, and removes a workdir it created unless `SHMUTANT_KEEP=1`.
+A `SHMUTANT_KEEP=1` assigned inside the plan or `prepare` is honoured by the CLI's cleanup too. A baseline run that exits with a
 status that is neither green nor red is recorded as `aborted`, not `red`.
 
 ## 7. Migrating a `check-lib.sh`-style harness

@@ -170,6 +170,7 @@ t_mut_validates_rows() {
   shmutant_target ../escape.sh 2>/dev/null; rc_is $? 2 'a leading .. component is refused'
   shmutant_target sub/../../escape.sh 2>/dev/null; rc_is $? 2 'an inner .. component is refused'
   shmutant_target 'sub/..hidden/f' 2>/dev/null; rc_is $? 0 'a name that merely starts with .. is a name'
+  shmutant_target lib.sh extra 2>/dev/null; rc_is $? 2 'a target with surplus arguments is refused (an unquoted path with spaces)'
   shmutant_target lib.sh; rc_is $? 0 'a relative target is accepted'
   shmutant_mut 'empty old' '' 'b' 'w' 2>/dev/null; rc_is $? 2 'empty old literal refused'
   shmutant_mut 'same' 'a' 'a' 'w' 2>/dev/null; rc_is $? 2 'identical literals refused'
@@ -179,6 +180,7 @@ t_mut_validates_rows() {
   shmutant_mut 'six args' 'a' 'b' 'w' 'sel' 'extra' 2>/dev/null; rc_is $? 2 'surplus arguments refused (an unquoted witness would land here)'
   shmutant_mut 'nl witness' 'a' 'b' $'two\nlines' 2>/dev/null; rc_is $? 2 'a witness with a newline can never match one red line'
   shmutant_mut 'nl select' 'a' 'b' 'w' $'two\nlines' 2>/dev/null; rc_is $? 2 'a selector with a newline is refused too'
+  shmutant_mut 'nl old' $'a\nb' 'c' 'w' 2>/dev/null; rc_is $? 2 'an old literal with a newline can never match one record and is refused'
   eq "${#SHMUTANT_ROWS_NAME[@]}" 0 'nothing was appended by a refused row'
   shmutant_mut 'ok' 'a' 'b' 'wit'; rc_is $? 0 'a valid row is appended'
   shmutant_mut 'ok2' 'a' 'b' 'wit' 'unit'; rc_is $? 0 'a row with a select is appended'
@@ -537,8 +539,24 @@ t_pool_restores_caller_traps() {
     exit 0 ) || _failed=1
   ( trap 'echo mine' TERM
     shmutant_pool lbl "$T/wd2" toy_prepare toy_run > /dev/null 2>&1
-    case "$(trap -p TERM)" in *mine*) ;; *) echo "FAIL: $_unit: the caller's own TERM trap was not restored: $(trap -p TERM)"; exit 1 ;; esac
+    [ "$(trap -p TERM)" = "trap -- 'echo mine' SIGTERM" ] || { echo "FAIL: $_unit: the caller's own TERM trap was not restored intact: $(trap -p TERM)"; exit 1; }
     exit 0 ) || _failed=1
+}
+
+t_inside_ignores_nocasematch() {
+  _shmutant_inside /a/b /a/b/c; rc_is $? 0 'below the root'
+  _shmutant_inside /a/b /a/b; rc_is $? 0 'the root itself'
+  _shmutant_inside /a/b /a/bc; rc_is $? 1 'a sibling with the root as a prefix is outside'
+  ( shopt -s nocasematch; _shmutant_inside /a/b /A/B/c ); rc_is $? 1 'a path that only resembles the root in case is outside, whatever the caller'"'"'s nocasematch says'
+}
+
+t_verdict_timeout_marker_cannot_be_forged() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  forging_run() { : > "$1/../timeout"; : > "$1/../.fired.forged"; bash "$1/test.sh"; }
+  SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=0 pool lbl "$T/wd" toy_prepare forging_run
+  eq "$(verdict_of a)" killed 'a file the callback writes beside its clone is not read as the watchdog marker'
 }
 
 t_baseline_non_red_exit_is_aborted() {
@@ -1050,6 +1068,29 @@ EOF
   TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-ftrap.sh" > /dev/null 2>&1; rc_is $? 2 'nor a trap set inside a helper function'
   { cat "$T/toy/plan-base.sh"; printf 'exit 0\n'; } > "$T/toy/plan-exit.sh"
   TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-exit.sh" > /dev/null 2>&1; rc_is $? 2 'a plan that exits 0 is a load failure, not a pass'
+  { printf 'SHMUTANT_KEEP=1\n'; cat "$T/toy/plan-base.sh"; } > "$T/toy/plan-keep.sh"
+  kept="$(TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-keep.sh" 2>&1 >/dev/null | sed -n 's/^shmutant: workdir kept: //p')"
+  [ -n "$kept" ] && [ -f "$kept/mut-0/tree/lib.sh" ] || fail_ 'SHMUTANT_KEEP=1 set inside the plan did not keep the workdir the CLI created'
+  [ -n "$kept" ] && rm -rf -- "$kept"
+  cat > "$T/toy/plan-hang.sh" <<'EOF'
+prepare() { shmutant_copy_tree "$SHMUTANT_PLAN_DIR" "$1"; }
+run() { bash -c "sleep 4; touch '$SHMUTANT_PLAN_DIR/finished'"; }
+shmutant_target lib.sh
+shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+EOF
+  TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-hang.sh" --timeout 0 --no-baseline > /dev/null 2>&1 & local cli=$!
+  sleep 1.5
+  kill -TERM "$cli"; wait "$cli" 2>/dev/null
+  sleep 4
+  [ -e "$T/toy/finished" ] && fail_ 'a worker outlived the CLI that was sent TERM'
+  eq "$(find "$T/tmpd" -mindepth 1 | wc -l | tr -d ' ')" 0 'the interrupted CLI removed the workdir it created'
+  SHMUTANT_KEEP=1 TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-hang.sh" --timeout 0 --no-baseline > /dev/null 2>&1 & cli=$!
+  sleep 1.5
+  kill -TERM "$cli"; wait "$cli" 2>/dev/null
+  sleep 4
+  rm -f "$T/toy/finished"
+  [ "$(find "$T/tmpd" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" -ge 1 ] || fail_ 'with SHMUTANT_KEEP=1 the interrupted CLI still removed its workdir'
+  rm -rf "$T/tmpd"/*
   { cat "$T/toy/plan-base.sh"; printf 'exec true\n'; } > "$T/toy/plan-exec.sh"
   TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-exec.sh" > /dev/null 2>&1; rc_is $? 2 'a plan that execs cannot become a passing run'
   { printf 'set -e\nroot="$(pwd)"\n( true )\n'; cat "$T/toy/plan-base.sh"; } > "$T/toy/plan-subs.sh"

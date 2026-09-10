@@ -101,7 +101,7 @@ The predecessor of this tool ran the **entire suite for every mutant**. On one p
 118-row table took 4,600 to 5,200 seconds per pass. The coverage map was already there, every
 row declared its witness, but nothing used it to select work. `shmutant` passes the row's
 selector to `run` and ships `shmutant_selected` so a hand-rolled suite can honour it in one line.
-Its own 109-row self-mutation pass finishes in about two minutes against a suite that takes 15 seconds to run once.
+Its own 116-row self-mutation pass finishes in about two minutes against a suite that takes 15 seconds to run once.
 
 ## Installation
 
@@ -149,7 +149,7 @@ could not run.
 ## Testing shmutant
 
 ```sh
-bash test/run.sh                     # the suite, 74 units
+bash test/run.sh                     # the suite, 76 units
 bash shmutant.sh run test/mutants.sh # the suite, mutation-tested by shmutant itself
 ```
 

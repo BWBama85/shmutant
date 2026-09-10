@@ -151,6 +151,12 @@ _shmutant_abs() {
   ( unset CDPATH; cd -P -- "$1" 2>/dev/null && pwd -P )
 }
 
+# _shmutant_inside <root> <path> — true when <path> is <root> or below it, compared byte for
+# byte: the caller's nocasematch must not make a path that merely resembles the root pass.
+_shmutant_inside() {
+  ( shopt -u nocasematch; case "$2" in "$1"|"$1/"*) exit 0 ;; esac; exit 1 )
+}
+
 # _shmutant_target_ok <root> <file> — true when <root>/<file> is a regular file, not a symlink,
 # whose directory resolves physically to <root> or below it. A symlinked parent component is
 # how a relative target reaches a caller-owned file outside the tree.
@@ -159,8 +165,7 @@ _shmutant_target_ok() {
   [ ! -L "$f" ] && [ -f "$f" ] || return 1
   root="$(_shmutant_abs "$root")" || return 1
   dir="$(_shmutant_abs "$(dirname -- "$f")")" || return 1
-  case "$dir" in "$root"|"$root/"*) return 0 ;; esac
-  return 1
+  _shmutant_inside "$root" "$dir"
 }
 
 # shmutant_selected <unit> — true when no selection is active or SHMUTANT_SELECT equals <unit>.
@@ -184,11 +189,10 @@ shmutant_copy_tree() {
   while [ ! -e "$probe" ]; do made="$probe"; probe="$(dirname -- "$probe")"; [ "$probe" != "$made" ] || break; done
   mkdir -p -- "$dst" || return 1
   asrc="$(_shmutant_abs "$src")" && adst="$(_shmutant_abs "$dst")" || return 1
-  case "$adst" in
-    "$asrc"|"$asrc/"*)
-      [ -n "$made" ] && rm -rf -- "$made"
-      _shmutant_err "copy_tree: destination $dst lies inside the source $src — it would copy itself; use a workdir outside the tree"; return 1 ;;
-  esac
+  if _shmutant_inside "$asrc" "$adst"; then
+    [ -n "$made" ] && rm -rf -- "$made"
+    _shmutant_err "copy_tree: destination $dst lies inside the source $src — it would copy itself; use a workdir outside the tree"; return 1
+  fi
   # The enumeration runs with the caller's expansion settings neutralised: `set -f` would hand
   # the loop three literal patterns, failglob would abort on an unmatched one, GLOBIGNORE would
   # drop entries, dotglob would list hidden entries twice.
@@ -266,6 +270,7 @@ shmutant_mutate() {
 
 # shmutant_target <file> — the tree-relative file that rows appended after this call mutate.
 shmutant_target() {
+  [ "$#" -eq 1 ] || { _shmutant_refuse "target: exactly one file, got $# arguments — an unquoted path?"; return 2; }
   [ -n "$1" ] || { _shmutant_refuse "target: a file is required"; return 2; }
   case "$1" in /*) _shmutant_refuse "target: must be relative to the tree root: $1"; return 2 ;; esac
   case "/$1/" in */../*) _shmutant_refuse "target: a .. component could leave the tree: $1"; return 2 ;; esac
@@ -283,6 +288,7 @@ shmutant_mut() {
   [ "$2" != "$3" ] || { _shmutant_refuse "mut '$1': old and new are identical — the row would inject nothing"; return 2; }
   [ -n "$4" ] || { _shmutant_refuse "mut '$1': a row needs a witness"; return 2; }
   case "$4${5:-}" in *$'\n'*) _shmutant_refuse "mut '$1': a witness or selector cannot contain a newline — a red line is one line"; return 2 ;; esac
+  case "$2" in *$'\n'*) _shmutant_refuse "mut '$1': the old literal cannot contain a newline — a literal is matched within one line"; return 2 ;; esac
   SHMUTANT_ROWS_NAME+=("$1"); SHMUTANT_ROWS_FILE+=("$SHMUTANT_TARGET"); SHMUTANT_ROWS_OLD+=("$2")
   SHMUTANT_ROWS_NEW+=("$3"); SHMUTANT_ROWS_WIT+=("$4"); SHMUTANT_ROWS_SEL+=("${5:-$4}")
 }
@@ -398,9 +404,14 @@ _shmutant_kill_tree() {
 # and the whole tree it spawned dies with it. That subshell's stderr is discarded: with job
 # control on, bash reports the reaped job there when the pool itself runs under `$(...)`.
 _shmutant_run_bounded() {
-  local dir="$1" run="$2" root="$3" sel="$4" timeout
+  local dir="$1" run="$2" root="$3" sel="$4" timeout mark
   timeout="$(_shmutant_pos_int "${SHMUTANT_TIMEOUT:-300}")" || timeout=0
-  rm -f -- "$dir/timeout"
+  # The marker's name is unpredictable: a callback can reach the worker directory through
+  # ../, and a file it happens to write must never read as a timeout.
+  rm -f -- "$dir"/.fired.*
+  mark="$(mktemp "$dir/.fired.XXXXXX")" || { SHMUTANT_RUN_STATUS=127; return; }
+  rm -f -- "$mark"
+  SHMUTANT_RUN_MARK="$mark"
   (
     set -m
     ( export SHMUTANT_SELECT="$sel"; "$run" "$root" "$sel" ) < /dev/null > "$dir/output" 2>&1 &
@@ -428,7 +439,7 @@ _shmutant_run_bounded() {
             seen["$p"]="$e"
           done < <(_shmutant_descendants "$pid")
         done
-        : > "$dir/timeout"
+        : > "$mark"
         # An array of pid:identity pairs, never an unquoted expansion.
         victims=()
         for p in "${!seen[@]}"; do victims+=("$p:${seen[$p]}"); done
@@ -442,7 +453,7 @@ _shmutant_run_bounded() {
     if [ -n "$dog" ]; then
       # Once the watchdog has fired, let it reach KILL: the group leader dying to TERM does not
       # mean a descendant that ignores TERM did.
-      [ -e "$dir/timeout" ] || kill -TERM "$dog" 2>/dev/null
+      [ -e "$mark" ] || kill -TERM "$dog" 2>/dev/null
       wait "$dog" 2>/dev/null
     fi
     exit "$rc"
@@ -489,7 +500,7 @@ _shmutant_worker() {
   _shmutant_run_bounded "$dir" "$run" "$root" "$sel"
   status="$SHMUTANT_RUN_STATUS"
   t1="$(_shmutant_now)"
-  if [ -e "$dir/timeout" ]; then
+  if [ -e "$SHMUTANT_RUN_MARK" ]; then
     verdict=timeout
   elif [ "$kind" = base ]; then
     red="${SHMUTANT_RED_STATUS:-1}"
@@ -575,19 +586,16 @@ _shmutant_abort_workers() {
 # empty saved handler means the caller had none, which is `trap -`, never `trap ""`: the empty
 # string would make the shell IGNORE the signal from then on.
 _shmutant_restore_traps() {
-  # shellcheck disable=SC2064
-  if [ -n "${SHMUTANT_TRAP_INT:-}" ]; then trap -- "$SHMUTANT_TRAP_INT" INT; else trap - INT; fi
-  # shellcheck disable=SC2064
-  if [ -n "${SHMUTANT_TRAP_TERM:-}" ]; then trap -- "$SHMUTANT_TRAP_TERM" TERM; else trap - TERM; fi
+  # The saved value is the complete `trap -- '…' SIGTERM` declaration `trap -p` printed, put
+  # back verbatim; re-spelling it by hand is how a handler once came back as `echo mineSIGTERM`.
+  if [ -n "${SHMUTANT_TRAP_INT:-}" ]; then eval "$SHMUTANT_TRAP_INT"; else trap - INT; fi
+  if [ -n "${SHMUTANT_TRAP_TERM:-}" ]; then eval "$SHMUTANT_TRAP_TERM"; else trap - TERM; fi
 }
 
-# _shmutant_saved_trap <signal> — the caller's current handler for <signal>, or empty.
+# _shmutant_saved_trap <signal> — the caller's current trap declaration for <signal> as
+# `trap -p` prints it, or empty.
 _shmutant_saved_trap() {
-  local t
-  t="$(trap -p "$1")"
-  [ -n "$t" ] || { printf ''; return; }
-  t="${t#trap -- }"; t="${t% "$1"}"
-  eval "printf '%s' $t"
+  trap -p "$1"
 }
 
 _shmutant_run_jobs() {
@@ -675,9 +683,9 @@ _shmutant_validate_settings() {
     if ! sdir="$(_shmutant_abs "$(dirname -- "$SHMUTANT_STREAM")")"; then
       _shmutant_err "$label: SHMUTANT_STREAM points into a directory that does not exist: $SHMUTANT_STREAM"; return 2
     fi
-    case "$sdir" in
-      "$wd"|"$wd/"*) _shmutant_err "$label: SHMUTANT_STREAM lies inside the workdir ($SHMUTANT_STREAM) — the pool recreates and removes what is in there"; return 2 ;;
-    esac
+    if _shmutant_inside "$wd" "$sdir"; then
+      _shmutant_err "$label: SHMUTANT_STREAM lies inside the workdir ($SHMUTANT_STREAM) — the pool recreates and removes what is in there"; return 2
+    fi
     # Replaced by its validated absolute form: prepare runs in this shell and may cd.
     SHMUTANT_STREAM="$sdir/$(basename -- "$SHMUTANT_STREAM")"
   fi
@@ -746,10 +754,9 @@ shmutant_pool() {
   jobs="$(_shmutant_jobs "$cap")"
   [ -n "$root" ] || root="$wd/pristine"
   root="$(_shmutant_abs "$root")" || { _shmutant_err "$label: prepare printed a root that is not a directory"; return 2; }
-  case "$root" in
-    "$wd/pristine"|"$wd/pristine/"*) ;;
-    *) _shmutant_err "$label: prepare printed a root outside the workdir ($root) — refusing to mutate what may be the working tree"; return 2 ;;
-  esac
+  if ! _shmutant_inside "$wd/pristine" "$root"; then
+    _shmutant_err "$label: prepare printed a root outside the workdir ($root) — refusing to mutate what may be the working tree"; return 2
+  fi
   suffix="${root#"$wd/pristine"}"
   for (( i = 0; i < n; i++ )); do
     if ! _shmutant_target_ok "$root" "${SHMUTANT_ROWS_FILE[$i]}"; then
@@ -870,8 +877,23 @@ _shmutant_cli_load() {
   # answers, not errors.
   set +o errexit
   shmutant_pool "$(basename -- "$plan")" "$SHMUTANT_CLI_WD" prepare run; rc=$?
-  printf '%s\n' "$rc" >| "$SHMUTANT_CLI_DONE"
+  printf '%s %s\n' "$rc" "${SHMUTANT_KEEP:-0}" >| "$SHMUTANT_CLI_DONE"
   return "$rc"
+}
+
+# _shmutant_cli_abort <signal> — INT or TERM reached the CLI while its plan subshell was running:
+# kill the child's tree, remove a workdir this run created, and re-deliver the signal.
+_shmutant_cli_abort() {
+  local sig="$1"
+  if [ -n "${SHMUTANT_CLI_CHILD:-}" ]; then
+    _shmutant_kill_tree TERM "$SHMUTANT_CLI_CHILD"
+    sleep 1
+    _shmutant_kill_tree KILL "$SHMUTANT_CLI_CHILD"
+    wait "$SHMUTANT_CLI_CHILD" 2>/dev/null
+  fi
+  [ -n "${SHMUTANT_CLI_WD_TO_RM:-}" ] && rm -rf -- "$SHMUTANT_CLI_WD_TO_RM"
+  trap - INT TERM
+  kill "-$sig" "$BASHPID"
 }
 
 _shmutant_cli_run() {
@@ -919,12 +941,23 @@ _shmutant_cli_run() {
   # ended the run before the pool finished, whatever status the subshell reports.
   done_file="$(mktemp "$wd/.done.XXXXXX")" || { _shmutant_err "run: cannot create a marker in $wd"; [ "$made" = 1 ] && rm -rf -- "$wd"; return 2; }
   rm -f -- "$done_file"
+  # A signal to this process must not orphan the subshell and its workers: the child's whole
+  # tree is killed, the workdir handled, and the signal re-delivered.
+  SHMUTANT_CLI_CHILD=""; SHMUTANT_CLI_WD_TO_RM=""
+  [ "$made" = 1 ] && [ "$keep" != 1 ] && SHMUTANT_CLI_WD_TO_RM="$wd"
+  trap '_shmutant_cli_abort INT' INT
+  trap '_shmutant_cli_abort TERM' TERM
   (
     readonly SHMUTANT_CLI_WD="$wd" SHMUTANT_CLI_DONE="$done_file"
     _shmutant_cli_load "$SHMUTANT_PLAN_DIR/$(basename -- "$plan")"
-  ); rc=$?
-  if [ -f "$done_file" ] && marker="$(cat "$done_file" 2>/dev/null)" && [ "$marker" = "$rc" ]; then
+  ) & SHMUTANT_CLI_CHILD=$!
+  wait "$SHMUTANT_CLI_CHILD"; rc=$?
+  trap - INT TERM
+  SHMUTANT_CLI_CHILD=""
+  if [ -f "$done_file" ] && marker="$(cat "$done_file" 2>/dev/null)" && [ "${marker%% *}" = "$rc" ]; then
     rm -f -- "$done_file"
+    # The plan or prepare may have set SHMUTANT_KEEP=1 inside the subshell; the pool honoured it.
+    [ "${marker#* }" = 1 ] && keep=1
   else
     rm -f -- "$done_file"
     case "$rc" in
