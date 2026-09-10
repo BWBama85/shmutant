@@ -56,6 +56,7 @@ Sweep each of these before opening a pull request.
 - `contract-not-honoured` — For every statement in a contract header (which shell a callback runs in, which statuses mean what, what a record field can contain), find the line of code that implements it and write the unit that would fail if the code did the nearest plausible other thing; a contract line with no such unit is either untested or false.
 - `option-surface-mismatch` — For every setting that has two surfaces (a flag and an environment variable, a value the caller sets and one a callback sets), trace both to the single place that consumes it and test each surface separately; a value that one surface honours and the other silently drops is a defect in whichever reads it too early.
 - `pipeline-status-lost` — For every documented command that runs the tool (README, guide, migration steps), grep the docs for the tool name followed by | or || and for && and check each example carries the tool exit status to its consumer on its own line; a doc example that loses the status ships the defect to every reader.
+- `write-failure-swallowed` — For every command whose failure would leave a promise unkept (a record written, metadata restored, a file replaced), grep for it and check its status reaches the function return; a 2>/dev/null with no || rc=1 beside it is the defect. Test by making the command fail (a read-only target, a closed descriptor, a foreign owner) and asserting the caller reports it.
 <!-- adb:checklist:end -->
 
 ## Hits
@@ -170,4 +171,10 @@ One line per resolved review thread, newest last.
 - `early-return-skips-cleanup` `shmutant.sh:822` `1e01f36` `PRRT_kwDOUT7q9s6g_IuX` PR #1 2026-09-10 — post-prepare validation failures left the pristine tree; every such exit now goes through the pool failure helper
 - `predictable-temp-path` `shmutant.sh:105` `1e01f36` `PRRT_kwDOUT7q9s6g_Iuf` PR #1 2026-09-10 — the stream path was reopened per record and could be swapped for a symlink by a callback; opened once as a descriptor
 - `rewrite-loses-file-shape` `shmutant.sh:200` `1e01f36` `PRRT_kwDOUT7q9s6g_Iuk` PR #1 2026-09-10 — copy_tree left the destination root with default metadata; source root owner, mode and mtime applied after the copy
+- `option-surface-mismatch` `shmutant.sh:812` `94ab7d5` `PRRT_kwDOUT7q9s6g_9Zo` PR #1 2026-09-10 — a stream path assigned by prepare passed validation but the descriptor stayed on the old path; reopened after prepare
+- `path-escapes-root` `shmutant.sh:199` `94ab7d5` `PRRT_kwDOUT7q9s6g_9Zr` PR #1 2026-09-10 — a symlinked source root was scanned by find without following but copied by glob; resolved first
+- `write-failure-swallowed` `shmutant.sh:228` `94ab7d5` `PRRT_kwDOUT7q9s6g_9Zx` PR #1 2026-09-10 — root metadata restore failures did not affect the copy status; folded in
+- `timeout-escalation-cancelled` `shmutant.sh:694` `94ab7d5` `PRRT_kwDOUT7q9s6g_9Z5` PR #1 2026-09-10 — a directory recreation failure waited on running workers; they are now ended, and the kill freezes the tree first
+- `option-surface-mismatch` `shmutant.sh:1045` `94ab7d5` `PRRT_kwDOUT7q9s6g_9Z9` PR #1 2026-09-10 — SHMUTANT_KEEP=1 in the environment was not honoured by an interrupt before the pool settled it; seeded in the parent
+- `path-escapes-root` `shmutant.sh:203` `94ab7d5` `PRRT_kwDOUT7q9s6g_9aF` PR #1 2026-09-10 — a symlink at the copy destination was written through; refused
 <!-- adb:hits:end -->
