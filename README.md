@@ -16,7 +16,7 @@ actually detect the bug it claims to cover, or does it merely pass?**
 > costs CI time and reports safety it never checked.
 
 It is one vendorable file, `shmutant.sh`, with no runtime dependencies beyond bash 5.3,
-coreutils and `awk`. Source it as a library or run it as a CLI.
+the POSIX utilities. Source it as a library or run it as a CLI.
 
 ## The three verdicts
 
@@ -38,9 +38,11 @@ exactly the way the tests it checks do:
 | `unapplied` | The old literal matched nothing. The row injected no defect and tests **nothing**. |
 | `baseline` | The selected tests were already red before any defect was injected. A red result would prove nothing. |
 
-And three that describe a run that never produced an answer: `aborted` (the suite exited
-with a status other than green or red, or red without a failure line), `timeout`, and `lost`
-(the worker died without reporting). An empty mutation table is a hard failure, not a pass.
+And four that describe a run that never produced an answer: `aborted` (the suite exited
+with a status other than green or red, or red without a failure line), `timeout`, `unsettled`
+(the run's process tree kept forking out of reach while it was being ended, so nothing it did can
+be trusted), and `lost` (the worker died without reporting). An empty mutation table is a hard
+failure, not a pass.
 
 ## A worked example
 
@@ -101,7 +103,7 @@ The predecessor of this tool ran the **entire suite for every mutant**. On one p
 118-row table took 4,600 to 5,200 seconds per pass. The coverage map was already there, every
 row declared its witness, but nothing used it to select work. `shmutant` passes the row's
 selector to `run` and ships `shmutant_selected` so a hand-rolled suite can honour it in one line.
-Its own 168-row self-mutation pass finishes in three to seven minutes against a suite that takes 15 seconds to run once.
+Its own 197-row self-mutation pass finishes in three to seven minutes against a suite that takes 15 seconds to run once.
 
 ## Installation
 
@@ -143,13 +145,13 @@ could not run.
 - bash 5.3 or newer. The entry point re-executes itself under a newer bash when it finds one
   (Homebrew paths, then `PATH`) and otherwise fails loudly with the platform's install command.
   macOS ships bash 3.2; put Homebrew's bin directory before `/bin` on `PATH`.
-- coreutils and `awk`. Neither `jq` nor `cmp` is required. POSIX `ps`, when present, lets a timeout reach descendants that left the run's process group.
+- the POSIX utilities: coreutils, `find` and `awk`, reached through `command -p`. Neither `jq` nor `cmp` is required. POSIX `ps`, when present, lets a timeout reach descendants that left the run's process group.
 - `shellcheck --severity=warning -e SC1091` clean.
 
 ## Testing shmutant
 
 ```sh
-bash test/run.sh                     # the suite, 104 units
+bash test/run.sh                     # the suite, 115 units
 bash shmutant.sh run test/mutants.sh # the suite, mutation-tested by shmutant itself
 ```
 

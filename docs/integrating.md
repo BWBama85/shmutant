@@ -109,6 +109,14 @@ can prevent). Anything the plan prints while loading goes to stderr; the CLI's s
 carries verdict records only. Its `prepare` and `run` must be defined in the plan; functions exported
 by the invoking environment are discarded first. `prepare` runs in the pool's own shell, so state it exports is visible to
 `run`, and its own `set -e` is honoured: a prepare that aborts ends the run as a harness error.
+Rows `prepare` declares with `shmutant_mut` are run too, and a declaration refused inside it is
+the same harness error as one refused before it. `run` executes with errexit OFF whatever the
+caller had: turn it on inside the callback if you want it. A pool refuses to run in POSIX mode,
+or while a function in the shell stands in for `kill`, `wait`, `read`, `trap`, `printf`, `mapfile`,
+`exec`, `cd` or `pwd`. Every utility the harness itself runs (`ps`, `awk`, `find`, `cp`, `ls`,
+`mktemp`, …) is reached through `command -p`, so neither a function a plan defines under such a
+name nor a `PATH` that `prepare` points at the tree's own `bin` is consulted by the harness; the
+callbacks still see the shell as they left it.
 `shmutant_copy_tree` and the per-row clones keep mode, ownership and timestamps, the root
 directory included (a root whose metadata cannot be reproduced is a copy failure); a symlinked
 source root is resolved first and a symlink at the destination is refused; a source with a multiply linked regular file outside its top-level `.git`
@@ -185,7 +193,11 @@ stream write failure).
 Keep `SHMUTANT_KEEP=1` and `--workdir` on a CI failure to upload `mut-<n>/output` as an
 artifact: it is the full output of the run that produced the verdict. A `--workdir` you supply
 is never removed; the pool's `base-<n>`, `mut-<n>` and `pristine` entries inside it are recreated
-on every run. A workdir the CLI created for itself is removed unless `--keep`, read-only trees
+on every run. Those entries are only ever removed from a workdir shmutant marked as its own on
+first use (a `.shmutant` file): a directory that already holds entries by those names and no
+marker is refused, not emptied. Each worker reports its verdict on a descriptor the pool opened
+before the worker forked, on a file with no name; nothing planted in a worker directory, by that
+worker or by a sibling, can stand in for it, and a worker that did not exit normally is `lost`. A workdir the CLI created for itself is removed unless `--keep`, read-only trees
 included; one that cannot be removed is reported and the run exits 2.
 
 ## 6. Tuning
@@ -193,7 +205,7 @@ included; one that cannot be removed is reported and the run exits 2.
 | Variable | Default | Use |
 |---|---|---|
 | `SHMUTANT_JOBS` | CPU count | Worker budget, a positive integer. The pool's cap (argument 5, default 8, validated the same way) still applies. |
-| `SHMUTANT_TIMEOUT` | 300 | Seconds per run before the run is killed. The kill freezes the tree first (SIGSTOP the root, then every descendant found, until a pass finds nothing new), adds every descendant the watchdog saw while the run was alive (snapshotted twice a second), and then sends KILL. There is no TERM and no grace, so a test runner's TERM handler does not run: after a deadline nothing may run. When a run returns normally, whatever it backgrounded is ended the same way before its verdict is accepted: its descendants are recorded on return, on `exit`, and by an EXIT trap of the wrapper the run executes in (a run that removes that trap and leaves through `builtin exit` or a signal to itself has dismantled the wrapper on purpose). The run's process group is kept in being by a holder process until that cleanup is over, so the group is ended by number whether or not `ps` can identify anything. A clone a run left behind that cannot be removed afterwards is a harness error (exit 2). A process that detached into its own session within half a second of forking is out of reach; that needs cgroups or `setsid`, which this tool does not depend on. Raise the bound for a suite that cannot select; 0 disables. |
+| `SHMUTANT_TIMEOUT` | 300 | Seconds per run before the run is killed. The kill freezes the tree first (SIGSTOP the root, then every descendant found, until a pass finds nothing new), adds every descendant the watchdog saw while the run was alive (snapshotted twice a second), and then sends KILL. There is no TERM and no grace, so a test runner's TERM handler does not run: after a deadline nothing may run. When a run returns normally, whatever it backgrounded is ended the same way before its verdict is accepted: its descendants are recorded on return, on `exit`, and by an EXIT trap of the wrapper the run executes in (a run that removes that trap and leaves through `builtin exit` or a signal to itself has dismantled the wrapper on purpose). The run's process group is kept in being by a holder process until that cleanup is over, so the group is ended by number whether or not `ps` can identify anything. A clone a run left behind that cannot be removed afterwards is a harness error (exit 2), and so is a `SHMUTANT_STREAM` file that a callback removed or replaced while the pool wrote to it. A run's output is scanned once, streaming, for the red prefix and the witness, so a suite that prints until its deadline costs disk, not memory. A process that detached into its own session within half a second of forking is out of reach; that needs cgroups or `setsid`, which this tool does not depend on. Raise the bound for a suite that cannot select; 0 disables. |
 | `SHMUTANT_BASELINE` | 1 | Run every distinct selector once, uninjected, and require green. Set 0 when the suite was proven green in a previous step. 0 or 1 only. |
 | `SHMUTANT_KEEP` | 0 | Keep every clone and the pristine tree. 0 or 1 only. |
 | `SHMUTANT_STREAM` | stdout | Append the verdict stream to a file instead. Its directory must exist; it must be a regular file or absent (no symlink, no FIFO), outside the workdir. It is opened once, before any callback runs, and every record goes to that descriptor; a path `prepare` assigns is validated and opened the same way when it returns. A relative path is resolved where the CLI was invoked. |

@@ -314,6 +314,65 @@ t_abs_ignores_cdpath() {
   local got
   got="$(cd "$T/here" && CDPATH="$T/elsewhere" _shmutant_abs sub)"
   eq "$got" "$(cd "$T/here/sub" && pwd -P)" 'a relative directory resolves against the cwd, on one line, whatever CDPATH says'
+  mkdir -p "$T/dash/-"
+  got="$(cd "$T/dash" && OLDPWD="$T/elsewhere" _shmutant_abs -)"
+  eq "$got" "$(cd "$T/dash/-" && pwd -P)" 'a directory named - is that directory, never cd -'
+  mkdir -p "$T/nl/x" "$T/nl/x
+"
+  ( cd "$T/nl" && _shmutant_abs "x
+" ); rc_is $? 1 'a name ending in a newline is refused rather than resolved to its sibling'
+  cd() { builtin cd "$@" && echo LISTING; }; pwd() { echo SHADOW; }
+  got="$(_shmutant_abs "$T/here/sub")"; unset -f cd pwd
+  eq "$got" "$(cd "$T/here/sub" && pwd -P)" 'a caller'"'"'s cd or pwd function does not stand in for the builtins'
+}
+
+t_pool_refuses_a_workdir_it_did_not_create_entries_in() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  # a caller's own pristine directory under the workdir, with no shmutant marker
+  mkdir -p "$T/wd/pristine"; printf 'mine\n' > "$T/wd/pristine/precious"
+  pool lbl "$T/wd" toy_prepare toy_run
+  rc_is "$RC" 2 'a workdir holding a pristine that shmutant did not create is refused'
+  has "$ERR" 'not created by shmutant' 'says why'
+  eq "$(cat "$T/wd/pristine/precious")" mine 'and the caller'"'"'s directory was not emptied'
+  mkdir -p "$T/wd2/mut-3"; printf 'x\n' > "$T/wd2/mut-3/keep"
+  ( set -f; shopt -s failglob; shmutant_pool lbl "$T/wd2" toy_prepare toy_run > /dev/null 2>&1 ); rc_is $? 2 'a mut-N of the caller'"'"'s is refused too, whatever the caller'"'"'s glob options'
+  [ -e "$T/wd2/mut-3/keep" ] || fail_ 'the caller'"'"'s entry was removed'
+  pool lbl "$T/wd3" toy_prepare toy_run
+  rc_is "$RC" 0 'an empty workdir is marked and used'
+  [ -e "$T/wd3/.shmutant" ] || fail_ 'the marker was not written'
+  pool lbl "$T/wd3" toy_prepare toy_run
+  rc_is "$RC" 0 'and a marked workdir is reused'
+}
+
+t_pool_refuses_shadowed_builtins_and_posix_mode() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  # bounded: a pool that ran with kill neutralised could never end its own helpers
+  set -m; ( kill() { :; }; shmutant_pool lbl "$T/wd" toy_prepare toy_run > /dev/null 2>"$T/e"; echo "$?" > "$T/rc" ) 2>/dev/null & local bg=$! i=0; set +m
+  until [ -e "$T/rc" ]; do i=$((i + 1)); [ "$i" -lt 100 ] || break; sleep 0.1; done
+  [ -e "$T/rc" ] || { kill -KILL -- -"$bg" 2>/dev/null; wait "$bg" 2>/dev/null; fail_ 'a pool with a shadowed kill ran instead of being refused'; return; }
+  wait "$bg" 2>/dev/null
+  eq "$(cat "$T/rc")" 2 'a function named kill is refused'
+  has "$(cat "$T/e")" 'shadows the builtin' 'says why'
+  ( set -o posix; shmutant_pool lbl "$T/wd" toy_prepare toy_run > /dev/null 2>"$T/e" ); rc_is $? 2 'POSIX mode is refused'
+  has "$(cat "$T/e")" 'POSIX mode' 'says why'
+  # utilities are reached through command -p: a plan's function or a PATH prepare set to the
+  # tree's bin does not stand in for ps, awk or ls
+  shadowing_prepare() { toy_prepare "$1"; mkdir -p "$1/bin"; printf '#!/bin/sh\necho "1 1"\n' > "$1/bin/awk"; printf '#!/bin/sh\nexit 0\n' > "$1/bin/ps"; chmod +x "$1/bin/awk" "$1/bin/ps"; PATH="$1/bin:$PATH"; }
+  awk() { echo "1 1"; }; ls() { :; }
+  SHMUTANT_BASELINE=0 pool lbl "$T/wd" shadowing_prepare toy_run
+  unset -f awk ls
+  rc_is "$RC" 0 'killed'
+  eq "$(verdict_of a)" killed 'the verdict came from the real awk and ls'
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'b' '$1 + $2' '$1 * $2' 'even-works' 'add-works'
+  awk() { echo "1 1"; }
+  SHMUTANT_BASELINE=0 pool lbl "$T/wd" shadowing_prepare toy_run
+  unset -f awk
+  eq "$(verdict_of b)" accidental 'a shadowing awk that claims every witness was not consulted: red without its witness stays accidental'
 }
 
 t_pool_reports_failed_prepare() {
@@ -333,6 +392,17 @@ t_pool_validates_timeout() {
 }
 
 # --- units: one verdict each -----------------------------------------------------------------------------
+
+t_verdict_scans_a_large_output() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  # a quarter million lines of chatter before the failure line, and more after it
+  chatty_run() { awk 'BEGIN { for (i = 0; i < 250000; i++) print "line", i }'; bash "$1/test.sh"; local rc=$?; awk 'BEGIN { for (i = 0; i < 100000; i++) print "after", i }'; return "$rc"; }
+  SHMUTANT_BASELINE=0 pool lbl "$T/wd" toy_prepare chatty_run
+  eq "$(verdict_of a)" killed 'the witness line is found in a large output'
+  [ "$(wc -l < "$T/wd/mut-0/output" | tr -d ' ')" -gt 350000 ] || fail_ 'the output artifact is not the whole capture'
+}
 
 t_verdict_killed() {
   mk_toy "$T/toy"; TOY="$T/toy"
@@ -392,6 +462,11 @@ t_verdict_aborted_no_red_line() {
   rc_is "$RC" 1 'exit 1 without a red line fails the pool'
   eq "$(verdict_of 'exits 1 silently')" aborted 'verdict is aborted'
   has "$ERR" 'no [FAIL: ] line' 'says no red line was printed'
+  # the prefix must start the line: a mention of it elsewhere is not a failure line
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'mentions the prefix' 'is_even() {' 'is_even() { echo "note: FAIL: even-works is mentioned, not failed"; exit 1;' 'even-works'
+  pool lbl "$T/wd2" toy_prepare toy_run
+  eq "$(verdict_of 'mentions the prefix')" aborted 'a line that carries the prefix mid-line is not a red line'
 }
 
 t_verdict_unapplied() {
@@ -493,6 +568,45 @@ t_verdict_timeout_kills_a_descendant_seen_before_it_detached() {
   [ -e "$T/finished" ] && fail_ 'a descendant that detached before the deadline outlived the kill'
 }
 
+t_settings_take_a_canonical_form() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'crashes' 'is_even() {' 'is_even() { exit 8;' 'even-works'
+  SHMUTANT_RED_STATUS=08 pool lbl "$T/wd" toy_prepare toy_run
+  eq "$(verdict_of crashes)" aborted 'a red status of 08 is 8'
+  has "$ERR" 'exited 8 with no' 'and the explanation compares it as 8, not 08'
+  SHMUTANT_JOBS=0002 pool lbl "$T/wd" toy_prepare toy_run
+  eq "$(field summary 7)" 2 'the jobs field of the summary is canonical'
+}
+
+t_mode_spec_is_immune_to_nocasematch() {
+  printf 'x\n' > "$T/f"; chmod 4644 "$T/f"
+  ( shopt -s nocasematch; shmutant_mutate "$T/f" x y ); rc_is $? 0 'applies'
+  eq "$(ls -l "$T/f" | cut -c1-10)" '-rwSr--r--' 'a set-uid bit without execute stays without execute under a caller'"'"'s nocasematch'
+  # the caller's errtrace is not mistaken for errexit and switched to it
+  ( shopt -s nocasematch; set -E; shmutant_reset; shmutant_target lib.sh; shmutant_mut 'a' 'a' 'b' 'w'
+    mk_toy "$T/toy2"; TOY="$T/toy2"
+    shmutant_pool lbl "$T/wd" toy_prepare toy_run > /dev/null 2>&1
+    [ -o errexit ] && echo "FAIL: $_unit: a caller with errtrace on came back with errexit on"; exit 0 ) | grep FAIL && _failed=1
+  return 0
+}
+
+t_library_is_immune_to_aliases_at_parse_time() {
+  # sourced into a shell whose aliases would otherwise be baked into every function body
+  mk_toy "$T/toy"
+  # shellcheck disable=SC2262,SC1090
+  ( shopt -s expand_aliases; alias cp='cp -i'; alias mkdir='mkdir -v'; alias printf='echo ALIASED'
+    . "$SHMUTANT"
+    shopt -q expand_aliases || { echo "FAIL: $_unit: the caller's expand_aliases was not put back"; exit 1; }
+    shmutant_reset; shmutant_target lib.sh; shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+    prep() { cp -R "$T/toy/." "$1"; }; runit() { bash "$1/test.sh"; }
+    SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd" prep runit 2>/dev/null | grep -v '^shmutant	' && { echo "FAIL: $_unit: an aliased utility printed into the verdict stream"; exit 1; }
+    exit 0 ) < /dev/null || _failed=1
+  # shellcheck disable=SC2262,SC1090
+  ( shopt -s expand_aliases; alias cp='cp -i'; . "$SHMUTANT"
+    printf 'old\n' > "$T/g"; shmutant_mutate "$T/g" old new ) < /dev/null; rc_is $? 0 'a cp -i alias in the caller does not break the rewrite'
+}
+
 t_pool_revalidates_settings_after_prepare() {
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
@@ -556,6 +670,7 @@ t_verdict_timeout_with_a_leading_zero() {
   SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=08 pool lbl "$T/wd" toy_prepare slow_run
   eq "$(verdict_of 'hangs')" timeout 'a timeout of 08 is eight seconds, not an octal error that disarms the watchdog'
   [ "${OUT##*$'\t'hangs$'\t'}" != "$OUT" ] && [ "$(field row 8 | cut -d. -f1)" -ge 8 ] || fail_ "the run was cut short of eight seconds: $(field row 8)s"
+  has "$ERR" 'within 8s' 'the bound is reported in its canonical form, not as 08'
   sleep 3
   [ -e "$T/finished" ] && fail_ 'the run outlived the leading-zero timeout'
 }
@@ -608,6 +723,35 @@ t_freeze_records_only_what_it_stopped() {
   kill "$bystander" "$root" 2>/dev/null; wait "$bystander" "$root" 2>/dev/null
 }
 
+# shellcheck disable=SC2034
+t_freeze_that_never_settles_is_reported() {
+  # every pass finds a process it has not seen: the bound is reached and recorded, and the run
+  # that was being ended is scored unsettled rather than trusted
+  ( sleep 5; : ) & local root=$!
+  sleep 0.2
+  ( _shmutant_descendants_started() { grep -qx "$1" "$T/spawned" 2>/dev/null && return 0; [ "$(grep -c . "$T/spawned" 2>/dev/null || echo 0)" -lt 40 ] || return 0; sleep 30 > /dev/null 2>&1 & echo "$!" >> "$T/spawned"; printf '%s %s\n' "$!" "$(_shmutant_identity "$!")"; }
+    local -a frozen=() roots=("$root"); local -A have=()
+    SHMUTANT_FREEZE_UNSETTLED=0
+    _shmutant_freeze_from
+    [ "$SHMUTANT_FREEZE_UNSETTLED" = 1 ] || { echo "FAIL: $_unit: a freeze that found new work on every pass ended as if settled"; exit 1; }
+    kill -KILL "${frozen[@]%:}" 2>/dev/null
+    rm -f "$T/spawned"
+    exec {u}>|"$T/unsettled"; SHMUTANT_UNSETTLED_FD="$u"
+    _shmutant_kill_tree_twice "$root"
+    grep -qx unsettled "$T/unsettled" || { echo "FAIL: $_unit: the unsettled freeze was not reported on the descriptor the runner named"; exit 1; }
+    exit 0 ) || _failed=1
+  kill "$root" 2>/dev/null; wait "$root" 2>/dev/null
+  rm -f "$T/spawned"
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  hanging_run() { sleep 3; bash "$1/test.sh"; }
+  ( _shmutant_descendants_started() { grep -qx "$1" "$T/spawned" 2>/dev/null && return 0; [ "$(grep -c . "$T/spawned" 2>/dev/null || echo 0)" -lt 40 ] || return 0; sleep 30 > /dev/null 2>&1 & echo "$!" >> "$T/spawned"; printf '%s %s\n' "$!" "$(_shmutant_identity "$!")"; }
+    SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=1 shmutant_pool lbl "$T/wd" toy_prepare hanging_run > "$T/out" 2> "$T/err" )
+  has "$(cat "$T/out")" 'unsettled' 'the verdict is unsettled, not timeout'
+  has "$(cat "$T/err")" 'never settled' 'and the row is explained'
+}
+
 t_post_run_cleanup_never_signals_a_reaped_root_by_number() {
   # After a normal return the root has been reaped, so its number may already belong to
   # someone else: _shmutant_kill_tree signals a root only through an identity-checked victim,
@@ -648,8 +792,31 @@ t_stream_descriptor_survives_a_callback_swapping_the_path() {
   shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
   printf 'precious\n' > "$T/victim"
   swapping_run() { rm -f "$T/stream"; ln -s "$T/victim" "$T/stream"; bash "$1/test.sh"; }
-  ( SHMUTANT_STREAM="$T/stream" shmutant_pool lbl "$T/wd" toy_prepare swapping_run > /dev/null 2>&1 ); rc_is $? 0 'killed'
+  ( SHMUTANT_STREAM="$T/stream" shmutant_pool lbl "$T/wd" toy_prepare swapping_run > /dev/null 2>"$T/e" ); rc_is $? 2 'a stream path a callback replaced is a harness error: the records went where nobody can read them'
+  has "$(cat "$T/e")" 'no longer names the file' 'says so'
   eq "$(cat "$T/victim")" precious 'records never follow a symlink a callback put at the stream path'
+  removing_run() { rm -f "$T/stream2"; bash "$1/test.sh"; }
+  ( SHMUTANT_STREAM="$T/stream2" shmutant_pool lbl "$T/wd2" toy_prepare removing_run > /dev/null 2>"$T/e" ); rc_is $? 2 'a stream a callback removed is a harness error'
+  has "$(cat "$T/e")" 'no longer names the file' 'says so'
+  keeping_run() { bash "$1/test.sh"; }
+  ( SHMUTANT_STREAM="$T/stream3" shmutant_pool lbl "$T/wd3" toy_prepare keeping_run > /dev/null 2>"$T/e" ); rc_is $? 0 'an untouched stream is fine'
+  has "$(cat "$T/stream3")" 'killed' 'and carries the records'
+  has "$(cat "$T/e")" 'killed on their own witness' 'opening the stream did not swallow the pool'"'"'s own stderr'
+}
+
+t_prepare_cannot_redirect_its_own_capture() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  # prepare turns every capture-shaped name in the workdir into a FIFO: reading the root by
+  # path afterwards would block forever, before any per-run bound exists
+  fifo_prepare() { toy_prepare "$1"; local f; for f in "$1"/../.prepare.*; do [ -e "$f" ] && rm -f "$f" && mkfifo "$f"; done; mkfifo "$1/../.prepare.planted"; }
+  ( SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd" fifo_prepare toy_run > "$T/out" 2>&1; touch "$T/pool-done" ) &
+  local bg=$! i=0
+  until [ -e "$T/pool-done" ]; do i=$((i + 1)); [ "$i" -lt 100 ] || break; sleep 0.1; done
+  if [ ! -e "$T/pool-done" ]; then kill "$bg" 2>/dev/null; wait "$bg" 2>/dev/null; fail_ 'the pool blocked reading a capture prepare had replaced with a FIFO'; return; fi
+  wait "$bg" 2>/dev/null
+  has "$(cat "$T/out")" 'killed' 'the pool ran to its verdict'
 }
 
 t_pool_removes_a_read_only_pristine_root() {
@@ -730,8 +897,9 @@ t_pool_never_trusts_a_verdict_from_a_replaced_directory() {
   # a run that is a survivor, but plants a killed verdict in a fresh directory of the same name
   planting_run() { local d; d="$(cd "$1/.." && pwd -P)"; mv "$d" "$d.moved" && mkdir -p "$d" && printf 'killed\n1\n1\n' > "$d/verdict"; exit 0; }
   SHMUTANT_BASELINE=0 pool lbl "$T/wd" toy_prepare planting_run
-  rc_is "$RC" 1 'the pool does not return success on a planted verdict'
-  eq "$(verdict_of a)" lost 'a verdict read from a replacement directory is scored lost'
+  rc_is "$RC" 2 'a planted verdict in a replacement directory is a harness error, never a pass'
+  eq "$(verdict_of a)" lost 'the verdict comes from the channel, not the planted file: lost'
+  has "$ERR" 'no longer the directory' 'the replaced directory is named'
   rm -rf "$T/wd/mut-0"; mv "$T/wd/mut-0.moved" "$T/wd/mut-0" 2>/dev/null
 }
 
@@ -772,6 +940,35 @@ t_worker_cleanup_refuses_a_swapped_directory() {
   rm -rf "$T/wd2/mut-0"; mv "$T/wd2/mut-0.moved" "$T/wd2/mut-0" 2>/dev/null
 }
 
+# shellcheck disable=SC2034
+t_sibling_cannot_plant_in_another_workers_directory() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  # Planted in a worker's directory before its worker starts, as a concurrent sibling could:
+  # `tree` a symlink to another tree, `output` a symlink to a victim. The clone must not be
+  # copied into the link's target, and the capture must not be written through the link.
+  mkdir -p "$T/wd"; toy_prepare "$T/wd/pristine"
+  mkdir -p "$T/wd/mut-0" "$T/other"; printf 'precious\n' > "$T/victim"
+  ln -s "$T/other" "$T/wd/mut-0/tree"; ln -s "$T/victim" "$T/wd/mut-0/output"
+  declare -gA SHMUTANT_DIR_IDS=() SHMUTANT_VERDICT_W=() SHMUTANT_VERDICT_R=() SHMUTANT_RES_VERDICT=() SHMUTANT_RES_US=() SHMUTANT_RES_STATUS=()
+  SHMUTANT_DIR_IDS[mut-0]="$(_shmutant_dir_id "$T/wd/mut-0")"; SHMUTANT_PRISTINE_ID="$(_shmutant_dir_id "$T/wd/pristine")"
+  SHMUTANT_ROWS_SEL=(add-works)
+  _shmutant_open_channel "$T/wd" mut-0 || fail_ 'fixture: no channel'
+  ( SHMUTANT_TIMEOUT=0 _shmutant_worker mut 0 "$T/wd" toy_run "" )
+  SHMUTANT_CLEANUP_FAILED=0; _shmutant_collect "$T/wd/mut-0" mut-0 0 2>/dev/null
+  eq "$SHMUTANT_V_VERDICT" unprepared 'a planted link at tree is not cloned into'
+  eq "$(find "$T/other" -mindepth 1 | wc -l | tr -d ' ')" 0 'nothing was copied into the link'"'"'s target'
+  rm -f "$T/wd/mut-0/tree"
+  _shmutant_open_channel "$T/wd" mut-0 || fail_ 'fixture: no channel'
+  ( SHMUTANT_TIMEOUT=0 _shmutant_worker mut 0 "$T/wd" toy_run "" )
+  _shmutant_collect "$T/wd/mut-0" mut-0 0 2>/dev/null
+  eq "$SHMUTANT_V_VERDICT" killed 'the row is scored on its own run'
+  eq "$(cat "$T/victim")" precious 'a link planted at output was not written through'
+  [ -L "$T/wd/mut-0/output" ] && fail_ 'the capture was not renamed over the planted link'
+  has "$(cat "$T/wd/mut-0/output")" 'FAIL: add-works' 'and the capture is the run'"'"'s own output'
+}
+
 t_worker_verdict_cannot_be_forged_through_a_link() {
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
@@ -780,8 +977,7 @@ t_worker_verdict_cannot_be_forged_through_a_link() {
   linking_run() { ln -sf "$T/victim" "$1/../verdict"; bash "$1/test.sh"; }
   SHMUTANT_BASELINE=0 pool lbl "$T/wd" toy_prepare linking_run
   eq "$(verdict_of a)" killed 'the verdict is still read correctly'
-  eq "$(cat "$T/victim")" precious 'a symlink the callback planted at verdict was replaced, not written through'
-  [ -L "$T/wd/mut-0/verdict" ] && fail_ 'the verdict is still a symlink'
+  eq "$(cat "$T/victim")" precious 'a symlink the callback planted at verdict is never written through: the verdict travels on a channel'
 }
 
 t_pool_interrupted_kills_its_workers() {
@@ -800,6 +996,15 @@ t_pool_interrupted_kills_its_workers() {
   kill -TERM "$pp"; wait "$pp" 2>/dev/null
   sleep 5
   [ -e "$T/stubborn" ] && fail_ 'a TERM-ignoring escaped descendant outlived the interrupted pool: the TERM victims were not retained for KILL'
+  # with nothing readable from the process table, the run's group is still ended by number,
+  # through the group and holder the runner reported on its channel
+  plain_run() { : > "$T/started3"; bash -c "sleep 4; touch '$T/finished3'"; }
+  ( _shmutant_identity() { return 1; }; _shmutant_identity_table() { SHMUTANT_START=(); }; _shmutant_descendants() { :; }; _shmutant_descendants_started() { :; }
+    SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=0 shmutant_pool lbl "$T/wd3" toy_prepare plain_run > /dev/null 2>&1 ) & pp=$!
+  wait_for "$T/started3" || fail_ 'the no-ps run never started'
+  kill -TERM "$pp"; wait "$pp" 2>/dev/null
+  sleep 4
+  [ -e "$T/finished3" ] && fail_ 'with no process table, an interrupted run outlived the pool: its group was not ended by number'
 }
 
 # shellcheck disable=SC2034
@@ -824,14 +1029,20 @@ t_abort_during_spawn_is_deferred() {
 
 t_run_partial_channel_open_is_a_setup_failure() {
   mkdir -p "$T/d"
-  # mkfifo leaves a directory where the FIFO should be: the earlier descriptors open, the
-  # FIFO's does not, and the run must not start.
-  ( mkfifo() { mkdir -- "$2"; }
-    cb() { touch "$T/ran"; }
-    SHMUTANT_TIMEOUT=0 _shmutant_run_bounded "$T/d" cb "$T/d" sel 2>/dev/null
+  # The descriptor limit is lowered to one below the smallest value at which a run succeeds:
+  # some of the channels open, the rest cannot, and the run must not start.
+  cb() { touch "$T/ran"; }
+  local n ok=""
+  for (( n = 8; n <= 64; n++ )); do
+    ( ulimit -n "$n" 2>/dev/null || exit 2; SHMUTANT_TIMEOUT=0 _shmutant_run_bounded "$T/d" cb "$T/d" sel 2>/dev/null; [ "$SHMUTANT_RUN_STATUS" = 0 ] ) && { ok="$n"; break; }
+  done
+  [ -n "$ok" ] || { echo "note: $_unit: no descriptor limit let a run through; skipped"; return; }
+  rm -f "$T/ran"
+  ( ulimit -n "$(( ok - 1 ))"; SHMUTANT_TIMEOUT=0 _shmutant_run_bounded "$T/d" cb "$T/d" sel 2>/dev/null
     printf '%s' "$SHMUTANT_RUN_STATUS" > "$T/status" )
   eq "$(cat "$T/status")" 127 'a channel that could not be opened is a setup failure'
   [ -e "$T/ran" ] && fail_ 'the callback ran without its channels'
+  eq "$(find "$T/d" -name '.*' | wc -l | tr -d ' ')" 0 'no channel file was left behind'
 }
 
 t_pool_abort_waits_only_for_its_helpers() {
@@ -1058,7 +1269,7 @@ t_pool_recreates_worker_dirs() {
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
   shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
-  mkdir -p "$T/wd/mut-0/tree/stale" "$T/wd/base-0"
+  mkdir -p "$T/wd/mut-0/tree/stale" "$T/wd/base-0"; : > "$T/wd/.shmutant"
   : > "$T/wd/mut-0/timeout"; : > "$T/wd/base-0/timeout"
   pool lbl "$T/wd" toy_prepare toy_run
   rc_is "$RC" 0 'a stale timeout marker from an earlier pool does not poison the verdict'
@@ -1067,22 +1278,42 @@ t_pool_recreates_worker_dirs() {
   [ -e "$T/wd/mut-0/tree/stale" ] && fail_ 'stale clone content survived into the new run'
 }
 
-t_read_verdict_fails_closed() {
-  declare -gA SHMUTANT_DIR_IDS=()
-  _shmutant_read_verdict "$T/none"
-  eq "$SHMUTANT_V_VERDICT" lost 'missing verdict file reads as lost'
-  mkdir -p "$T/d"; printf 'killed\n1\n1\n' > "$T/d/verdict"
-  _shmutant_read_verdict "$T/d" 2>/dev/null
-  eq "$SHMUTANT_V_VERDICT" lost 'a verdict in a directory the pool did not create reads as lost'
-  # shellcheck disable=SC2034
-  SHMUTANT_DIR_IDS[d]="$(_shmutant_dir_id "$T/d")"
-  printf '\n0\n1\n' > "$T/d/verdict"
-  _shmutant_read_verdict "$T/d"
-  eq "$SHMUTANT_V_VERDICT" lost 'blank verdict reads as lost'
-  printf 'killed\nabc\n1\n' > "$T/d/verdict"
-  _shmutant_read_verdict "$T/d"
+# shellcheck disable=SC2034
+t_collect_fails_closed() {
+  declare -gA SHMUTANT_DIR_IDS=() SHMUTANT_VERDICT_W=() SHMUTANT_VERDICT_R=() SHMUTANT_RES_VERDICT=() SHMUTANT_RES_US=() SHMUTANT_RES_STATUS=()
+  SHMUTANT_CLEANUP_FAILED=0
+  mkdir -p "$T/d"; SHMUTANT_DIR_IDS[d]="$(_shmutant_dir_id "$T/d")"
+  # no channel at all
+  _shmutant_collect "$T/d" d 0
+  eq "$SHMUTANT_V_VERDICT" lost 'no channel reads as lost'
+  # a channel with nothing on it
+  _shmutant_open_channel "$T" d || fail_ 'fixture: cannot open a channel'
+  _shmutant_collect "$T/d" d 0
+  eq "$SHMUTANT_V_VERDICT" lost 'an empty channel reads as lost'
+  # a good verdict, but the worker did not exit 0
+  _shmutant_open_channel "$T" d; printf 'verdict killed 1 1\n' >&"${SHMUTANT_VERDICT_W[d]}"
+  _shmutant_collect "$T/d" d 137
+  eq "$SHMUTANT_V_VERDICT" lost 'a verdict from a worker that was killed reads as lost'
+  # a planted file at the old name changes nothing
+  printf 'killed\n1\n1\n' > "$T/d/verdict"
+  _shmutant_open_channel "$T" d
+  _shmutant_collect "$T/d" d 0
+  eq "$SHMUTANT_V_VERDICT" lost 'a verdict file planted in the directory is not read'
+  _shmutant_open_channel "$T" d; printf 'verdict  5 0\n' >&"${SHMUTANT_VERDICT_W[d]}"
+  _shmutant_collect "$T/d" d 0
+  eq "$SHMUTANT_V_VERDICT" lost 'a blank verdict word reads as lost'
+  # the last verdict line wins, a damaged duration reads as zero, group lines are ignored
+  _shmutant_open_channel "$T" d; printf 'group 1 2 3\nverdict survived 5 0\nverdict killed abc 1\n' >&"${SHMUTANT_VERDICT_W[d]}"
+  _shmutant_collect "$T/d" d 0
   eq "$SHMUTANT_V_VERDICT" killed 'verdict word read'
   eq "$SHMUTANT_V_US" 0 'a damaged duration reads as zero'
+  eq "$SHMUTANT_V_STATUS" 1 'status read'
+  eq "$SHMUTANT_CLEANUP_FAILED" 0 'a clean directory is not a cleanup failure'
+  # a replaced directory is a harness error
+  SHMUTANT_DIR_IDS[d]=999999999
+  _shmutant_open_channel "$T" d
+  _shmutant_collect "$T/d" d 0 2>/dev/null
+  eq "$SHMUTANT_CLEANUP_FAILED" 1 'a directory that is no longer the one the pool made is a cleanup failure'
   has "$(_shmutant_detail lost '' '' '')" 'NO verdict' 'lost has a human sentence'
 }
 
@@ -1139,6 +1370,7 @@ t_pool_aborts_running_workers_when_a_dir_cannot_be_recreated() {
   shmutant_mut 'b' '$1 + $2' '$1 * $2' 'add-works'
   hanging_run() { : > "$T/started"; bash -c "sleep 30; touch '$T/finished'"; }
   make_unremovable "$T/wd/mut-1/held" || { echo "note: $_unit: no way to make a directory unremovable here; skipped"; return; }
+  : > "$T/wd/.shmutant"
   local t0; t0="$(_shmutant_now)"
   SHMUTANT_JOBS=2 SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=0 pool lbl "$T/wd" toy_prepare hanging_run
   unmake_unremovable "$T/wd/mut-1/held"
@@ -1149,6 +1381,7 @@ t_pool_aborts_running_workers_when_a_dir_cannot_be_recreated() {
   # with a TERM-ignoring escaped descendant, the abort must not return before it is gone
   stubborn_hanging_run() { : > "$T/started2"; set -m; bash -c "trap '' TERM; sleep 30; touch '$T/finished2'" & wait; }
   make_unremovable "$T/wd2/mut-1/held" || return
+  : > "$T/wd2/.shmutant"
   SHMUTANT_JOBS=2 SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=0 pool lbl "$T/wd2" toy_prepare stubborn_hanging_run
   unmake_unremovable "$T/wd2/mut-1/held"
   rc_is "$RC" 2 'harness error'
@@ -1160,6 +1393,7 @@ t_pool_refuses_unremovable_pristine() {
   shmutant_reset; shmutant_target lib.sh
   shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
   make_unremovable "$T/wd/pristine/held" || { echo "note: $_unit: no way to make a directory unremovable here; skipped"; return; }
+  : > "$T/wd/.shmutant"
   pool lbl "$T/wd" toy_prepare toy_run
   unmake_unremovable "$T/wd/pristine/held"
   rc_is "$RC" 2 'a pristine directory that cannot be recreated aborts the pool'
@@ -1174,6 +1408,46 @@ t_pool_prepare_capture_never_follows_a_link() {
   pool lbl "$T/wd" toy_prepare toy_run
   rc_is "$RC" 0 'killed'
   eq "$(cat "$T/victim")" precious 'a symlink at the old capture name is never written through'
+}
+
+t_pool_reads_the_table_prepare_declared() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  declaring_prepare() { toy_prepare "$1"; shmutant_mut 'b' '$1 + $2' '$2 + $1' 'add-works'; }
+  SHMUTANT_BASELINE=0 pool lbl "$T/wd" toy_prepare toy_run
+  rc_is "$RC" 0 'baseline'
+  SHMUTANT_BASELINE=0 pool lbl "$T/wd" declaring_prepare toy_run
+  rc_is "$RC" 1 'a row prepare declared is run, and here survives'
+  eq "$(verdict_of b)" survived 'the row declared by prepare has its verdict'
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  refusing_prepare() { toy_prepare "$1"; shmutant_mut 'c' '' 'x' 'add-works' 2>/dev/null; true; }
+  SHMUTANT_BASELINE=0 pool lbl "$T/wd" refusing_prepare toy_run
+  rc_is "$RC" 2 'a declaration refused inside prepare is the same harness error as one refused before it'
+  # errexit is not leaked into a run callback by a caller that has it on. In a fresh process:
+  # this suite runs each unit where bash ignores errexit.
+  bash -c '. "$1"; set -e; T="$2"; TOY="$T/toy"
+    toy_prepare() { shmutant_copy_tree "$TOY" "$1"; }
+    counting_run() { false; bash "$1/test.sh"; }
+    shmutant_reset; shmutant_target lib.sh; shmutant_mut "a" "\$1 + \$2" "\$1 - \$2" add-works
+    SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd5" toy_prepare counting_run > "$T/out" 2>&1; echo "rc=$?" >> "$T/out"' _ "$SHMUTANT" "$T"
+  has "$(cat "$T/out")" 'killed' 'a run callback owns its own errexit: the caller'"'"'s set -e did not end it at its first false'
+  has "$(cat "$T/out")" 'rc=0' 'and the caller shell survived a pool status under set -e'
+  # a harness error from the row pool (a worker directory that cannot be recreated) under the
+  # caller's set -e still passes through the pool's own cleanup: the prepared tree is gone
+  mkdir -p "$T/wd7"; : > "$T/wd7/.shmutant"
+  if make_unremovable "$T/wd7/mut-0/held"; then
+    bash -c '. "$1"; set -e; T="$2"; TOY="$T/toy"
+      toy_prepare() { shmutant_copy_tree "$TOY" "$1"; }
+      toy_run() { bash "$1/test.sh"; }
+      shmutant_reset; shmutant_target lib.sh; shmutant_mut "a" "\$1 + \$2" "\$1 - \$2" add-works
+      SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd7" toy_prepare toy_run > "$T/out3" 2>&1; echo "after=$?" >> "$T/out3"' _ "$SHMUTANT" "$T"
+    unmake_unremovable "$T/wd7/mut-0/held"
+    [ -e "$T/wd7/pristine" ] && fail_ 'a row pool that could not start its workers, under the caller'"'"'s set -e, ended the caller before the prepared tree was removed'
+  else
+    echo "note: $_unit: no way to make a directory unremovable here; the errexit cleanup case was skipped"
+  fi
 }
 
 t_pool_prepare_keeps_its_own_errexit() {
@@ -1194,6 +1468,10 @@ EOF
   case "$-" in *e*) fail_ 'precondition: errexit already on' ;; esac
   shmutant_pool lbl "$T/wd3" lax_prepare toy_run > /dev/null 2>&1; rc_is $? 0 'killed'
   case "$-" in *e*) fail_ 'the errexit prepare turned on leaked into the caller' ;; esac
+  # and on a pool that stops right after prepare (a root outside the workdir)
+  escaping_lax_prepare() { set -e; shmutant_copy_tree "$TOY" "$1"; printf '%s\n' "$T"; }
+  shmutant_pool lbl "$T/wd4" escaping_lax_prepare toy_run > /dev/null 2>&1; rc_is $? 2 'refused'
+  case "$-" in *e*) fail_ 'the errexit prepare turned on leaked into the caller through an early return' ;; esac
 }
 
 t_pool_clone_keeps_metadata() {
@@ -1241,11 +1519,26 @@ t_pool_reports_a_clone_it_could_not_remove() {
   has "$ERR" 'could not be removed' 'and says the run is unclean'
 }
 
+t_pool_refuses_a_worker_dir_under_a_swapped_workdir() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  shmutant_mut 'b' '$1 + $2' '$1 * $2' 'add-works'
+  # the first run moves the whole workdir away and leaves a symlink to a caller tree in its
+  # place: the second worker's directory, not yet created, must not be made through the link
+  mkdir -p "$T/elsewhere"
+  swapping_run() { mv "$T/wd" "$T/moved"; ln -s "$T/elsewhere" "$T/wd"; bash "$1/test.sh"; }
+  SHMUTANT_JOBS=1 SHMUTANT_BASELINE=0 pool lbl "$T/wd" toy_prepare swapping_run
+  rc_is "$RC" 2 'a workdir replaced by a symlink is a harness error'
+  [ -e "$T/elsewhere/mut-1" ] && fail_ 'a worker directory was created through the symlink'
+  rm -f "$T/wd"; mv "$T/moved" "$T/wd" 2>/dev/null
+}
+
 t_pool_refuses_unremovable_worker_dir() {
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
   shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
-  mkdir -p "$T/wd/mut-0"; printf 'killed\n1\n1\n' > "$T/wd/mut-0/verdict"
+  mkdir -p "$T/wd/mut-0"; printf 'killed\n1\n1\n' > "$T/wd/mut-0/verdict"; : > "$T/wd/.shmutant"
   make_unremovable "$T/wd/mut-0/held" || { echo "note: $_unit: no way to make a directory unremovable here; skipped"; return; }
   # with a long caller job of its own, so a bare wait in the failure path would block on it
   sleep 30 & local job=$!
@@ -1421,6 +1714,7 @@ t_pool_validates_red_status_and_prefix() {
   has "$ERR" 'every line' 'says why'
   SHMUTANT_RED_STATUS=99999999999999999999999 pool lbl "$T/wd" toy_prepare toy_run
   rc_is "$RC" 2 'a red status wider than a shell integer is refused'
+  has "$ERR" 'got [99999999999999999999999]' 'the overflowing value is refused as given, not as whatever it wraps to'
   SHMUTANT_TIMEOUT=99999999999999999999999 pool lbl "$T/wd" toy_prepare toy_run
   rc_is "$RC" 2 'a timeout wider than a shell integer is refused'
   has "$ERR" 'too large' 'says why'
@@ -1491,6 +1785,9 @@ t_copy_tree_excludes_git() {
   [ -L "$T/dst/link" ] || fail_ 'symlink was not kept as a symlink'
   shmutant_copy_tree "$T/missing" "$T/dst2" 2>/dev/null; rc_is $? 1 'a missing source is an error'
   ( set -u; shmutant_copy_tree "$T/src" 2>"$T/e" ); rc_is $? 1 'a missing destination is a copy failure even under set -u'
+  mkdir -p "$T/cwd"
+  ( cd "$T/cwd" && shmutant_copy_tree "$T/src" "" 2>/dev/null ); rc_is $? 1 'an empty destination is refused'
+  eq "$(find "$T/cwd" -mindepth 1 | wc -l | tr -d ' ')" 0 'and nothing was copied into the current directory'
   has "$(cat "$T/e")" 'usage' 'reported as a usage error, not an unbound-variable abort'
   [ -e "$T/dst2" ] && fail_ 'a missing source was refused only after its destination had been created'
   mkdir -p "$T/gl/.git/objects"; printf 'o' > "$T/gl/.git/objects/x"; ln "$T/gl/.git/objects/x" "$T/gl/.git/objects/y"; printf 'f' > "$T/gl/f"
@@ -1571,6 +1868,20 @@ EOF
   out="$(bash "$SHMUTANT" run "$T/toy/plan.sh" 2> "$T/err")"; rc_is $? 0 'a plan whose rows are all killed exits 0'
   has "$out" $'shmutant\t1\trow\tkilled' 'the stream reaches stdout'
   has "$(cat "$T/err")" 'plan.sh: 1/1' 'the label is the plan file name'
+  TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan.sh" --workdir --keep > /dev/null 2>"$T/e"; rc_is $? 2 'a flag where a value was expected is refused'
+  has "$(cat "$T/e")" 'needs a value' 'says so'
+  [ -e "./--keep" ] && fail_ 'a directory named --keep was created'
+  printf 'touch "$SHMUTANT_PLAN_DIR/loaded"\n' >> "$T/toy/plan.sh"
+  TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan.sh" --jobs abc > /dev/null 2>&1; rc_is $? 2 'a bad --jobs is refused'
+  [ -e "$T/toy/loaded" ] && fail_ 'the plan ran before its settings were checked'
+  sed -i.bak '/loaded/d' "$T/toy/plan.sh"; rm -f "$T/toy/plan.sh.bak"
+  ( _shmutant_checksum "$T/does-not-exist" 2>/dev/null ); rc_is $? 2 'a digest that could not be computed is a failure, not an empty line'
+  # --keep on the command line, and a prepare that settles SHMUTANT_KEEP=0: the settled value
+  # is what the workers honoured and what decides the workdir
+  sed 's/^prepare() {/prepare() { SHMUTANT_KEEP=0;/' "$T/toy/plan.sh" > "$T/toy/plan-unkeep.sh"
+  rm -rf "$T/tmpd"; mkdir -p "$T/tmpd"
+  TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-unkeep.sh" --keep > /dev/null 2>&1
+  eq "$(find "$T/tmpd" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" 0 'a prepare that settled SHMUTANT_KEEP=0 under --keep leaves no workdir behind'
   printf "shmutant_mut 'survivor' '%%' '+' 'uncovered'\n" >> "$T/toy/plan.sh"
   bash "$SHMUTANT" run "$T/toy/plan.sh" > /dev/null 2>&1; rc_is $? 1 'a survivor exits 1'
   bash "$SHMUTANT" run "$T/toy/plan.sh" --jobs 1 --no-baseline --timeout 30 --workdir "$T/w" --keep > /dev/null 2>&1; rc_is $? 1 'options are accepted'
@@ -1669,6 +1980,28 @@ EOF
   rm -f "$T/toy/finished"
   [ "$(find "$T/tmpd" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" -ge 1 ] || fail_ 'SHMUTANT_KEEP=1 set by prepare was not honoured when the CLI was interrupted'
   rm -rf "$T/tmpd"/*
+  # SHMUTANT_KEEP=1 in the environment, interrupted while the plan is still loading (before
+  # anything could be reported): the decision was the operator's, and the workdir stays
+  { printf ': > "$SHMUTANT_PLAN_DIR/loading"; sleep 3\n'; cat "$T/toy/plan-hang.sh"; } > "$T/toy/plan-slow-load.sh"
+  SHMUTANT_KEEP=1 TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-slow-load.sh" --timeout 0 --no-baseline > /dev/null 2>&1 & cli=$!
+  wait_for "$T/toy/loading" || fail_ 'the plan never started loading'; rm -f "$T/toy/loading"
+  kill -TERM "$cli"; wait "$cli" 2>/dev/null
+  [ "$(find "$T/tmpd" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" -ge 1 ] || fail_ 'SHMUTANT_KEEP=1 in the environment was not honoured by an interrupt during plan load'
+  rm -rf "$T/tmpd"/*
+  # SHMUTANT_KEEP=1 assigned by the plan at load time, interrupted while prepare is still running
+  { printf 'SHMUTANT_KEEP=1\n'; cat "$T/toy/plan-slow-prepare.sh"; } > "$T/toy/plan-load-keep.sh"
+  TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-load-keep.sh" --timeout 0 --no-baseline > /dev/null 2>&1 & cli=$!
+  wait_for "$T/toy/preparing" || fail_ 'prepare never started'; rm -f "$T/toy/preparing"
+  kill -TERM "$cli"; wait "$cli" 2>/dev/null
+  [ "$(find "$T/tmpd" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" -ge 1 ] || fail_ 'SHMUTANT_KEEP=1 assigned by the plan at load was not honoured by an interrupt during prepare'
+  rm -rf "$T/tmpd"/*
+  # an interrupt in a caller-supplied workdir leaves no marker files behind
+  mkdir -p "$T/mine"
+  bash "$SHMUTANT" run "$T/toy/plan-hang.sh" --workdir "$T/mine" --timeout 0 --no-baseline > /dev/null 2>&1 & cli=$!
+  wait_for "$T/toy/started" || fail_ 'the run never started'; rm -f "$T/toy/started"
+  kill -TERM "$cli"; wait "$cli" 2>/dev/null
+  sleep 4; rm -f "$T/toy/finished"
+  eq "$(find "$T/mine" -maxdepth 1 -name '.done.*' -o -maxdepth 1 -name '.keep.*' | wc -l | tr -d ' ')" 0 'no completion or keep marker survives an interrupt in the caller'"'"'s workdir'
   SHMUTANT_KEEP=1 TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-hang.sh" --timeout 0 --no-baseline > /dev/null 2>&1 & cli=$!
   wait_for "$T/toy/started" || fail_ 'the env-keep run never started'; rm -f "$T/toy/started"
   kill -TERM "$cli"; wait "$cli" 2>/dev/null

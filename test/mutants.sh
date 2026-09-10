@@ -94,16 +94,16 @@ shmutant_mut 'a bad SHMUTANT_TIMEOUT is accepted' \
 
 # --- verdicts ---
 shmutant_mut 'the witness is checked against the selector' \
-  '"${SHMUTANT_RED_PREFIX:-FAIL: }" "${SHMUTANT_ROWS_WIT[$i]}"' \
-  '"${SHMUTANT_RED_PREFIX:-FAIL: }" "${SHMUTANT_ROWS_SEL[$i]}"' \
+  '"$run" "$root" "$sel" "${SHMUTANT_ROWS_WIT[$i]}"' \
+  '"$run" "$root" "$sel" "${SHMUTANT_ROWS_SEL[$i]}"' \
   't_verdict_accidental'
 shmutant_mut 'a witness on a non-red line counts' \
-  '"$2"*) case "$line" in *"$3"*) return 0 ;; esac ;;' \
-  '*) case "$line" in *"$3"*) return 0 ;; esac ;;' \
+  '    index($0, p) == 1 { red = 1; if (w != "" && index($0, w)) { wit = 1; exit } }' \
+  '    index($0, p) == 1 { red = 1 } w != "" && index($0, w) { wit = 1 }' \
   't_verdict_accidental'
 shmutant_mut 'exit 1 without a red line is scored accidental' \
-  'elif _shmutant_has_red_line' \
-  'elif true || _shmutant_has_red_line' \
+  '    elif [ "$SHMUTANT_RUN_RED" = 1 ]; then' \
+  '    elif true; then' \
   't_verdict_aborted_no_red_line'
 shmutant_mut 'any non-zero status counts as red' \
   'elif [ "$status" -eq "${SHMUTANT_RED_STATUS:-1}" ]; then' \
@@ -132,7 +132,7 @@ shmutant_mut 'a timeout is reported as an abort' \
 shmutant_mut 'a blank verdict file reads as a verdict' \
   '[ -n "$SHMUTANT_V_VERDICT" ] || SHMUTANT_V_VERDICT=lost' \
   '[ -n "$SHMUTANT_V_VERDICT" ] || true' \
-  't_read_verdict_fails_closed'
+  't_collect_fails_closed'
 
 # --- mechanics ---
 shmutant_mut 'run does not receive the selector' \
@@ -152,8 +152,8 @@ shmutant_mut 'the cap no longer bounds SHMUTANT_JOBS' \
   '[ "$n" -ge "$cap" ] || n="$cap"' \
   't_pool_honours_jobs'
 shmutant_mut 'the pool reaps any job, including the caller'"'"'s' \
-  'wait -n -p done_pid "${pids[@]}" || true' \
-  'wait -n -p done_pid || true' \
+  '  wait -n -p done_pid "${pids[@]}"; wrc=$?' \
+  '  wait -n -p done_pid; wrc=$?' \
   't_pool_does_not_reap_callers_jobs'
 shmutant_mut 'baseline runs once per row instead of once per selector' \
   '[ "$k" = "$sel" ] && continue 2; done' \
@@ -184,7 +184,7 @@ shmutant_mut 'SHMUTANT_STREAM is ignored' \
 
 # --- the CLI ---
 shmutant_mut 'the label is not the plan name' \
-  'shmutant_pool "$(basename -- "$plan")"' \
+  'shmutant_pool "$(command -p basename -- "$plan")"' \
   'shmutant_pool "plan"' \
   't_cli_run'
 shmutant_mut 'version prints the wrong marker' \
@@ -192,8 +192,8 @@ shmutant_mut 'version prints the wrong marker' \
   '"$SHMUTANT_VERSION-mutant"' \
   't_cli_run'
 shmutant_mut 'checksum prints the file name instead of the digest' \
-  "sha256sum -- \"\$1\" | awk '{print \$1}'" \
-  "sha256sum -- \"\$1\" | awk '{print \$2}'" \
+  '  printf '"'"'%s\n'"'"' "${out%% *}"' \
+  '  printf '"'"'%s\n'"'"' "${out#* }"' \
   't_cli_run'
 
 # --- guards added for the first review round ---
@@ -206,7 +206,7 @@ shmutant_mut 'a stream write failure is swallowed' \
   '{ printf '"'"'%s\n'"'"' "$out" >&"$SHMUTANT_STREAM_FD"; } 2>/dev/null || SHMUTANT_EMIT_FAILED=0' \
   't_stream_write_failure_is_a_harness_error'
 shmutant_mut 'the rewrite drops the target mode' \
-  'mode="$(ls -ld -- "$f" 2>/dev/null)"; mode="${mode%% *}"' \
+  'mode="$(command -p ls -ld -- "$f" 2>/dev/null)"; mode="${mode%% *}"' \
   'mode="-rw-r--r--"' \
   't_mutate_preserves_mode'
 shmutant_mut 'the rewrite always appends a final newline' \
@@ -214,7 +214,7 @@ shmutant_mut 'the rewrite always appends a final newline' \
   'ENVIRON["SHMUTANT_MUT_NL"] != 2) printf' \
   't_mutate_preserves_missing_final_newline'
 shmutant_mut 'the temp file is a predictable sibling name again' \
-  'tmp="$(mktemp "$dir/.shmutant.XXXXXX" 2>/dev/null)" || { _shmutant_mutate_restore "$dir" "$dirmode"; return 1; }' \
+  'tmp="$(command -p mktemp "$dir/.shmutant.XXXXXX" 2>/dev/null)" || { _shmutant_mutate_restore "$dir" "$dirmode"; return 1; }' \
   'tmp="$f.shmutant-tmp"' \
   't_mutate_never_follows_a_stale_temp_link'
 shmutant_mut 'worker directories are reused with their stale contents' \
@@ -249,14 +249,6 @@ shmutant_mut 'a symlinked parent directory passes the target check' \
   '  _shmutant_inside "$root" "$dir"' \
   '  true' \
   't_pool_refuses_target_under_symlinked_dir'
-shmutant_mut 'the caller'"'"'s nocasematch reaches witness matching' \
-  '  shopt -u nocasematch' \
-  '  shopt -s nocasematch' \
-  't_pool_witness_match_is_case_sensitive'
-shmutant_mut 'CDPATH reaches the path resolver' \
-  '( unset CDPATH; cd -P -- "$1"' \
-  '( cd -P -- "$1"' \
-  't_abs_ignores_cdpath'
 shmutant_mut 'a destination inside the source is copied into itself' \
   'if _shmutant_inside "$asrc" "$adst"; then' \
   'if false; then' \
@@ -312,8 +304,8 @@ shmutant_mut 'the timeout is read bare, so nounset aborts the pool' \
   'local v_timeout="$SHMUTANT_TIMEOUT"' \
   't_pool_survives_nounset'
 shmutant_mut 'a hard-linked target is accepted' \
-  '| awk '"'"'{ print $2 }'"'"')" -gt 1 ]; then' \
-  '| awk '"'"'{ print $2 }'"'"')" -gt 99 ]; then' \
+  '| command -p awk '"'"'{ print $2 }'"'"')" -gt 1 ]; then' \
+  '| command -p awk '"'"'{ print $2 }'"'"')" -gt 99 ]; then' \
   't_pool_refuses_hard_linked_target'
 shmutant_mut 'SHMUTANT_JOBS=0 falls back to the CPU count' \
   'if [ "${#v_jobs}" -gt 4 ] || [ "$v_jobs" -lt 1 ]; then' \
@@ -334,21 +326,17 @@ shmutant_mut 'the descendant list is split by the caller IFS again' \
   '        _shmutant_held_group "$pid"; _shmutant_kill_tree_twice "${SHMUTANT_HELD[@]}" "$pid:$rootid" $(printf "%s\n" "${victims[@]}")' \
   't_verdict_timeout_kills_a_descendant_seen_then_reparented'
 shmutant_mut 'prepare runs in a subshell' \
-  '"$prep" "$wd/pristine" >| "$pout"; prc=$?' \
-  '( "$prep" "$wd/pristine" >| "$pout" ); prc=$?' \
+  '"$prep" "$wd/pristine" >&"$pout_w"; prc=$?' \
+  '( "$prep" "$wd/pristine" >&"$pout_w" ); prc=$?' \
   't_pool_runs_prepare_in_its_own_shell'
 shmutant_mut 'surplus mutation arguments are accepted' \
   'if [ "$#" -lt 4 ] || [ "$#" -gt 5 ]; then' \
   'if [ "$#" -lt 4 ]; then' \
   't_mut_validates_rows'
-shmutant_mut 'a worker directory that cannot be recreated is used anyway' \
-  '  [ ! -e "$path" ] && [ ! -L "$path" ]' \
-  '  true' \
-  't_pool_refuses_unremovable_worker_dir'
 
 # --- guards added for the eighth review round ---
 shmutant_mut 'a relative library stream is left relative for prepare to move' \
-  '    SHMUTANT_STREAM="$sdir/$(basename -- "$SHMUTANT_STREAM")"' \
+  '    SHMUTANT_STREAM="$sdir/$(command -p basename -- "$SHMUTANT_STREAM")"' \
   '    :' \
   't_stream_relative_survives_a_prepare_that_cds'
 shmutant_mut 'pristine is reused when it cannot be recreated' \
@@ -356,12 +344,12 @@ shmutant_mut 'pristine is reused when it cannot be recreated' \
   'true ||' \
   't_pool_refuses_unremovable_pristine'
 shmutant_mut 'the prepare capture is a predictable name again' \
-  'pout="$(mktemp "$wd/.prepare.XXXXXX" 2>/dev/null)" ||' \
+  'pout="$(command -p mktemp "$wd/.prepare.XXXXXX" 2>/dev/null)" ||' \
   'pout="$wd/prepare.out" ||' \
   't_pool_prepare_capture_never_follows_a_link'
 shmutant_mut 'prepare runs as a condition, muting its errexit' \
-  '"$prep" "$wd/pristine" >| "$pout"; prc=$?' \
-  'if "$prep" "$wd/pristine" >| "$pout"; then prc=0; else prc=$?; fi' \
+  '"$prep" "$wd/pristine" >&"$pout_w"; prc=$?' \
+  'if "$prep" "$wd/pristine" >&"$pout_w"; then prc=0; else prc=$?; fi' \
   't_pool_prepare_keeps_its_own_errexit'
 shmutant_mut 'the errexit prepare turned on is left on' \
   'if [ "$errexit_before" = 1 ]; then set -e; else set +e; fi' \
@@ -376,8 +364,8 @@ shmutant_mut 'descendants are snapshotted only at the deadline' \
   '          done < /dev/null' \
   't_verdict_timeout_kills_a_descendant_seen_before_it_detached'
 shmutant_mut 'clones drop metadata' \
-  'cp -RPp -- "$wd/pristine" "$dir/tree"' \
-  'cp -RP -- "$wd/pristine" "$dir/tree"' \
+  'cp -RPp -- "$wd/pristine/." "$dir/tree/"' \
+  'cp -RP -- "$wd/pristine/." "$dir/tree/"' \
   't_pool_clone_keeps_metadata'
 shmutant_mut 'copy_tree drops metadata' \
   'cp -RPp -- "$entry" "$dst/"' \
@@ -394,7 +382,7 @@ shmutant_mut 'a caller-supplied workdir is removed' \
   '  elif true; then _shmutant_remove "$wd" || {' \
   't_cli_run'
 shmutant_mut 'the plan is sourced by its bare name' \
-  '_shmutant_cli_load "$SHMUTANT_PLAN_DIR/$(basename -- "$plan")"' \
+  '_shmutant_cli_load "$SHMUTANT_PLAN_DIR/$(command -p basename -- "$plan")"' \
   '_shmutant_cli_load "$plan"' \
   't_cli_run'
 shmutant_mut 'a relative --workdir is resolved after the plan may have moved' \
@@ -410,8 +398,8 @@ shmutant_mut 'the plan errexit is left on across the pool call' \
   '  :' \
   't_cli_run'
 shmutant_mut 'a relative SHMUTANT_STREAM is resolved after the plan may have moved' \
-  '          sdir="$(_shmutant_abs "$(dirname -- "$SHMUTANT_STREAM")")" || sdir=""' \
-  '          sdir="$(dirname -- "$SHMUTANT_STREAM")"' \
+  '    SHMUTANT_STREAM="$sdir/$(command -p basename -- "$SHMUTANT_STREAM")"' \
+  '    :' \
   't_cli_run'
 shmutant_mut 'the subshell status is trusted without the completion marker' \
   '  if [ -n "$marker" ] && [ "${marker%% *}" = "$rc" ]; then' \
@@ -446,8 +434,8 @@ shmutant_mut 'jobs ignores what prepare assigned to SHMUTANT_JOBS' \
   '  jobs="$(SHMUTANT_JOBS= _shmutant_jobs "$cap")"' \
   't_pool_bookkeeping_survives_prepare_assignments'
 shmutant_mut 'the pool bookkeeping is not restored after prepare' \
-  'n="$_shmutant_pool_n"; t0="$_shmutant_pool_t0"; pout="$_shmutant_pool_pout"; errexit_before="$_shmutant_pool_errexit"' \
-  't0="$_shmutant_pool_t0"; errexit_before="$_shmutant_pool_errexit"' \
+  '  label="$_shmutant_pool_label"; wd="$_shmutant_pool_wd"; run="$_shmutant_pool_run"; cap="$_shmutant_pool_cap"' \
+  '  label="$_shmutant_pool_label"; run="$_shmutant_pool_run"; cap="$_shmutant_pool_cap"' \
   't_pool_bookkeeping_survives_prepare_assignments'
 shmutant_mut 'SHMUTANT_KEEP is not validated' \
   'case "${SHMUTANT_KEEP:-0}" in 0|1) ;; *)' \
@@ -458,11 +446,11 @@ shmutant_mut 'SHMUTANT_BASELINE is not validated' \
   'case "${SHMUTANT_BASELINE:-1}" in *) ;; never)' \
   't_pool_validates_boolean_settings'
 shmutant_mut 'a leading-zero timeout reaches arithmetic as octal' \
-  't_end=$(( $(_shmutant_now) + 10#$timeout * 1000000 ))' \
-  't_end=$(( $(_shmutant_now) + timeout * 1000000 ))' \
+  '  [ -n "${SHMUTANT_TIMEOUT+x}" ] && SHMUTANT_TIMEOUT="$(( 10#$v_timeout ))"' \
+  '  :' \
   't_verdict_timeout_with_a_leading_zero'
 shmutant_mut 'a refused nested copy leaves its directory behind' \
-  '    [ -n "$made" ] && rm -rf -- "$made"' \
+  '    [ -n "$made" ] && command -p rm -rf -- "$made"' \
   '    :' \
   't_copy_tree_excludes_git'
 shmutant_mut 'an interrupted pool leaves its workers running' \
@@ -488,7 +476,7 @@ shmutant_mut 'a target with surplus arguments is accepted' \
   '[ "$#" -ge 1 ] || { _shmutant_refuse "target: exactly one file' \
   't_mut_validates_rows'
 shmutant_mut 'KEEP set inside the plan is not carried back to the CLI' \
-  '    [ "${marker#* }" = 1 ] && keep=1' \
+  '    if [ "${marker#* }" = 1 ]; then keep=1; else keep=0; fi' \
   '    :' \
   't_cli_run'
 shmutant_mut 'containment honours the caller nocasematch' \
@@ -506,8 +494,8 @@ shmutant_mut 'a callback that returned normally leaves its helpers running' \
   '      :' \
   't_run_leftovers_are_killed_after_a_normal_return'
 shmutant_mut 'the verdict is written straight to its fixed name' \
-  'printf '"'"'%s\n%s\n%s\n'"'"' "$2" "$3" "$4" >| "$tmp" && mv -f -- "$tmp" "$1/verdict"' \
-  'printf '"'"'%s\n%s\n%s\n'"'"' "$2" "$3" "$4" > "$1/verdict"; rm -f -- "$tmp"' \
+  '  { printf '"'"'verdict %s %s %s\n'"'"' "$2" "$3" "$4" >&"$SHMUTANT_VERDICT_FD"; } 2>/dev/null' \
+  '  { printf '"'"'verdict %s %s %s\n'"'"' "$2" "$3" "$4" >&"$SHMUTANT_VERDICT_FD"; } 2>/dev/null; printf '"'"'%s\n'"'"' "$2" > "$1/verdict"' \
   't_worker_verdict_cannot_be_forged_through_a_link'
 shmutant_mut 'the filesystem root contains nothing' \
   '    if [ "$1" = / ]; then case "$2" in /*) exit 0 ;; esac; exit 1; fi' \
@@ -522,12 +510,12 @@ shmutant_mut 'rc and killed are not reset after prepare' \
   '  :' \
   't_pool_bookkeeping_survives_prepare_assignments'
 shmutant_mut 'the settled KEEP is not recorded for the CLI abort path' \
-  '[ -n "${SHMUTANT_CLI_KEEPFILE:-}" ] && printf '"'"'%s\n'"'"' "${SHMUTANT_KEEP:-0}" >| "$SHMUTANT_CLI_KEEPFILE"' \
-  ':' \
+  '  _shmutant_report_keep after-prepare' \
+  '  :' \
   't_cli_run'
 shmutant_mut 'the row pool runs as a condition, muting callback errexit' \
-  '  _shmutant_run_jobs mut "$n" "$wd" "$run" "$suffix" "$jobs"; rjrc=$?' \
-  '  _shmutant_run_jobs mut "$n" "$wd" "$run" "$suffix" "$jobs" || rjrc=2; rjrc=${rjrc:-0}' \
+  '  set +e; _shmutant_run_jobs mut "$n" "$wd" "$run" "$suffix" "$jobs"; rjrc=$?' \
+  '  set +e; rjrc=0; _shmutant_run_jobs mut "$n" "$wd" "$run" "$suffix" "$jobs" || rjrc=$?' \
   't_run_errexit_is_honoured_in_workers'
 
 # --- guards added for the thirteenth review round ---
@@ -562,7 +550,7 @@ shmutant_mut 'a validation failure after prepare keeps the pristine tree' \
   '      return 2' \
   't_pool_failure_after_prepare_removes_pristine'
 shmutant_mut 'the destination root does not get the source root mode' \
-  '  chmod -- "$(_shmutant_mode_spec "${rootls%% *}")" "$dst" 2>/dev/null' \
+  '  command -p chmod -- "$(_shmutant_mode_spec "${rootls%% *}")" "$dst" 2>/dev/null' \
   '  :' \
   't_pool_clone_keeps_metadata'
 
@@ -584,8 +572,8 @@ shmutant_mut 'a failed root metadata restore is a silent success' \
   '  rc=0; [ "$rc" -eq 0 ] || _shmutant_err "copy_tree: could not reproduce' \
   't_pool_clone_keeps_metadata'
 shmutant_mut 'a directory that cannot be recreated waits on running workers' \
-  '      for p in "${pids[@]}"; do _shmutant_kill_tree_twice "$p" & helpers+=("$!"); done' \
-  '      :' \
+  '      [ "${#pids[@]}" -eq 0 ] || { _shmutant_end_workers "${pids[@]}"; wait "${pids[@]}" 2>/dev/null; }' \
+  '      [ "${#pids[@]}" -eq 0 ] || wait "${pids[@]}" 2>/dev/null' \
   't_pool_aborts_running_workers_when_a_dir_cannot_be_recreated'
 shmutant_mut 'the CLI ignores SHMUTANT_KEEP=1 before the pool settles it' \
   '  [ "${SHMUTANT_KEEP:-0}" = 1 ] && keep=1' \
@@ -598,7 +586,7 @@ shmutant_mut 'the leftover record is written by path after the callback' \
   '      _shmutant_snapshot "$BASHPID" > "$dir/.left"; trap - EXIT; builtin exit "$rrc" )' \
   't_run_cannot_lose_the_leftover_record_by_locking_its_dir'
 shmutant_mut 'a read-only tree of ours is not made removable' \
-  '      find "$path" -type d ! -perm -u+rwx -exec chmod u+rwx {} + 2>/dev/null' \
+  '      command -p find "$path" -type d ! -perm -u+rwx -exec chmod u+rwx {} + 2>/dev/null' \
   '      :' \
   't_pool_removes_a_read_only_pristine_root'
 shmutant_mut 'the tree below the root is signalled without being frozen first' \
@@ -610,31 +598,27 @@ shmutant_mut 'retained victims are neither frozen nor searched from' \
   '    :' \
   't_verdict_timeout_kills_a_descendant_seen_then_reparented'
 shmutant_mut 'mutate does not loosen a read-only directory' \
-  '    chmod -- u+w "$dir" 2>/dev/null || return 1' \
+  '    command -p chmod -- u+w "$dir" 2>/dev/null || return 1' \
   '    return 1' \
   't_pool_removes_a_read_only_pristine_root'
 
 # --- guards added for the seventeenth review round ---
 shmutant_mut 'the channel opens are not forced past noclobber' \
-  'exec {left_w}>|"$mark.left" {left_r}<"$mark.left" {seen_w}>|"$mark.seen" {seen_r}<"$mark.seen" {fired}<>"$fifo" {out_r}<"$dir/output"' \
-  'exec {left_w}>"$mark.left" {left_r}<"$mark.left" {seen_w}>"$mark.seen" {seen_r}<"$mark.seen" {fired}<>"$fifo" {out_r}<"$dir/output"' \
+  'exec {left_w}>|"$left" {left_r}<"$left" {seen_w}>|"$seen" {seen_r}<"$seen" {fired}<>"$fifo" {out_w}>|"$outf" {out_r}<"$outf"' \
+  'exec {left_w}>"$left" {left_r}<"$left" {seen_w}>"$seen" {seen_r}<"$seen" {fired}<>"$fifo" {out_w}>"$outf" {out_r}<"$outf"' \
   't_run_cannot_forge_its_output_or_the_marker'
 shmutant_mut 'the verdict is scored from the output path, not the descriptor' \
-  '  SHMUTANT_RUN_OUTPUT="$(cat <&"$out_r")"' \
-  '  SHMUTANT_RUN_OUTPUT="$(cat "$dir/output" 2>/dev/null)"' \
+  '  _shmutant_scan_output "$out_r" "${SHMUTANT_RED_PREFIX:-FAIL: }" "$wit"' \
+  '  exec {out_r}<"$dir/output"; _shmutant_scan_output "$out_r" "${SHMUTANT_RED_PREFIX:-FAIL: }" "$wit"' \
   't_run_cannot_forge_its_output_or_the_marker'
 shmutant_mut 'a swapped worker directory is cleaned and written beneath' \
-  '  if [ -L "$1" ] || [ "$(ls -di -- "$1" 2>/dev/null | awk '"'"'{ print $1 }'"'"')" != "${SHMUTANT_DIR_ID:-}" ]; then' \
+  '  if [ -L "$1" ] || [ "$(command -p ls -di -- "$1" 2>/dev/null | command -p awk '"'"'{ print $1 }'"'"')" != "${SHMUTANT_DIR_ID:-}" ]; then' \
   '  if false; then' \
   't_worker_cleanup_refuses_a_swapped_directory'
 shmutant_mut 'a root given with an identity is stopped without checking it' \
   '  else rootid="${spec#*:}"; [ -n "$rootid" ] && _shmutant_alive_since "$pid" "$rootid" && root_ok=1' \
   '  else rootid="${spec#*:}"; [ -n "$rootid" ] && root_ok=1' \
   't_post_run_cleanup_never_signals_a_reaped_root_by_number'
-shmutant_mut 'a bare wait when no worker has started' \
-  '      [ "${#pids[@]}" -eq 0 ] || wait "${helpers[@]}" "${pids[@]}" 2>/dev/null' \
-  '      wait "${helpers[@]}" "${pids[@]}" 2>/dev/null' \
-  't_pool_refuses_unremovable_worker_dir'
 shmutant_mut 'the baseline arrays are not reset after prepare' \
   '  killed=0; rc=0; base_sel=(); base_verdict=()' \
   '  killed=0; rc=0' \
@@ -646,7 +630,7 @@ shmutant_mut 'the wrapper snapshot runs after the callback, not from an EXIT tra
   '>&"$_shmutant_wrap_left"'"'"' USR2' \
   't_run_errexit_failure_still_snapshots_leftovers'
 shmutant_mut 'a verdict is read from whatever directory has the name' \
-  '  if [ -L "$1" ] || [ "$(_shmutant_dir_id "$1")" != "${SHMUTANT_DIR_IDS[${1##*/}]:-}" ]; then' \
+  '  if [ -L "$dir" ] || [ "$(_shmutant_dir_id "$dir")" != "${SHMUTANT_DIR_IDS[$key]:-}" ]; then' \
   '  if false; then' \
   't_pool_never_trusts_a_verdict_from_a_replaced_directory'
 shmutant_mut 'the stream cache is set before the open succeeds' \
@@ -656,7 +640,7 @@ shmutant_mut 'the stream cache is set before the open succeeds' \
 
 # --- guards added for the nineteenth review round ---
 shmutant_mut 'the completion marker keeps its path while the plan loads' \
-  '  rm -f -- "$SHMUTANT_CLI_DONE_PATH"' \
+  '  command -p rm -f -- "$SHMUTANT_CLI_DONE_PATH"' \
   '  :' \
   't_cli_run'
 shmutant_mut 'the snapshot on return is dropped, leaving only the trap' \
@@ -679,10 +663,6 @@ shmutant_mut 'a signal during a worker spawn is acted on before registration' \
   '  if [ "${SHMUTANT_SPAWNING:-0}" = 1 ]; then SHMUTANT_ABORT_PENDING="$sig"; return 0; fi' \
   '  :' \
   't_abort_during_spawn_is_deferred'
-shmutant_mut 'a partial channel open is not a setup failure' \
-  '    rm -f -- "$mark" "$mark.left" "$mark.seen" "$fifo" "$mark.hold" "$mark.hp"; SHMUTANT_RUN_STATUS=127; return' \
-  '    rm -f -- "$mark" "$mark.left" "$mark.seen" "$fifo" "$mark.hold" "$mark.hp"' \
-  't_run_partial_channel_open_is_a_setup_failure'
 shmutant_mut 'the pool reads its positionals before checking their count' \
   '  if [ "$#" -lt 4 ] || [ "$#" -gt 5 ]; then _shmutant_err "pool: usage' \
   '  if false; then _shmutant_err "pool: usage' \
@@ -698,12 +678,12 @@ shmutant_mut 'a verified holder yields no group to signal' \
   '  SHMUTANT_HELD=()' \
   't_verdict_timeout_without_an_identity'
 shmutant_mut 'the .git prune takes the source name as a pattern' \
-  '  linked="$(cd "$src" 2>/dev/null && find . -path ./.git -prune' \
-  '  linked="$(cd "$src" 2>/dev/null && find "$src" -path "$src/.git" -prune' \
+  '  linked="$(cd "$src" 2>/dev/null && command -p find . -path ./.git -prune' \
+  '  linked="$(cd "$src" 2>/dev/null && command -p find "$src" -path "$src/.git" -prune' \
   't_copy_tree_excludes_git'
 shmutant_mut 'a relative stream in a missing directory is re-based onto the root' \
-  '          [ -n "$sdir" ] || { _shmutant_err "run: SHMUTANT_STREAM points into a directory that does not exist: $SHMUTANT_STREAM"; return 2; }' \
-  '          :' \
+  '    if ! sdir="$(_shmutant_abs "$(command -p dirname -- "$SHMUTANT_STREAM")")"; then' \
+  '    if ! sdir="$(command -p dirname -- "$SHMUTANT_STREAM")"; then' \
   't_cli_run'
 shmutant_mut 'the automatic workdir is removed raw after an incomplete run' \
   '  elif [ "$made" = 1 ]; then _shmutant_remove "$wd" || { _shmutant_err "run: could not remove the workdir $wd"; rc=2; }' \
@@ -716,12 +696,12 @@ shmutant_mut 'a pid listed but gone before the stop is recorded as frozen' \
   '      SHMUTANT_FROZEN_NOW=("${pids[@]}")' \
   't_freeze_records_only_what_it_stopped'
 shmutant_mut 'a clone left behind by a worker is not a harness error' \
-  '    _shmutant_err "$1/tree was not removed"; SHMUTANT_CLEANUP_FAILED=1' \
+  '    _shmutant_err "$dir/tree was not removed"; SHMUTANT_CLEANUP_FAILED=1' \
   '    :' \
   't_pool_reports_a_clone_it_could_not_remove'
 shmutant_mut 'copy_tree reads its positionals before checking their count' \
-  '  if [ "$#" -ne 2 ]; then _shmutant_err "copy_tree: usage' \
-  '  if false; then _shmutant_err "copy_tree: usage' \
+  '  if [ "$#" -ne 2 ] || [ -z "$1" ] || [ -z "$2" ]; then _shmutant_err "copy_tree: usage' \
+  '  if [ -z "$1" ] || [ -z "$2" ]; then _shmutant_err "copy_tree: usage' \
   't_copy_tree_excludes_git'
 shmutant_mut 'no holder keeps the group in being after the wrapper' \
   '      ( ( read -r _ <&"$hold" ) < /dev/null > /dev/null 2>&1 & printf '"'"'%s\n'"'"' "$!" >&"$hp" )' \
@@ -751,3 +731,143 @@ shmutant_mut 'the holder is a job of the wrapper' \
   '      ( ( read -r _ <&"$hold" ) < /dev/null > /dev/null 2>&1 & printf '"'"'%s\n'"'"' "$!" >&"$hp" )' \
   '      ( read -r _ <&"$hold" ) < /dev/null > /dev/null 2>&1 & printf '"'"'%s\n'"'"' "$!" >&"$hp"' \
   't_callback_bare_wait_does_not_block_on_the_holder'
+
+# --- guards added for the twenty-second review round ---
+shmutant_mut 'the prepared root is read back by path after prepare' \
+  '  root="$(command -p cat <&"$pout_r")"; exec {pout_w}>&- {pout_r}<&-' \
+  '  root="$(command -p cat "$wd"/.prepare.* 2>/dev/null)"; exec {pout_w}>&- {pout_r}<&-' \
+  't_prepare_cannot_redirect_its_own_capture'
+shmutant_mut 'a stream removed or replaced during the run is not noticed' \
+  '  if ! _shmutant_stream_intact; then' \
+  '  if false; then' \
+  't_stream_descriptor_survives_a_callback_swapping_the_path'
+shmutant_mut 'an empty copy destination is accepted' \
+  '  if [ "$#" -ne 2 ] || [ -z "$1" ] || [ -z "$2" ]; then' \
+  '  if [ "$#" -ne 2 ]; then' \
+  't_copy_tree_excludes_git'
+shmutant_mut 'the red prefix is matched anywhere in the line' \
+  '    index($0, p) == 1 { red = 1; if (w != "" && index($0, w)) { wit = 1; exit } }' \
+  '    index($0, p) { red = 1; if (w != "" && index($0, w)) { wit = 1; exit } }' \
+  't_verdict_aborted_no_red_line'
+shmutant_mut 'a freeze that never settles is endured in silence' \
+  '    if [ "$rounds" -ge 32 ]; then SHMUTANT_FREEZE_UNSETTLED=1; break; fi' \
+  '    if [ "$rounds" -ge 32 ]; then break; fi' \
+  't_freeze_that_never_settles_is_reported'
+shmutant_mut 'an unsettled run is scored as a timeout' \
+  '  if [ "$SHMUTANT_RUN_UNSETTLED" = 1 ]; then' \
+  '  if false; then' \
+  't_freeze_that_never_settles_is_reported'
+shmutant_mut 'a missing path is accepted before its parent is checked' \
+  '  parent="$(command -p dirname -- "$path")"' \
+  '  parent="$(command -p dirname -- "$path")"; { [ -e "$path" ] || [ -L "$path" ]; } || return 0' \
+  't_pool_refuses_a_worker_dir_under_a_swapped_workdir'
+shmutant_mut 'opening the stream silences stderr for the rest of the run' \
+  '  if ! { exec {SHMUTANT_STREAM_FD}>>"$SHMUTANT_STREAM"; } 2>/dev/null; then' \
+  '  if ! exec {SHMUTANT_STREAM_FD}>>"$SHMUTANT_STREAM" 2>/dev/null; then' \
+  't_stream_descriptor_survives_a_callback_swapping_the_path'
+
+# --- guards found by the promoted-checklist sweep (round 22) ---
+shmutant_mut 'a flag where a value was expected is taken as the value' \
+  '    -*) _shmutant_err "$1 needs a value, got the option $2"; return 2 ;;' \
+  '    -*) ;;' \
+  't_cli_run'
+shmutant_mut 'a digest tool that fails yields an empty digest and success' \
+  '  [ -n "$out" ] || { _shmutant_err "cannot compute the digest of $1"; return 2; }' \
+  '  :' \
+  't_cli_run'
+shmutant_mut 'rows prepare declared are not read' \
+  '  if [ "$n" -eq 0 ]; then _shmutant_err "$label: the mutation table is empty after prepare"' \
+  '  n="$_shmutant_pool_n"; if [ "$n" -eq 0 ]; then _shmutant_err "$label: the mutation table is empty after prepare"' \
+  't_pool_reads_the_table_prepare_declared'
+shmutant_mut 'a declaration refused inside prepare is lost' \
+  '    _shmutant_err "$label: $SHMUTANT_DECL_ERRORS declaration(s) were refused — a table missing rows it was meant to carry proves nothing"; _shmutant_pool_fail "$label" "$wd"; return 2' \
+  '    :' \
+  't_pool_reads_the_table_prepare_declared'
+shmutant_mut 'the caller errexit reaches the run callbacks and the pool status' \
+  '  set +e; _shmutant_run_jobs mut "$n" "$wd" "$run" "$suffix" "$jobs"; rjrc=$?' \
+  '  _shmutant_run_jobs mut "$n" "$wd" "$run" "$suffix" "$jobs"; rjrc=$?' \
+  't_pool_reads_the_table_prepare_declared'
+shmutant_mut 'a directory named - resolves as cd -' \
+  '  case "$d" in /*) ;; *) d="./$d" ;; esac' \
+  '  :' \
+  't_abs_ignores_cdpath'
+shmutant_mut 'a name ending in a newline resolves to its sibling' \
+  '  case "$1" in *$'"'"'\n'"'"') return 1 ;; esac' \
+  '  :' \
+  't_abs_ignores_cdpath'
+shmutant_mut 'a caller function named cd stands in for the builtin' \
+  '  ( builtin cd -P -- "$d" 2>/dev/null && builtin pwd -P )' \
+  '  ( cd -P -- "$d" 2>/dev/null && pwd -P )' \
+  't_abs_ignores_cdpath'
+shmutant_mut 'a caller workdir holding entries shmutant did not make is emptied' \
+  '  if [ -e "$wd/.shmutant" ]; then return 0; fi' \
+  '  return 0' \
+  't_pool_refuses_a_workdir_it_did_not_create_entries_in'
+shmutant_mut 'the workdir ownership check runs under the caller glob options' \
+  '  ( set +f; shopt -u failglob; shopt -s nullglob; unset GLOBIGNORE' \
+  '  ( ' \
+  't_pool_refuses_a_workdir_it_did_not_create_entries_in'
+shmutant_mut 'a function shadowing kill is not refused' \
+  '  for n in kill wait read trap printf mapfile exec builtin command cd pwd; do' \
+  '  for n in; do' \
+  't_pool_refuses_shadowed_builtins_and_posix_mode'
+shmutant_mut 'POSIX mode is not refused' \
+  '  if [ -o posix ]; then _shmutant_err "$label: shmutant does not run with POSIX mode on (set +o posix)"; return 2; fi' \
+  '  :' \
+  't_pool_refuses_shadowed_builtins_and_posix_mode'
+shmutant_mut 'the output scan runs whatever awk the caller resolves' \
+  '  got="$(command -p awk -v p="$2" -v w="$3" '"'"'' \
+  '  got="$(awk -v p="$2" -v w="$3" '"'"'' \
+  't_pool_refuses_shadowed_builtins_and_posix_mode'
+shmutant_mut 'a red status of 08 stays 08' \
+  '  [ -n "${SHMUTANT_RED_STATUS+x}" ] && SHMUTANT_RED_STATUS="$(( 10#$v_red ))"' \
+  '  :' \
+  't_settings_take_a_canonical_form'
+shmutant_mut 'the jobs setting keeps its leading zeros' \
+  '  [ -n "$v_jobs" ] && SHMUTANT_JOBS="$(( 10#$v_jobs ))"' \
+  '  :' \
+  't_settings_take_a_canonical_form'
+shmutant_mut 'the mode spec is computed under the caller nocasematch' \
+  '  ( shopt -u nocasematch; printf '"'"'%s,%s,%s'"'"'' \
+  '  ( printf '"'"'%s,%s,%s'"'"'' \
+  't_mode_spec_is_immune_to_nocasematch'
+shmutant_mut 'errtrace is mistaken for errexit under nocasematch' \
+  '  [ -o errexit ] && errexit_before=1' \
+  '  case "$-" in *[eE]*) errexit_before=1 ;; esac' \
+  't_mode_spec_is_immune_to_nocasematch'
+shmutant_mut 'aliases in the sourcing shell are baked into the library' \
+  'shopt -u expand_aliases' \
+  ':' \
+  't_library_is_immune_to_aliases_at_parse_time'
+shmutant_mut 'the alias setting of the sourcing shell is not put back' \
+  'eval "$_shmutant_alias_state"; unset _shmutant_alias_state' \
+  'unset _shmutant_alias_state' \
+  't_library_is_immune_to_aliases_at_parse_time'
+shmutant_mut 'the clone directory is made with -p and follows a planted link' \
+  '    || ! command -p mkdir -- "$dir/tree" 2>/dev/null || ! command -p cp -RPp -- "$wd/pristine/." "$dir/tree/" 2>/dev/null; then' \
+  '    || ! command -p mkdir -p -- "$dir/tree" 2>/dev/null || ! command -p cp -RPp -- "$wd/pristine/." "$dir/tree/" 2>/dev/null; then' \
+  't_sibling_cannot_plant_in_another_workers_directory'
+shmutant_mut 'the run output is written by its documented name' \
+  '      _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; trap - EXIT; builtin exit "$rrc" ) < /dev/null >&"$out_w" 2>&1 &' \
+  '      _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; trap - EXIT; builtin exit "$rrc" ) < /dev/null >> "$dir/output" 2>&1 &' \
+  't_sibling_cannot_plant_in_another_workers_directory'
+shmutant_mut 'a verdict from a worker that was killed is believed' \
+  '  [ "$wstatus" = 0 ] || { SHMUTANT_V_VERDICT=lost; SHMUTANT_V_US=0; SHMUTANT_V_STATUS=""; }' \
+  '  :' \
+  't_collect_fails_closed'
+shmutant_mut 'a replaced worker directory is not a cleanup failure' \
+  '    _shmutant_err "$dir is no longer the directory this run created"; SHMUTANT_CLEANUP_FAILED=1' \
+  '    :' \
+  't_collect_fails_closed'
+shmutant_mut 'the runner status is trusted without the channel' \
+  '      "status "*) case "${line#status }" in '"'"''"'"'|*[!0-9]*) ;; *) SHMUTANT_RUN_STATUS="${line#status }" ;; esac ;;' \
+  '      "status "*) ;;' \
+  't_verdict_survived'
+shmutant_mut 'the settled keep is only ever raised by the marker' \
+  '    if [ "${marker#* }" = 1 ]; then keep=1; else keep=0; fi' \
+  '    [ "${marker#* }" = 1 ] && keep=1' \
+  't_cli_run'
+shmutant_mut 'the plan subshell keeps the phantom trap trap -p reports' \
+  '    readonly SHMUTANT_CLI_WD="$wd" SHMUTANT_CLI_KEEP_FD="$keep_w"' \
+  '    trap "_shmutant_cli_abort TERM" TERM; readonly SHMUTANT_CLI_WD="$wd" SHMUTANT_CLI_KEEP_FD="$keep_w"' \
+  't_cli_run'
