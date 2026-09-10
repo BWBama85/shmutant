@@ -136,8 +136,8 @@ shmutant_mut 'a blank verdict file reads as a verdict' \
 
 # --- mechanics ---
 shmutant_mut 'run does not receive the selector' \
-  '"$run" "$root" "$sel" )' \
-  '"$run" "$root" )' \
+  '"$run" "$root" "$sel"; rrc=$?' \
+  '"$run" "$root"; rrc=$?' \
   't_pool_passes_select_to_run'
 shmutant_mut 'SHMUTANT_SELECT is exported with the wrong value' \
   'export SHMUTANT_SELECT="$sel";' \
@@ -414,8 +414,8 @@ shmutant_mut 'a relative SHMUTANT_STREAM is resolved after the plan may have mov
   '      *)  SHMUTANT_STREAM="$SHMUTANT_STREAM" \' \
   't_cli_run'
 shmutant_mut 'the subshell status is trusted without the completion marker' \
-  'if [ -f "$done_file" ] && marker="$(cat "$done_file" 2>/dev/null)" && [ "${marker%% *}" = "$rc" ]; then' \
-  'if marker="$(cat "$done_file" 2>/dev/null)" || true; then' \
+  '  if [ -n "$marker" ] && [ "${marker%% *}" = "$rc" ]; then' \
+  '  if true; then' \
   't_cli_run'
 
 # --- guards added for the ninth review round ---
@@ -531,9 +531,9 @@ shmutant_mut 'the row pool runs as a condition, muting callback errexit' \
   't_run_errexit_is_honoured_in_workers'
 
 # --- guards added for the thirteenth review round ---
-shmutant_mut 'the leftover record path is read after the callback could assign mark' \
-  '>&"$_shmutant_wrap_left"'"'"' EXIT' \
-  '>&"$left_w"'"'"' EXIT' \
+shmutant_mut 'the leftover record descriptor is read after the callback could assign it' \
+  '      _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; trap - EXIT; exit "$rrc" )' \
+  '      _shmutant_snapshot "$BASHPID" >&"$left_w"; trap - EXIT; exit "$rrc" )' \
   't_run_cannot_redirect_the_leftover_record'
 shmutant_mut 'the hard-link preflight scans the top-level .git the copy skips' \
   'find "$src" -path "$src/.git" -prune -o -type f -links +1 -print' \
@@ -594,8 +594,8 @@ shmutant_mut 'the CLI ignores SHMUTANT_KEEP=1 before the pool settles it' \
 
 # --- guards added for the sixteenth review round ---
 shmutant_mut 'the leftover record is written by path after the callback' \
-  '>&"$_shmutant_wrap_left"'"'"' EXIT' \
-  '> "$dir/.left"'"'"' EXIT' \
+  '      _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; trap - EXIT; exit "$rrc" )' \
+  '      _shmutant_snapshot "$BASHPID" > "$dir/.left"; trap - EXIT; exit "$rrc" )' \
   't_run_cannot_lose_the_leftover_record_by_locking_its_dir'
 shmutant_mut 'a read-only tree of ours is not made removable' \
   '      find "$path" -type d ! -perm -u+rwx -exec chmod u+rwx {} + 2>/dev/null' \
@@ -628,8 +628,8 @@ shmutant_mut 'a swapped worker directory is cleaned and written beneath' \
   '  if false; then' \
   't_worker_cleanup_refuses_a_swapped_directory'
 shmutant_mut 'a root given with an identity is stopped without checking it' \
-  '  if [ -n "$rootid" ] && _shmutant_alive_since "$pid" "$rootid"; then' \
-  '  if true; then' \
+  '  else rootid="${spec#*:}"; [ -n "$rootid" ] && _shmutant_alive_since "$pid" "$rootid" && root_ok=1' \
+  '  else rootid="${spec#*:}"; [ -n "$rootid" ] && root_ok=1' \
   't_post_run_cleanup_never_signals_a_reaped_root_by_number'
 shmutant_mut 'a bare wait when no worker has started' \
   '      [ "${#pids[@]}" -eq 0 ] || wait "${helpers[@]}" "${pids[@]}" 2>/dev/null' \
@@ -653,3 +653,37 @@ shmutant_mut 'the stream cache is set before the open succeeds' \
   '  unset SHMUTANT_STREAM_OPENED' \
   '  SHMUTANT_STREAM_OPENED="${SHMUTANT_STREAM:-}"' \
   't_stream_write_failure_is_a_harness_error'
+
+# --- guards added for the nineteenth review round ---
+shmutant_mut 'the completion marker keeps its path while the plan loads' \
+  '  rm -f -- "$SHMUTANT_CLI_DONE_PATH"' \
+  '  :' \
+  't_cli_run'
+shmutant_mut 'the snapshot on return is dropped, leaving only the trap' \
+  '      _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; trap - EXIT; exit "$rrc" )' \
+  '      trap - EXIT; exit "$rrc" )' \
+  't_run_cannot_lose_the_leftover_record_by_locking_its_dir'
+shmutant_mut 'a rejected root is still searched from while freezing' \
+  '  if [ "$root_ok" = 1 ]; then' \
+  '  roots=("$pid"); if [ "$root_ok" = 1 ]; then' \
+  't_post_run_cleanup_never_signals_a_reaped_root_by_number'
+shmutant_mut 'a rejected root is still searched from by the final kill' \
+  '  else _shmutant_kill_tree KILL "" "${frozen[@]}"' \
+  '  else _shmutant_kill_tree KILL "$pid" "${frozen[@]}"' \
+  't_post_run_cleanup_never_signals_a_reaped_root_by_number'
+shmutant_mut 'a bare live root needs an identity to be stopped' \
+  '  if [ "$spec" = "$pid" ]; then root_ok=1' \
+  '  if [ "$spec" = "$pid" ]; then rootid="$(_shmutant_identity "$pid")" && root_ok=1' \
+  't_post_run_cleanup_never_signals_a_reaped_root_by_number'
+shmutant_mut 'a signal during a worker spawn is acted on before registration' \
+  '  if [ "${SHMUTANT_SPAWNING:-0}" = 1 ]; then SHMUTANT_ABORT_PENDING="$sig"; return 0; fi' \
+  '  :' \
+  't_abort_during_spawn_is_deferred'
+shmutant_mut 'a partial channel open is not a setup failure' \
+  '    rm -f -- "$mark" "$mark.left" "$mark.seen" "$fifo"; SHMUTANT_RUN_STATUS=127; return' \
+  '    rm -f -- "$mark" "$mark.left" "$mark.seen" "$fifo"' \
+  't_run_partial_channel_open_is_a_setup_failure'
+shmutant_mut 'the pool reads its positionals before checking their count' \
+  '  if [ "$#" -lt 4 ] || [ "$#" -gt 5 ]; then _shmutant_err "pool: usage' \
+  '  if false; then _shmutant_err "pool: usage' \
+  't_pool_checks_its_arity_first'

@@ -102,7 +102,10 @@ Run with `SHMUTANT_RED_PREFIX='not ok '`, and probe the failure exit status as a
 A plan is a bash file. The CLI sources it with `SHMUTANT_PLAN_DIR` set to its directory, then
 runs the table, both in a subshell of the CLI: whatever the plan does there (an `exit`, an
 `exec`, a trap, an assignment) stays there, and the CLI reports status 2 whenever the pool did
-not run to completion. Anything the plan prints while loading goes to stderr; the CLI's stdout
+not run to completion. That completion is recorded through a descriptor whose file is unlinked
+before the plan loads, so nothing a plan does by path can stand in for a finished pool (a plan
+that writes to the descriptor itself is forging on purpose, which no harness sharing its process
+can prevent). Anything the plan prints while loading goes to stderr; the CLI's stdout
 carries verdict records only. Its `prepare` and `run` must be defined in the plan; functions exported
 by the invoking environment are discarded first. `prepare` runs in the pool's own shell, so state it exports is visible to
 `run`, and its own `set -e` is honoured: a prepare that aborts ends the run as a harness error.

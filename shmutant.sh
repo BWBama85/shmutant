@@ -455,7 +455,8 @@ _shmutant_alive_since() {
 
 # _shmutant_kill_tree <signal> <pid> <pids…> — send <signal> to <pid>'s process group, to every
 # descendant found now, and to each of <pids…>: the descendants found before an earlier signal,
-# which a leader's death may have reparented out of reach of a fresh walk.
+# which a leader's death may have reparented out of reach of a fresh walk. An empty <pid>
+# signals only <pids…>.
 # <pids…> are `pid:identity` pairs recorded when each was seen (see _shmutant_identity); one that
 # no longer matches is a reused pid and is left alone. `pid:` with no identity is a frozen pid. Every target is decided first and signalled in
 # ONE kill: a parent signalled after its child has already run on past the child's death.
@@ -509,13 +510,18 @@ _shmutant_kill_tree_twice() {
   local -a frozen=() roots=()
   local -A have=()
   shift
-  pid="${spec%%:*}"; roots=("$pid")
-  # The root is stopped and later signalled by number only when it is known to be the process
-  # it was: a bare pid means live at the caller's hands (identity computed now); `pid:identity`
-  # carries what was captured while it lived; `pid:` means reaped, whose number may already be
-  # someone else's.
-  if [ "$spec" = "$pid" ]; then rootid="$(_shmutant_identity "$pid")" || rootid=""; else rootid="${spec#*:}"; fi
-  if [ -n "$rootid" ] && _shmutant_alive_since "$pid" "$rootid"; then
+  pid="${spec%%:*}"
+  # The root is stopped, searched from and later signalled by number only when it is known to
+  # be the process it was: a bare pid means live at the caller's hands (stopped even when ps
+  # cannot identify it); `pid:identity` carries what was captured while it lived and must still
+  # match; `pid:` means reaped, whose number may already be someone else's, and neither it nor
+  # the children it now has are touched.
+  local root_ok=0
+  if [ "$spec" = "$pid" ]; then root_ok=1
+  else rootid="${spec#*:}"; [ -n "$rootid" ] && _shmutant_alive_since "$pid" "$rootid" && root_ok=1
+  fi
+  if [ "$root_ok" = 1 ]; then
+    roots=("$pid")
     kill -STOP "$pid" 2>/dev/null && { frozen+=("$pid:"); have["$pid"]=1; }
   fi
   # The root's tree first, before any identity work: every pass is one ps and one bulk stop.
@@ -540,7 +546,9 @@ _shmutant_kill_tree_twice() {
     for p in "${stillours[@]}"; do frozen+=("$p:"); done
     _shmutant_freeze_from
   fi
-  _shmutant_kill_tree KILL "$pid" "${frozen[@]}"
+  if [ "$root_ok" = 1 ]; then _shmutant_kill_tree KILL "$pid" "${frozen[@]}"
+  else _shmutant_kill_tree KILL "" "${frozen[@]}"
+  fi
   return 0
 }
 
@@ -555,6 +563,12 @@ _shmutant_kill_tree() {
     else _shmutant_alive_since "${p%%:*}" "${p#*:}" && targets+=("${p%%:*}")
     fi
   done
+  # No root (a rejected `pid:identity`, or one already reaped) means no group and no walk: the
+  # number and whatever now sits beneath it belong to someone else.
+  if [ -z "$pid" ]; then
+    [ "${#targets[@]}" -gt 0 ] && kill "-$sig" -- "${targets[@]}" 2>/dev/null
+    return 0
+  fi
   mapfile -t now < <(_shmutant_descendants "$pid")
   for p in "${now[@]}"; do [ -n "$p" ] && targets+=("$p"); done
   # The group, and every identity-checked target: the root is among them when it was alive at
@@ -570,7 +584,7 @@ _shmutant_kill_tree() {
 # and the whole tree it spawned dies with it. That subshell's stderr is discarded: with job
 # control on, bash reports the reaped job there when the pool itself runs under `$(...)`.
 _shmutant_run_bounded() {
-  local dir="$1" run="$2" root="$3" sel="$4" timeout mark fifo
+  local dir="$1" run="$2" root="$3" sel="$4" timeout mark fifo fd
   local left_w left_r seen_w seen_r fired out_r
   timeout="$(_shmutant_pos_int "${SHMUTANT_TIMEOUT:-300}")" || timeout=0
   SHMUTANT_RUN_FIRED=0; SHMUTANT_RUN_OUTPUT=""
@@ -583,14 +597,20 @@ _shmutant_run_bounded() {
   fifo="$mark.fired"
   { : >| "$mark.left" && : >| "$mark.seen" && : >| "$dir/output" && rm -f -- "$fifo" && mkfifo -- "$fifo"; } 2>/dev/null \
     || { rm -f -- "$mark" "$mark.left" "$mark.seen"; SHMUTANT_RUN_STATUS=127; return; }
-  exec {left_w}>|"$mark.left" {left_r}<"$mark.left" {seen_w}>|"$mark.seen" {seen_r}<"$mark.seen" {fired}<>"$fifo" {out_r}<"$dir/output"
+  if ! exec {left_w}>|"$mark.left" {left_r}<"$mark.left" {seen_w}>|"$mark.seen" {seen_r}<"$mark.seen" {fired}<>"$fifo" {out_r}<"$dir/output"; then
+    # A partial open (a descriptor limit) is a setup failure, not a run: close what did open.
+    for fd in "${left_w:-}" "${left_r:-}" "${seen_w:-}" "${seen_r:-}" "${fired:-}" "${out_r:-}"; do [ -n "$fd" ] && exec {fd}>&-; done
+    rm -f -- "$mark" "$mark.left" "$mark.seen" "$fifo"; SHMUTANT_RUN_STATUS=127; return
+  fi
   rm -f -- "$mark" "$mark.left" "$mark.seen" "$fifo"
   (
     set -m
     # The snapshot is an EXIT trap of the wrapper, so it runs however the callback ends: a
     # callback that turned errexit on and failed would otherwise leave without it.
     ( _shmutant_wrap_left="$left_w"; trap '_shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"' EXIT
-      export SHMUTANT_SELECT="$sel"; "$run" "$root" "$sel" ) < /dev/null >> "$dir/output" 2>&1 &
+      export SHMUTANT_SELECT="$sel"; "$run" "$root" "$sel"; rrc=$?
+      # And once more explicitly: a callback that dropped the trap is still recorded on return.
+      _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; trap - EXIT; exit "$rrc" ) < /dev/null >> "$dir/output" 2>&1 &
     pid=$!
     # The root's identity while it is certainly alive: the post-run kill must not stop or signal
     # a reaped root by number.
@@ -828,6 +848,9 @@ _shmutant_fresh_dir() {
 _shmutant_abort_workers() {
   local sig="$1" p
   local -a helpers=()
+  # Between a worker's spawn and its registration the handler only takes note; the loop
+  # applies the abort as soon as the new worker is on the list.
+  if [ "${SHMUTANT_SPAWNING:-0}" = 1 ]; then SHMUTANT_ABORT_PENDING="$sig"; return 0; fi
   for p in "${SHMUTANT_ACTIVE[@]}"; do _shmutant_kill_tree_twice "$p" & helpers+=("$!"); done
   # Only the helpers: a bare wait would also block on the caller's own background jobs.
   [ "${#helpers[@]}" -eq 0 ] || wait "${helpers[@]}" 2>/dev/null
@@ -854,7 +877,7 @@ _shmutant_saved_trap() {
 _shmutant_run_jobs() {
   local kind="$1" n="$2" wd="$3" run="$4" suffix="$5" jobs="$6" i done_pid p rc=0
   local -a pids=() rest=()
-  SHMUTANT_ACTIVE=()
+  SHMUTANT_ACTIVE=(); SHMUTANT_SPAWNING=0; SHMUTANT_ABORT_PENDING=""
   SHMUTANT_TRAP_INT="$(_shmutant_saved_trap INT)"; SHMUTANT_TRAP_TERM="$(_shmutant_saved_trap TERM)"
   trap '_shmutant_abort_workers INT' INT
   trap '_shmutant_abort_workers TERM' TERM
@@ -880,9 +903,12 @@ _shmutant_run_jobs_loop() {
       [ "${#pids[@]}" -eq 0 ] || wait "${helpers[@]}" "${pids[@]}" 2>/dev/null
       return 2
     fi
+    SHMUTANT_SPAWNING=1
     _shmutant_worker "$kind" "$i" "$wd" "$run" "$suffix" &
     pids+=("$!")
     SHMUTANT_ACTIVE=("${pids[@]}")
+    SHMUTANT_SPAWNING=0
+    [ -z "${SHMUTANT_ABORT_PENDING:-}" ] || { p="$SHMUTANT_ABORT_PENDING"; SHMUTANT_ABORT_PENDING=""; _shmutant_abort_workers "$p"; }
     if [ "${#pids[@]}" -ge "$jobs" ]; then
       wait -n -p done_pid "${pids[@]}" || true
       rest=()
@@ -984,6 +1010,7 @@ _shmutant_pool_fail() {
 # 2 when the harness itself could not run (a refused declaration, empty table, bad workdir,
 # prepare failed, root outside the workdir, or a verdict-stream write that failed).
 shmutant_pool() {
+  if [ "$#" -lt 4 ] || [ "$#" -gt 5 ]; then _shmutant_err "pool: usage: shmutant_pool <label> <workdir> <prepare> <run> [cap] (got $# arguments)"; return 2; fi
   local label="$1" wd="$2" prep="$3" run="$4" cap="${5:-}"
   local n jobs root suffix i k sel t0 t1 killed=0 rc=0 verdict detail rjrc
   local -a base_sel=() base_verdict=()
@@ -1162,9 +1189,15 @@ _shmutant_checksum() {
 # invoking environment; the plan is sourced bare, not in an || list, so its own errexit keeps
 # meaning what it says.
 _shmutant_cli_load() {
-  local plan="$1" rc
+  local plan="$1" rc done_w
   unset -f prepare run
   shmutant_reset
+  # The completion channel is a descriptor on a file unlinked before
+  # the plan's own code runs: nothing the plan does by path can reach it. A
+  # plan that writes to the descriptor itself is forging on purpose, and out of scope.
+  if ! exec {done_w}>|"$SHMUTANT_CLI_DONE_PATH"; then _shmutant_err "run: cannot open the completion channel"; return 2; fi
+  rm -f -- "$SHMUTANT_CLI_DONE_PATH"
+  readonly SHMUTANT_CLI_DONE_FD="$done_w"
   # shellcheck disable=SC1090
   # Loaded with stdout on stderr: anything a plan prints while loading is prose, and the CLI's
   # stdout carries verdict records only.
@@ -1177,7 +1210,7 @@ _shmutant_cli_load() {
   # answers, not errors.
   set +o errexit
   shmutant_pool "$(basename -- "$plan")" "$SHMUTANT_CLI_WD" prepare run; rc=$?
-  printf '%s %s\n' "$rc" "${SHMUTANT_KEEP:-0}" >| "$SHMUTANT_CLI_DONE"
+  printf '%s %s\n' "$rc" "${SHMUTANT_KEEP:-0}" >&"$SHMUTANT_CLI_DONE_FD"
   return "$rc"
 }
 
@@ -1247,8 +1280,11 @@ _shmutant_cli_run() {
   # assignment to any variable — stays there: this shell never executed it, and decides the
   # outcome from the marker only a completed pool writes. No marker means the plan or a callback
   # ended the run before the pool finished, whatever status the subshell reports.
+  # Created here and held open for reading; the subshell opens it for writing and unlinks it
+  # before the plan loads, so its name is never in the plan's reach.
   done_file="$(mktemp "$wd/.done.XXXXXX")" || { _shmutant_err "run: cannot create a marker in $wd"; [ "$made" = 1 ] && rm -rf -- "$wd"; return 2; }
-  rm -f -- "$done_file"
+  local done_r
+  if ! exec {done_r}<"$done_file"; then _shmutant_err "run: cannot open the completion channel"; rm -f -- "$done_file"; [ "$made" = 1 ] && rm -rf -- "$wd"; return 2; fi
   # A signal to this process must not orphan the subshell and its workers: the child's whole
   # tree is killed, the workdir handled, and the signal re-delivered.
   SHMUTANT_CLI_CHILD=""; SHMUTANT_CLI_WD_TO_RM=""
@@ -1258,19 +1294,20 @@ _shmutant_cli_run() {
   trap '_shmutant_cli_abort INT' INT
   trap '_shmutant_cli_abort TERM' TERM
   (
-    readonly SHMUTANT_CLI_WD="$wd" SHMUTANT_CLI_DONE="$done_file" SHMUTANT_CLI_KEEPFILE
+    readonly SHMUTANT_CLI_WD="$wd" SHMUTANT_CLI_KEEPFILE
+    SHMUTANT_CLI_DONE_PATH="$done_file"
     _shmutant_cli_load "$SHMUTANT_PLAN_DIR/$(basename -- "$plan")"
   ) & SHMUTANT_CLI_CHILD=$!
   wait "$SHMUTANT_CLI_CHILD"; rc=$?
   trap - INT TERM
   SHMUTANT_CLI_CHILD=""
   rm -f -- "$SHMUTANT_CLI_KEEPFILE"; unset SHMUTANT_CLI_KEEPFILE
-  if [ -f "$done_file" ] && marker="$(cat "$done_file" 2>/dev/null)" && [ "${marker%% *}" = "$rc" ]; then
-    rm -f -- "$done_file"
+  marker="$(cat <&"$done_r")"; exec {done_r}<&-
+  rm -f -- "$done_file"
+  if [ -n "$marker" ] && [ "${marker%% *}" = "$rc" ]; then
     # The plan or prepare may have set SHMUTANT_KEEP=1 inside the subshell; the pool honoured it.
     [ "${marker#* }" = 1 ] && keep=1
   else
-    rm -f -- "$done_file"
     case "$rc" in
       2) ;;
       *) _shmutant_err "run: the plan or a callback ended the run before the pool completed (status $rc)" ;;

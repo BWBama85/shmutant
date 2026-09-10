@@ -242,6 +242,13 @@ t_pool_rejects_empty_table() {
   eq "$OUT" '' 'no stream records for a run that never started'
 }
 
+t_pool_checks_its_arity_first() {
+  shmutant_reset; shmutant_target lib.sh; shmutant_mut 'r' 'a' 'b' 'w'
+  ( set -u; shmutant_pool lbl 2>"$T/e" ); rc_is $? 2 'too few arguments is a harness error even under set -u'
+  has "$(cat "$T/e")" 'usage' 'says so'
+  ( set -u; shmutant_pool a b c d e f 2>/dev/null ); rc_is $? 2 'too many arguments is refused'
+}
+
 t_pool_rejects_missing_callbacks() {
   shmutant_reset; shmutant_target lib.sh; shmutant_mut 'r' 'a' 'b' 'w'
   pool lbl "$T/wd" no_such_prepare toy_run
@@ -596,6 +603,19 @@ t_post_run_cleanup_never_signals_a_reaped_root_by_number() {
   kill -0 "$b2" 2>/dev/null; rc_is $? 0 'a root whose given identity does not match is neither stopped nor killed'
   case "$(ps -o stat= -p "$b2")" in T*) fail_ 'the mismatched root was left stopped' ;; esac
   kill "$b2" 2>/dev/null; wait "$b2" 2>/dev/null
+  # a rejected root's current children are not searched from either
+  ( sleep 5; : ) & local b3=$!
+  sleep 0.3
+  local kid; kid="$(_shmutant_descendants "$b3" | head -n 1)"
+  [ -n "$kid" ] || fail_ 'fixture: the root has no child to protect'
+  _shmutant_kill_tree_twice "$b3:$(( $(_shmutant_identity "$b3") - 100 ))"; sleep 0.2
+  kill -0 "$kid" 2>/dev/null; rc_is $? 0 'the children of a root whose identity does not match are left alone'
+  kill "$b3" "$kid" 2>/dev/null; wait "$b3" 2>/dev/null
+  # a bare pid is stopped and killed even when ps cannot identify it
+  sleep 5 & local b4=$!
+  ( _shmutant_identity() { return 1; }; _shmutant_snapshot() { :; }; _shmutant_descendants() { :; }; _shmutant_kill_tree_twice "$b4" ); sleep 0.2
+  kill -0 "$b4" 2>/dev/null; rc_is $? 1 'a bare live root is killed even when no identity can be read'
+  wait "$b4" 2>/dev/null
 }
 
 t_stream_descriptor_survives_a_callback_swapping_the_path() {
@@ -647,6 +667,10 @@ t_run_cannot_lose_the_leftover_record_by_locking_its_dir() {
   eq "$(verdict_of a)" killed 'the verdict is the callback'"'"'s own'
   sleep 5
   [ -e "$T/escaped" ] && fail_ 'the leftover record was lost to a locked directory and the helper survived'
+  untrapping_run() { trap - EXIT; set -m; bash -c "sleep 4; touch '$T/escaped2'" & set +m; bash "$1/test.sh"; }
+  SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=0 pool lbl "$T/wd2" toy_prepare untrapping_run
+  sleep 5
+  [ -e "$T/escaped2" ] && fail_ 'a callback that dropped the EXIT trap escaped the snapshot taken on return'
 }
 
 leaky_c() { set -m; bash -c "sleep 3; touch '$T/escaped-c'" & set +m; bash "$1/test.sh"; }
@@ -750,6 +774,38 @@ t_pool_interrupted_kills_its_workers() {
   [ -e "$T/stubborn" ] && fail_ 'a TERM-ignoring escaped descendant outlived the interrupted pool: the TERM victims were not retained for KILL'
 }
 
+# shellcheck disable=SC2034
+t_abort_during_spawn_is_deferred() {
+  ( trap '_shmutant_abort_workers TERM' TERM
+    # a caller trap that survives re-delivery, so an early re-raise is a FAIL, not an abort
+    SHMUTANT_TRAP_INT=""; SHMUTANT_TRAP_TERM="trap -- 'hit=1' SIGTERM"; hit=0
+    sleep 5 & w=$!
+    SHMUTANT_ACTIVE=(); SHMUTANT_SPAWNING=1; SHMUTANT_ABORT_PENDING=""
+    # the handler runs while a worker is being registered: it must only take note
+    _shmutant_abort_workers TERM
+    [ "$hit" = 0 ] || { echo "FAIL: $_unit: the signal was re-delivered during spawn"; exit 1; }
+    [ "$SHMUTANT_ABORT_PENDING" = TERM ] || { echo "FAIL: $_unit: a signal during spawn was not deferred"; exit 1; }
+    kill -0 "$w" 2>/dev/null || { echo "FAIL: $_unit: the handler killed during spawn"; exit 1; }
+    SHMUTANT_ACTIVE=("$w"); SHMUTANT_SPAWNING=0
+    trap - TERM
+    ( _shmutant_abort_workers "$SHMUTANT_ABORT_PENDING" ) 2>/dev/null
+    sleep 0.3
+    kill -0 "$w" 2>/dev/null && { echo "FAIL: $_unit: the deferred abort did not kill the registered worker"; exit 1; }
+    exit 0 ) || _failed=1
+}
+
+t_run_partial_channel_open_is_a_setup_failure() {
+  mkdir -p "$T/d"
+  # mkfifo leaves a directory where the FIFO should be: the earlier descriptors open, the
+  # FIFO's does not, and the run must not start.
+  ( mkfifo() { mkdir -- "$2"; }
+    cb() { touch "$T/ran"; }
+    SHMUTANT_TIMEOUT=0 _shmutant_run_bounded "$T/d" cb "$T/d" sel 2>/dev/null
+    printf '%s' "$SHMUTANT_RUN_STATUS" > "$T/status" )
+  eq "$(cat "$T/status")" 127 'a channel that could not be opened is a setup failure'
+  [ -e "$T/ran" ] && fail_ 'the callback ran without its channels'
+}
+
 t_pool_abort_waits_only_for_its_helpers() {
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
@@ -820,15 +876,17 @@ t_verdict_timeout_kills_a_descendant_seen_then_reparented() {
   shmutant_mut 'hangs' '$1 + $2' '$1 - $2' 'add-works'
   # A is seen by the watchdog while its parent I is alive, then I exits and A is reparented, so
   # at the deadline A is reachable only through what the watchdog retained.
-  orphaning_run() { set -m; bash -c "bash -c 'sleep 5; touch \"$T/orphan\"' & sleep 0.7" & sleep 3; }
-  SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=1 pool lbl "$T/wd" toy_prepare orphaning_run
+  # I lives through two watchdog polls and dies well before the deadline: one poll is a
+  # coin-flip on a loaded host.
+  orphaning_run() { set -m; bash -c "bash -c 'sleep 7; touch \"$T/orphan\"' & sleep 1.3" & sleep 4; }
+  SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=2 pool lbl "$T/wd" toy_prepare orphaning_run
   eq "$(verdict_of 'hangs')" timeout 'verdict is timeout'
-  sleep 5
+  sleep 6
   [ -e "$T/orphan" ] && fail_ 'a descendant seen by the watchdog and then reparented outlived the timeout'
   [ -z "$(ps -A -o args= | grep -F "touch \"$T/orphan\"" | grep -v grep)" ] || fail_ 'the reparented descendant is still there'
   rm -f "$T/orphan"
-  ( IFS=''; SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=1 shmutant_pool lbl "$T/wd2" toy_prepare orphaning_run > /dev/null 2>&1 )
-  sleep 5
+  ( IFS=''; SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=2 shmutant_pool lbl "$T/wd2" toy_prepare orphaning_run > /dev/null 2>&1 )
+  sleep 6
   [ -e "$T/orphan" ] && fail_ 'with the caller IFS empty, the retained list was not split and the reparented descendant survived'
 }
 
@@ -1510,6 +1568,9 @@ EOF
   [ $(( ($(_shmutant_now) - t0) / 1000000 )) -lt 10 ] || fail_ 'interrupting a CLI whose plan execd a command blocked instead of killing it'
   sleep 4
   [ -e "$T/toy/execd" ] && fail_ 'the command the plan execd into outlived the interrupted CLI'
+  # A plan forging the marker while loading, by every name the workdir could give it.
+  { cat "$T/toy/plan-base.sh"; printf 'for f in "${SHMUTANT_CLI_DONE_PATH:-}" "$SHMUTANT_CLI_WD"/.done.*; do [ -n "$f" ] && [ -e "$f" ] && printf "0 0\\n" > "$f"; done; exit 0\n'; } > "$T/toy/plan-forge.sh"
+  TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-forge.sh" > /dev/null 2>&1; rc_is $? 2 'a plan that writes a completion marker while loading and exits 0 is still a load failure'
   { cat "$T/toy/plan-base.sh"; printf 'exec true\n'; } > "$T/toy/plan-exec.sh"
   TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-exec.sh" > /dev/null 2>&1; rc_is $? 2 'a plan that execs cannot become a passing run'
   { printf 'set -e\nroot="$(pwd)"\n( true )\n'; cat "$T/toy/plan-base.sh"; } > "$T/toy/plan-subs.sh"
