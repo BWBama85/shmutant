@@ -445,15 +445,16 @@ t_pool_refuses_shadowed_builtins_and_posix_mode() {
   # arity guard, which uses [, would refuse a [ shadow first, so the check is exercised directly)
   ( eval '[() { :; }'; _shmutant_no_shadows lbl 2>"$T/e7" ); rc_is $? 2 'a function named [ is refused by the shadow check'
   has "$(cat "$T/e7")" 'is not the builtin' 'says why'
-  # the check neutralises a caller's CHLD trap around its per-name forks: with it armed the trap
-  # would fire ~once per builtin checked and could define a shadow after its name was cleared.
-  # A count is deterministic where catching the race is not: at most the one unavoidable fork
-  # that captures the trap, versus dozens with the trap left armed.
-  ( : > "$T/chld"; trap 'echo x >> "$T/chld"' CHLD
-    _shmutant_no_shadows lbl > /dev/null 2>&1
-    trap - CHLD
+  # a CHLD trap prepare installs fires at most once after prepare returns (the fork that saves
+  # it): every later fork the pool makes, through the shadow recheck and the workers, runs with
+  # it held, so a handler cannot define a shadow after the recheck cleared the name. A count is
+  # deterministic where catching the race is not.
+  : > "$T/chld"
+  counting_chld_prepare() { toy_prepare "$1"; trap 'echo x >> "$T/chld"' CHLD; }
+  ( SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd" counting_chld_prepare toy_run > "$T/chld-out" 2>&1; rc=$?; trap - CHLD
     fires="$(grep -c x "$T/chld" 2>/dev/null || echo 0)"
-    [ "$fires" -le 2 ] || { echo "FAIL: $_unit: a caller CHLD trap fired $fires times through the shadow check's forks"; exit 1; }
+    [ "$rc" -eq 0 ] || { echo "FAIL: $_unit: the pool failed ($rc) under a CHLD trap prepare installed: $(cat "$T/chld-out")"; exit 1; }
+    [ "$fires" -le 1 ] || { echo "FAIL: $_unit: a CHLD trap prepare installed fired $fires times after prepare returned"; exit 1; }
     exit 0 ) || _failed=1
   # utilities are reached through command -p: a plan's function or a PATH prepare set to the
   # tree's bin does not stand in for ps, awk or ls
@@ -531,6 +532,64 @@ t_witness_matches_a_whole_token() {
     SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd" toy_prepare toy_run > "$T/out" 2> "$T/err" ); rc_is $? 2 'a run whose output could not be scanned is a harness error'
   has "$(cat "$T/err")" 'could not be scanned' 'says why'
   case "$(cat "$T/out")" in *survived*) fail_ 'an unscanned run was scored a survivor' ;; esac
+}
+
+t_pool_refuses_a_modified_pristine_tree() {
+  # a callback that writes into the pristine tree after prepare (through ../../pristine from its
+  # clone) is not cloned from again: every later row is unprepared and says why
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  shmutant_mut 'b' '$1 + $2' '$1 * $2' 'add-works'
+  writing_run() { printf '\n# scribble\n' >> "$1/../../pristine/lib.sh"; bash "$1/test.sh"; }
+  SHMUTANT_JOBS=1 SHMUTANT_BASELINE=0 pool lbl "$T/wd" toy_prepare writing_run
+  eq "$(verdict_of a)" killed 'the first row ran before the tree was touched'
+  eq "$(verdict_of b)" unprepared 'a row after a callback wrote into pristine is not cloned'
+  has "$ERR" 'modified after prepare' 'says why'
+  deleting_run() { rm -f "$1/../../pristine/test.sh"; bash "$1/test.sh"; }
+  SHMUTANT_JOBS=1 SHMUTANT_BASELINE=0 pool lbl "$T/wd2" toy_prepare deleting_run
+  eq "$(verdict_of b)" unprepared 'a row after a callback removed from pristine is not cloned'
+  # reading pristine, and a prepared file dated in the future, are not modifications
+  touch -t 203001010000 "$T/toy/lib.sh"
+  reading_run() { cat "$1/../../pristine/lib.sh" > /dev/null; bash "$1/test.sh"; }
+  SHMUTANT_JOBS=1 SHMUTANT_BASELINE=0 pool lbl "$T/wd3" toy_prepare reading_run
+  rc_is "$RC" 0 'a callback that only reads pristine, with a future-dated file in it, is fine'
+  eq "$(verdict_of b)" killed 'and every row is cloned'
+}
+
+t_readonly_settings_do_not_kill_the_caller() {
+  # a caller that made a setting readonly: accepted when already canonical, refused otherwise —
+  # never assigned, which would end a non-interactive caller's shell
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  ( readonly SHMUTANT_TIMEOUT=5; SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd" toy_prepare toy_run > "$T/o" 2>/dev/null; echo "rc=$?" >> "$T/o" )
+  has "$(cat "$T/o")" 'rc=0' 'a readonly setting already in canonical form is accepted and the caller shell survives'
+  has "$(cat "$T/o")" $'\trow\tkilled\ta\t' 'and the pool ran'
+  ( readonly SHMUTANT_TIMEOUT=05; SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd2" toy_prepare toy_run > /dev/null 2>"$T/e"; echo "rc=$?" > "$T/o2" )
+  has "$(cat "$T/o2")" 'rc=2' 'a readonly setting not in canonical form is refused with status 2, and the caller shell survives'
+  has "$(cat "$T/e")" 'readonly' 'says why'
+  # shellcheck disable=SC2034
+  ( readonly SHMUTANT_JOBS=2 SHMUTANT_RED_STATUS=1; SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd3" toy_prepare toy_run > "$T/o3" 2>/dev/null; echo "rc=$?" >> "$T/o3" )
+  has "$(cat "$T/o3")" 'rc=0' 'readonly jobs and red status in canonical form are accepted'
+}
+
+t_pool_refuses_alias_only_callbacks() {
+  # a callback name defined only as an alias cannot be called by variable: refused up front,
+  # not run into 127 and reported as mutation results
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  # shellcheck disable=SC2262
+  ( shopt -s expand_aliases; alias aliased_run='toy_run'
+    SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd" toy_prepare aliased_run > /dev/null 2>"$T/e"; echo "rc=$?" > "$T/rc" )
+  has "$(cat "$T/rc")" 'rc=2' 'an alias-only run callback is a harness error'
+  has "$(cat "$T/e")" 'run callback not found' 'says why'
+  # shellcheck disable=SC2262
+  ( shopt -s expand_aliases; alias aliased_prep='toy_prepare'
+    SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd2" aliased_prep toy_run > /dev/null 2>"$T/e2"; echo "rc=$?" > "$T/rc2" )
+  has "$(cat "$T/rc2")" 'rc=2' 'an alias-only prepare callback is a harness error'
+  has "$(cat "$T/e2")" 'prepare callback not found' 'says why'
 }
 
 t_verdict_scans_a_large_output() {
@@ -1128,6 +1187,8 @@ t_sibling_cannot_plant_in_another_workers_directory() {
   ln -s "$T/other" "$T/wd/mut-0/tree"; ln -s "$T/victim" "$T/wd/mut-0/output"
   declare -gA SHMUTANT_DIR_IDS=() SHMUTANT_VERDICT_W=() SHMUTANT_VERDICT_R=() SHMUTANT_RES_VERDICT=() SHMUTANT_RES_US=() SHMUTANT_RES_STATUS=()
   SHMUTANT_DIR_IDS[mut-0]="$(_shmutant_dir_id "$T/wd/mut-0")"; SHMUTANT_PRISTINE_ID="$(_shmutant_dir_id "$T/wd/pristine")"
+  # the pool's record of the prepared tree, which the worker checks before cloning
+  SHMUTANT_PRISTINE_STAMP="$(mktemp "$T/wd/.stamp.XXXXXX")"; SHMUTANT_PRISTINE_NEWER="$(_shmutant_pristine_newer "$T/wd")"
   SHMUTANT_ROWS_SEL=(add-works)
   _shmutant_open_channel "$T/wd" mut-0 || fail_ 'fixture: no channel'
   ( SHMUTANT_TIMEOUT=0 _shmutant_worker mut 0 "$T/wd" toy_run "" )
@@ -2160,6 +2221,10 @@ t_bash_floor() {
   _shmutant_bash_ok 4 4; rc_is $? 1 '4.4 is below the floor'
   _shmutant_bash_ok 3 2; rc_is $? 1 '3.2 is below the floor'
   has "$(_shmutant_install_hint)" 'bash' 'the install hint names bash'
+  # the PATH candidate is an executable file, never an (exported) function named bash
+  ( bash() { :; }; export -f bash; out="$(_shmutant_path_bash)"
+    case "$out" in /*) [ -x "$out" ] && exit 0 ;; esac
+    echo "FAIL: $_unit: with a function named bash the PATH lookup returned [$out], not an executable path"; exit 1 ) || _failed=1
   local old
   for old in /bin/bash /usr/bin/bash; do
     [ -x "$old" ] || continue

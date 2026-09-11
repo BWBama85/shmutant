@@ -75,9 +75,15 @@ _shmutant_install_hint() {
   esac
 }
 
+# _shmutant_path_bash — the executable named bash on PATH, or nothing. -P: an exported function
+# named bash would otherwise be returned by name and mistaken for a missing interpreter.
+_shmutant_path_bash() {
+  type -P bash 2>/dev/null
+}
+
 if ! _shmutant_bash_ok "${BASH_VERSINFO[0]:-0}" "${BASH_VERSINFO[1]:-0}"; then
   if [ "${BASH_SOURCE[0]}" = "$0" ] && [ -z "${SHMUTANT_REEXEC:-}" ]; then
-    for _shmutant_candidate in /opt/homebrew/bin/bash /usr/local/bin/bash /home/linuxbrew/.linuxbrew/bin/bash "$(command -v bash 2>/dev/null)"; do
+    for _shmutant_candidate in /opt/homebrew/bin/bash /usr/local/bin/bash /home/linuxbrew/.linuxbrew/bin/bash "$(_shmutant_path_bash)"; do
       if [ -n "$_shmutant_candidate" ] && [ -x "$_shmutant_candidate" ] \
         && "$_shmutant_candidate" -c '[ "${BASH_VERSINFO[0]}" -gt 5 ] || { [ "${BASH_VERSINFO[0]}" -eq 5 ] && [ "${BASH_VERSINFO[1]}" -ge 3 ]; }' 2>/dev/null; then
         SHMUTANT_REEXEC=1 exec "$_shmutant_candidate" "$0" "$@"
@@ -1035,7 +1041,12 @@ _shmutant_worker() {
   # prepared tree's values, not the pool's umask.
   # The clone directory is made first, by a mkdir that refuses an existing entry: a symlink a
   # sibling planted at the name would otherwise have cp copy INTO its target. The pristine tree
-  # is still the one prepare built, by inode.
+  # is still the one prepare built, by inode, and unmodified since prepare (a callback that wrote
+  # through its tree into ../../pristine would otherwise be cloned into every later row).
+  local newer
+  if ! newer="$(_shmutant_pristine_newer "$wd")" || [ "$newer" != "${SHMUTANT_PRISTINE_NEWER-}" ]; then
+    _shmutant_worker_finish "$dir" unprepared 0 modified; return 0
+  fi
   if [ "$(_shmutant_dir_id "$wd/pristine")" != "${SHMUTANT_PRISTINE_ID:-}" ] || [ -L "$wd/pristine" ] \
     || ! command -p mkdir -- "$dir/tree" 2>/dev/null || ! command -p cp -RPp -- "$wd/pristine/." "$dir/tree/" 2>/dev/null; then
     _shmutant_worker_finish "$dir" unprepared 0 clone; return 0
@@ -1196,6 +1207,7 @@ _shmutant_detail() {
     unapplied)  printf 'the injection did not apply — the old literal matched nothing, so this row tests NOTHING' ;;
     unprepared) case "$2" in
                   clone)   printf 'could not clone the pristine tree' ;;
+                  modified) printf 'the pristine tree was modified after prepare — a callback wrote into it, so nothing is cloned from it' ;;
                   missing) printf 'the target is not a regular file inside the tree' ;;
                   *)       printf 'the rewrite failed' ;;
                 esac ;;
@@ -1271,7 +1283,21 @@ _shmutant_restore_traps() {
   # back verbatim; re-spelling it by hand is how a handler once came back as `echo mineSIGTERM`.
   if [ -n "${SHMUTANT_TRAP_INT:-}" ]; then eval "$SHMUTANT_TRAP_INT"; else trap - INT; fi
   if [ -n "${SHMUTANT_TRAP_TERM:-}" ]; then eval "$SHMUTANT_TRAP_TERM"; else trap - TERM; fi
+}
+
+# _shmutant_hold_chld / _shmutant_release_chld — the caller's CHLD trap, off from the moment
+# prepare returns until the pool is done: a handler that waits would reap the workers, and one
+# that defines a shadow on a later invocation would do so on any fork after the shadow check.
+# Held once; the save is the one fork the handler still sees.
+_shmutant_hold_chld() {
+  [ -z "${SHMUTANT_CHLD_HELD:-}" ] || return 0
+  SHMUTANT_TRAP_CHLD="$(_shmutant_saved_trap CHLD)"
+  SHMUTANT_CHLD_HELD=1; trap - CHLD
+}
+_shmutant_release_chld() {
+  [ -n "${SHMUTANT_CHLD_HELD:-}" ] || return 0
   if [ -n "${SHMUTANT_TRAP_CHLD:-}" ]; then eval "$SHMUTANT_TRAP_CHLD"; else trap - CHLD; fi
+  unset SHMUTANT_CHLD_HELD SHMUTANT_TRAP_CHLD
 }
 
 # _shmutant_saved_trap <signal> — the caller's current trap declaration for <signal> as
@@ -1284,10 +1310,7 @@ _shmutant_run_jobs() {
   local rc=0
   SHMUTANT_ACTIVE=(); SHMUTANT_SPAWNING=0; SHMUTANT_ABORT_PENDING=""
   SHMUTANT_TRAP_INT="$(_shmutant_saved_trap INT)"; SHMUTANT_TRAP_TERM="$(_shmutant_saved_trap TERM)"
-  # A caller's CHLD trap that waits would reap the workers before the pool can: off while the
-  # pool owns them, put back after.
-  SHMUTANT_TRAP_CHLD="$(_shmutant_saved_trap CHLD)"
-  trap - CHLD
+  _shmutant_hold_chld
   trap '_shmutant_abort_workers INT' INT
   trap '_shmutant_abort_workers TERM' TERM
   _shmutant_run_jobs_loop "$@"; rc=$?
@@ -1386,9 +1409,11 @@ _shmutant_validate_settings() {
     fi
   fi
   # Canonical forms from here on: `08` would compare equal numerically and unequal as text.
-  [ -n "${SHMUTANT_TIMEOUT+x}" ] && SHMUTANT_TIMEOUT="$(( 10#$v_timeout ))"
-  [ -n "${SHMUTANT_RED_STATUS+x}" ] && SHMUTANT_RED_STATUS="$(( 10#$v_red ))"
-  [ -n "$v_jobs" ] && SHMUTANT_JOBS="$(( 10#$v_jobs ))"
+  # A readonly setting is not assigned (that ends a non-interactive caller's shell): it is
+  # accepted when already canonical and refused otherwise.
+  if [ -n "${SHMUTANT_TIMEOUT+x}" ]; then _shmutant_canon "$label" SHMUTANT_TIMEOUT "$(( 10#$v_timeout ))" || return 2; fi
+  if [ -n "${SHMUTANT_RED_STATUS+x}" ]; then _shmutant_canon "$label" SHMUTANT_RED_STATUS "$(( 10#$v_red ))" || return 2; fi
+  if [ -n "$v_jobs" ]; then _shmutant_canon "$label" SHMUTANT_JOBS "$(( 10#$v_jobs ))" || return 2; fi
   case "${SHMUTANT_BASELINE:-1}" in 0|1) ;; *) _shmutant_err "$label: SHMUTANT_BASELINE must be 0 or 1, got [${SHMUTANT_BASELINE:-}]"; return 2 ;; esac
   case "${SHMUTANT_KEEP:-0}" in 0|1) ;; *) _shmutant_err "$label: SHMUTANT_KEEP must be 0 or 1, got [${SHMUTANT_KEEP:-}]"; return 2 ;; esac
   if [ -n "${SHMUTANT_RED_PREFIX+x}" ] && [ -z "$SHMUTANT_RED_PREFIX" ]; then
@@ -1447,6 +1472,42 @@ _shmutant_stream_intact() {
   [ ! -L "$SHMUTANT_STREAM" ] && [ "$(_shmutant_dir_id "$SHMUTANT_STREAM")" = "${SHMUTANT_STREAM_INO:-}" ]
 }
 
+# _shmutant_readonly <name> — true when the caller made <name> readonly; an assignment to it
+# would end a non-interactive shell.
+_shmutant_readonly() {
+  local d
+  d="$(declare -p -- "$1" 2>/dev/null)" || return 1
+  d="${d#declare -}"; d="${d%% *}"
+  case "$d" in *r*) return 0 ;; esac
+  return 1
+}
+
+# _shmutant_canon <label> <name> <canonical> — set <name> to its canonical value, or, when the
+# caller made it readonly, accept it only if it already is that value.
+_shmutant_canon() {
+  if _shmutant_readonly "$2"; then
+    [ "${!2}" = "$3" ] || { _shmutant_err "$1: $2 is readonly and not in canonical decimal form ([${!2}], canonical $3) — set it as a plain decimal"; return 2; }
+    return 0
+  fi
+  printf -v "$2" '%s' "$3"
+}
+
+# _shmutant_callable <name> — true when <name> is a function, a builtin or an executable file:
+# what an invocation by variable can call. An alias is not (aliases expand at parse time).
+_shmutant_callable() {
+  case "$(builtin type -t -- "$1" 2>/dev/null)" in function|builtin|file) return 0 ;; esac
+  return 1
+}
+
+# _shmutant_pristine_newer <workdir> — the sorted list of entries under <workdir>/pristine whose
+# modification time is later than the pool's stamp; fails when the stamp is not the regular
+# file the pool made or the listing could not be taken. A change within the filesystem's
+# timestamp resolution, or one that forges timestamps, is not seen.
+_shmutant_pristine_newer() {
+  [ -f "${SHMUTANT_PRISTINE_STAMP:-}" ] && [ ! -L "$SHMUTANT_PRISTINE_STAMP" ] || return 1
+  ( set -o pipefail; command -p find "$1/pristine" -newer "$SHMUTANT_PRISTINE_STAMP" -print 2>/dev/null | LC_ALL=C command -p sort )
+}
+
 # _shmutant_pool_fail <label> <workdir> — the exit for a pool that stops after prepare: the
 # pristine tree goes unless SHMUTANT_KEEP=1, and the stream descriptor is closed.
 _shmutant_pool_fail() {
@@ -1455,30 +1516,26 @@ _shmutant_pool_fail() {
   fi
   if [ -n "${SHMUTANT_STREAM_FD:-}" ]; then exec {SHMUTANT_STREAM_FD}>&-; unset SHMUTANT_STREAM_FD; fi
   unset SHMUTANT_STREAM_OPENED
+  [ -z "${SHMUTANT_PRISTINE_STAMP:-}" ] || { command -p rm -f -- "$SHMUTANT_PRISTINE_STAMP"; unset SHMUTANT_PRISTINE_STAMP SHMUTANT_PRISTINE_NEWER; }
+  # Last: from here to the pool's return nothing forks, so the handler sees no child of the pool.
+  _shmutant_release_chld
 }
 
 # _shmutant_no_shadows <label> — refuse to run while a builtin this harness signals, waits and
 # reads with is not itself: a function of that name, or one disabled with `enable -n`, would
 # decide what lives. External utilities are already reached through `command -p`.
 _shmutant_no_shadows() {
-  local n kinds saved_chld
-  # A CHLD trap (a caller's, or one prepare installed) fires on the child the check below forks,
-  # and could define a shadow just after its name was cleared. Off for the whole check, restored
-  # after; the pool clears it again before spawning workers.
-  saved_chld="$(trap -p CHLD)"; trap - CHLD
+  local n kinds
+  # The check after prepare runs with CHLD held (_shmutant_hold_chld): a trap that defines a
+  # shadow on a later invocation would otherwise fire on the forks below or on any later one.
   # `[` and `:` are shadowable and load-bearing; every builtin the harness invokes is listed.
   for n in kill wait read trap printf mapfile exec builtin command cd pwd exit return declare local unset set shopt eval readonly export shift true false '[' : . type test; do
     # An enabled builtin, not a function of that name and not one switched off with `enable -n`.
     # A caller's alias is no concern: this file's functions were parsed with aliases off.
     kinds="$(builtin type -at -- "$n" 2>/dev/null)"
     case "$kinds" in *function*) kinds="" ;; esac
-    case "$kinds" in
-      *builtin*) ;;
-      *) [ -z "$saved_chld" ] || eval "$saved_chld"
-         _shmutant_err "$1: $n is not the builtin this harness relies on (a function of that name, or disabled with enable)"; return 2 ;;
-    esac
+    case "$kinds" in *builtin*) ;; *) _shmutant_err "$1: $n is not the builtin this harness relies on (a function of that name, or disabled with enable)"; return 2 ;; esac
   done
-  [ -z "$saved_chld" ] || eval "$saved_chld"
 }
 
 # _shmutant_workdir_owned <label> <workdir> — the entries this pool recreates (pristine, base-N,
@@ -1534,12 +1591,8 @@ shmutant_pool() {
   command -p mkdir -p -- "$wd" 2>/dev/null || { _shmutant_err "$label: cannot create workdir $wd"; return 2; }
   wd="$(_shmutant_abs "$wd")" || { _shmutant_err "$label: cannot resolve workdir"; return 2; }
   _shmutant_workdir_owned "$label" "$wd" || return 2
-  if ! declare -F -- "$prep" > /dev/null 2>&1 && ! command -v -- "$prep" > /dev/null 2>&1; then
-    _shmutant_err "$label: prepare callback not found: $prep"; return 2
-  fi
-  if ! declare -F -- "$run" > /dev/null 2>&1 && ! command -v -- "$run" > /dev/null 2>&1; then
-    _shmutant_err "$label: run callback not found: $run"; return 2
-  fi
+  _shmutant_callable "$prep" || { _shmutant_err "$label: prepare callback not found: $prep (a function, builtin or executable; an alias cannot be called by name)"; return 2; }
+  _shmutant_callable "$run" || { _shmutant_err "$label: run callback not found: $run (a function, builtin or executable; an alias cannot be called by name)"; return 2; }
   _shmutant_validate_settings "$label" "$wd" || return 2
   case "$cap" in
     '') ;;
@@ -1571,6 +1624,9 @@ shmutant_pool() {
   local _shmutant_pool_n="$n" _shmutant_pool_t0="$t0" _shmutant_pool_pout_r="$pout_r" _shmutant_pool_pout_w="$pout_w" _shmutant_pool_errexit="$errexit_before"
   _shmutant_report_keep before-prepare
   "$prep" "$wd/pristine" >&"$pout_w"; prc=$?
+  # First, before anything forks: from here to the pool's return a CHLD trap prepare installed
+  # (or the caller's) sees no child of this shell but the one that saves it.
+  _shmutant_hold_chld
   label="$_shmutant_pool_label"; wd="$_shmutant_pool_wd"; run="$_shmutant_pool_run"; cap="$_shmutant_pool_cap"
   n="$_shmutant_pool_n"; t0="$_shmutant_pool_t0"; pout_r="$_shmutant_pool_pout_r"; pout_w="$_shmutant_pool_pout_w"; errexit_before="$_shmutant_pool_errexit"
   killed=0; rc=0; base_sel=(); base_verdict=()
@@ -1586,9 +1642,7 @@ shmutant_pool() {
   # prepare may have defined a function under a builtin's name, or taken the run callback away:
   # checked again before any worker relies on either.
   _shmutant_no_shadows "$label" || { _shmutant_pool_fail "$label" "$wd"; return 2; }
-  if ! declare -F -- "$run" > /dev/null 2>&1 && ! command -v -- "$run" > /dev/null 2>&1; then
-    _shmutant_err "$label: run callback not found after prepare: $run"; _shmutant_pool_fail "$label" "$wd"; return 2
-  fi
+  _shmutant_callable "$run" || { _shmutant_err "$label: run callback not found after prepare: $run"; _shmutant_pool_fail "$label" "$wd"; return 2; }
   # prepare may have declared rows or had one refused: the table is read again here, and a
   # refusal after prepare is the same harness error as one before it.
   if [ "${SHMUTANT_DECL_ERRORS:-0}" -ne 0 ]; then
@@ -1603,6 +1657,11 @@ shmutant_pool() {
   _shmutant_report_keep after-prepare
   _shmutant_open_stream "$label" || { _shmutant_pool_fail "$label" "$wd"; return 2; }
   SHMUTANT_PRISTINE_ID="$(_shmutant_dir_id "$wd/pristine")" || SHMUTANT_PRISTINE_ID=""
+  # The tree's state as prepare left it: a stamp, and the (normally empty) list of entries
+  # already newer than it. A callback that later writes into pristine, adds to it or removes
+  # from it changes that list, and no row is cloned from the tree afterwards.
+  SHMUTANT_PRISTINE_STAMP="$(command -p mktemp "$wd/.stamp.XXXXXX" 2>/dev/null)" || { _shmutant_err "$label: cannot create a stamp in $wd"; _shmutant_pool_fail "$label" "$wd"; return 2; }
+  SHMUTANT_PRISTINE_NEWER="$(_shmutant_pristine_newer "$wd")" || { _shmutant_err "$label: cannot list the prepared tree"; _shmutant_pool_fail "$label" "$wd"; return 2; }
   [ -n "$root" ] || root="$wd/pristine"
   root="$(_shmutant_abs "$root")" || { _shmutant_err "$label: prepare printed a root that is not a directory"; _shmutant_pool_fail "$label" "$wd"; return 2; }
   if ! _shmutant_inside "$wd/pristine" "$root"; then
@@ -1684,12 +1743,14 @@ shmutant_pool() {
   t1="$(_shmutant_now)"
   _shmutant_emit shmutant 1 summary "$label" "$n" "$killed" "$jobs" "$(_shmutant_secs "$(( t1 - t0 ))")"
   _shmutant_err "$label: $killed/$n mutation(s) killed on their own witness (jobs=$jobs, $(_shmutant_secs "$(( t1 - t0 ))")s)"
+  # Read before _shmutant_pool_fail, which hands the caller's CHLD trap back: the check forks.
+  local intact=1; _shmutant_stream_intact || intact=0
   _shmutant_pool_fail "$label" "$wd"
   if [ "${SHMUTANT_CLEANUP_FAILED:-0}" -ne 0 ]; then
     _shmutant_err "$label: a worker did not run or finish as promised (a run not set up, a tree not removed, or an output not published) — see above"
     return 2
   fi
-  if ! _shmutant_stream_intact; then
+  if [ "$intact" -eq 0 ]; then
     _shmutant_err "$label: SHMUTANT_STREAM no longer names the file the records were written to (${SHMUTANT_STREAM:-}) — it was removed or replaced during the run"
     return 2
   fi

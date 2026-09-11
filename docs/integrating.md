@@ -126,7 +126,12 @@ source root is resolved first, a symlink at the destination is refused, and an e
 destination must be empty (the copy never removes or overwrites a caller's entries); a source with a multiply linked regular file outside its top-level `.git`
 is refused by `shmutant_copy_tree`, since a copy cannot keep the links joined. A pool that
 stops after `prepare` (a target the tree lacks, a setting `prepare` broke) removes the prepared
-tree unless `SHMUTANT_KEEP=1`.
+tree unless `SHMUTANT_KEEP=1`. The prepared tree is proven unmodified before every clone: a
+callback that writes into it after `prepare` (say through `../../pristine` from its clone),
+adds to it or removes from it makes every later row `unprepared`, with the reason, rather than
+cloning what it left; a change within the filesystem's timestamp resolution, or one that forges
+timestamps, is not seen. Both callbacks must be functions, builtins or executables: an alias,
+which cannot be called by name, is refused (status 2).
 
 ```sh
 # test/mutants.sh

@@ -446,7 +446,7 @@ shmutant_mut 'SHMUTANT_BASELINE is not validated' \
   'case "${SHMUTANT_BASELINE:-1}" in *) ;; never)' \
   't_pool_validates_boolean_settings'
 shmutant_mut 'a leading-zero timeout reaches arithmetic as octal' \
-  '  [ -n "${SHMUTANT_TIMEOUT+x}" ] && SHMUTANT_TIMEOUT="$(( 10#$v_timeout ))"' \
+  '  if [ -n "${SHMUTANT_TIMEOUT+x}" ]; then _shmutant_canon "$label" SHMUTANT_TIMEOUT "$(( 10#$v_timeout ))" || return 2; fi' \
   '  :' \
   't_verdict_timeout_with_a_leading_zero'
 shmutant_mut 'a refused nested copy leaves its directory behind' \
@@ -734,7 +734,7 @@ shmutant_mut 'the prepared root is read back by path after prepare' \
   '  root="$(command -p cat "$wd"/.prepare.* 2>/dev/null; builtin printf x)"; root="${root%x}"; exec {pout_w}>&- {pout_r}<&-' \
   't_prepare_cannot_redirect_its_own_capture'
 shmutant_mut 'a stream removed or replaced during the run is not noticed' \
-  '  if ! _shmutant_stream_intact; then' \
+  '  if [ "$intact" -eq 0 ]; then' \
   '  if false; then' \
   't_stream_descriptor_survives_a_callback_swapping_the_path'
 shmutant_mut 'an empty copy destination is accepted' \
@@ -816,11 +816,11 @@ shmutant_mut 'the output scan runs whatever awk the caller resolves' \
   '  got="$(SHMUTANT_SCAN_P="$2" SHMUTANT_SCAN_W="$3" awk '"'"'' \
   't_pool_refuses_shadowed_builtins_and_posix_mode'
 shmutant_mut 'a red status of 08 stays 08' \
-  '  [ -n "${SHMUTANT_RED_STATUS+x}" ] && SHMUTANT_RED_STATUS="$(( 10#$v_red ))"' \
+  '  if [ -n "${SHMUTANT_RED_STATUS+x}" ]; then _shmutant_canon "$label" SHMUTANT_RED_STATUS "$(( 10#$v_red ))" || return 2; fi' \
   '  :' \
   't_settings_take_a_canonical_form'
 shmutant_mut 'the jobs setting keeps its leading zeros' \
-  '  [ -n "$v_jobs" ] && SHMUTANT_JOBS="$(( 10#$v_jobs ))"' \
+  '  if [ -n "$v_jobs" ]; then _shmutant_canon "$label" SHMUTANT_JOBS "$(( 10#$v_jobs ))" || return 2; fi' \
   '  :' \
   't_settings_take_a_canonical_form'
 shmutant_mut 'the mode spec is computed under the caller nocasematch' \
@@ -893,8 +893,8 @@ shmutant_mut 'mutate reads its positionals before checking their count' \
   '  if [ "$#" -ne 3 ]; then _shmutant_err "mutate: usage: shmutant_mutate <file> <old> <new>"; return 1; fi' \
   '  :' \
   't_copy_tree_excludes_git'
-shmutant_mut 'the caller CHLD trap stays armed while the pool owns its workers' \
-  '  trap - CHLD' \
+shmutant_mut 'the caller CHLD trap is not put back after the pool' \
+  '  if [ -n "${SHMUTANT_TRAP_CHLD:-}" ]; then eval "$SHMUTANT_TRAP_CHLD"; else trap - CHLD; fi' \
   '  :' \
   't_pool_survives_a_caller_chld_trap'
 shmutant_mut 'a worker reaped by someone else is spun on' \
@@ -992,8 +992,8 @@ shmutant_mut 'a target under an absolute in-tree link passes the preflight' \
   '  :' \
   't_pool_refuses_target_under_symlinked_dir'
 shmutant_mut 'a run callback prepare removed is not noticed' \
-  '    _shmutant_err "$label: run callback not found after prepare: $run"; _shmutant_pool_fail "$label" "$wd"; return 2' \
-  '    :' \
+  '  _shmutant_callable "$run" || { _shmutant_err "$label: run callback not found after prepare: $run"; _shmutant_pool_fail "$label" "$wd"; return 2; }' \
+  '  :' \
   't_pool_reads_the_table_prepare_declared'
 shmutant_mut 'the capture keeps its name while run executes' \
   '  command -p rm -f -- "$outf" "$mark" "$left" "$seen" "$fifo" "$mark.hold" "$mark.hp" "$mark.go"' \
@@ -1019,9 +1019,9 @@ shmutant_mut 'a listing entry with no start time is left stopped and unreported'
   't_freeze_records_only_what_it_stopped'
 
 # --- guards added for the twenty-eighth review round ---
-shmutant_mut 'the shadow check leaves CHLD armed through its forks' \
-  '  saved_chld="$(trap -p CHLD)"; trap - CHLD' \
-  '  saved_chld="$(trap -p CHLD)"' \
+shmutant_mut 'the CHLD trap is not held once prepare returns' \
+  '  SHMUTANT_CHLD_HELD=1; trap - CHLD' \
+  '  SHMUTANT_CHLD_HELD=1' \
   't_pool_refuses_shadowed_builtins_and_posix_mode'
 shmutant_mut 'the punctuation builtins are not in the shadow list' \
   "  for n in kill wait read trap printf mapfile exec builtin command cd pwd exit return declare local unset set shopt eval readonly export shift true false '[' : . type test; do" \
@@ -1065,3 +1065,21 @@ shmutant_mut 'an unscanned run keeps its callback verdict' \
   '  [ "${SHMUTANT_RUN_SCAN_FAILED:-0}" = 0 ] || SHMUTANT_RUN_SETUP_FAILED=1' \
   '  :' \
   't_witness_matches_a_whole_token'
+
+# --- guards added for the thirtieth review round ---
+shmutant_mut 'a pristine tree modified after prepare is cloned anyway' \
+  '  if ! newer="$(_shmutant_pristine_newer "$wd")" || [ "$newer" != "${SHMUTANT_PRISTINE_NEWER-}" ]; then' \
+  '  if false; then' \
+  't_pool_refuses_a_modified_pristine_tree'
+shmutant_mut 'a readonly setting is assigned to' \
+  '  case "$d" in *r*) return 0 ;; esac' \
+  '  :' \
+  't_readonly_settings_do_not_kill_the_caller'
+shmutant_mut 'an alias passes as a callback' \
+  '  case "$(builtin type -t -- "$1" 2>/dev/null)" in function|builtin|file) return 0 ;; esac' \
+  '  return 0' \
+  't_pool_refuses_alias_only_callbacks'
+shmutant_mut 'a function named bash is taken for the PATH interpreter' \
+  '  type -P bash 2>/dev/null' \
+  '  command -v bash 2>/dev/null' \
+  't_bash_floor'
