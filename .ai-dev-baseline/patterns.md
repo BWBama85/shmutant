@@ -313,4 +313,11 @@ One line per resolved review thread, newest last.
 - `caller-owned-path-deleted` `shmutant.sh` `9aada9c` `PRRT_kwDOUT7q9s6hT19_` PR #1 2026-09-11
 - `path-lookup-ambiguity` `shmutant.sh` `9aada9c` `PRRT_kwDOUT7q9s6hT1-A` PR #1 2026-09-11
 - `timeout-escalation-cancelled` `shmutant.sh` `9aada9c` `PRRT_kwDOUT7q9s6hT1-C` PR #1 2026-09-11
+- `host-shell-option-leak` `shmutant.sh` `45af05b` `PRRT_kwDOUT7q9s6hWum6` PR #1 2026-09-11
+- `host-shell-option-leak` `shmutant.sh` `45af05b` `PRRT_kwDOUT7q9s6hWunH` PR #1 2026-09-11
+- `host-shell-option-leak` `shmutant.sh` `45af05b` `PRRT_kwDOUT7q9s6hWunL` PR #1 2026-09-11
+- `caller-owned-path-deleted` `shmutant.sh` `45af05b` `PRRT_kwDOUT7q9s6hWum_` PR #1 2026-09-11
+- `caller-owned-path-deleted` `shmutant.sh` `45af05b` `PRRT_kwDOUT7q9s6hWunC` PR #1 2026-09-11
+- `path-lookup-ambiguity` `shmutant.sh` `45af05b` `PRRT_kwDOUT7q9s6hWunE` PR #1 2026-09-11
+- `write-failure-swallowed` `shmutant.sh` `45af05b` `PRRT_kwDOUT7q9s6hWunO` PR #1 2026-09-11
 <!-- adb:hits:end -->
