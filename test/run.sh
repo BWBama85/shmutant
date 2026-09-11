@@ -838,8 +838,11 @@ t_freeze_records_only_what_it_stopped() {
 t_freeze_that_never_settles_is_reported() {
   # every pass finds a process it has not seen: the bound is reached and recorded, and the run
   # that was being ended is scored unsettled rather than trusted
+  # In its own process group (set -m): this half stops real processes, and an orphaned
+  # stopped group delivers SIGHUP to its members — which must not be the suite runner.
   ( sleep 5; : ) & local root=$!
   sleep 0.2
+  set -m
   ( _shmutant_descendants_started() { grep -qx "$1" "$T/spawned" 2>/dev/null && return 0; [ "$(grep -c . "$T/spawned" 2>/dev/null || echo 0)" -lt 40 ] || return 0; sleep 30 > /dev/null 2>&1 & echo "$!" >> "$T/spawned"; local id="" i; for i in 1 2 3 4 5 6 7 8 9 10; do id="$(_shmutant_identity "$!")" && [ -n "$id" ] && break; sleep 0.1; done; printf '%s %s\n' "$!" "$id"; }
     local -a frozen=() roots=("$root"); local -A have=()
     SHMUTANT_FREEZE_UNSETTLED=0
@@ -850,7 +853,9 @@ t_freeze_that_never_settles_is_reported() {
     exec {u}>|"$T/unsettled"; SHMUTANT_UNSETTLED_FD="$u"
     _shmutant_kill_tree_twice "$root"
     grep -qx unsettled "$T/unsettled" || { echo "FAIL: $_unit: the unsettled freeze was not reported on the descriptor the runner named"; exit 1; }
-    exit 0 ) || _failed=1
+    exit 0 ) & local half=$!
+  wait "$half" || _failed=1
+  set +m
   kill -KILL "$root" 2>/dev/null; wait "$root" 2>/dev/null
   rm -f "$T/spawned"
   # The pool turns an unsettled run into an `unsettled` verdict. Driven through a stubbed
