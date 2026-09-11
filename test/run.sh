@@ -857,7 +857,7 @@ t_freeze_that_never_settles_is_reported() {
   shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
   hanging_run() { sleep 3; bash "$1/test.sh"; }
   ( _shmutant_descendants_started() { grep -qx "$1" "$T/spawned" 2>/dev/null && return 0; [ "$(grep -c . "$T/spawned" 2>/dev/null || echo 0)" -lt 40 ] || return 0; sleep 30 > /dev/null 2>&1 & echo "$!" >> "$T/spawned"; local id="" i; for i in 1 2 3 4 5 6 7 8 9 10; do id="$(_shmutant_identity "$!")" && [ -n "$id" ] && break; sleep 0.1; done; printf '%s %s\n' "$!" "$id"; }
-    SHMUTANT_DEBUG_FREEZE=1 SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=1 shmutant_pool lbl "$T/wd" toy_prepare hanging_run > "$T/out" 2> "$T/err" )
+    SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=1 shmutant_pool lbl "$T/wd" toy_prepare hanging_run > "$T/out" 2> "$T/err" )
   case "$(cat "$T/out")" in *unsettled*) ;; *) echo "note: $_unit: spawned=$(grep -c . "$T/spawned" 2>/dev/null) out=[$(cat "$T/out")] err=[$(cat "$T/err")]" ;; esac
   has "$(cat "$T/out")" 'unsettled' 'the verdict is unsettled, not timeout'
   has "$(cat "$T/err")" 'never settled' 'and the row is explained'

@@ -613,7 +613,6 @@ _shmutant_freeze_from() {
     # reach; the bound is recorded, not endured in silence.
     if [ "$rounds" -ge 32 ]; then SHMUTANT_FREEZE_UNSETTLED=1; break; fi
   done
-  [ -z "${err_fd:-}" ] || [ "${SHMUTANT_DEBUG_FREEZE:-0}" != 1 ] || _shmutant_err "freeze: loop ended rounds=$rounds new=$new unsettled=${SHMUTANT_FREEZE_UNSETTLED:-unset} pid=$BASHPID" 2>&"$err_fd"
 }
 
 # _shmutant_frozen_only <pid start>… — after a bulk stop, SHMUTANT_FROZEN_NOW holds the pids
@@ -637,10 +636,8 @@ _shmutant_frozen_only() {
     # An entry with no start time was stopped without anything to verify it by: let go, and the
     # freeze counts as unsettled rather than pretending the pid was recorded.
     case "${p#* }" in ''|*[!0-9]*) kill -CONT "${p%% *}" 2>/dev/null; SHMUTANT_FREEZE_UNSETTLED=1; continue ;; esac
-    [ -z "${err_fd:-}" ] || [ "${SHMUTANT_DEBUG_FREEZE:-0}" != 1 ] || [ -n "${SHMUTANT_START[${p%% *}]:-}" ] || _shmutant_err "freeze: ${p%% *} found=${p#* } not in table (${#SHMUTANT_START[@]} entries)" 2>&"$err_fd"
     if [ -n "${SHMUTANT_START[${p%% *}]:-}" ]; then
       d=$(( SHMUTANT_START[${p%% *}] - ${p#* } ))
-      [ -z "${err_fd:-}" ] || [ "${SHMUTANT_DEBUG_FREEZE:-0}" != 1 ] || _shmutant_err "freeze: ${p%% *} found=${p#* } table=${SHMUTANT_START[${p%% *}]} d=$d" 2>&"$err_fd"
       if [ "$d" -ge -1 ] && [ "$d" -le 1 ]; then
         # Still the process found, and stopped: a stop that was refused (a set-uid descendant)
         # leaves a live process the record would otherwise claim as frozen.
@@ -718,15 +715,15 @@ _shmutant_kill_tree_twice() {
     for p in "${SHMUTANT_FROZEN_NOW[@]}"; do frozen+=("$p:"); done
     _shmutant_freeze_from
   fi
-  if [ "$root_ok" = 1 ]; then _shmutant_kill_tree KILL "$pid" "${frozen[@]}"
-  else _shmutant_kill_tree KILL "" "${frozen[@]}"
-  fi
   # An unsettled freeze is reported to the runner through the descriptor it named, since this
-  # may run in the watchdog.
-  [ -z "${err_fd:-}" ] || [ "${SHMUTANT_DEBUG_FREEZE:-0}" != 1 ] || _shmutant_err "freeze: kill done unsettled=${SHMUTANT_FREEZE_UNSETTLED:-unset} pid=$BASHPID" 2>&"$err_fd"
+  # may run in the watchdog — and BEFORE the kill: the freeze is complete by now, and the kill
+  # may end the wrapper this watchdog's parent is waiting on before this shell runs again.
   if [ "${SHMUTANT_FREEZE_UNSETTLED:-0}" = 1 ]; then
     if [ -n "${SHMUTANT_UNSETTLED_FD:-}" ]; then printf 'unsettled\n' >&"$SHMUTANT_UNSETTLED_FD"; fi
-    if [ -n "${err_fd:-}" ]; then _shmutant_err "the process tree being ended did not settle within ${SHMUTANT_FREEZE_ROUNDS:-32} passes (reported on descriptor ${SHMUTANT_UNSETTLED_FD:-none})" 2>&"$err_fd"; fi
+    if [ -n "${err_fd:-}" ]; then _shmutant_err "the process tree being ended did not settle within 32 passes" 2>&"$err_fd"; fi
+  fi
+  if [ "$root_ok" = 1 ]; then _shmutant_kill_tree KILL "$pid" "${frozen[@]}"
+  else _shmutant_kill_tree KILL "" "${frozen[@]}"
   fi
   return 0
 }
@@ -759,7 +756,6 @@ _shmutant_kill_tree() {
   # The group is the run's only while its holder lives, which the caller has checked.
   [ -n "${SHMUTANT_KILL_GROUP:-}" ] && targets=(-"$SHMUTANT_KILL_GROUP" "${targets[@]}")
   [ "${#targets[@]}" -gt 0 ] || return 0
-  [ -z "${err_fd:-}" ] || [ "${SHMUTANT_DEBUG_FREEZE:-0}" != 1 ] || _shmutant_err "freeze: kill $sig from $BASHPID (pgid $(command -p ps -o pgid= -p "$BASHPID" | command -p tr -d ' '), ppid $PPID, root pgid $(command -p ps -o pgid= -p "$pid" 2>/dev/null | command -p tr -d ' ')) targets: ${targets[*]}" 2>&"$err_fd"
   kill "-$sig" -- "${targets[@]}" 2>/dev/null
 }
 
