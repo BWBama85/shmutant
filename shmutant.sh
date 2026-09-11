@@ -759,7 +759,7 @@ _shmutant_kill_tree() {
   # The group is the run's only while its holder lives, which the caller has checked.
   [ -n "${SHMUTANT_KILL_GROUP:-}" ] && targets=(-"$SHMUTANT_KILL_GROUP" "${targets[@]}")
   [ "${#targets[@]}" -gt 0 ] || return 0
-  [ -z "${err_fd:-}" ] || [ "${SHMUTANT_DEBUG_FREEZE:-0}" != 1 ] || _shmutant_err "freeze: kill $sig from $BASHPID (ppid $PPID) targets: ${targets[*]}" 2>&"$err_fd"
+  [ -z "${err_fd:-}" ] || [ "${SHMUTANT_DEBUG_FREEZE:-0}" != 1 ] || _shmutant_err "freeze: kill $sig from $BASHPID (pgid $(command -p ps -o pgid= -p "$BASHPID" | command -p tr -d ' '), ppid $PPID, root pgid $(command -p ps -o pgid= -p "$pid" 2>/dev/null | command -p tr -d ' ')) targets: ${targets[*]}" 2>&"$err_fd"
   kill "-$sig" -- "${targets[@]}" 2>/dev/null
 }
 
