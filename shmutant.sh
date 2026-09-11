@@ -613,6 +613,7 @@ _shmutant_freeze_from() {
     # reach; the bound is recorded, not endured in silence.
     if [ "$rounds" -ge 32 ]; then SHMUTANT_FREEZE_UNSETTLED=1; break; fi
   done
+  [ -z "${err_fd:-}" ] || [ "${SHMUTANT_DEBUG_FREEZE:-0}" != 1 ] || _shmutant_err "freeze: loop ended rounds=$rounds new=$new unsettled=${SHMUTANT_FREEZE_UNSETTLED:-unset} pid=$BASHPID" 2>&"$err_fd"
 }
 
 # _shmutant_frozen_only <pid start>… — after a bulk stop, SHMUTANT_FROZEN_NOW holds the pids
@@ -722,6 +723,7 @@ _shmutant_kill_tree_twice() {
   fi
   # An unsettled freeze is reported to the runner through the descriptor it named, since this
   # may run in the watchdog.
+  [ -z "${err_fd:-}" ] || [ "${SHMUTANT_DEBUG_FREEZE:-0}" != 1 ] || _shmutant_err "freeze: kill done unsettled=${SHMUTANT_FREEZE_UNSETTLED:-unset} pid=$BASHPID" 2>&"$err_fd"
   if [ "${SHMUTANT_FREEZE_UNSETTLED:-0}" = 1 ]; then
     if [ -n "${SHMUTANT_UNSETTLED_FD:-}" ]; then printf 'unsettled\n' >&"$SHMUTANT_UNSETTLED_FD"; fi
     if [ -n "${err_fd:-}" ]; then _shmutant_err "the process tree being ended did not settle within ${SHMUTANT_FREEZE_ROUNDS:-32} passes (reported on descriptor ${SHMUTANT_UNSETTLED_FD:-none})" 2>&"$err_fd"; fi
