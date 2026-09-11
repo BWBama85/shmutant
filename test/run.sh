@@ -2003,6 +2003,12 @@ t_copy_tree_excludes_git() {
   shmutant_copy_tree "$T/missing" "$T/dst2" 2>/dev/null; rc_is $? 1 'a missing source is an error'
   ( set -u; shmutant_copy_tree "$T/src" 2>"$T/e" ); rc_is $? 1 'a missing destination is a copy failure even under set -u'
   ( set -u; shmutant_mutate "$T/src/sub/f" y 2>"$T/e2" ); rc_is $? 1 'a mutate call missing an argument is a failure even under set -u'
+  mkdir -p "$T/nlm
+"; printf 'old\n' > "$T/nlm
+/f"; mkdir -p "$T/nlm"
+  shmutant_mutate "$T/nlm
+/f" old new 2>/dev/null; rc_is $? 1 'a mutate path with a newline is refused'
+  eq "$(find "$T/nlm" -mindepth 1 | wc -l | tr -d ' ')" 0 'and nothing was made in the sibling directory'
   has "$(cat "$T/e2")" 'usage' 'reported as a usage error'
   ( set -u; SHMUTANT_SELECT=x shmutant_selected 2>"$T/e3" ); rc_is $? 2 'a selected call with no unit is a usage failure even under set -u'
   has "$(cat "$T/e3")" 'usage' 'reported as a usage error'
@@ -2222,6 +2228,21 @@ EOF
   kill -TERM "$cli"; wait "$cli" 2>/dev/null
   sleep 4; rm -f "$T/toy/finished"
   eq "$(find "$T/tmpd" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" 0 'a workdir created under --keep that prepare settled to 0 is removed on an interrupt'
+  # the workdir's parent swapped for a link to a caller tree holding a directory of the same
+  # name: neither the final cleanup nor an interrupt may remove through it
+  # (the swap is two levels up: the workdir's own parent stays a real directory, reached
+  # through the link, so only the pinned physical parent can tell)
+  mkdir -p "$T/tmp2/nest/deeper" "$T/toy/theirs"
+  cat > "$T/toy/plan-swap-parent.sh" <<'EOF'
+prepare() { shmutant_copy_tree "$SHMUTANT_PLAN_DIR" "$1"; }
+run() { local w; w="$(cd "$1/../.." && pwd -P)"; local up; up="$(dirname "$(dirname "$w")")"; mkdir -p "$SHMUTANT_PLAN_DIR/theirs/deeper/$(basename "$w")/keep"; mv "$up" "$up.moved"; ln -s "$SHMUTANT_PLAN_DIR/theirs" "$up"; bash "$1/test.sh"; }
+shmutant_target lib.sh
+shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+EOF
+  TMPDIR="$T/tmp2/nest/deeper" bash "$SHMUTANT" run "$T/toy/plan-swap-parent.sh" --no-baseline > /dev/null 2>"$T/e"
+  [ "$(find "$T/toy/theirs" -name keep | wc -l | tr -d ' ')" -ge 1 ] || fail_ 'the caller tree behind a swapped workdir ancestor was removed by the CLI cleanup'
+  has "$(cat "$T/e")" 'no longer resolves' 'the swap is reported'
+  rm -f "$T/tmp2/nest"; mv "$T/tmp2/nest.moved" "$T/tmp2/nest" 2>/dev/null; rm -rf "$T/tmp2" "$T/toy/theirs"
   # SHMUTANT_KEEP=1 in the environment, interrupted while the plan is still loading (before
   # anything could be reported): the decision was the operator's, and the workdir stays
   { printf ': > "$SHMUTANT_PLAN_DIR/loading"; sleep 3\n'; cat "$T/toy/plan-hang.sh"; } > "$T/toy/plan-slow-load.sh"

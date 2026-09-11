@@ -378,8 +378,8 @@ shmutant_mut '--keep deletes the workdir' \
   'if [ "$keep" = 0 ]; then _shmutant_err "workdir kept: $wd"' \
   't_cli_run'
 shmutant_mut 'a caller-supplied workdir is removed' \
-  '  elif [ "$made" = 1 ]; then _shmutant_remove "$wd" || {' \
-  '  elif true; then _shmutant_remove "$wd" || {' \
+  '  elif [ "$made" = 1 ]; then _shmutant_remove "$wd" "${SHMUTANT_CLI_WD_PARENT:-}" || {' \
+  '  elif true; then _shmutant_remove "$wd" "${SHMUTANT_CLI_WD_PARENT:-}" || {' \
   't_cli_run'
 shmutant_mut 'the plan is sourced by its bare name' \
   '_shmutant_cli_load "$SHMUTANT_PLAN_DIR/$(command -p basename -- "$plan")"' \
@@ -686,8 +686,8 @@ shmutant_mut 'a relative stream in a missing directory is re-based onto the root
   '    if ! sdir="$(command -p dirname -- "$SHMUTANT_STREAM")"; then' \
   't_cli_run'
 shmutant_mut 'the automatic workdir is removed raw after an incomplete run' \
-  '  elif [ "$made" = 1 ]; then _shmutant_remove "$wd" || { _shmutant_err "run: could not remove the workdir $wd"; rc=2; }' \
-  '  elif [ "$made" = 1 ]; then rm -rf -- "$wd" 2>/dev/null' \
+  '  elif [ "$made" = 1 ]; then _shmutant_remove "$wd" "${SHMUTANT_CLI_WD_PARENT:-}" || { _shmutant_err "run: could not remove the workdir $wd"; rc=2; }' \
+  '  elif [ "$made" = 1 ]; then command -p rm -rf -- "$wd" 2>/dev/null' \
   't_cli_run'
 
 # --- guards added for the twenty-first review round ---
@@ -1007,3 +1007,13 @@ shmutant_mut 'a baseline-skipped row keeps an earlier pool directory' \
   '        _shmutant_fresh_dir "$wd/mut-$i" "$wd" || { _shmutant_err "$label: cannot recreate $wd/mut-$i"; _shmutant_pool_fail "$label" "$wd"; return 2; }' \
   '        :' \
   't_pool_recreates_worker_dirs'
+
+# --- guards added for the twenty-seventh review round ---
+shmutant_mut 'the CLI removes its workdir without pinning the parent' \
+  '  elif [ "$made" = 1 ]; then _shmutant_remove "$wd" "${SHMUTANT_CLI_WD_PARENT:-}" ||' \
+  '  elif [ "$made" = 1 ]; then _shmutant_remove "$wd" ||' \
+  't_cli_run'
+shmutant_mut 'a mutate path with a newline is accepted' \
+  '  case "$1" in *$'"'"'\n'"'"'*) _shmutant_err "mutate: a path containing a newline is refused"; return 1 ;; esac' \
+  '  :' \
+  't_copy_tree_excludes_git'

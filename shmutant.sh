@@ -50,6 +50,10 @@
 # invoking environment, or a PATH prepare set to the tree's own bin never stands in for one.
 
 SHMUTANT_VERSION=0.1.0
+# Process identity comes from the kernel's start time in /proc where there is one (Linux):
+# tick resolution, so a reused pid cannot pass for the process it replaced. Elsewhere it is
+# `ps -o etime`, at second resolution, which is the best POSIX ps offers.
+SHMUTANT_PROC=0; [ -r /proc/self/stat ] && SHMUTANT_PROC=1
 
 # Aliases expand while a file is PARSED: a sourcing shell whose dotfiles alias `cp` or `mkdir`
 # would otherwise bake those flags into every function below. Off for the rest of this file,
@@ -356,6 +360,7 @@ _shmutant_mutate_restore() {
 # has no newline keeps that shape: the only change is the literal.
 shmutant_mutate() {
   if [ "$#" -ne 3 ]; then _shmutant_err "mutate: usage: shmutant_mutate <file> <old> <new>"; return 1; fi
+  case "$1" in *$'\n'*) _shmutant_err "mutate: a path containing a newline is refused"; return 1 ;; esac
   local f="$1" tmp nl=1 rc mode dir dirmode=""
   [ -n "$2" ] && [ "$2" != "$3" ] || return 2
   [ -f "$f" ] && [ ! -L "$f" ] || return 1
@@ -467,6 +472,19 @@ _shmutant_descendants() {
 # `ps -A -o pid= -o ppid= -o etime=` pass, so each is carried with the identity it had when found.
 _shmutant_descendants_started() {
   local table now
+  if [ "${SHMUTANT_PROC:-}" = 1 ]; then
+    ( set +f; shopt -u failglob nullglob; command -p cat /proc/[0-9]*/stat 2>/dev/null ) | command -p awk -v root="$1" '
+      $1 ~ /^[0-9]+$/ { s = $0; sub(/^.*\) /, "", s); n = split(s, a, " "); i++; child[i] = $1; parent[i] = a[2]; start[i] = a[20] }
+      END {
+        want[root] = 1
+        do {
+          added = 0
+          for (j = 1; j <= i; j++) if ((parent[j] in want) && !(child[j] in want)) { want[child[j]] = 1; added = 1 }
+        } while (added)
+        for (j = 1; j <= i; j++) if ((child[j] in want) && child[j] != root) print child[j], start[j]
+      }'
+    return 0
+  fi
   table="$(command -p ps -A -o pid= -o ppid= -o etime= 2>/dev/null)" || return 0
   now="$(_shmutant_now)"; now=$(( now / 1000000 ))
   printf '%s\n' "$table" | command -p awk -v root="$1" -v now="$now" '
@@ -510,6 +528,13 @@ _shmutant_etime_secs() {
 # still tells a reused pid apart: the newer process started later.
 _shmutant_identity() {
   local etime now
+  if [ "${SHMUTANT_PROC:-}" = 1 ]; then
+    # The kernel's own start time in clock ticks (field 22 of /proc/<pid>/stat, after the
+    # parenthesised name): two processes cannot share a pid and a tick.
+    etime="$(command -p awk '{ s = $0; sub(/^.*\) /, "", s); n = split(s, a, " "); print a[20] }' "/proc/$1/stat" 2>/dev/null)" || return 1
+    case "$etime" in ''|*[!0-9]*) return 1 ;; esac
+    printf '%s' "$etime"; return 0
+  fi
   etime="$(command -p ps -o etime= -p "$1" 2>/dev/null | command -p tr -d ' ')" || return 1
   [ -n "$etime" ] || return 1
   now="$(_shmutant_now)"
@@ -522,6 +547,16 @@ _shmutant_identity() {
 _shmutant_identity_table() {
   local line now
   SHMUTANT_START=()
+  if [ "${SHMUTANT_PROC:-}" = 1 ]; then
+    # cat, not awk's own file list: a process gone between the glob and the read is skipped, not
+    # fatal; the pid is the line's first field. Globbed with the caller's options neutralised.
+    while IFS= read -r line; do
+      # shellcheck disable=SC2034
+      [ -n "$line" ] && SHMUTANT_START["${line%% *}"]="${line#* }"
+    done < <( ( set +f; shopt -u failglob nullglob; command -p cat /proc/[0-9]*/stat 2>/dev/null ) | command -p awk '
+      $1 ~ /^[0-9]+$/ { s = $0; sub(/^.*\) /, "", s); n = split(s, a, " "); print $1, a[20] }')
+    return 0
+  fi
   now="$(_shmutant_now)"; now=$(( now / 1000000 ))
   # awk does the etime arithmetic for every row at once; a bash loop over the whole process
   # table took longer than the tree being frozen had left to live.
@@ -1715,7 +1750,7 @@ _shmutant_cli_abort() {
     if [ "$keep_last" = 1 ]; then
       _shmutant_err "workdir kept: $SHMUTANT_CLI_WD_TO_RM"
     else
-      _shmutant_remove "$SHMUTANT_CLI_WD_TO_RM" || _shmutant_err "run: could not remove the workdir $SHMUTANT_CLI_WD_TO_RM"
+      _shmutant_remove "$SHMUTANT_CLI_WD_TO_RM" "${SHMUTANT_CLI_WD_PARENT:-}" || _shmutant_err "run: could not remove the workdir $SHMUTANT_CLI_WD_TO_RM"
     fi
   fi
   trap - INT TERM
@@ -1771,6 +1806,9 @@ _shmutant_cli_run() {
   # tree is killed, the workdir handled, and the signal re-delivered.
   SHMUTANT_CLI_CHILD=""; SHMUTANT_CLI_WD_TO_RM=""
   [ "$made" = 1 ] && SHMUTANT_CLI_WD_TO_RM="$wd"
+  # The workdir's parent, physical, taken before any plan code runs: the removal at the end
+  # and on an interrupt is refused if the ancestry no longer resolves to it.
+  SHMUTANT_CLI_WD_PARENT="$(_shmutant_abs "$(command -p dirname -- "$wd")")" || SHMUTANT_CLI_WD_PARENT=""
   # The effective SHMUTANT_KEEP travels on a second channel: the plan subshell and the pool
   # append the value each time it may have changed (after the plan loads, before and after
   # prepare), and an interrupt reads the last one. Unlinked at once: no path names it.
@@ -1820,7 +1858,7 @@ _shmutant_cli_run() {
   # Only a workdir this run created is removed. A caller-supplied one is theirs: the pool's own
   # artifacts stay in it and nothing else in it is touched.
   if [ "$keep" = 1 ]; then _shmutant_err "workdir kept: $wd"
-  elif [ "$made" = 1 ]; then _shmutant_remove "$wd" || { _shmutant_err "run: could not remove the workdir $wd"; rc=2; }
+  elif [ "$made" = 1 ]; then _shmutant_remove "$wd" "${SHMUTANT_CLI_WD_PARENT:-}" || { _shmutant_err "run: could not remove the workdir $wd"; rc=2; }
   fi
   return "$rc"
 }
