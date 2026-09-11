@@ -717,7 +717,10 @@ _shmutant_kill_tree_twice() {
   fi
   # An unsettled freeze is reported to the runner through the descriptor it named, since this
   # may run in the watchdog.
-  if [ "${SHMUTANT_FREEZE_UNSETTLED:-0}" = 1 ] && [ -n "${SHMUTANT_UNSETTLED_FD:-}" ]; then printf 'unsettled\n' >&"$SHMUTANT_UNSETTLED_FD"; fi
+  if [ "${SHMUTANT_FREEZE_UNSETTLED:-0}" = 1 ]; then
+    if [ -n "${SHMUTANT_UNSETTLED_FD:-}" ]; then printf 'unsettled\n' >&"$SHMUTANT_UNSETTLED_FD"; fi
+    if [ -n "${err_fd:-}" ]; then _shmutant_err "the process tree being ended did not settle within ${SHMUTANT_FREEZE_ROUNDS:-32} passes (reported on descriptor ${SHMUTANT_UNSETTLED_FD:-none})" 2>&"$err_fd"; fi
+  fi
   return 0
 }
 
