@@ -834,38 +834,27 @@ t_freeze_records_only_what_it_stopped() {
 }
 
 # shellcheck disable=SC2034
-# shellcheck disable=SC2034
 t_freeze_that_never_settles_is_reported() {
-  # every pass finds a process it has not seen: the bound is reached and recorded, and the run
-  # that was being ended is scored unsettled rather than trusted
-  # In its own process group (set -m): this half stops real processes, and an orphaned
-  # stopped group delivers SIGHUP to its members — which must not be the suite runner.
-  # The freeze-machinery check runs as its own bash process, so the real processes it stops
-  # and any orphaned-stopped SIGHUP stay in that process's session, off the suite runner (this
-  # matters under the self-mutation pass, where the suite runs nested inside a pool).
-  SHMUTANT="$SHMUTANT" T="$T" _u="$_unit" bash -c '
-    . "$SHMUTANT"
-    root_stub() { grep -qx "$1" "$T/spawned" 2>/dev/null && return 0; [ "$(grep -c . "$T/spawned" 2>/dev/null || echo 0)" -lt 40 ] || return 0; sleep 30 > /dev/null 2>&1 & echo "$!" >> "$T/spawned"; id=""; for i in 1 2 3 4 5 6 7 8 9 10; do id="$(_shmutant_identity "$!")" && [ -n "$id" ] && break; sleep 0.1; done; printf "%s %s\n" "$!" "$id"; }
-    ( sleep 5; : ) & root=$!
-    sleep 0.2
-    _shmutant_descendants_started() { root_stub "$@"; }
-    declare -a frozen=() roots=("$root"); declare -A have=()
+  # A freeze whose every pass finds a process it has not seen reaches its bound and records it,
+  # and the run is then scored unsettled rather than trusted. Driven with fabricated pids and
+  # stubbed helpers: no real process is spawned, stopped or killed, so nothing the freeze does
+  # can escape to the suite runner (this unit runs nested inside a pool during self-mutation).
+  ( echo 0 > "$T/fc"
+    # Each pass reports a fresh pid the freeze has not seen, and the frozen-set check accepts it,
+    # so the loop keeps finding new work until the 32-pass bound. The counter is a file: the
+    # stub is called from a process substitution, where a variable would not persist.
+    _shmutant_descendants_started() { [ "$1" = 2000000000 ] || return 0; local n; n=$(($(cat "$T/fc") + 1)); echo "$n" > "$T/fc"; printf '%s %s\n' "$((2000000000 + n))" "$n"; }
+    _shmutant_frozen_only() { SHMUTANT_FROZEN_NOW=("${1%% *}"); }
+    declare -a frozen=() roots=(2000000000); declare -A have=()
     SHMUTANT_FREEZE_UNSETTLED=0
     _shmutant_freeze_from
-    [ "$SHMUTANT_FREEZE_UNSETTLED" = 1 ] || { echo "FAIL: $_u: a freeze that found new work on every pass ended as if settled"; exit 1; }
-    kill -KILL "${frozen[@]%:}" 2>/dev/null
-    rm -f "$T/spawned"
+    [ "$SHMUTANT_FREEZE_UNSETTLED" = 1 ] || { echo "FAIL: $_unit: a freeze that found new work on every pass ended as if settled"; exit 1; }
     exec {u}>|"$T/unsettled"; SHMUTANT_UNSETTLED_FD="$u"
-    _shmutant_kill_tree_twice "$root"
-    kill -KILL "$root" 2>/dev/null
-    for p in $(cat "$T/spawned" 2>/dev/null); do kill -KILL "$p" 2>/dev/null; done
-    grep -qx unsettled "$T/unsettled" || { echo "FAIL: $_u: the unsettled freeze was not reported on the descriptor the runner named"; exit 1; }
-    exit 0
-  ' || _failed=1
-  rm -f "$T/spawned"
+    _shmutant_kill_tree_twice 2000000000
+    grep -qx unsettled "$T/unsettled" || { echo "FAIL: $_unit: the unsettled freeze was not reported on the descriptor the runner named"; exit 1; }
+    exit 0 ) || _failed=1
   # The pool turns an unsettled run into an `unsettled` verdict. Driven through a stubbed
-  # runner, not real process-group kills: nested inside the self-mutation pass, a real freeze
-  # kill escapes to the enclosing test runner.
+  # runner, so no real freeze kill runs here either.
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
   shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
