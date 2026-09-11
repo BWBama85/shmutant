@@ -632,7 +632,10 @@ _shmutant_frozen_only() {
   fi
   for p in "$@"; do
     [ -n "$p" ] || continue
-    case "${p%% *}${p#* }" in *[!0-9]*|'') continue ;; esac
+    case "${p%% *}" in ''|*[!0-9]*) continue ;; esac
+    # An entry with no start time was stopped without anything to verify it by: let go, and the
+    # freeze counts as unsettled rather than pretending the pid was recorded.
+    case "${p#* }" in ''|*[!0-9]*) kill -CONT "${p%% *}" 2>/dev/null; SHMUTANT_FREEZE_UNSETTLED=1; continue ;; esac
     if [ -n "${SHMUTANT_START[${p%% *}]:-}" ]; then
       d=$(( SHMUTANT_START[${p%% *}] - ${p#* } ))
       if [ "$d" -ge -1 ] && [ "$d" -le 1 ]; then

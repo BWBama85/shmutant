@@ -1013,3 +1013,7 @@ shmutant_mut 'a mutate path with a newline is accepted' \
   '  case "$1" in *$'"'"'\n'"'"'*) _shmutant_err "mutate: a path containing a newline is refused"; return 1 ;; esac' \
   '  :' \
   't_copy_tree_excludes_git'
+shmutant_mut 'a listing entry with no start time is left stopped and unreported' \
+  '    case "${p#* }" in '"'"''"'"'|*[!0-9]*) kill -CONT "${p%% *}" 2>/dev/null; SHMUTANT_FREEZE_UNSETTLED=1; continue ;; esac' \
+  '    :' \
+  't_freeze_records_only_what_it_stopped'

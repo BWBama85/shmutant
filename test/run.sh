@@ -817,11 +817,15 @@ t_freeze_records_only_what_it_stopped() {
   sleep 5 & local bystander=$!
   ( sleep 5; : ) & local root=$!
   sleep 0.3
-  ( _shmutant_descendants_started() { printf '%s %s\n' "$bystander" "$(( $(_shmutant_identity "$bystander") - 100 ))"; }
+  ( _shmutant_descendants_started() { printf '%s %s\n' "$bystander" "$(( $(_shmutant_identity "$bystander") - 100 ))"; printf '%s \n' "$root"; }
     local -a frozen=() roots=("$root"); local -A have=()
     _shmutant_freeze_from
     case " ${frozen[*]} " in *" $bystander:"*) echo "FAIL: $_unit: a pid whose process had changed since the listing was recorded as frozen" ;; esac
+    case " ${frozen[*]} " in *" $root:"*) echo "FAIL: $_unit: a pid listed with no start time was recorded as frozen" ;; esac
+    [ "${SHMUTANT_FREEZE_UNSETTLED:-0}" = 1 ] || echo "FAIL: $_unit: an entry with nothing to verify it by did not make the freeze unsettled"
     exit 0 )
+  sleep 0.2
+  case "$(ps -o stat= -p "$root")" in T*) fail_ 'a pid listed with no start time was left stopped' ;; esac
   sleep 0.2
   case "$(ps -o stat= -p "$bystander")" in T*) fail_ 'the bystander was left stopped' ;; esac
   kill -0 "$bystander" 2>/dev/null; rc_is $? 0 'the bystander is still there'
@@ -835,7 +839,7 @@ t_freeze_that_never_settles_is_reported() {
   # that was being ended is scored unsettled rather than trusted
   ( sleep 5; : ) & local root=$!
   sleep 0.2
-  ( _shmutant_descendants_started() { grep -qx "$1" "$T/spawned" 2>/dev/null && return 0; [ "$(grep -c . "$T/spawned" 2>/dev/null || echo 0)" -lt 40 ] || return 0; sleep 30 > /dev/null 2>&1 & echo "$!" >> "$T/spawned"; printf '%s %s\n' "$!" "$(_shmutant_identity "$!")"; }
+  ( _shmutant_descendants_started() { grep -qx "$1" "$T/spawned" 2>/dev/null && return 0; [ "$(grep -c . "$T/spawned" 2>/dev/null || echo 0)" -lt 40 ] || return 0; sleep 30 > /dev/null 2>&1 & echo "$!" >> "$T/spawned"; local id="" i; for i in 1 2 3 4 5 6 7 8 9 10; do id="$(_shmutant_identity "$!")" && [ -n "$id" ] && break; sleep 0.1; done; printf '%s %s\n' "$!" "$id"; }
     local -a frozen=() roots=("$root"); local -A have=()
     SHMUTANT_FREEZE_UNSETTLED=0
     _shmutant_freeze_from
@@ -852,7 +856,7 @@ t_freeze_that_never_settles_is_reported() {
   shmutant_reset; shmutant_target lib.sh
   shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
   hanging_run() { sleep 3; bash "$1/test.sh"; }
-  ( _shmutant_descendants_started() { grep -qx "$1" "$T/spawned" 2>/dev/null && return 0; [ "$(grep -c . "$T/spawned" 2>/dev/null || echo 0)" -lt 40 ] || return 0; sleep 30 > /dev/null 2>&1 & echo "$!" >> "$T/spawned"; printf '%s %s\n' "$!" "$(_shmutant_identity "$!")"; }
+  ( _shmutant_descendants_started() { grep -qx "$1" "$T/spawned" 2>/dev/null && return 0; [ "$(grep -c . "$T/spawned" 2>/dev/null || echo 0)" -lt 40 ] || return 0; sleep 30 > /dev/null 2>&1 & echo "$!" >> "$T/spawned"; local id="" i; for i in 1 2 3 4 5 6 7 8 9 10; do id="$(_shmutant_identity "$!")" && [ -n "$id" ] && break; sleep 0.1; done; printf '%s %s\n' "$!" "$id"; }
     SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=1 shmutant_pool lbl "$T/wd" toy_prepare hanging_run > "$T/out" 2> "$T/err" )
   case "$(cat "$T/out")" in *unsettled*) ;; *) echo "note: $_unit: spawned=$(grep -c . "$T/spawned" 2>/dev/null) out=[$(cat "$T/out")] err=[$(cat "$T/err")]" ;; esac
   has "$(cat "$T/out")" 'unsettled' 'the verdict is unsettled, not timeout'
