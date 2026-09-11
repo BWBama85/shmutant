@@ -130,6 +130,7 @@ _shmutant_emit() {
   # path: a callback could have replaced it with a symlink since.
   if [ -n "${SHMUTANT_STREAM_FD:-}" ]; then
     { printf '%s\n' "$out" >&"$SHMUTANT_STREAM_FD"; } 2>/dev/null || SHMUTANT_EMIT_FAILED=1
+    [ -z "${SHMUTANT_STREAM_COPY_W:-}" ] || { printf '%s\n' "$out" >&"$SHMUTANT_STREAM_COPY_W"; } 2>/dev/null || SHMUTANT_EMIT_FAILED=1
   else
     printf '%s\n' "$out" 2>/dev/null || SHMUTANT_EMIT_FAILED=1
   fi
@@ -377,6 +378,8 @@ shmutant_mutate() {
   if [ "$#" -ne 3 ]; then _shmutant_err "mutate: usage: shmutant_mutate <file> <old> <new>"; return 1; fi
   case "$1" in *$'\n'*) _shmutant_err "mutate: a path containing a newline is refused"; return 1 ;; esac
   local f="$1" tmp nl=1 rc mode dir dirmode=""
+  # A bare name is made a path: to awk, `-` is standard input and `x=1` an assignment.
+  case "$f" in /*|./*|../*) ;; *) f="./$f" ;; esac
   [ -n "$2" ] && [ "$2" != "$3" ] || return 2
   [ -f "$f" ] && [ ! -L "$f" ] || return 1
   dir="$(command -p dirname -- "$f")"
@@ -1046,12 +1049,18 @@ _shmutant_worker() {
   # is still the one prepare built, by inode, and unmodified since prepare (a callback that wrote
   # through its tree into ../../pristine would otherwise be cloned into every later row).
   local state
-  if ! state="$(_shmutant_pristine_state "$wd")" || [ "$state" != "${SHMUTANT_PRISTINE_STATE-}" ]; then
+  if ! state="$(_shmutant_pristine_state "$wd/pristine")" || [ "$state" != "${SHMUTANT_PRISTINE_STATE-}" ]; then
     _shmutant_worker_finish "$dir" unprepared 0 modified; return 0
   fi
   if [ "$(_shmutant_dir_id "$wd/pristine")" != "${SHMUTANT_PRISTINE_ID:-}" ] || [ -L "$wd/pristine" ] \
     || ! command -p mkdir -- "$dir/tree" 2>/dev/null || ! command -p cp -RPp -- "$wd/pristine/." "$dir/tree/" 2>/dev/null; then
     _shmutant_worker_finish "$dir" unprepared 0 clone; return 0
+  fi
+  # The clone itself is checked against the recorded state: a callback already running could
+  # have written into pristine between the check above and the copy, or during it, and put it
+  # back before the next worker looked.
+  if ! state="$(_shmutant_pristine_state "$dir/tree")" || [ "$state" != "${SHMUTANT_PRISTINE_STATE-}" ]; then
+    _shmutant_worker_finish "$dir" unprepared 0 raced; return 0
   fi
   if [ "$kind" = mut ]; then
     target="$root/${SHMUTANT_ROWS_FILE[$i]}"
@@ -1219,6 +1228,7 @@ _shmutant_detail() {
     unprepared) case "$2" in
                   clone)   printf 'could not clone the pristine tree' ;;
                   modified) printf 'the pristine tree was modified after prepare — a callback wrote into it, so nothing is cloned from it' ;;
+                  raced)   printf 'the clone does not match the prepared tree — a concurrent callback wrote into pristine during the copy' ;;
                   missing) printf 'the target is not a regular file inside the tree' ;;
                   moved)   printf 'the target'"'"'s directory left the tree before the rewrite — a concurrent callback moved or replaced it' ;;
                   *)       printf 'the rewrite failed' ;;
@@ -1478,15 +1488,36 @@ _shmutant_open_stream() {
   fi
   # Cached only once the descriptor exists: a retry after a failed open must open again.
   SHMUTANT_STREAM_OPENED="$SHMUTANT_STREAM"
-  # The inode the path named when opened; the pool checks at the end that it still does.
+  # The inode the path named when opened; the pool checks at the end that it still does, and
+  # that what follows the bytes already there is exactly what the pool wrote: every record also
+  # goes to a private unlinked copy, so a callback that truncates, overwrites or appends to the
+  # stream in place is seen.
   SHMUTANT_STREAM_INO="$(_shmutant_dir_id "$SHMUTANT_STREAM")"
+  SHMUTANT_STREAM_BASE="$(command -p wc -c < "$SHMUTANT_STREAM" 2>/dev/null | command -p tr -d ' ')" || SHMUTANT_STREAM_BASE=0
+  _shmutant_close_stream_copy
+  local copy
+  copy="$(command -p mktemp "${TMPDIR:-/tmp}/shmutant-stream.XXXXXX" 2>/dev/null)" || { _shmutant_err "$label: cannot create the private copy of the verdict stream"; return 2; }
+  # shellcheck disable=SC2093
+  if ! { exec {SHMUTANT_STREAM_COPY_W}>>"$copy" {SHMUTANT_STREAM_COPY_R}<"$copy"; } 2>/dev/null; then
+    command -p rm -f -- "$copy"; _shmutant_err "$label: cannot open the private copy of the verdict stream"; return 2
+  fi
+  command -p rm -f -- "$copy"
+}
+_shmutant_close_stream_copy() {
+  [ -z "${SHMUTANT_STREAM_COPY_W:-}" ] || exec {SHMUTANT_STREAM_COPY_W}>&-
+  [ -z "${SHMUTANT_STREAM_COPY_R:-}" ] || exec {SHMUTANT_STREAM_COPY_R}<&-
+  unset SHMUTANT_STREAM_COPY_W SHMUTANT_STREAM_COPY_R
 }
 
 # _shmutant_stream_intact — true when SHMUTANT_STREAM is unset or still names the file that was
 # opened: a callback that unlinked or replaced it left the records on an inode nobody can read.
 _shmutant_stream_intact() {
   [ -n "${SHMUTANT_STREAM:-}" ] || return 0
-  [ ! -L "$SHMUTANT_STREAM" ] && [ "$(_shmutant_dir_id "$SHMUTANT_STREAM")" = "${SHMUTANT_STREAM_INO:-}" ]
+  [ ! -L "$SHMUTANT_STREAM" ] && [ "$(_shmutant_dir_id "$SHMUTANT_STREAM")" = "${SHMUTANT_STREAM_INO:-}" ] || return 1
+  # Contents, past what was there when opened: a truncation, an overwrite or an appended record
+  # from a callback changes them; the pool's own records, through the descriptor, do not.
+  [ -n "${SHMUTANT_STREAM_COPY_R:-}" ] || return 1
+  [ "$(command -p tail -c "+$(( ${SHMUTANT_STREAM_BASE:-0} + 1 ))" -- "$SHMUTANT_STREAM" 2>/dev/null | command -p cksum)" = "$(command -p cksum <&"$SHMUTANT_STREAM_COPY_R")" ]
 }
 
 # _shmutant_readonly <name> — true when the caller made <name> readonly; an assignment to it
@@ -1516,21 +1547,24 @@ _shmutant_callable() {
   return 1
 }
 
-# _shmutant_pristine_state <workdir> — a fingerprint of <workdir>/pristine: every entry newer
-# than the pool's stamp, every entry's metadata (`ls -ldn`: mode, links, owner, size, a link's
-# target) and every regular file's content and size (POSIX cksum), sorted. Any write, addition,
-# removal or mode change after prepare changes it, whatever the timestamps say. Fails when the
-# stamp is not the regular file the pool made.
+# _shmutant_pristine_state <dir> — a fingerprint of the tree under <dir>, relative to it: every
+# entry's `ls -ldn` line (mode, owner, group, a file's size, mtime, name, a link's target) and
+# every regular file's content and size (POSIX cksum), sorted. The root entry, link counts,
+# directory sizes and platform mode suffixes are left out, so a faithful `cp -RPp` clone of a
+# tree has the fingerprint of the tree. Any write, addition, removal or mode change changes it,
+# whatever the timestamps say. Fails, rather than yield a partial listing, when a stage fails —
+# which includes a regular file whose content cannot be read.
 _shmutant_pristine_state() {
-  [ -f "${SHMUTANT_PRISTINE_STAMP:-}" ] && [ ! -L "$SHMUTANT_PRISTINE_STAMP" ] || return 1
   # find execs a PROGRAM: `command` is a shell builtin (macOS ships a stub of that name, Linux
   # does not), so the utilities are resolved from the standard PATH first and exec'd by path.
   local ls_bin cksum_bin
   ls_bin="$(command -pv ls)" && cksum_bin="$(command -pv cksum)" || return 1
-  { command -p find "$1/pristine" -newer "$SHMUTANT_PRISTINE_STAMP" -print 2>/dev/null
-    command -p find "$1/pristine" -exec "$ls_bin" -ldn -- {} + 2>/dev/null
-    command -p find "$1/pristine" -type f -exec "$cksum_bin" {} + 2>/dev/null
-  } | LC_ALL=C command -p sort
+  ( builtin cd -P -- "$1" 2>/dev/null || exit 1
+    set -o pipefail
+    { command -p find . ! -name . -exec "$ls_bin" -ldn -- {} + \
+        && command -p find . -type f -exec "$cksum_bin" {} + ; } 2>/dev/null \
+      | command -p awk '/^[0-9]/ { print; next } { sub(/[@+.]$/, "", $1); $2 = "-"; if ($1 ~ /^d/) $5 = "-"; print }' \
+      | LC_ALL=C command -p sort )
 }
 
 # _shmutant_pool_fail <label> <workdir> — the exit for a pool that stops after prepare: the
@@ -1540,8 +1574,9 @@ _shmutant_pool_fail() {
     _shmutant_remove "$2/pristine" "$2" || { _shmutant_err "$1: could not remove $2/pristine"; SHMUTANT_CLEANUP_FAILED=1; }
   fi
   if [ -n "${SHMUTANT_STREAM_FD:-}" ]; then exec {SHMUTANT_STREAM_FD}>&-; unset SHMUTANT_STREAM_FD; fi
+  _shmutant_close_stream_copy
   unset SHMUTANT_STREAM_OPENED
-  [ -z "${SHMUTANT_PRISTINE_STAMP:-}" ] || { command -p rm -f -- "$SHMUTANT_PRISTINE_STAMP"; unset SHMUTANT_PRISTINE_STAMP SHMUTANT_PRISTINE_STATE; }
+  unset SHMUTANT_PRISTINE_STATE
   # Last: from here to the pool's return nothing forks, so a handler sees no child of the pool.
   _shmutant_release_traps
 }
@@ -1616,6 +1651,7 @@ shmutant_pool() {
   command -p mkdir -p -- "$wd" 2>/dev/null || { _shmutant_err "$label: cannot create workdir $wd"; return 2; }
   wd="$(_shmutant_abs "$wd")" || { _shmutant_err "$label: cannot resolve workdir"; return 2; }
   _shmutant_workdir_owned "$label" "$wd" || return 2
+  SHMUTANT_WD_ID="$(_shmutant_dir_id "$wd")"
   _shmutant_callable "$prep" || { _shmutant_err "$label: prepare callback not found: $prep (a function, builtin or executable; an alias cannot be called by name)"; return 2; }
   _shmutant_callable "$run" || { _shmutant_err "$label: run callback not found: $run (a function, builtin or executable; an alias cannot be called by name)"; return 2; }
   _shmutant_validate_settings "$label" "$wd" || return 2
@@ -1667,6 +1703,10 @@ shmutant_pool() {
   # prepare may have defined a function under a builtin's name, or taken the run callback away:
   # checked again before any worker relies on either.
   _shmutant_no_shadows "$label" || { _shmutant_pool_fail "$label" "$wd"; return 2; }
+  # The workdir itself: prepare could have renamed it away and put another directory at its
+  # path. Nothing there is this pool's, so nothing there is removed (the pristine prepare made
+  # in it included).
+  if [ -L "$wd" ] || [ "$(_shmutant_dir_id "$wd")" != "${SHMUTANT_WD_ID:-}" ]; then _shmutant_err "$label: $wd is no longer the directory this pool marked as its own — prepare moved or replaced it"; SHMUTANT_KEEP=1 _shmutant_pool_fail "$label" "$wd"; return 2; fi
   _shmutant_callable "$run" || { _shmutant_err "$label: run callback not found after prepare: $run"; _shmutant_pool_fail "$label" "$wd"; return 2; }
   # prepare may have declared rows or had one refused: the table is read again here, and a
   # refusal after prepare is the same harness error as one before it.
@@ -1682,11 +1722,10 @@ shmutant_pool() {
   _shmutant_report_keep after-prepare
   _shmutant_open_stream "$label" || { _shmutant_pool_fail "$label" "$wd"; return 2; }
   SHMUTANT_PRISTINE_ID="$(_shmutant_dir_id "$wd/pristine")" || SHMUTANT_PRISTINE_ID=""
-  # The tree's state as prepare left it: a stamp and a fingerprint. A callback that later
-  # writes into pristine, adds to it, removes from it or changes a mode changes the fingerprint,
-  # and no row is cloned from the tree afterwards.
-  SHMUTANT_PRISTINE_STAMP="$(command -p mktemp "$wd/.stamp.XXXXXX" 2>/dev/null)" || { _shmutant_err "$label: cannot create a stamp in $wd"; _shmutant_pool_fail "$label" "$wd"; return 2; }
-  SHMUTANT_PRISTINE_STATE="$(_shmutant_pristine_state "$wd")" || { _shmutant_err "$label: cannot fingerprint the prepared tree"; _shmutant_pool_fail "$label" "$wd"; return 2; }
+  # The tree's state as prepare left it. A callback that later writes into pristine, adds to
+  # it, removes from it or changes a mode changes the fingerprint, and no row is cloned from the
+  # tree afterwards; every clone is checked against it after the copy.
+  SHMUTANT_PRISTINE_STATE="$(_shmutant_pristine_state "$wd/pristine")" || { _shmutant_err "$label: cannot fingerprint the prepared tree — a stage failed, or it holds a regular file whose content cannot be read"; _shmutant_pool_fail "$label" "$wd"; return 2; }
   [ -n "$root" ] || root="$wd/pristine"
   root="$(_shmutant_abs "$root")" || { _shmutant_err "$label: prepare printed a root that is not a directory"; _shmutant_pool_fail "$label" "$wd"; return 2; }
   if ! _shmutant_inside "$wd/pristine" "$root"; then
@@ -1776,7 +1815,7 @@ shmutant_pool() {
     return 2
   fi
   if [ "$intact" -eq 0 ]; then
-    _shmutant_err "$label: SHMUTANT_STREAM no longer names the file the records were written to (${SHMUTANT_STREAM:-}) — it was removed or replaced during the run"
+    _shmutant_err "$label: SHMUTANT_STREAM no longer names the file the records were written to, as they were written (${SHMUTANT_STREAM:-}) — it was removed, replaced, truncated, overwritten or appended to during the run"
     return 2
   fi
   if [ "$SHMUTANT_EMIT_FAILED" -ne 0 ]; then
@@ -1860,6 +1899,11 @@ _shmutant_cli_load() {
   return "$rc"
 }
 
+# _shmutant_cli_wd_is_ours <path> — true while <path> is, by identity, the workdir this run made.
+_shmutant_cli_wd_is_ours() {
+  [ ! -L "$1" ] && [ "$(_shmutant_dir_id "$1")" = "${SHMUTANT_CLI_WD_ID:-}" ]
+}
+
 # _shmutant_cli_abort <signal> — INT or TERM reached the CLI while its plan subshell was running:
 # kill the child's tree, remove a workdir this run created, and re-deliver the signal.
 _shmutant_cli_abort() {
@@ -1892,6 +1936,7 @@ _shmutant_cli_abort() {
   if [ -n "${SHMUTANT_CLI_WD_TO_RM:-}" ]; then
     if [ "$keep_last" = 1 ]; then
       _shmutant_err "workdir kept: $SHMUTANT_CLI_WD_TO_RM"
+    elif ! _shmutant_cli_wd_is_ours "$SHMUTANT_CLI_WD_TO_RM"; then _shmutant_err "run: refusing to remove $SHMUTANT_CLI_WD_TO_RM — it is no longer the workdir this run created"
     else
       _shmutant_remove "$SHMUTANT_CLI_WD_TO_RM" "${SHMUTANT_CLI_WD_PARENT:-}" || _shmutant_err "run: could not remove the workdir $SHMUTANT_CLI_WD_TO_RM"
     fi
@@ -1952,6 +1997,9 @@ _shmutant_cli_run() {
   # The workdir's parent, physical, taken before any plan code runs: the removal at the end
   # and on an interrupt is refused if the ancestry no longer resolves to it.
   SHMUTANT_CLI_WD_PARENT="$(_shmutant_abs "$(command -p dirname -- "$wd")")" || SHMUTANT_CLI_WD_PARENT=""
+  # The workdir's own identity, taken before the plan runs: it is removed only while the path
+  # still names this directory, not whatever a plan put there after moving it away.
+  SHMUTANT_CLI_WD_ID="$(_shmutant_dir_id "$wd")"
   # The effective SHMUTANT_KEEP travels on a second channel: the plan subshell and the pool
   # append the value each time it may have changed (after the plan loads, before and after
   # prepare), and an interrupt reads the last one. Unlinked at once: no path names it.
@@ -2006,6 +2054,7 @@ _shmutant_cli_run() {
   # Only a workdir this run created is removed. A caller-supplied one is theirs: the pool's own
   # artifacts stay in it and nothing else in it is touched.
   if [ "$keep" = 1 ]; then _shmutant_err "workdir kept: $wd"
+  elif [ "$made" = 1 ] && ! _shmutant_cli_wd_is_ours "$wd"; then _shmutant_err "run: refusing to remove $wd — it is no longer the workdir this run created"; rc=2
   elif [ "$made" = 1 ]; then _shmutant_remove "$wd" "${SHMUTANT_CLI_WD_PARENT:-}" || { _shmutant_err "run: could not remove the workdir $wd"; rc=2; }
   fi
   return "$rc"

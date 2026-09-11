@@ -577,6 +577,24 @@ t_pool_refuses_a_modified_pristine_tree() {
   forging_run() { local f="$1/../../pristine/lib.sh"; sed 's/\$1 + \$2/$1 - $2/' "$f" > "$T/forged" && cat "$T/forged" > "$f"; touch -t 203001010000 "$f"; bash "$1/test.sh"; }
   SHMUTANT_JOBS=1 SHMUTANT_BASELINE=0 pool lbl "$T/wd6" toy_prepare forging_run
   eq "$(verdict_of b)" unprepared 'a same-size write with its timestamp forged back is seen by content'
+  # a write between a worker's check of pristine and its copy (a concurrent callback), put back
+  # before the next check: the CLONE is checked against the recorded state after the copy
+  ( eval "$(declare -f _shmutant_pristine_state | sed '1s/_shmutant_pristine_state/_shmutant_pristine_state_real/')"
+    # the write lands on the SECOND look at pristine: the first is the pool's own record of it
+    _shmutant_pristine_state() { local out; out="$(_shmutant_pristine_state_real "$@")" || return 1; case "$1" in */pristine) echo x >> "$T/looks"; [ "$(grep -c x "$T/looks")" -eq 2 ] && printf '\n# raced\n' >> "$1/lib.sh" ;; esac; printf '%s' "$out"; }
+    SHMUTANT_JOBS=1 SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd7" toy_prepare toy_run > "$T/out7" 2>"$T/err7" )
+  has "$(cat "$T/out7")" $'\trow\tunprepared\ta\t' 'a clone taken while a callback wrote into pristine is not run'
+  has "$(cat "$T/err7")" 'during the copy' 'says why'
+  # a regular file the pool cannot read makes the fingerprint fail, and the pool refuse
+  if [ "$(id -u)" -ne 0 ]; then
+    unreadable_prepare() { toy_prepare "$1"; printf 'secret\n' > "$1/unreadable"; chmod 000 "$1/unreadable"; }
+    SHMUTANT_BASELINE=0 pool lbl "$T/wd8" toy_prepare toy_run
+    rc_is "$RC" 0 'fixture: the pool runs before the unreadable file is added'
+    SHMUTANT_BASELINE=0 pool lbl "$T/wd9" unreadable_prepare toy_run
+    rc_is "$RC" 2 'a prepared tree holding a file whose content cannot be fingerprinted is refused, not passed over'
+    has "$ERR" 'cannot fingerprint' 'says why'
+    chmod 600 "$T/wd9/pristine/unreadable" 2>/dev/null
+  fi
 }
 
 t_readonly_settings_do_not_kill_the_caller() {
@@ -646,6 +664,68 @@ t_cli_abort_waits_for_the_child_and_names_its_identity() {
   eq "$out" 'pending=TERM alive' 'a signal during the spawn window is recorded, not acted on'
   out="$(SHMUTANT="$SHMUTANT" bash -c '. "$SHMUTANT"; sleep 30 & SHMUTANT_CLI_CHILD=$!; SHMUTANT_CLI_CHILD_ID="$(_shmutant_identity "$!")"; _shmutant_kill_tree_twice() { printf "%s\n" "$1"; }; _shmutant_cli_abort TERM' 2>/dev/null)"
   case "$out" in [0-9]*:[0-9]*) ;; *) fail_ "the CLI abort escalated with [$out], not pid:identity" ;; esac
+}
+
+t_mutate_takes_a_bare_relative_target_as_a_path() {
+  # the worker rewrites a target by its base name in a pinned directory: to awk a bare `-` is
+  # standard input and `x=1` an assignment, so a bare name is made a path first
+  mkdir -p "$T/bare"; printf 'a=1\n' > "$T/bare/-"; printf 'a=1\n' > "$T/bare/x=1"
+  ( cd "$T/bare" && shmutant_mutate - 'a=1' 'a=2' < /dev/null ); rc_is $? 0 'a target named - is rewritten'
+  eq "$(cat "$T/bare/-")" a=2 'as a file, not standard input'
+  ( cd "$T/bare" && shmutant_mutate x=1 'a=1' 'a=3' < /dev/null ); rc_is $? 0 'a target named like an assignment is rewritten'
+  eq "$(cat "$T/bare/x=1")" a=3 'as a file'
+}
+
+t_stream_altered_in_place_is_reported() {
+  # a callback that truncates, overwrites or appends to the SHMUTANT_STREAM file in place (same
+  # inode) is seen: the pool checks the stream past what was there when opened against its own
+  # private copy of the records
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  printf 'earlier\n' > "$T/s.tsv"
+  ( SHMUTANT_STREAM="$T/s.tsv" SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd" toy_prepare toy_run > /dev/null 2>"$T/e"; echo "rc=$?" > "$T/rc" )
+  has "$(cat "$T/rc")" 'rc=0' 'an untouched stream with earlier content passes'
+  has "$(head -n 1 "$T/s.tsv")" earlier 'and the earlier content is kept'
+  # truncated after the baseline record went out: that record is gone from the file
+  truncating_run() { : > "$SHMUTANT_STREAM"; bash "$1/test.sh"; }
+  ( SHMUTANT_STREAM="$T/s2.tsv" SHMUTANT_BASELINE=1 shmutant_pool lbl "$T/wd2" toy_prepare truncating_run > /dev/null 2>"$T/e2"; echo "rc=$?" > "$T/rc2" )
+  has "$(cat "$T/rc2")" 'rc=2' 'a stream truncated in place by a callback is a harness error'
+  has "$(cat "$T/e2")" 'truncated, overwritten or appended' 'says why'
+  appending_run() { printf 'shmutant\t1\trow\tkilled\tfake\tlib.sh\tx\t0\tplanted\n' >> "$SHMUTANT_STREAM"; bash "$1/test.sh"; }
+  ( SHMUTANT_STREAM="$T/s3.tsv" SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd3" toy_prepare appending_run > /dev/null 2>"$T/e3"; echo "rc=$?" > "$T/rc3" )
+  has "$(cat "$T/rc3")" 'rc=2' 'a record a callback appended to the stream is a harness error'
+}
+
+t_cli_removes_only_the_workdir_it_created_by_identity() {
+  # a plan whose prepare moves the automatic workdir away and puts a caller directory at its
+  # path: the pool refuses to go on, and neither the normal nor the interrupted cleanup removes
+  # what now sits there
+  mk_toy "$T/toy"; TOY="$T/toy"
+  mkdir -p "$T/toy/victim"; printf 'precious\n' > "$T/toy/victim/keep"
+  cat > "$T/toy/plan-swap.sh" <<'EOF'
+prepare() { printf '%s' "$SHMUTANT_CLI_WD" > "$SHMUTANT_PLAN_DIR/wdpath"; mv "$SHMUTANT_CLI_WD" "$SHMUTANT_CLI_WD.moved" && mv "$SHMUTANT_PLAN_DIR/victim" "$SHMUTANT_CLI_WD"; shmutant_copy_tree "$SHMUTANT_PLAN_DIR" "$1"; }
+run() { bash "$1/test.sh"; }
+shmutant_target lib.sh
+shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+EOF
+  mkdir -p "$T/tmpd"
+  TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-swap.sh" --no-baseline > /dev/null 2>"$T/e"; rc_is $? 2 'a workdir prepare replaced is a harness error'
+  local wd; wd="$(cat "$T/toy/wdpath" 2>/dev/null)"
+  [ -n "$wd" ] || fail_ 'fixture: the plan did not record the workdir path'
+  [ -f "$wd/keep" ] || fail_ 'the caller directory put at the automatic workdir path was removed'
+  has "$(cat "$T/e")" 'no longer the directory this pool marked' 'the pool says why'
+  has "$(cat "$T/e")" 'no longer the workdir this run created' 'the CLI says why it left it'
+  rm -rf "$T/tmpd"; mkdir -p "$T/tmpd" "$T/toy/victim"; printf 'precious\n' > "$T/toy/victim/keep"
+  # the same swap during a prepare that is then interrupted
+  sed 's/shmutant_copy_tree "\$SHMUTANT_PLAN_DIR" "\$1"; }/: > "$SHMUTANT_PLAN_DIR\/swapped"; sleep 5; shmutant_copy_tree "$SHMUTANT_PLAN_DIR" "$1"; }/' "$T/toy/plan-swap.sh" > "$T/toy/plan-swap-slow.sh"
+  grep -q 'swapped' "$T/toy/plan-swap-slow.sh" || fail_ 'fixture: the slow plan was not derived'
+  TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-swap-slow.sh" --no-baseline > /dev/null 2>"$T/e2" & local cli=$!
+  wait_for "$T/toy/swapped" || fail_ 'fixture: the slow prepare never swapped'
+  kill -TERM "$cli"; wait "$cli" 2>/dev/null
+  wd="$(cat "$T/toy/wdpath" 2>/dev/null)"
+  [ -f "$wd/keep" ] || fail_ 'the interrupted cleanup removed the caller directory at the automatic workdir path'
+  has "$(cat "$T/e2")" 'no longer the workdir this run created' 'the interrupted CLI says why it left it'
 }
 
 t_verdict_scans_a_large_output() {
@@ -1244,7 +1324,7 @@ t_sibling_cannot_plant_in_another_workers_directory() {
   declare -gA SHMUTANT_DIR_IDS=() SHMUTANT_VERDICT_W=() SHMUTANT_VERDICT_R=() SHMUTANT_RES_VERDICT=() SHMUTANT_RES_US=() SHMUTANT_RES_STATUS=()
   SHMUTANT_DIR_IDS[mut-0]="$(_shmutant_dir_id "$T/wd/mut-0")"; SHMUTANT_PRISTINE_ID="$(_shmutant_dir_id "$T/wd/pristine")"
   # the pool's record of the prepared tree, which the worker checks before cloning
-  SHMUTANT_PRISTINE_STAMP="$(mktemp "$T/wd/.stamp.XXXXXX")"; SHMUTANT_PRISTINE_STATE="$(_shmutant_pristine_state "$T/wd")"
+  SHMUTANT_PRISTINE_STATE="$(_shmutant_pristine_state "$T/wd/pristine")"
   SHMUTANT_ROWS_SEL=(add-works)
   _shmutant_open_channel "$T/wd" mut-0 || fail_ 'fixture: no channel'
   ( SHMUTANT_TIMEOUT=0 _shmutant_worker mut 0 "$T/wd" toy_run "" )

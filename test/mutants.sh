@@ -1005,10 +1005,8 @@ shmutant_mut 'a baseline-skipped row keeps an earlier pool directory' \
   't_pool_recreates_worker_dirs'
 
 # --- guards added for the twenty-seventh review round ---
-shmutant_mut 'the CLI removes its workdir without pinning the parent' \
-  '  elif [ "$made" = 1 ]; then _shmutant_remove "$wd" "${SHMUTANT_CLI_WD_PARENT:-}" ||' \
-  '  elif [ "$made" = 1 ]; then _shmutant_remove "$wd" ||' \
-  't_cli_run'
+# The CLI workdir parent-pin row (round 27) is subsumed: the workdir's identity (inode and
+# physical path) is checked before removal, which refuses the same ancestor swap first.
 shmutant_mut 'a mutate path with a newline is accepted' \
   '  case "$1" in *$'"'"'\n'"'"'*) _shmutant_err "mutate: a path containing a newline is refused"; return 1 ;; esac' \
   '  :' \
@@ -1068,7 +1066,7 @@ shmutant_mut 'an unscanned run keeps its callback verdict' \
 
 # --- guards added for the thirtieth review round ---
 shmutant_mut 'a pristine tree modified after prepare is cloned anyway' \
-  '  if ! state="$(_shmutant_pristine_state "$wd")" || [ "$state" != "${SHMUTANT_PRISTINE_STATE-}" ]; then' \
+  '  if ! state="$(_shmutant_pristine_state "$wd/pristine")" || [ "$state" != "${SHMUTANT_PRISTINE_STATE-}" ]; then' \
   '  if false; then' \
   't_pool_refuses_a_modified_pristine_tree'
 shmutant_mut 'a readonly setting is assigned to' \
@@ -1086,12 +1084,12 @@ shmutant_mut 'a function named bash is taken for the PATH interpreter' \
 
 # --- guards added for the thirty-first review round ---
 shmutant_mut 'the pristine fingerprint ignores file content' \
-  '    command -p find "$1/pristine" -type f -exec "$cksum_bin" {} + 2>/dev/null' \
-  '    :' \
+  '        && command -p find . -type f -exec "$cksum_bin" {} + ; } 2>/dev/null \' \
+  '        && : ; } 2>/dev/null \' \
   't_pool_refuses_a_modified_pristine_tree'
 shmutant_mut 'the pristine fingerprint ignores metadata' \
-  '    command -p find "$1/pristine" -exec "$ls_bin" -ldn -- {} + 2>/dev/null' \
-  '    :' \
+  '    { command -p find . ! -name . -exec "$ls_bin" -ldn -- {} + \' \
+  '    { : \' \
   't_pool_refuses_a_modified_pristine_tree'
 shmutant_mut 'a DEBUG trap prepare left keeps running through the pool' \
   '  SHMUTANT_TRAPS_HELD=1; trap - CHLD DEBUG RETURN ERR' \
@@ -1117,3 +1115,33 @@ shmutant_mut 'the CLI child is escalated on by number alone' \
   '    _shmutant_kill_tree_twice "$SHMUTANT_CLI_CHILD${SHMUTANT_CLI_CHILD_ID:+:$SHMUTANT_CLI_CHILD_ID}"' \
   '    _shmutant_kill_tree_twice "$SHMUTANT_CLI_CHILD"' \
   't_cli_abort_waits_for_the_child_and_names_its_identity'
+
+# --- guards added for the thirty-second review round ---
+shmutant_mut 'the CLI removes its automatic workdir whatever now sits at its path' \
+  '  elif [ "$made" = 1 ] && ! _shmutant_cli_wd_is_ours "$wd"; then _shmutant_err "run: refusing to remove $wd — it is no longer the workdir this run created"; rc=2' \
+  '  elif false; then :' \
+  't_cli_removes_only_the_workdir_it_created_by_identity'
+shmutant_mut 'the interrupted CLI removes whatever sits at its workdir path' \
+  '    elif ! _shmutant_cli_wd_is_ours "$SHMUTANT_CLI_WD_TO_RM"; then _shmutant_err "run: refusing to remove $SHMUTANT_CLI_WD_TO_RM — it is no longer the workdir this run created"' \
+  '    elif false; then :' \
+  't_cli_removes_only_the_workdir_it_created_by_identity'
+shmutant_mut 'the pool goes on in a workdir prepare replaced' \
+  '  if [ -L "$wd" ] || [ "$(_shmutant_dir_id "$wd")" != "${SHMUTANT_WD_ID:-}" ]; then _shmutant_err "$label: $wd is no longer the directory this pool marked as its own — prepare moved or replaced it"; SHMUTANT_KEEP=1 _shmutant_pool_fail "$label" "$wd"; return 2; fi' \
+  '  :' \
+  't_cli_removes_only_the_workdir_it_created_by_identity'
+shmutant_mut 'a clone is not checked against the prepared tree after the copy' \
+  '  if ! state="$(_shmutant_pristine_state "$dir/tree")" || [ "$state" != "${SHMUTANT_PRISTINE_STATE-}" ]; then' \
+  '  if false; then' \
+  't_pool_refuses_a_modified_pristine_tree'
+shmutant_mut 'a bare relative target reaches awk as an operand' \
+  '  case "$f" in /*|./*|../*) ;; *) f="./$f" ;; esac' \
+  '  :' \
+  't_mutate_takes_a_bare_relative_target_as_a_path'
+shmutant_mut 'a file the fingerprint cannot read is passed over' \
+  '    set -o pipefail' \
+  '    :' \
+  't_pool_refuses_a_modified_pristine_tree'
+shmutant_mut 'the verdict stream contents are not checked at the end' \
+  '  [ "$(command -p tail -c "+$(( ${SHMUTANT_STREAM_BASE:-0} + 1 ))" -- "$SHMUTANT_STREAM" 2>/dev/null | command -p cksum)" = "$(command -p cksum <&"$SHMUTANT_STREAM_COPY_R")" ]' \
+  '  true' \
+  't_stream_altered_in_place_is_reported'
