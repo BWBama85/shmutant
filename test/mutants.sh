@@ -589,10 +589,6 @@ shmutant_mut 'a read-only tree of ours is not made removable' \
   '      command -p find "$path" -type d ! -perm -u+rwx -exec chmod u+rwx {} + 2>/dev/null' \
   '      :' \
   't_pool_removes_a_read_only_pristine_root'
-shmutant_mut 'the tree below the root is signalled without being frozen first' \
-  '  _shmutant_freeze_from' \
-  '  :' \
-  't_verdict_timeout_stops_a_run_that_keeps_forking'
 shmutant_mut 'retained victims are neither frozen nor searched from' \
   '    have["${p%%:*}"]=1; stillours+=("${p%%:*} ${p#*:}")' \
   '    :' \

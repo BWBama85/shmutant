@@ -825,7 +825,8 @@ t_freeze_records_only_what_it_stopped() {
   sleep 0.2
   case "$(ps -o stat= -p "$bystander")" in T*) fail_ 'the bystander was left stopped' ;; esac
   kill -0 "$bystander" 2>/dev/null; rc_is $? 0 'the bystander is still there'
-  kill "$bystander" "$root" 2>/dev/null; wait "$bystander" "$root" 2>/dev/null
+  # KILL: a bystander a defect left stopped would never see a TERM, and the wait would hang
+  kill -KILL "$bystander" "$root" 2>/dev/null; wait "$bystander" "$root" 2>/dev/null
 }
 
 # shellcheck disable=SC2034
@@ -853,6 +854,7 @@ t_freeze_that_never_settles_is_reported() {
   hanging_run() { sleep 3; bash "$1/test.sh"; }
   ( _shmutant_descendants_started() { grep -qx "$1" "$T/spawned" 2>/dev/null && return 0; [ "$(grep -c . "$T/spawned" 2>/dev/null || echo 0)" -lt 40 ] || return 0; sleep 30 > /dev/null 2>&1 & echo "$!" >> "$T/spawned"; printf '%s %s\n' "$!" "$(_shmutant_identity "$!")"; }
     SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=1 shmutant_pool lbl "$T/wd" toy_prepare hanging_run > "$T/out" 2> "$T/err" )
+  case "$(cat "$T/out")" in *unsettled*) ;; *) echo "note: $_unit: spawned=$(grep -c . "$T/spawned" 2>/dev/null) out=[$(cat "$T/out")] err=[$(cat "$T/err")]" ;; esac
   has "$(cat "$T/out")" 'unsettled' 'the verdict is unsettled, not timeout'
   has "$(cat "$T/err")" 'never settled' 'and the row is explained'
 }
@@ -1701,7 +1703,7 @@ t_pool_clone_keeps_metadata() {
   [ "$T/root-copy" -nt "$T/root" ] && fail_ 'the destination root did not keep the source root timestamp'
   chmod 755 "$T/root" "$T/root-copy"
   local rootowned
-  for rootowned in /var/empty /var/empty; do
+  for rootowned in /var/empty /etc/skel /usr/share/base-files /etc/cron.d; do
     [ -d "$rootowned" ] && [ "$(ls -ld "$rootowned" | awk '{ print $3 }')" != "$(id -un)" ] && break
     rootowned=""
   done
