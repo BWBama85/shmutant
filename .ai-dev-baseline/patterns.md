@@ -320,4 +320,9 @@ One line per resolved review thread, newest last.
 - `caller-owned-path-deleted` `shmutant.sh` `45af05b` `PRRT_kwDOUT7q9s6hWunC` PR #1 2026-09-11
 - `path-lookup-ambiguity` `shmutant.sh` `45af05b` `PRRT_kwDOUT7q9s6hWunE` PR #1 2026-09-11
 - `write-failure-swallowed` `shmutant.sh` `45af05b` `PRRT_kwDOUT7q9s6hWunO` PR #1 2026-09-11
+- `contract-not-honoured` `shmutant.sh` `8a0c8cc` `PRRT_kwDOUT7q9s6hZ7h7` PR #1 2026-09-11
+- `contract-not-honoured` `shmutant.sh` `8a0c8cc` `PRRT_kwDOUT7q9s6hZ7iD` PR #1 2026-09-11
+- `contract-not-honoured` `README.md` `8a0c8cc` `PRRT_kwDOUT7q9s6hZ7iK` PR #1 2026-09-11
+- `caller-owned-path-deleted` `shmutant.sh` `8a0c8cc` `sweep-r29-caller-owned-path-deleted-1` PR #1 2026-09-11
+- `write-failure-swallowed` `shmutant.sh` `8a0c8cc` `sweep-r29-write-failure-swallowed-1` PR #1 2026-09-11
 <!-- adb:hits:end -->
