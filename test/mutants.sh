@@ -608,7 +608,7 @@ shmutant_mut 'the verdict is scored from the output path, not the descriptor' \
   '  exec {out_r}<"$dir/output"; _shmutant_scan_output "$out_r" "${SHMUTANT_RED_PREFIX:-FAIL: }" "$wit"' \
   't_run_cannot_forge_its_output_or_the_marker'
 shmutant_mut 'a swapped worker directory is cleaned and written beneath' \
-  '  if [ -L "$1" ] || [ "$(command -p ls -di -- "$1" 2>/dev/null | command -p awk '"'"'{ print $1 }'"'"')" != "${SHMUTANT_DIR_ID:-}" ]; then' \
+  '  if [ -L "$1" ] || [ "$(_shmutant_dir_id "$1")" != "${SHMUTANT_DIR_ID:-}" ]; then' \
   '  if false; then' \
   't_worker_cleanup_refuses_a_swapped_directory'
 shmutant_mut 'a root given with an identity is stopped without checking it' \
@@ -674,8 +674,8 @@ shmutant_mut 'a verified holder yields no group to signal' \
   '  SHMUTANT_HELD=()' \
   't_verdict_timeout_without_an_identity'
 shmutant_mut 'the .git prune takes the source name as a pattern' \
-  '  linked="$(cd "$src" 2>/dev/null && command -p find . -path ./.git -prune' \
-  '  linked="$(cd "$src" 2>/dev/null && command -p find "$src" -path "$src/.git" -prune' \
+  '  linked="$(builtin cd -- "$src" 2>/dev/null && command -p find . -path ./.git -prune' \
+  '  linked="$(builtin cd -- "$src" 2>/dev/null && command -p find "$src" -path "$src/.git" -prune' \
   't_copy_tree_excludes_git'
 shmutant_mut 'a relative stream in a missing directory is re-based onto the root' \
   '    if ! sdir="$(_shmutant_abs "$(command -p dirname -- "$SHMUTANT_STREAM")")"; then' \
@@ -730,8 +730,8 @@ shmutant_mut 'the holder is a job of the wrapper' \
 
 # --- guards added for the twenty-second review round ---
 shmutant_mut 'the prepared root is read back by path after prepare' \
-  '  root="$(command -p cat <&"$pout_r")"; exec {pout_w}>&- {pout_r}<&-' \
-  '  root="$(command -p cat "$wd"/.prepare.* 2>/dev/null)"; exec {pout_w}>&- {pout_r}<&-' \
+  '  root="$(command -p cat <&"$pout_r"; builtin printf x)"; root="${root%x}"; exec {pout_w}>&- {pout_r}<&-' \
+  '  root="$(command -p cat "$wd"/.prepare.* 2>/dev/null; builtin printf x)"; root="${root%x}"; exec {pout_w}>&- {pout_r}<&-' \
   't_prepare_cannot_redirect_its_own_capture'
 shmutant_mut 'a stream removed or replaced during the run is not noticed' \
   '  if ! _shmutant_stream_intact; then' \
@@ -804,7 +804,7 @@ shmutant_mut 'the workdir ownership check runs under the caller glob options' \
   '  ( ' \
   't_pool_refuses_a_workdir_it_did_not_create_entries_in'
 shmutant_mut 'a function shadowing kill is not refused' \
-  '  for n in kill wait read trap printf mapfile exec builtin command cd pwd exit return declare local unset set shopt eval readonly export shift true false; do' \
+  "  for n in kill wait read trap printf mapfile exec builtin command cd pwd exit return declare local unset set shopt eval readonly export shift true false '[' : . type test; do" \
   '  for n in; do' \
   't_pool_refuses_shadowed_builtins_and_posix_mode'
 shmutant_mut 'POSIX mode is not refused' \
@@ -962,7 +962,7 @@ shmutant_mut 'a workdir created under an initial keep is never tracked for remov
   '  [ "$made" = 1 ] && [ "$keep" != 1 ] && SHMUTANT_CLI_WD_TO_RM="$wd"' \
   't_cli_run'
 shmutant_mut 'a function named exit is not a refused shadow' \
-  '  for n in kill wait read trap printf mapfile exec builtin command cd pwd exit return declare local unset set shopt eval readonly export shift true false; do' \
+  "  for n in kill wait read trap printf mapfile exec builtin command cd pwd exit return declare local unset set shopt eval readonly export shift true false '[' : . type test; do" \
   '  for n in kill wait read trap printf mapfile exec builtin command cd pwd; do' \
   't_pool_refuses_shadowed_builtins_and_posix_mode'
 shmutant_mut 'a relative copy destination is rebased on the PWD variable' \
@@ -1017,3 +1017,37 @@ shmutant_mut 'a listing entry with no start time is left stopped and unreported'
   '    case "${p#* }" in '"'"''"'"'|*[!0-9]*) kill -CONT "${p%% *}" 2>/dev/null; SHMUTANT_FREEZE_UNSETTLED=1; continue ;; esac' \
   '    :' \
   't_freeze_records_only_what_it_stopped'
+
+# --- guards added for the twenty-eighth review round ---
+shmutant_mut 'the shadow check leaves CHLD armed through its forks' \
+  '  saved_chld="$(trap -p CHLD)"; trap - CHLD' \
+  '  saved_chld="$(trap -p CHLD)"' \
+  't_pool_refuses_shadowed_builtins_and_posix_mode'
+shmutant_mut 'the punctuation builtins are not in the shadow list' \
+  "  for n in kill wait read trap printf mapfile exec builtin command cd pwd exit return declare local unset set shopt eval readonly export shift true false '[' : . type test; do" \
+  '  for n in kill wait read trap printf mapfile exec builtin command cd pwd exit return declare local unset set shopt eval readonly export shift true false; do' \
+  't_pool_refuses_shadowed_builtins_and_posix_mode'
+shmutant_mut 'a colliding destination entry is written through' \
+  '      { [ -e "$dst/$name" ] || [ -L "$dst/$name" ]; } && command -p rm -rf -- "$dst/$name" 2>/dev/null' \
+  '      :' \
+  't_copy_tree_excludes_git'
+shmutant_mut 'the hard-link scan uses a caller cd' \
+  '  linked="$(builtin cd -- "$src" 2>/dev/null && command -p find . -path ./.git -prune -o -type f -links +1 -print 2>/dev/null)" || frc=$?' \
+  '  linked="$(cd -- "$src" 2>/dev/null && command -p find . -path ./.git -prune -o -type f -links +1 -print 2>/dev/null)" || frc=$?' \
+  't_copy_tree_excludes_git'
+shmutant_mut 'a directory identity is inode only, without the physical path' \
+  '  printf '"'"'%s:%s'"'"' "$id" "$phys"' \
+  '  printf '"'"'%s'"'"' "$id"' \
+  't_worker_cleanup_refuses_a_swapped_directory'
+shmutant_mut 'a failed directory mode restore is a silent success' \
+  '  command -p chmod -- "$(_shmutant_mode_spec "$2")" "$1" 2>/dev/null && return 0' \
+  '  command -p chmod -- "$(_shmutant_mode_spec "$2")" "$1" 2>/dev/null; return 0' \
+  't_mutate_preserves_mode'
+shmutant_mut 'the mutate success path ignores a failed restore' \
+  '  _shmutant_mutate_restore "$dir" "$dirmode" || return 1' \
+  '  _shmutant_mutate_restore "$dir" "$dirmode" || true' \
+  't_mutate_preserves_mode'
+shmutant_mut 'a prepare root ending in a newline is trimmed to its sibling' \
+  "  case \"\$root\" in *\$'\\n'*) _shmutant_err \"\$label: prepare printed a root whose name contains a newline\"; _shmutant_pool_fail \"\$label\" \"\$wd\"; return 2 ;; esac" \
+  '  :' \
+  't_pool_reads_the_table_prepare_declared'

@@ -145,6 +145,12 @@ t_mutate_preserves_mode() {
   shmutant_mutate "$T/f" 'new' 'newer'; rc_is $? 0 'applies again'
   [ -x "$T/f" ] && fail_ 'a mode the file did not have was added'
   eq "$(cat "$T/f")" $'#!/bin/sh\necho newer' 'content rewritten'
+  # restoring a directory mode that cannot be applied (here the directory is gone) is a failure
+  _shmutant_mutate_restore "$T/gone-dir" 'drwxr-xr-x'; rc_is $? 1 'restoring a mode that chmod cannot apply returns failure'
+  _shmutant_mutate_restore "$T/gone-dir" ''; rc_is $? 0 'restoring nothing is a no-op success'
+  # and the mutate success path propagates a restore failure
+  printf 'x=1\n' > "$T/pf"
+  ( _shmutant_mutate_restore() { return 1; }; shmutant_mutate "$T/pf" 'x=1' 'x=2' ); rc_is $? 1 'a mutate whose directory-mode restore failed reports failure'
 }
 
 t_mutate_rewrites_a_read_only_target() {
@@ -433,6 +439,20 @@ t_pool_refuses_shadowed_builtins_and_posix_mode() {
   eq "$(cat "$T/rc2")" 2 'a kill function defined by prepare is refused after prepare'
   has "$(cat "$T/e4")" 'is not the builtin' 'says why'
   has "$(cat "$T/e")" 'POSIX mode' 'says why'
+  # a punctuation builtin the harness relies on: the shadow check names it (the pool's own
+  # arity guard, which uses [, would refuse a [ shadow first, so the check is exercised directly)
+  ( eval '[() { :; }'; _shmutant_no_shadows lbl 2>"$T/e7" ); rc_is $? 2 'a function named [ is refused by the shadow check'
+  has "$(cat "$T/e7")" 'is not the builtin' 'says why'
+  # the check neutralises a caller's CHLD trap around its per-name forks: with it armed the trap
+  # would fire ~once per builtin checked and could define a shadow after its name was cleared.
+  # A count is deterministic where catching the race is not: at most the one unavoidable fork
+  # that captures the trap, versus dozens with the trap left armed.
+  ( : > "$T/chld"; trap 'echo x >> "$T/chld"' CHLD
+    _shmutant_no_shadows lbl > /dev/null 2>&1
+    trap - CHLD
+    fires="$(grep -c x "$T/chld" 2>/dev/null || echo 0)"
+    [ "$fires" -le 2 ] || { echo "FAIL: $_unit: a caller CHLD trap fired $fires times through the shadow check's forks"; exit 1; }
+    exit 0 ) || _failed=1
   # utilities are reached through command -p: a plan's function or a PATH prepare set to the
   # tree's bin does not stand in for ps, awk or ls
   shadowing_prepare() { toy_prepare "$1"; mkdir -p "$1/bin"; printf '#!/bin/sh\necho "1 1"\n' > "$1/bin/awk"; printf '#!/bin/sh\nexit 0\n' > "$1/bin/ps"; chmod +x "$1/bin/awk" "$1/bin/ps"; PATH="$1/bin:$PATH"; }
@@ -1032,6 +1052,13 @@ t_run_errexit_failure_still_snapshots_leftovers() {
 
 t_worker_cleanup_refuses_a_swapped_directory() {
   mk_toy "$T/toy"; TOY="$T/toy"
+  # A directory identity carries its resolved physical path, not the inode alone: an inode is
+  # unique only within a filesystem, so a same-inode directory across a swapped mount would
+  # otherwise pass. (A cross-mount swap is impractical to stage in a unit; the path component
+  # that closes it is asserted directly.)
+  mkdir -p "$T/idd"
+  case "$(_shmutant_dir_id "$T/idd")" in */*) ;; *) fail_ 'a directory identity does not carry its physical path' ;; esac
+  eq "$(_shmutant_dir_id "$T/idd")" "$(command -p ls -di -- "$T/idd" | awk '{print $1}'):$(cd "$T/idd" && pwd -P)" 'the identity is inode and physical path'
   shmutant_reset; shmutant_target lib.sh
   shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
   mkdir -p "$T/victim/tree" "$T/victim/output"; printf 'precious\n' > "$T/victim/tree/keep"; printf 'mine\n' > "$T/victim/output/keep"
@@ -1630,6 +1657,12 @@ t_pool_reads_the_table_prepare_declared() {
   eq "$(verdict_of b)" survived 'the row declared by prepare has its verdict'
   shmutant_reset; shmutant_target lib.sh
   shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  newline_root_prepare() { toy_prepare "$1"; mkdir -p "$1/r
+"; printf '%s\n' "$1/r
+"; }
+  SHMUTANT_BASELINE=0 pool lbl "$T/wdnl" newline_root_prepare toy_run
+  rc_is "$RC" 2 'a prepare root whose name ends in a newline is refused, not trimmed to the sibling'
+  has "$ERR" 'contains a newline' 'says why'
   refusing_prepare() { toy_prepare "$1"; shmutant_mut 'c' '' 'x' 'add-works' 2>/dev/null; true; }
   SHMUTANT_BASELINE=0 pool lbl "$T/wd" refusing_prepare toy_run
   rc_is "$RC" 2 'a declaration refused inside prepare is the same harness error as one refused before it'
@@ -1803,11 +1836,14 @@ t_pool_honours_jobs() {
   shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
   shmutant_mut 'b' '$1 + $2' '$1 * $2' 'add-works'
   shmutant_mut 'c' '$1 + $2' '$1 / $2' 'add-works'
-  trace_run() { echo start >> "$T/trace"; sleep 0.2; echo end >> "$T/trace"; bash "$1/test.sh"; }
+  rm -f "$T/trace"
+  # A one-second window so both workers reach `start` before either reaches `end` if they run
+  # at once; counting the starts before the first end is deterministic where trace order is not.
+  trace_run() { echo start >> "$T/trace"; sleep 1; echo end >> "$T/trace"; bash "$1/test.sh"; }
   SHMUTANT_JOBS=1 SHMUTANT_BASELINE=0 pool lbl "$T/wd" toy_prepare trace_run
   rc_is "$RC" 0 'all killed'
   eq "$(field summary 7)" 1 'summary reports jobs=1'
-  eq "$(tr '\n' ' ' < "$T/trace")" 'start end start end start end ' 'with one job the runs never overlap'
+  eq "$(awk '/^end/{print c; exit} /^start/{c++}' "$T/trace")" 1 'with one job only one run has started before the first ends'
   SHMUTANT_JOBS=50 SHMUTANT_BASELINE=0 pool lbl "$T/wd2" toy_prepare toy_run 3
   eq "$(field summary 7)" 3 'the cap bounds SHMUTANT_JOBS'
   eq "$(_shmutant_jobs 4 | tr -d ' ')" "$(_shmutant_jobs 4)" 'jobs is a bare number'
@@ -2008,6 +2044,15 @@ t_copy_tree_excludes_git() {
   [ -L "$T/dst/link" ] || fail_ 'symlink was not kept as a symlink'
   shmutant_copy_tree "$T/missing" "$T/dst2" 2>/dev/null; rc_is $? 1 'a missing source is an error'
   ( set -u; shmutant_copy_tree "$T/src" 2>"$T/e" ); rc_is $? 1 'a missing destination is a copy failure even under set -u'
+  # a caller cd function must not make the hard-link scan miss aliases
+  mkdir -p "$T/hlc"; printf 'x' > "$T/hlc/a"; ln "$T/hlc/a" "$T/hlc/b"
+  ( cd() { builtin cd /tmp; }; shmutant_copy_tree "$T/hlc" "$T/hlc-copy" 2>/dev/null ); rc_is $? 1 'a caller cd function does not make the hard-link scan pass a multiply linked source'
+  # an existing destination entry colliding with a source entry via a symlink is not written through
+  mkdir -p "$T/coll-src" "$T/coll-dst" "$T/coll-victim"; printf 'src\n' > "$T/coll-src/f"; printf 'precious\n' > "$T/coll-victim/f"
+  ln -s "$T/coll-victim/f" "$T/coll-dst/f"
+  shmutant_copy_tree "$T/coll-src" "$T/coll-dst"; rc_is $? 0 'copies over a colliding destination symlink'
+  eq "$(cat "$T/coll-victim/f")" precious 'a destination symlink colliding with a source entry is replaced, not written through'
+  eq "$(cat "$T/coll-dst/f")" src 'and the real file is copied in'
   ( set -u; shmutant_mutate "$T/src/sub/f" y 2>"$T/e2" ); rc_is $? 1 'a mutate call missing an argument is a failure even under set -u'
   mkdir -p "$T/nlm
 "; printf 'old\n' > "$T/nlm

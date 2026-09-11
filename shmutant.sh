@@ -275,7 +275,7 @@ shmutant_copy_tree() {
   # Searched from inside the source: `-path` takes a pattern, and a source whose name holds a
   # bracket expression would otherwise never match its own .git.
   local frc=0
-  linked="$(cd "$src" 2>/dev/null && command -p find . -path ./.git -prune -o -type f -links +1 -print 2>/dev/null)" || frc=$?
+  linked="$(builtin cd -- "$src" 2>/dev/null && command -p find . -path ./.git -prune -o -type f -links +1 -print 2>/dev/null)" || frc=$?
   if [ "$frc" -ne 0 ]; then _shmutant_err "copy_tree: cannot scan $src for hard links (find failed, status $frc)"; return 1; fi
   linked="${linked%%$'\n'*}"
   if [ -n "$linked" ]; then
@@ -302,6 +302,9 @@ shmutant_copy_tree() {
       [ -e "$entry" ] || [ -L "$entry" ] || continue
       name="${entry##*/}"
       [ "$name" = .git ] && continue
+      # Any existing entry of that name goes first: cp -P would otherwise open a destination
+      # symlink and write through it to its external referent.
+      { [ -e "$dst/$name" ] || [ -L "$dst/$name" ]; } && command -p rm -rf -- "$dst/$name" 2>/dev/null
       command -p cp -RPp -- "$entry" "$dst/" || rc=1
     done
     exit "$rc"
@@ -342,8 +345,9 @@ _shmutant_mode_spec() {
 # _shmutant_mutate_restore <dir> <ls-mode-or-empty> — put back a directory mode shmutant_mutate
 # loosened for the rewrite; a no-op when it loosened nothing.
 _shmutant_mutate_restore() {
-  [ -z "$2" ] || command -p chmod -- "$(_shmutant_mode_spec "$2")" "$1" 2>/dev/null || _shmutant_err "mutate: the mode of $1 could not be put back"
-  return 0
+  [ -n "$2" ] || return 0
+  command -p chmod -- "$(_shmutant_mode_spec "$2")" "$1" 2>/dev/null && return 0
+  _shmutant_err "mutate: the mode of $1 could not be put back"; return 1
 }
 
 # shmutant_mutate <file> <old> <new> — replace the FIRST occurrence of literal <old> with <new>,
@@ -393,7 +397,9 @@ shmutant_mutate() {
   esac
   command -p chmod -- "$(_shmutant_mode_spec "$mode")" "$tmp" 2>/dev/null || { command -p rm -f "$tmp"; _shmutant_mutate_restore "$dir" "$dirmode"; return 1; }
   command -p mv -f "$tmp" "$f" 2>/dev/null || { command -p rm -f "$tmp"; _shmutant_mutate_restore "$dir" "$dirmode"; return 1; }
-  _shmutant_mutate_restore "$dir" "$dirmode"
+  # The rewrite is in place; a directory mode that could not be restored is still a failure,
+  # since mutate promises to leave the tree's metadata as it found it.
+  _shmutant_mutate_restore "$dir" "$dirmode" || return 1
   return 0
 }
 
@@ -973,7 +979,7 @@ _shmutant_worker_finish() {
   # Only in a directory that is still the one this run created, by inode: a callback may have
   # renamed it away and put a symlink or a fresh directory in its place, and nothing is written
   # or removed beneath a replacement.
-  if [ -L "$1" ] || [ "$(command -p ls -di -- "$1" 2>/dev/null | command -p awk '{ print $1 }')" != "${SHMUTANT_DIR_ID:-}" ]; then
+  if [ -L "$1" ] || [ "$(_shmutant_dir_id "$1")" != "${SHMUTANT_DIR_ID:-}" ]; then
     _shmutant_err "refusing to clean $1: it is no longer the worker directory this run created"
     return 0
   fi
@@ -1060,9 +1066,13 @@ _shmutant_worker() {
 
 # _shmutant_dir_id <dir> — the inode number of <dir>, from POSIX `ls -di`; empty when absent.
 _shmutant_dir_id() {
-  local id
+  local id phys
   id="$(command -p ls -di -- "$1" 2>/dev/null | command -p awk '{ print $1 }')"
-  [ -n "$id" ] && printf '%s' "$id"
+  [ -n "$id" ] || return 0
+  # The inode is unique only within a filesystem; the resolved physical path distinguishes a
+  # same-inode directory reached across a swapped mount (portable, where a device number is not).
+  phys="$(_shmutant_abs "$1")" || phys=""
+  printf '%s:%s' "$id" "$phys"
 }
 
 # _shmutant_collect <dir> <key> <wait-status> — read a reaped worker's channel into
@@ -1429,14 +1439,24 @@ _shmutant_pool_fail() {
 # reads with is not itself: a function of that name, or one disabled with `enable -n`, would
 # decide what lives. External utilities are already reached through `command -p`.
 _shmutant_no_shadows() {
-  local n kinds
-  for n in kill wait read trap printf mapfile exec builtin command cd pwd exit return declare local unset set shopt eval readonly export shift true false; do
+  local n kinds saved_chld
+  # A CHLD trap (a caller's, or one prepare installed) fires on the child the check below forks,
+  # and could define a shadow just after its name was cleared. Off for the whole check, restored
+  # after; the pool clears it again before spawning workers.
+  saved_chld="$(trap -p CHLD)"; trap - CHLD
+  # `[` and `:` are shadowable and load-bearing; every builtin the harness invokes is listed.
+  for n in kill wait read trap printf mapfile exec builtin command cd pwd exit return declare local unset set shopt eval readonly export shift true false '[' : . type test; do
     # An enabled builtin, not a function of that name and not one switched off with `enable -n`.
     # A caller's alias is no concern: this file's functions were parsed with aliases off.
     kinds="$(builtin type -at -- "$n" 2>/dev/null)"
     case "$kinds" in *function*) kinds="" ;; esac
-    case "$kinds" in *builtin*) ;; *) _shmutant_err "$1: $n is not the builtin this harness relies on (a function of that name, or disabled with enable)"; return 2 ;; esac
+    case "$kinds" in
+      *builtin*) ;;
+      *) [ -z "$saved_chld" ] || eval "$saved_chld"
+         _shmutant_err "$1: $n is not the builtin this harness relies on (a function of that name, or disabled with enable)"; return 2 ;;
+    esac
   done
+  [ -z "$saved_chld" ] || eval "$saved_chld"
 }
 
 # _shmutant_workdir_owned <label> <workdir> — the entries this pool recreates (pristine, base-N,
@@ -1537,7 +1557,10 @@ shmutant_pool() {
     exec {pout_w}>&- {pout_r}<&-
     _shmutant_err "$label: prepare failed (status $prc) — no tree to mutate"; _shmutant_pool_fail "$label" "$wd"; return 2
   fi
-  root="$(command -p cat <&"$pout_r")"; exec {pout_w}>&- {pout_r}<&-
+  # printf x then strip it: command substitution trims trailing newlines, which would turn a
+  # root whose name ends in one into its sibling.
+  root="$(command -p cat <&"$pout_r"; builtin printf x)"; root="${root%x}"; exec {pout_w}>&- {pout_r}<&-
+  case "$root" in *$'\n'*) _shmutant_err "$label: prepare printed a root whose name contains a newline"; _shmutant_pool_fail "$label" "$wd"; return 2 ;; esac
   # prepare may have defined a function under a builtin's name, or taken the run callback away:
   # checked again before any worker relies on either.
   _shmutant_no_shadows "$label" || { _shmutant_pool_fail "$label" "$wd"; return 2; }
