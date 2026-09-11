@@ -302,4 +302,12 @@ One line per resolved review thread, newest last.
 - `option-surface-mismatch` `shmutant.sh` `3053e56` `PRRT_kwDOUT7q9s6hRY-t` PR #1 2026-09-10
 - `host-shell-option-leak` `shmutant.sh` `3053e56` `PRRT_kwDOUT7q9s6hRY-w` PR #1 2026-09-10
 - `host-shell-option-leak` `shmutant.sh` `3053e56` `PRRT_kwDOUT7q9s6hRY-0` PR #1 2026-09-10
+- `host-shell-option-leak` `shmutant.sh` `c358ecf` `PRRT_kwDOUT7q9s6hSVRx` PR #1 2026-09-11
+- `host-shell-option-leak` `shmutant.sh` `c358ecf` `PRRT_kwDOUT7q9s6hSVR2` PR #1 2026-09-11
+- `early-return-skips-cleanup` `shmutant.sh` `c358ecf` `PRRT_kwDOUT7q9s6hSVR6` PR #1 2026-09-11
+- `contract-not-honoured` `shmutant.sh` `c358ecf` `PRRT_kwDOUT7q9s6hSVR9` PR #1 2026-09-11
+- `option-surface-mismatch` `shmutant.sh` `c358ecf` `PRRT_kwDOUT7q9s6hSVSC` PR #1 2026-09-11
+- `pipeline-status-lost` `test/run.sh` `c358ecf` `PRRT_kwDOUT7q9s6hSVSG` PR #1 2026-09-11
+- `predictable-temp-path` `shmutant.sh` `c358ecf` `PRRT_kwDOUT7q9s6hSVSI` PR #1 2026-09-11
+- `stale-artifact-reuse` `shmutant.sh` `c358ecf` `PRRT_kwDOUT7q9s6hSVSQ` PR #1 2026-09-11
 <!-- adb:hits:end -->
