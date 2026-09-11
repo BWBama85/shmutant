@@ -636,8 +636,10 @@ _shmutant_frozen_only() {
     # An entry with no start time was stopped without anything to verify it by: let go, and the
     # freeze counts as unsettled rather than pretending the pid was recorded.
     case "${p#* }" in ''|*[!0-9]*) kill -CONT "${p%% *}" 2>/dev/null; SHMUTANT_FREEZE_UNSETTLED=1; continue ;; esac
+    [ -z "${err_fd:-}" ] || [ "${SHMUTANT_DEBUG_FREEZE:-0}" != 1 ] || [ -n "${SHMUTANT_START[${p%% *}]:-}" ] || _shmutant_err "freeze: ${p%% *} found=${p#* } not in table (${#SHMUTANT_START[@]} entries)" 2>&"$err_fd"
     if [ -n "${SHMUTANT_START[${p%% *}]:-}" ]; then
       d=$(( SHMUTANT_START[${p%% *}] - ${p#* } ))
+      [ -z "${err_fd:-}" ] || [ "${SHMUTANT_DEBUG_FREEZE:-0}" != 1 ] || _shmutant_err "freeze: ${p%% *} found=${p#* } table=${SHMUTANT_START[${p%% *}]} d=$d" 2>&"$err_fd"
       if [ "$d" -ge -1 ] && [ "$d" -le 1 ]; then
         # Still the process found, and stopped: a stop that was refused (a set-uid descendant)
         # leaves a live process the record would otherwise claim as frozen.
