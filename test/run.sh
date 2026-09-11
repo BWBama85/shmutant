@@ -840,23 +840,28 @@ t_freeze_that_never_settles_is_reported() {
   # that was being ended is scored unsettled rather than trusted
   # In its own process group (set -m): this half stops real processes, and an orphaned
   # stopped group delivers SIGHUP to its members — which must not be the suite runner.
-  ( sleep 5; : ) & local root=$!
-  sleep 0.2
-  set -m
-  ( _shmutant_descendants_started() { grep -qx "$1" "$T/spawned" 2>/dev/null && return 0; [ "$(grep -c . "$T/spawned" 2>/dev/null || echo 0)" -lt 40 ] || return 0; sleep 30 > /dev/null 2>&1 & echo "$!" >> "$T/spawned"; local id="" i; for i in 1 2 3 4 5 6 7 8 9 10; do id="$(_shmutant_identity "$!")" && [ -n "$id" ] && break; sleep 0.1; done; printf '%s %s\n' "$!" "$id"; }
-    local -a frozen=() roots=("$root"); local -A have=()
+  # The freeze-machinery check runs as its own bash process, so the real processes it stops
+  # and any orphaned-stopped SIGHUP stay in that process's session, off the suite runner (this
+  # matters under the self-mutation pass, where the suite runs nested inside a pool).
+  SHMUTANT="$SHMUTANT" T="$T" _u="$_unit" bash -c '
+    . "$SHMUTANT"
+    root_stub() { grep -qx "$1" "$T/spawned" 2>/dev/null && return 0; [ "$(grep -c . "$T/spawned" 2>/dev/null || echo 0)" -lt 40 ] || return 0; sleep 30 > /dev/null 2>&1 & echo "$!" >> "$T/spawned"; id=""; for i in 1 2 3 4 5 6 7 8 9 10; do id="$(_shmutant_identity "$!")" && [ -n "$id" ] && break; sleep 0.1; done; printf "%s %s\n" "$!" "$id"; }
+    ( sleep 5; : ) & root=$!
+    sleep 0.2
+    _shmutant_descendants_started() { root_stub "$@"; }
+    declare -a frozen=() roots=("$root"); declare -A have=()
     SHMUTANT_FREEZE_UNSETTLED=0
     _shmutant_freeze_from
-    [ "$SHMUTANT_FREEZE_UNSETTLED" = 1 ] || { echo "FAIL: $_unit: a freeze that found new work on every pass ended as if settled"; exit 1; }
+    [ "$SHMUTANT_FREEZE_UNSETTLED" = 1 ] || { echo "FAIL: $_u: a freeze that found new work on every pass ended as if settled"; exit 1; }
     kill -KILL "${frozen[@]%:}" 2>/dev/null
     rm -f "$T/spawned"
     exec {u}>|"$T/unsettled"; SHMUTANT_UNSETTLED_FD="$u"
     _shmutant_kill_tree_twice "$root"
-    grep -qx unsettled "$T/unsettled" || { echo "FAIL: $_unit: the unsettled freeze was not reported on the descriptor the runner named"; exit 1; }
-    exit 0 ) & local half=$!
-  wait "$half" || _failed=1
-  set +m
-  kill -KILL "$root" 2>/dev/null; wait "$root" 2>/dev/null
+    kill -KILL "$root" 2>/dev/null
+    for p in $(cat "$T/spawned" 2>/dev/null); do kill -KILL "$p" 2>/dev/null; done
+    grep -qx unsettled "$T/unsettled" || { echo "FAIL: $_u: the unsettled freeze was not reported on the descriptor the runner named"; exit 1; }
+    exit 0
+  ' || _failed=1
   rm -f "$T/spawned"
   # The pool turns an unsettled run into an `unsettled` verdict. Driven through a stubbed
   # runner, not real process-group kills: nested inside the self-mutation pass, a real freeze
