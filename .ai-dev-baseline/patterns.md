@@ -310,4 +310,7 @@ One line per resolved review thread, newest last.
 - `pipeline-status-lost` `test/run.sh` `c358ecf` `PRRT_kwDOUT7q9s6hSVSG` PR #1 2026-09-11
 - `predictable-temp-path` `shmutant.sh` `c358ecf` `PRRT_kwDOUT7q9s6hSVSI` PR #1 2026-09-11
 - `stale-artifact-reuse` `shmutant.sh` `c358ecf` `PRRT_kwDOUT7q9s6hSVSQ` PR #1 2026-09-11
+- `caller-owned-path-deleted` `shmutant.sh` `9aada9c` `PRRT_kwDOUT7q9s6hT19_` PR #1 2026-09-11
+- `path-lookup-ambiguity` `shmutant.sh` `9aada9c` `PRRT_kwDOUT7q9s6hT1-A` PR #1 2026-09-11
+- `timeout-escalation-cancelled` `shmutant.sh` `9aada9c` `PRRT_kwDOUT7q9s6hT1-C` PR #1 2026-09-11
 <!-- adb:hits:end -->
