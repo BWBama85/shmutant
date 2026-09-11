@@ -1523,9 +1523,13 @@ _shmutant_callable() {
 # stamp is not the regular file the pool made.
 _shmutant_pristine_state() {
   [ -f "${SHMUTANT_PRISTINE_STAMP:-}" ] && [ ! -L "$SHMUTANT_PRISTINE_STAMP" ] || return 1
+  # find execs a PROGRAM: `command` is a shell builtin (macOS ships a stub of that name, Linux
+  # does not), so the utilities are resolved from the standard PATH first and exec'd by path.
+  local ls_bin cksum_bin
+  ls_bin="$(command -pv ls)" && cksum_bin="$(command -pv cksum)" || return 1
   { command -p find "$1/pristine" -newer "$SHMUTANT_PRISTINE_STAMP" -print 2>/dev/null
-    command -p find "$1/pristine" -exec command -p ls -ldn -- {} + 2>/dev/null
-    command -p find "$1/pristine" -type f -exec command -p cksum {} + 2>/dev/null
+    command -p find "$1/pristine" -exec "$ls_bin" -ldn -- {} + 2>/dev/null
+    command -p find "$1/pristine" -type f -exec "$cksum_bin" {} + 2>/dev/null
   } | LC_ALL=C command -p sort
 }
 

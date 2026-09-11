@@ -1086,11 +1086,11 @@ shmutant_mut 'a function named bash is taken for the PATH interpreter' \
 
 # --- guards added for the thirty-first review round ---
 shmutant_mut 'the pristine fingerprint ignores file content' \
-  '    command -p find "$1/pristine" -type f -exec command -p cksum {} + 2>/dev/null' \
+  '    command -p find "$1/pristine" -type f -exec "$cksum_bin" {} + 2>/dev/null' \
   '    :' \
   't_pool_refuses_a_modified_pristine_tree'
 shmutant_mut 'the pristine fingerprint ignores metadata' \
-  '    command -p find "$1/pristine" -exec command -p ls -ldn -- {} + 2>/dev/null' \
+  '    command -p find "$1/pristine" -exec "$ls_bin" -ldn -- {} + 2>/dev/null' \
   '    :' \
   't_pool_refuses_a_modified_pristine_tree'
 shmutant_mut 'a DEBUG trap prepare left keeps running through the pool' \
