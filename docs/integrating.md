@@ -126,12 +126,20 @@ source root is resolved first, a symlink at the destination is refused, and an e
 destination must be empty (the copy never removes or overwrites a caller's entries); a source with a multiply linked regular file outside its top-level `.git`
 is refused by `shmutant_copy_tree`, since a copy cannot keep the links joined. A pool that
 stops after `prepare` (a target the tree lacks, a setting `prepare` broke) removes the prepared
-tree unless `SHMUTANT_KEEP=1`. The prepared tree is proven unmodified before every clone: a
-callback that writes into it after `prepare` (say through `../../pristine` from its clone),
-adds to it or removes from it makes every later row `unprepared`, with the reason, rather than
-cloning what it left; a change within the filesystem's timestamp resolution, or one that forges
-timestamps, is not seen. Both callbacks must be functions, builtins or executables: an alias,
-which cannot be called by name, is refused (status 2).
+tree unless `SHMUTANT_KEEP=1`. The prepared tree is proven unmodified before every clone, by a
+fingerprint of every entry's metadata and every file's content (POSIX `cksum`) taken after
+`prepare`: a callback that writes into it (say through `../../pristine` from its clone), adds to
+it, removes from it or changes a mode makes every later row `unprepared`, with the reason,
+rather than cloning what it left, whatever the timestamps say. The rewrite of a row's target is
+pinned to the target's directory and re-checked to be inside the tree from there, so a
+concurrent callback that swaps a directory component of a sibling's clone for a link cannot
+redirect it (that row is `unprepared`). Both callbacks must be functions, builtins or
+executables: an alias, which cannot be called by name, is refused (status 2). From the moment
+`prepare` returns until the pool is done, the shell's CHLD, DEBUG, RETURN and ERR traps are
+held (saved, disarmed, put back at the end): a handler `prepare` left cannot run inside the
+pool. A setting the caller made `readonly` is accepted when it is already canonical (a plain
+decimal; for `SHMUTANT_STREAM`, an absolute physical path) and refused with status 2 otherwise,
+never assigned.
 
 ```sh
 # test/mutants.sh

@@ -445,16 +445,26 @@ t_pool_refuses_shadowed_builtins_and_posix_mode() {
   # arity guard, which uses [, would refuse a [ shadow first, so the check is exercised directly)
   ( eval '[() { :; }'; _shmutant_no_shadows lbl 2>"$T/e7" ); rc_is $? 2 'a function named [ is refused by the shadow check'
   has "$(cat "$T/e7")" 'is not the builtin' 'says why'
-  # a CHLD trap prepare installs fires at most once after prepare returns (the fork that saves
-  # it): every later fork the pool makes, through the shadow recheck and the workers, runs with
-  # it held, so a handler cannot define a shadow after the recheck cleared the name. A count is
-  # deterministic where catching the race is not.
+  # a CHLD trap prepare installs fires at most four times after prepare returns (the forks that
+  # save the four held traps): every later fork the pool makes, through the shadow recheck and
+  # the workers, runs with it held, so a handler cannot define a shadow after the recheck
+  # cleared the name. A count is deterministic where catching the race is not.
   : > "$T/chld"
   counting_chld_prepare() { toy_prepare "$1"; trap 'echo x >> "$T/chld"' CHLD; }
   ( SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd" counting_chld_prepare toy_run > "$T/chld-out" 2>&1; rc=$?; trap - CHLD
     fires="$(grep -c x "$T/chld" 2>/dev/null || echo 0)"
     [ "$rc" -eq 0 ] || { echo "FAIL: $_unit: the pool failed ($rc) under a CHLD trap prepare installed: $(cat "$T/chld-out")"; exit 1; }
-    [ "$fires" -le 1 ] || { echo "FAIL: $_unit: a CHLD trap prepare installed fired $fires times after prepare returned"; exit 1; }
+    [ "$fires" -le 4 ] || { echo "FAIL: $_unit: a CHLD trap prepare installed fired $fires times after prepare returned"; exit 1; }
+    exit 0 ) || _failed=1
+  # a DEBUG trap prepare leaves (with functrace, so it reaches every function and subshell)
+  # runs before each of the few commands that save the traps and nothing past them: with it
+  # armed it would run before every command of the pool and its workers (thousands)
+  : > "$T/dbg"
+  debug_prepare() { toy_prepare "$1"; set -T; trap 'echo x >> "$T/dbg"' DEBUG; }
+  ( SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd-dbg" debug_prepare toy_run > "$T/dbg-out" 2>&1; rc=$?; trap - DEBUG; set +T
+    fires="$(grep -c x "$T/dbg" 2>/dev/null || echo 0)"
+    [ "$rc" -eq 0 ] || { echo "FAIL: $_unit: the pool failed ($rc) under a DEBUG trap prepare left: $(cat "$T/dbg-out")"; exit 1; }
+    [ "$fires" -le 40 ] || { echo "FAIL: $_unit: a DEBUG trap prepare left ran $fires times after prepare returned"; exit 1; }
     exit 0 ) || _failed=1
   # utilities are reached through command -p: a plan's function or a PATH prepare set to the
   # tree's bin does not stand in for ps, awk or ls
@@ -555,6 +565,18 @@ t_pool_refuses_a_modified_pristine_tree() {
   SHMUTANT_JOBS=1 SHMUTANT_BASELINE=0 pool lbl "$T/wd3" toy_prepare reading_run
   rc_is "$RC" 0 'a callback that only reads pristine, with a future-dated file in it, is fine'
   eq "$(verdict_of b)" killed 'and every row is cloned'
+  # a write to a file that was ALREADY newer than the stamp (future-dated) is still seen: the
+  # fingerprint is content and metadata, not the set of newer paths
+  SHMUTANT_JOBS=1 SHMUTANT_BASELINE=0 pool lbl "$T/wd4" toy_prepare writing_run
+  eq "$(verdict_of b)" unprepared 'a write to a future-dated pristine file is seen'
+  chmodding_run() { chmod 600 "$1/../../pristine/lib.sh"; bash "$1/test.sh"; }
+  SHMUTANT_JOBS=1 SHMUTANT_BASELINE=0 pool lbl "$T/wd5" toy_prepare chmodding_run
+  eq "$(verdict_of b)" unprepared 'a mode change in pristine (content and mtime unchanged) is seen'
+  # a same-size content change written in place (no entry made or removed in pristine, so its
+  # directory's mtime stands) with the file's timestamp put back: only the content sees it
+  forging_run() { local f="$1/../../pristine/lib.sh"; sed 's/\$1 + \$2/$1 - $2/' "$f" > "$T/forged" && cat "$T/forged" > "$f"; touch -t 203001010000 "$f"; bash "$1/test.sh"; }
+  SHMUTANT_JOBS=1 SHMUTANT_BASELINE=0 pool lbl "$T/wd6" toy_prepare forging_run
+  eq "$(verdict_of b)" unprepared 'a same-size write with its timestamp forged back is seen by content'
 }
 
 t_readonly_settings_do_not_kill_the_caller() {
@@ -572,6 +594,13 @@ t_readonly_settings_do_not_kill_the_caller() {
   # shellcheck disable=SC2034
   ( readonly SHMUTANT_JOBS=2 SHMUTANT_RED_STATUS=1; SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd3" toy_prepare toy_run > "$T/o3" 2>/dev/null; echo "rc=$?" >> "$T/o3" )
   has "$(cat "$T/o3")" 'rc=0' 'readonly jobs and red status in canonical form are accepted'
+  local phys; phys="$(cd "$T" && pwd -P)"
+  ( readonly SHMUTANT_STREAM="$phys/ro.tsv"; SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd4" toy_prepare toy_run > /dev/null 2>/dev/null; echo "rc=$?" > "$T/o4" )
+  has "$(cat "$T/o4")" 'rc=0' 'a readonly absolute physical stream path is accepted and the caller shell survives'
+  has "$(cat "$phys/ro.tsv")" $'\trow\tkilled\ta\t' 'and the records went to it'
+  ( cd "$T" && readonly SHMUTANT_STREAM=rel.tsv && SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd5" toy_prepare toy_run > /dev/null 2>"$T/e5"; echo "rc=$?" > "$T/o5" )
+  has "$(cat "$T/o5")" 'rc=2' 'a readonly relative stream path is refused with status 2, not assigned'
+  has "$(cat "$T/e5")" 'readonly' 'says why'
 }
 
 t_pool_refuses_alias_only_callbacks() {
@@ -590,6 +619,33 @@ t_pool_refuses_alias_only_callbacks() {
     SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd2" aliased_prep toy_run > /dev/null 2>"$T/e2"; echo "rc=$?" > "$T/rc2" )
   has "$(cat "$T/rc2")" 'rc=2' 'an alias-only prepare callback is a harness error'
   has "$(cat "$T/e2")" 'prepare callback not found' 'says why'
+}
+
+t_rewrite_is_pinned_against_a_sibling_swap() {
+  # between the containment check and the rewrite, a concurrent sibling's callback swaps the
+  # target's directory for a link to a caller-owned directory: the rewrite, pinned to the
+  # directory it checked and naming the target by base name, does not follow it
+  mk_toy "$T/toy"; TOY="$T/toy"; mkdir -p "$T/toy/sub" "$T/victim"; printf 'x=1\n' > "$T/toy/sub/extra.sh"; printf 'precious\n' > "$T/victim/extra.sh"
+  shmutant_reset; shmutant_target sub/extra.sh
+  shmutant_mut 'a' 'x=1' 'x=2' 'add-works'
+  ( eval "$(declare -f _shmutant_target_ok | sed '1s/_shmutant_target_ok/_shmutant_target_ok_real/')"
+    # the swap only in a clone (the pool also checks the table against pristine)
+    _shmutant_target_ok() { _shmutant_target_ok_real "$@" || return 1; case "$1" in */tree*) rm -rf "$1/sub"; ln -s "$T/victim" "$1/sub" ;; esac; }
+    SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd" toy_prepare toy_run > "$T/out" 2>"$T/err" )
+  eq "$(cat "$T/victim/extra.sh")" precious 'a directory swapped for a link after the check is not rewritten through'
+  has "$(cat "$T/out")" $'\trow\tunprepared\ta\t' 'the row is unprepared'
+  has "$(cat "$T/err")" 'left the tree' 'says why'
+}
+
+t_cli_abort_waits_for_the_child_and_names_its_identity() {
+  # a signal that lands between the plan subshell's spawn and its registration is held, then
+  # acted on once the child is known; and the escalation names the child with the identity
+  # taken at the spawn, never by number alone
+  local out
+  out="$(SHMUTANT="$SHMUTANT" bash -c '. "$SHMUTANT"; SHMUTANT_CLI_SPAWNING=1; _shmutant_cli_abort TERM; echo "pending=$SHMUTANT_CLI_ABORT_PENDING alive"' 2>/dev/null)"
+  eq "$out" 'pending=TERM alive' 'a signal during the spawn window is recorded, not acted on'
+  out="$(SHMUTANT="$SHMUTANT" bash -c '. "$SHMUTANT"; sleep 30 & SHMUTANT_CLI_CHILD=$!; SHMUTANT_CLI_CHILD_ID="$(_shmutant_identity "$!")"; _shmutant_kill_tree_twice() { printf "%s\n" "$1"; }; _shmutant_cli_abort TERM' 2>/dev/null)"
+  case "$out" in [0-9]*:[0-9]*) ;; *) fail_ "the CLI abort escalated with [$out], not pid:identity" ;; esac
 }
 
 t_verdict_scans_a_large_output() {
@@ -1188,7 +1244,7 @@ t_sibling_cannot_plant_in_another_workers_directory() {
   declare -gA SHMUTANT_DIR_IDS=() SHMUTANT_VERDICT_W=() SHMUTANT_VERDICT_R=() SHMUTANT_RES_VERDICT=() SHMUTANT_RES_US=() SHMUTANT_RES_STATUS=()
   SHMUTANT_DIR_IDS[mut-0]="$(_shmutant_dir_id "$T/wd/mut-0")"; SHMUTANT_PRISTINE_ID="$(_shmutant_dir_id "$T/wd/pristine")"
   # the pool's record of the prepared tree, which the worker checks before cloning
-  SHMUTANT_PRISTINE_STAMP="$(mktemp "$T/wd/.stamp.XXXXXX")"; SHMUTANT_PRISTINE_NEWER="$(_shmutant_pristine_newer "$T/wd")"
+  SHMUTANT_PRISTINE_STAMP="$(mktemp "$T/wd/.stamp.XXXXXX")"; SHMUTANT_PRISTINE_STATE="$(_shmutant_pristine_state "$T/wd")"
   SHMUTANT_ROWS_SEL=(add-works)
   _shmutant_open_channel "$T/wd" mut-0 || fail_ 'fixture: no channel'
   ( SHMUTANT_TIMEOUT=0 _shmutant_worker mut 0 "$T/wd" toy_run "" )
@@ -1701,9 +1757,15 @@ t_pool_aborts_running_workers_when_a_dir_cannot_be_recreated() {
   hanging_run() { : > "$T/started"; bash -c "sleep 30; touch '$T/finished'"; }
   make_unremovable "$T/wd/mut-1/held" || { echo "note: $_unit: no way to make a directory unremovable here; skipped"; return; }
   : > "$T/wd/.shmutant"
+  # The startup failure on mut-1 is held until mut-0 is RUNNING its callback: the abort must
+  # then end a live worker and remove a clone that exists, which is what the assertions below
+  # observe (a worker still fingerprinting pristine when aborted has neither).
+  eval "$(declare -f _shmutant_fresh_dir | sed '1s/_shmutant_fresh_dir/_shmutant_fresh_dir_real/')"
+  _shmutant_fresh_dir() { local i=0; case "$1" in */mut-1) until [ -e "$T/${WAIT_FOR:-started}" ] || [ "$i" -ge 100 ]; do i=$((i + 1)); sleep 0.1; done ;; esac; _shmutant_fresh_dir_real "$@"; }
   local t0; t0="$(_shmutant_now)"
-  SHMUTANT_JOBS=2 SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=0 pool lbl "$T/wd" toy_prepare hanging_run
+  WAIT_FOR=started SHMUTANT_JOBS=2 SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=0 pool lbl "$T/wd" toy_prepare hanging_run
   unmake_unremovable "$T/wd/mut-1/held"
+  [ -e "$T/started" ] || fail_ 'fixture: the running worker never started its callback before the abort'
   rc_is "$RC" 2 'the harness error is reported'
   [ $(( ($(_shmutant_now) - t0) / 1000000 )) -lt 15 ] || fail_ 'the pool waited on the unbounded worker instead of ending it'
   [ -e "$T/wd/mut-0/tree" ] && fail_ 'the ended worker'"'"'s clone was left behind'
@@ -1712,10 +1774,11 @@ t_pool_aborts_running_workers_when_a_dir_cannot_be_recreated() {
   [ -e "$T/finished" ] && fail_ 'the running worker survived the abort'
   # with a TERM-ignoring escaped descendant, the abort must not return before it is gone
   stubborn_hanging_run() { : > "$T/started2"; set -m; bash -c "trap '' TERM; sleep 30; touch '$T/finished2'" & wait; }
-  make_unremovable "$T/wd2/mut-1/held" || return
+  make_unremovable "$T/wd2/mut-1/held" || { eval "$(declare -f _shmutant_fresh_dir_real | sed '1s/_shmutant_fresh_dir_real/_shmutant_fresh_dir/')"; unset -f _shmutant_fresh_dir_real; return; }
   : > "$T/wd2/.shmutant"
-  SHMUTANT_JOBS=2 SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=0 pool lbl "$T/wd2" toy_prepare stubborn_hanging_run
+  WAIT_FOR=started2 SHMUTANT_JOBS=2 SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=0 pool lbl "$T/wd2" toy_prepare stubborn_hanging_run
   unmake_unremovable "$T/wd2/mut-1/held"
+  eval "$(declare -f _shmutant_fresh_dir_real | sed '1s/_shmutant_fresh_dir_real/_shmutant_fresh_dir/')"; unset -f _shmutant_fresh_dir_real
   rc_is "$RC" 2 'harness error'
   [ -z "$(ps -A -o args= | grep -F "touch '$T/finished2'" | grep -v grep)" ] || fail_ 'the abort returned while a TERM-ignoring descendant was still alive'
 }
@@ -2221,6 +2284,8 @@ t_bash_floor() {
   _shmutant_bash_ok 4 4; rc_is $? 1 '4.4 is below the floor'
   _shmutant_bash_ok 3 2; rc_is $? 1 '3.2 is below the floor'
   has "$(_shmutant_install_hint)" 'bash' 'the install hint names bash'
+  # the floor test invokes the builtin, never a caller's function named [
+  eq "$( eval '[() { return 0; }'; _shmutant_bash_ok 5 2; echo "rc=$?" )" rc=1 'a function named [ that always succeeds does not make 5.2 pass the floor'
   # the PATH candidate is an executable file, never an (exported) function named bash
   ( bash() { :; }; export -f bash; out="$(_shmutant_path_bash)"
     case "$out" in /*) [ -x "$out" ] && exit 0 ;; esac

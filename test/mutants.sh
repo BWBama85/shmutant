@@ -18,8 +18,8 @@ shmutant_target shmutant.sh
 
 # --- the bash floor ---
 shmutant_mut 'the floor accepts any 5.x' \
-  '[ "$1" -gt 5 ] || { [ "$1" -eq 5 ] && [ "$2" -ge 3 ]; }' \
-  '[ "$1" -gt 5 ] || { [ "$1" -eq 5 ] && [ "$2" -ge 0 ]; }' \
+  'builtin [ "$1" -gt 5 ] || { builtin [ "$1" -eq 5 ] && builtin [ "$2" -ge 3 ]; }' \
+  'builtin [ "$1" -gt 5 ] || { builtin [ "$1" -eq 5 ] && builtin [ "$2" -ge 0 ]; }' \
   't_bash_floor'
 shmutant_mut 'the floor accepts bash 4' \
   '[ "$1" -gt 5 ] || {' \
@@ -336,7 +336,7 @@ shmutant_mut 'surplus mutation arguments are accepted' \
 
 # --- guards added for the eighth review round ---
 shmutant_mut 'a relative library stream is left relative for prepare to move' \
-  '    SHMUTANT_STREAM="$sdir/$(command -p basename -- "$SHMUTANT_STREAM")"' \
+  '    _shmutant_canon "$label" SHMUTANT_STREAM "$sdir/$(command -p basename -- "$SHMUTANT_STREAM")" || return 2' \
   '    :' \
   't_stream_relative_survives_a_prepare_that_cds'
 shmutant_mut 'pristine is reused when it cannot be recreated' \
@@ -398,7 +398,7 @@ shmutant_mut 'the plan errexit is left on across the pool call' \
   '  :' \
   't_cli_run'
 shmutant_mut 'a relative SHMUTANT_STREAM is resolved after the plan may have moved' \
-  '    SHMUTANT_STREAM="$sdir/$(command -p basename -- "$SHMUTANT_STREAM")"' \
+  '    _shmutant_canon "$label" SHMUTANT_STREAM "$sdir/$(command -p basename -- "$SHMUTANT_STREAM")" || return 2' \
   '    :' \
   't_cli_run'
 shmutant_mut 'the subshell status is trusted without the completion marker' \
@@ -954,8 +954,8 @@ shmutant_mut 'anything named .shmutant marks a workdir as ours' \
   '  if [ -e "$wd/.shmutant" ]; then return 0; fi' \
   't_pool_refuses_a_workdir_it_did_not_create_entries_in'
 shmutant_mut 'the alias setting is not put back when an old bash is refused' \
-  '  if [ "${BASH_SOURCE[0]}" = "$0" ]; then exit 2; fi' \
-  '  if [ "${BASH_SOURCE[0]}" = "$0" ]; then exit 2; else return 2; fi' \
+  '  if builtin [ "${BASH_SOURCE[0]}" = "$0" ]; then builtin exit 2; fi' \
+  '  if builtin [ "${BASH_SOURCE[0]}" = "$0" ]; then builtin exit 2; else builtin return 2; fi' \
   't_library_restores_alias_state_when_refusing_an_old_bash'
 shmutant_mut 'a workdir created under an initial keep is never tracked for removal' \
   '  [ "$made" = 1 ] && SHMUTANT_CLI_WD_TO_RM="$wd"' \
@@ -1020,8 +1020,8 @@ shmutant_mut 'a listing entry with no start time is left stopped and unreported'
 
 # --- guards added for the twenty-eighth review round ---
 shmutant_mut 'the CHLD trap is not held once prepare returns' \
-  '  SHMUTANT_CHLD_HELD=1; trap - CHLD' \
-  '  SHMUTANT_CHLD_HELD=1' \
+  '  SHMUTANT_TRAPS_HELD=1; trap - CHLD DEBUG RETURN ERR' \
+  '  SHMUTANT_TRAPS_HELD=1; trap - DEBUG RETURN ERR' \
   't_pool_refuses_shadowed_builtins_and_posix_mode'
 shmutant_mut 'the punctuation builtins are not in the shadow list' \
   "  for n in kill wait read trap printf mapfile exec builtin command cd pwd exit return declare local unset set shopt eval readonly export shift true false '[' : . type test; do" \
@@ -1068,7 +1068,7 @@ shmutant_mut 'an unscanned run keeps its callback verdict' \
 
 # --- guards added for the thirtieth review round ---
 shmutant_mut 'a pristine tree modified after prepare is cloned anyway' \
-  '  if ! newer="$(_shmutant_pristine_newer "$wd")" || [ "$newer" != "${SHMUTANT_PRISTINE_NEWER-}" ]; then' \
+  '  if ! state="$(_shmutant_pristine_state "$wd")" || [ "$state" != "${SHMUTANT_PRISTINE_STATE-}" ]; then' \
   '  if false; then' \
   't_pool_refuses_a_modified_pristine_tree'
 shmutant_mut 'a readonly setting is assigned to' \
@@ -1080,6 +1080,40 @@ shmutant_mut 'an alias passes as a callback' \
   '  return 0' \
   't_pool_refuses_alias_only_callbacks'
 shmutant_mut 'a function named bash is taken for the PATH interpreter' \
-  '  type -P bash 2>/dev/null' \
-  '  command -v bash 2>/dev/null' \
+  '  builtin type -P bash 2>/dev/null' \
+  '  builtin command -v bash 2>/dev/null' \
   't_bash_floor'
+
+# --- guards added for the thirty-first review round ---
+shmutant_mut 'the pristine fingerprint ignores file content' \
+  '    command -p find "$1/pristine" -type f -exec command -p cksum {} + 2>/dev/null' \
+  '    :' \
+  't_pool_refuses_a_modified_pristine_tree'
+shmutant_mut 'the pristine fingerprint ignores metadata' \
+  '    command -p find "$1/pristine" -exec command -p ls -ldn -- {} + 2>/dev/null' \
+  '    :' \
+  't_pool_refuses_a_modified_pristine_tree'
+shmutant_mut 'a DEBUG trap prepare left keeps running through the pool' \
+  '  SHMUTANT_TRAPS_HELD=1; trap - CHLD DEBUG RETURN ERR' \
+  '  SHMUTANT_TRAPS_HELD=1; trap - CHLD RETURN ERR' \
+  't_pool_refuses_shadowed_builtins_and_posix_mode'
+shmutant_mut 'the floor test calls a caller function named [' \
+  '  builtin [ "$1" -gt 5 ] || { builtin [ "$1" -eq 5 ] && builtin [ "$2" -ge 3 ]; }' \
+  '  [ "$1" -gt 5 ] || { [ "$1" -eq 5 ] && [ "$2" -ge 3 ]; }' \
+  't_bash_floor'
+shmutant_mut 'the rewrite is not re-checked to be inside the tree from its pinned directory' \
+  '      _shmutant_inside "$(_shmutant_abs "$root")" "$(builtin pwd -P)" || exit 4' \
+  '      :' \
+  't_rewrite_is_pinned_against_a_sibling_swap'
+shmutant_mut 'a readonly stream setting is assigned to' \
+  '    _shmutant_canon "$label" SHMUTANT_STREAM "$sdir/$(command -p basename -- "$SHMUTANT_STREAM")" || return 2' \
+  '    SHMUTANT_STREAM="$sdir/$(command -p basename -- "$SHMUTANT_STREAM")"' \
+  't_readonly_settings_do_not_kill_the_caller'
+shmutant_mut 'a signal during the CLI spawn window is acted on at once' \
+  '  if [ "${SHMUTANT_CLI_SPAWNING:-0}" = 1 ]; then SHMUTANT_CLI_ABORT_PENDING="$sig"; return 0; fi' \
+  '  :' \
+  't_cli_abort_waits_for_the_child_and_names_its_identity'
+shmutant_mut 'the CLI child is escalated on by number alone' \
+  '    _shmutant_kill_tree_twice "$SHMUTANT_CLI_CHILD${SHMUTANT_CLI_CHILD_ID:+:$SHMUTANT_CLI_CHILD_ID}"' \
+  '    _shmutant_kill_tree_twice "$SHMUTANT_CLI_CHILD"' \
+  't_cli_abort_waits_for_the_child_and_names_its_identity'
