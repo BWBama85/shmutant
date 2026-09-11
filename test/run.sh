@@ -2044,9 +2044,10 @@ t_copy_tree_excludes_git() {
   [ -L "$T/dst/link" ] || fail_ 'symlink was not kept as a symlink'
   shmutant_copy_tree "$T/missing" "$T/dst2" 2>/dev/null; rc_is $? 1 'a missing source is an error'
   ( set -u; shmutant_copy_tree "$T/src" 2>"$T/e" ); rc_is $? 1 'a missing destination is a copy failure even under set -u'
-  # a caller cd function must not make the hard-link scan miss aliases
-  mkdir -p "$T/hlc"; printf 'x' > "$T/hlc/a"; ln "$T/hlc/a" "$T/hlc/b"
-  ( cd() { builtin cd /tmp; }; shmutant_copy_tree "$T/hlc" "$T/hlc-copy" 2>/dev/null ); rc_is $? 1 'a caller cd function does not make the hard-link scan pass a multiply linked source'
+  # a caller cd function must not make the hard-link scan miss aliases: it points at a known
+  # link-free directory, so were the scan to honour it the multiply linked source would pass
+  mkdir -p "$T/hlc" "$T/hlc-empty"; printf 'x' > "$T/hlc/a"; ln "$T/hlc/a" "$T/hlc/b"
+  ( cd() { builtin cd "$T/hlc-empty"; }; shmutant_copy_tree "$T/hlc" "$T/hlc-copy" 2>/dev/null ); rc_is $? 1 'a caller cd function does not make the hard-link scan pass a multiply linked source'
   # an existing destination entry colliding with a source entry via a symlink is not written through
   mkdir -p "$T/coll-src" "$T/coll-dst" "$T/coll-victim"; printf 'src\n' > "$T/coll-src/f"; printf 'precious\n' > "$T/coll-victim/f"
   ln -s "$T/coll-victim/f" "$T/coll-dst/f"
