@@ -54,8 +54,8 @@ SHMUTANT_VERSION=0.1.0
 # Aliases expand while a file is PARSED: a sourcing shell whose dotfiles alias `cp` or `mkdir`
 # would otherwise bake those flags into every function below. Off for the rest of this file,
 # and the caller's setting put back at its end.
-_shmutant_alias_state="$(shopt -p expand_aliases; :)"
-shopt -u expand_aliases
+_shmutant_alias_state="$(builtin shopt -p expand_aliases; :)"
+builtin shopt -u expand_aliases
 
 # _shmutant_bash_ok <major> <minor> — is that interpreter version at or above the floor?
 # Defined in bash-3.2 syntax: it runs before the rest of this file is parsed.
@@ -189,7 +189,28 @@ _shmutant_target_ok() {
   [ ! -L "$f" ] && [ -f "$f" ] || return 1
   root="$(_shmutant_abs "$root")" || return 1
   dir="$(_shmutant_abs "$(command -p dirname -- "$f")")" || return 1
-  _shmutant_inside "$root" "$dir"
+  _shmutant_inside "$root" "$dir" || return 1
+  # A directory component that is an ABSOLUTE symlink stays inside this tree but, cloned as a
+  # link, points back at it: the clone's copy of the target would not be the clone's.
+  _shmutant_no_absolute_link "$1" "$2"
+}
+
+# _shmutant_no_absolute_link <root> <relative> — true when no directory component of <relative>
+# under <root> is a symlink whose target is absolute.
+_shmutant_no_absolute_link() {
+  local rel="$2" here="$1" comp target
+  rel="$(command -p dirname -- "$rel")"
+  [ "$rel" != . ] || return 0
+  while [ -n "$rel" ]; do
+    comp="${rel%%/*}"; case "$rel" in */*) rel="${rel#*/}" ;; *) rel="" ;; esac
+    [ -n "$comp" ] || continue
+    here="$here/$comp"
+    if [ -L "$here" ]; then
+      target="$(command -p readlink -- "$here" 2>/dev/null)" || return 1
+      case "$target" in /*) return 1 ;; esac
+    fi
+  done
+  return 0
 }
 
 # shmutant_selected <unit> — true when no selection is active or SHMUTANT_SELECT equals <unit>.
@@ -716,7 +737,7 @@ _shmutant_snapshot() {
 # control on, bash reports the reaped job there when the pool itself runs under `$(...)`.
 _shmutant_run_bounded() {
   local dir="$1" run="$2" root="$3" sel="$4" wit="${5:-}" timeout mark fifo fd left seen outf line
-  local left_w left_r seen_w seen_r fired out_w out_r hold hp go holder holderid err_fd
+  local left_w left_r seen_w seen_r fired out_w out_r out_r2 hold hp go holder holderid err_fd
   timeout="$(_shmutant_pos_int "${SHMUTANT_TIMEOUT:-300}")" || timeout=0
   SHMUTANT_RUN_FIRED=0; SHMUTANT_RUN_RED=0; SHMUTANT_RUN_WITNESSED=0; SHMUTANT_RUN_UNSETTLED=0; SHMUTANT_RUN_PUBLISHED=1
   # Until the runner reports its own status the run has not started: a setup failure (a channel
@@ -736,12 +757,14 @@ _shmutant_run_bounded() {
   fifo="$mark.fired"
   { command -p mkfifo -- "$fifo" "$mark.hold" "$mark.hp" "$mark.go"; } 2>/dev/null \
     || { command -p rm -f -- "$mark" "$left" "$seen" "$outf" "$fifo" "$mark.hold" "$mark.hp" "$mark.go"; return 0; }
-  if ! exec {left_w}>|"$left" {left_r}<"$left" {seen_w}>|"$seen" {seen_r}<"$seen" {fired}<>"$fifo" {out_w}>|"$outf" {out_r}<"$outf" {hold}<>"$mark.hold" {hp}<>"$mark.hp" {go}<>"$mark.go" {err_fd}>&2; then
+  if ! exec {left_w}>|"$left" {left_r}<"$left" {seen_w}>|"$seen" {seen_r}<"$seen" {fired}<>"$fifo" {out_w}>|"$outf" {out_r}<"$outf" {out_r2}<"$outf" {hold}<>"$mark.hold" {hp}<>"$mark.hp" {go}<>"$mark.go" {err_fd}>&2; then
     # A partial open (a descriptor limit) is a setup failure, not a run: close what did open.
-    for fd in "${left_w:-}" "${left_r:-}" "${seen_w:-}" "${seen_r:-}" "${fired:-}" "${out_w:-}" "${out_r:-}" "${hold:-}" "${hp:-}" "${go:-}" "${err_fd:-}"; do [ -n "$fd" ] && exec {fd}>&-; done
+    for fd in "${left_w:-}" "${left_r:-}" "${seen_w:-}" "${seen_r:-}" "${fired:-}" "${out_w:-}" "${out_r:-}" "${out_r2:-}" "${hold:-}" "${hp:-}" "${go:-}" "${err_fd:-}"; do [ -n "$fd" ] && exec {fd}>&-; done
     command -p rm -f -- "$mark" "$left" "$seen" "$outf" "$fifo" "$mark.hold" "$mark.hp" "$mark.go"; return 0
   fi
-  command -p rm -f -- "$mark" "$left" "$seen" "$fifo" "$mark.hold" "$mark.hp" "$mark.go"
+  # The capture too has no name while the run executes: it is read back through one descriptor
+  # for the verdict and copied out through another for the artifact afterwards.
+  command -p rm -f -- "$outf" "$mark" "$left" "$seen" "$fifo" "$mark.hold" "$mark.hp" "$mark.go"
   # An unsettled freeze, from this shell or the watchdog, is reported on the sightings channel.
   local SHMUTANT_UNSETTLED_FD="$seen_w"
   (
@@ -867,20 +890,22 @@ _shmutant_run_bounded() {
   # The directory is this run's; a callback that made it unwritable does not get to keep the
   # capture from its name. A capture that still cannot be published is a harness error.
   # Only into the directory this run created, by inode: nothing is changed, removed or renamed
-  # beneath a replacement a callback put at the name.
+  # beneath a replacement a callback put at the name. The artifact is materialised from the
+  # capture's descriptor into a fresh mktemp file and renamed over the documented name.
   SHMUTANT_RUN_PUBLISHED=1
   if [ -L "$dir" ] || { [ -n "${SHMUTANT_DIR_ID:-}" ] && [ "$(_shmutant_dir_id "$dir")" != "$SHMUTANT_DIR_ID" ]; }; then
-    command -p rm -f -- "$outf"
     SHMUTANT_RUN_PUBLISHED=0
   else
     [ -w "$dir" ] || command -p chmod -- u+rwx "$dir" 2>/dev/null
     [ -d "$dir/output" ] && [ ! -L "$dir/output" ] && command -p rm -rf -- "$dir/output" 2>/dev/null
-    if ! command -p mv -f -- "$outf" "$dir/output" 2>/dev/null || [ ! -f "$dir/output" ] || [ -L "$dir/output" ]; then
-      command -p rm -f -- "$outf"
+    if outf="$(command -p mktemp "$dir/.output.XXXXXX" 2>/dev/null)" && command -p cat <&"$out_r2" >| "$outf" 2>/dev/null \
+      && command -p mv -f -- "$outf" "$dir/output" 2>/dev/null && [ -f "$dir/output" ] && [ ! -L "$dir/output" ]; then :
+    else
+      [ -n "${outf:-}" ] && command -p rm -f -- "$outf"
       SHMUTANT_RUN_PUBLISHED=0
     fi
   fi
-  exec {left_w}>&- {left_r}<&- {seen_w}>&- {seen_r}<&- {fired}<&- {out_w}>&- {out_r}<&- {hold}<&- {hp}<&- {go}<&- {err_fd}>&-
+  exec {left_w}>&- {left_r}<&- {seen_w}>&- {seen_r}<&- {fired}<&- {out_w}>&- {out_r}<&- {out_r2}<&- {hold}<&- {hp}<&- {go}<&- {err_fd}>&-
 }
 
 # _shmutant_held_group <pgid> — set SHMUTANT_HELD to `-g <pgid>` when the run's holder is still
@@ -1021,8 +1046,14 @@ _shmutant_collect() {
     unset "SHMUTANT_VERDICT_R[$key]"
   fi
   # A worker that did not end of its own accord (killed by a signal, by the callback or by the
-  # host) has no verdict, whatever reached the channel before it died.
-  [ "$wstatus" = 0 ] || { SHMUTANT_V_VERDICT=lost; SHMUTANT_V_US=0; SHMUTANT_V_STATUS=""; }
+  # host) has no verdict, whatever reached the channel before it died; the clone it could not
+  # remove goes here, from the directory this run created.
+  if [ "$wstatus" != 0 ]; then
+    SHMUTANT_V_VERDICT=lost; SHMUTANT_V_US=0; SHMUTANT_V_STATUS=""
+    if [ "${SHMUTANT_KEEP:-0}" != 1 ] && [ ! -L "$dir" ] && [ "$(_shmutant_dir_id "$dir")" = "${SHMUTANT_DIR_IDS[$key]:-}" ]; then
+      _shmutant_remove "$dir/tree" "$dir" 2>/dev/null || true
+    fi
+  fi
   [ -n "$SHMUTANT_V_VERDICT" ] || SHMUTANT_V_VERDICT=lost
   _shmutant_pos_int "$SHMUTANT_V_US" > /dev/null || SHMUTANT_V_US=0
   SHMUTANT_RES_VERDICT["$key"]="$SHMUTANT_V_VERDICT"; SHMUTANT_RES_US["$key"]="$SHMUTANT_V_US"; SHMUTANT_RES_STATUS["$key"]="$SHMUTANT_V_STATUS"
@@ -1202,7 +1233,11 @@ _shmutant_run_jobs_loop() {
       || ! _shmutant_open_channel "$wd" "$kind-$i"; then
       _shmutant_err "cannot recreate $wd/$kind-$i — a stale verdict there could be read as this run's; refusing to continue"
       # The workers already running are ended, not waited for: one of them may be unbounded.
-      [ "${#pids[@]}" -eq 0 ] || { _shmutant_end_workers "${pids[@]}"; wait "${pids[@]}" 2>/dev/null; }
+      if [ "${#pids[@]}" -gt 0 ]; then
+        _shmutant_end_workers "${pids[@]}"
+        # Reaped and collected like any other: their channels close, their clones go.
+        while [ "${#pids[@]}" -gt 0 ]; do _shmutant_reap_one "$wd"; done
+      fi
       return 2
     fi
     SHMUTANT_SPAWNING=1
@@ -1348,13 +1383,17 @@ _shmutant_pool_fail() {
   unset SHMUTANT_STREAM_OPENED
 }
 
-# _shmutant_no_shadows <label> — refuse to run while a function stands in for a builtin this
-# harness signals, waits and reads with: a `kill` or `wait` of a plan's own would decide what
-# lives. External utilities are already reached through `command -p`.
+# _shmutant_no_shadows <label> — refuse to run while a builtin this harness signals, waits and
+# reads with is not itself: a function of that name, or one disabled with `enable -n`, would
+# decide what lives. External utilities are already reached through `command -p`.
 _shmutant_no_shadows() {
-  local n
+  local n kinds
   for n in kill wait read trap printf mapfile exec builtin command cd pwd exit return declare local unset set shopt eval readonly export shift true false; do
-    if declare -F -- "$n" > /dev/null 2>&1; then _shmutant_err "$1: a function named $n shadows the builtin this harness relies on"; return 2; fi
+    # An enabled builtin, not a function of that name and not one switched off with `enable -n`.
+    # A caller's alias is no concern: this file's functions were parsed with aliases off.
+    kinds="$(builtin type -at -- "$n" 2>/dev/null)"
+    case "$kinds" in *function*) kinds="" ;; esac
+    case "$kinds" in *builtin*) ;; *) _shmutant_err "$1: $n is not the builtin this harness relies on (a function of that name, or disabled with enable)"; return 2 ;; esac
   done
 }
 
@@ -1457,9 +1496,12 @@ shmutant_pool() {
     _shmutant_err "$label: prepare failed (status $prc) — no tree to mutate"; _shmutant_pool_fail "$label" "$wd"; return 2
   fi
   root="$(command -p cat <&"$pout_r")"; exec {pout_w}>&- {pout_r}<&-
-  # prepare may have defined a function under a builtin's name: checked again before any worker
-  # signals or waits with it.
+  # prepare may have defined a function under a builtin's name, or taken the run callback away:
+  # checked again before any worker relies on either.
   _shmutant_no_shadows "$label" || { _shmutant_pool_fail "$label" "$wd"; return 2; }
+  if ! declare -F -- "$run" > /dev/null 2>&1 && ! command -v -- "$run" > /dev/null 2>&1; then
+    _shmutant_err "$label: run callback not found after prepare: $run"; _shmutant_pool_fail "$label" "$wd"; return 2
+  fi
   # prepare may have declared rows or had one refused: the table is read again here, and a
   # refusal after prepare is the same harness error as one before it.
   if [ "${SHMUTANT_DECL_ERRORS:-0}" -ne 0 ]; then
@@ -1482,7 +1524,7 @@ shmutant_pool() {
   suffix="${root#"$wd/pristine"}"
   for (( i = 0; i < n; i++ )); do
     if ! _shmutant_target_ok "$root" "${SHMUTANT_ROWS_FILE[$i]}"; then
-      _shmutant_err "$label: row '${SHMUTANT_ROWS_NAME[$i]}' targets ${SHMUTANT_ROWS_FILE[$i]}, which the prepared tree does not contain as a regular file (missing, a symlink, or reached through one that leaves the tree)"
+      _shmutant_err "$label: row '${SHMUTANT_ROWS_NAME[$i]}' targets ${SHMUTANT_ROWS_FILE[$i]}, which the prepared tree does not contain as a regular file (missing, a symlink, reached through one that leaves the tree, or through an absolute one that a clone could not keep inside itself)"
       _shmutant_pool_fail "$label" "$wd"; return 2
     fi
     # Link count is `ls -l` column 2. A clone gives each hard link its own inode, so a test
@@ -1524,6 +1566,9 @@ shmutant_pool() {
     for (( k = 0; k < ${#base_sel[@]}; k++ )); do
       if [ "${base_sel[$k]}" = "${SHMUTANT_ROWS_SEL[$i]}" ] && [ "${base_verdict[$k]}" != green ]; then
         SHMUTANT_SKIP[i]=1
+        # Recreated although no worker starts: an earlier pool's artifacts under this name would
+        # otherwise read as this run's.
+        _shmutant_fresh_dir "$wd/mut-$i" "$wd" || { _shmutant_err "$label: cannot recreate $wd/mut-$i"; _shmutant_pool_fail "$label" "$wd"; return 2; }
         SHMUTANT_RES_VERDICT["mut-$i"]=baseline; SHMUTANT_RES_US["mut-$i"]=0; SHMUTANT_RES_STATUS["mut-$i"]=""
       fi
     done

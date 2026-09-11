@@ -246,8 +246,8 @@ shmutant_mut 'a symlink target passes the pool precheck' \
 
 # --- guards added for the third review round ---
 shmutant_mut 'a symlinked parent directory passes the target check' \
-  '  _shmutant_inside "$root" "$dir"' \
-  '  true' \
+  '  _shmutant_inside "$root" "$dir" || return 1' \
+  '  :' \
   't_pool_refuses_target_under_symlinked_dir'
 shmutant_mut 'a destination inside the source is copied into itself' \
   'if _shmutant_inside "$asrc" "$adst"; then' \
@@ -572,8 +572,8 @@ shmutant_mut 'a failed root metadata restore is a silent success' \
   '  rc=0; [ "$rc" -eq 0 ] || _shmutant_err "copy_tree: could not reproduce' \
   't_pool_clone_keeps_metadata'
 shmutant_mut 'a directory that cannot be recreated waits on running workers' \
-  '      [ "${#pids[@]}" -eq 0 ] || { _shmutant_end_workers "${pids[@]}"; wait "${pids[@]}" 2>/dev/null; }' \
-  '      [ "${#pids[@]}" -eq 0 ] || wait "${pids[@]}" 2>/dev/null' \
+  '        _shmutant_end_workers "${pids[@]}"' \
+  '        :' \
   't_pool_aborts_running_workers_when_a_dir_cannot_be_recreated'
 shmutant_mut 'the CLI ignores SHMUTANT_KEEP=1 before the pool settles it' \
   '  [ "${SHMUTANT_KEEP:-0}" = 1 ] && keep=1' \
@@ -852,8 +852,8 @@ shmutant_mut 'the run output is written by its documented name' \
   '      _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; trap - EXIT; builtin exit "$rrc" ) < /dev/null >> "$dir/output" 2>&1 &' \
   't_sibling_cannot_plant_in_another_workers_directory'
 shmutant_mut 'a verdict from a worker that was killed is believed' \
-  '  [ "$wstatus" = 0 ] || { SHMUTANT_V_VERDICT=lost; SHMUTANT_V_US=0; SHMUTANT_V_STATUS=""; }' \
-  '  :' \
+  '  if [ "$wstatus" != 0 ]; then' \
+  '  if false; then' \
   't_collect_fails_closed'
 shmutant_mut 'a replaced worker directory is not a cleanup failure' \
   '    _shmutant_err "$dir is no longer the directory this run created"; SHMUTANT_CLEANUP_FAILED=1' \
@@ -936,8 +936,8 @@ shmutant_mut 'a shadow prepare introduced is not rechecked' \
   '  :' \
   't_pool_refuses_shadowed_builtins_and_posix_mode'
 shmutant_mut 'sourcing the library fails a caller under errexit' \
-  '_shmutant_alias_state="$(shopt -p expand_aliases; :)"' \
-  '_shmutant_alias_state="$(shopt -p expand_aliases)"' \
+  '_shmutant_alias_state="$(builtin shopt -p expand_aliases; :)"' \
+  '_shmutant_alias_state="$(builtin shopt -p expand_aliases)"' \
   't_library_sources_under_errexit'
 
 # --- guards added for the twenty-fifth review round ---
@@ -973,3 +973,37 @@ shmutant_mut 'a relative copy destination is rebased on the PWD variable' \
   '  case "$probe" in /*) ;; *) probe="$(builtin pwd -P)/$probe" ;; esac' \
   '  case "$probe" in /*) ;; *) probe="$PWD/$probe" ;; esac' \
   't_copy_tree_excludes_git'
+
+# --- guards added for the twenty-sixth review round ---
+shmutant_mut 'the prologue runs whatever shopt the caller aliased' \
+  'builtin shopt -u expand_aliases' \
+  'shopt -u expand_aliases' \
+  't_library_is_immune_to_aliases_at_parse_time'
+shmutant_mut 'a builtin disabled with enable passes the shadow check' \
+  '    kinds="$(builtin type -at -- "$n" 2>/dev/null)"' \
+  '    kinds=builtin; declare -F -- "$n" > /dev/null 2>&1 && kinds=""' \
+  't_pool_refuses_shadowed_builtins_and_posix_mode'
+shmutant_mut 'workers ended on a startup failure are neither collected nor cleaned' \
+  '        while [ "${#pids[@]}" -gt 0 ]; do _shmutant_reap_one "$wd"; done' \
+  '        wait "${pids[@]}" 2>/dev/null' \
+  't_pool_aborts_running_workers_when_a_dir_cannot_be_recreated'
+shmutant_mut 'a killed worker leaves its clone' \
+  '      _shmutant_remove "$dir/tree" "$dir" 2>/dev/null || true' \
+  '      :' \
+  't_pool_aborts_running_workers_when_a_dir_cannot_be_recreated'
+shmutant_mut 'a target under an absolute in-tree link passes the preflight' \
+  '  _shmutant_no_absolute_link "$1" "$2"' \
+  '  :' \
+  't_pool_refuses_target_under_symlinked_dir'
+shmutant_mut 'a run callback prepare removed is not noticed' \
+  '    _shmutant_err "$label: run callback not found after prepare: $run"; _shmutant_pool_fail "$label" "$wd"; return 2' \
+  '    :' \
+  't_pool_reads_the_table_prepare_declared'
+shmutant_mut 'the capture keeps its name while run executes' \
+  '  command -p rm -f -- "$outf" "$mark" "$left" "$seen" "$fifo" "$mark.hold" "$mark.hp" "$mark.go"' \
+  '  command -p rm -f -- "$mark" "$left" "$seen" "$fifo" "$mark.hold" "$mark.hp" "$mark.go"' \
+  't_run_capture_has_no_name_while_run_executes'
+shmutant_mut 'a baseline-skipped row keeps an earlier pool directory' \
+  '        _shmutant_fresh_dir "$wd/mut-$i" "$wd" || { _shmutant_err "$label: cannot recreate $wd/mut-$i"; _shmutant_pool_fail "$label" "$wd"; return 2; }' \
+  '        :' \
+  't_pool_recreates_worker_dirs'

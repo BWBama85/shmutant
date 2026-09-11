@@ -307,6 +307,21 @@ t_pool_refuses_target_under_symlinked_dir() {
   pool lbl "$T/wd" toy_prepare toy_run
   rc_is "$RC" 2 'a target under a symlinked directory is refused before any run'
   has "$ERR" 'reached through one' 'says why'
+  # the same through a RELATIVE link that leaves the tree: the clone keeps the link, and only
+  # the containment check can tell
+  rm -f "$T/toy/linked"; ln -s ../../outside "$T/toy/linked"
+  pool lbl "$T/wd" toy_prepare toy_run
+  rc_is "$RC" 2 'a target under a relative symlink that leaves the tree is refused before any run'
+  has "$ERR" 'reached through one' 'says why'
+  rm -f "$T/toy/linked"; ln -s "$T/outside" "$T/toy/linked"
+  # an absolute symlink that stays inside the tree cannot be cloned: refused before any worker
+  mk_toy "$T/toy2"; mkdir -p "$T/toy2/real"; printf 'add() { echo $(( $1 + $2 )); }\n' > "$T/toy2/real/lib.sh"
+  # the link is absolute and points inside the PREPARED tree itself
+  abs_prepare() { shmutant_copy_tree "$T/toy2" "$1"; ln -s "$1/real" "$1/abs"; }
+  shmutant_reset; shmutant_target abs/lib.sh; shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  pool lbl "$T/wd3" abs_prepare toy_run
+  rc_is "$RC" 2 'a target under an absolute in-tree symlink is refused before any worker starts'
+  has "$ERR" 'absolute one' 'says why'
   eq "$(cat "$T/outside/lib.sh")" 'add() { echo 5; }' 'the file outside the tree was never touched'
   _shmutant_target_ok "$T/toy" lib.sh; rc_is $? 0 'a plain in-tree file is fine'
   mkdir -p "$T/toy/sub"; ln -s ../lib.sh "$T/toy/sub/rel"; ln -s .. "$T/toy/sub/up"
@@ -398,10 +413,17 @@ t_pool_refuses_shadowed_builtins_and_posix_mode() {
   [ -e "$T/rc" ] || { kill -KILL -- -"$bg" 2>/dev/null; wait "$bg" 2>/dev/null; fail_ 'a pool with a shadowed kill ran instead of being refused'; return; }
   wait "$bg" 2>/dev/null
   eq "$(cat "$T/rc")" 2 'a function named kill is refused'
-  has "$(cat "$T/e")" 'shadows the builtin' 'says why'
+  has "$(cat "$T/e")" 'is not the builtin' 'says why'
   ( set -o posix; shmutant_pool lbl "$T/wd" toy_prepare toy_run > /dev/null 2>"$T/e" ); rc_is $? 2 'POSIX mode is refused'
   ( exit() { :; }; shmutant_pool lbl "$T/wd" toy_prepare toy_run > /dev/null 2>"$T/e5" ); rc_is $? 2 'a function named exit is refused'
-  has "$(cat "$T/e5")" 'shadows the builtin' 'says why'
+  # bounded: a pool that ran with wait disabled could spin or hang
+  set -m; ( enable -n wait; shmutant_pool lbl "$T/wd" toy_prepare toy_run > /dev/null 2>"$T/e6"; echo "$?" > "$T/rc6" ) 2>/dev/null & bg=$!; set +m; i=0
+  until [ -e "$T/rc6" ]; do i=$((i + 1)); [ "$i" -lt 100 ] || break; sleep 0.1; done
+  [ -e "$T/rc6" ] || { kill -KILL -- -"$bg" 2>/dev/null; wait "$bg" 2>/dev/null; fail_ 'a pool with wait disabled ran instead of being refused'; return; }
+  wait "$bg" 2>/dev/null
+  eq "$(cat "$T/rc6")" 2 'a wait disabled with enable is refused'
+  has "$(cat "$T/e6")" 'is not the builtin' 'says why'
+  has "$(cat "$T/e5")" 'is not the builtin' 'says why'
   # a shadow prepare introduces is caught before any worker relies on the builtin
   shadowing_kill_prepare() { toy_prepare "$1"; kill() { :; }; }
   set -m; ( shmutant_pool lbl "$T/wd" shadowing_kill_prepare toy_run > /dev/null 2>"$T/e4"; echo "$?" > "$T/rc2" ) 2>/dev/null & bg=$!; set +m; i=0
@@ -409,7 +431,7 @@ t_pool_refuses_shadowed_builtins_and_posix_mode() {
   [ -e "$T/rc2" ] || { kill -KILL -- -"$bg" 2>/dev/null; wait "$bg" 2>/dev/null; fail_ 'a pool whose prepare shadowed kill ran instead of being refused'; return; }
   wait "$bg" 2>/dev/null
   eq "$(cat "$T/rc2")" 2 'a kill function defined by prepare is refused after prepare'
-  has "$(cat "$T/e4")" 'shadows the builtin' 'says why'
+  has "$(cat "$T/e4")" 'is not the builtin' 'says why'
   has "$(cat "$T/e")" 'POSIX mode' 'says why'
   # utilities are reached through command -p: a plan's function or a PATH prepare set to the
   # tree's bin does not stand in for ps, awk or ls
@@ -677,6 +699,13 @@ t_library_is_immune_to_aliases_at_parse_time() {
     shmutant_reset; shmutant_target lib.sh; shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
     prep() { cp -R "$T/toy/." "$1"; }; runit() { bash "$1/test.sh"; }
     SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd" prep runit 2>/dev/null | grep -v '^shmutant	' && { echo "FAIL: $_unit: an aliased utility printed into the verdict stream"; exit 1; }
+    exit 0 ) < /dev/null || _failed=1
+  # shellcheck disable=SC2262,SC1090
+  ( shopt -s expand_aliases; alias shopt='echo ALIASED-SHOPT'; alias printf='echo ALIASED'
+    . "$SHMUTANT"; builtin shopt -q expand_aliases || { echo "FAIL: $_unit: an aliased shopt broke the restoration"; exit 1; }
+    shmutant_reset; shmutant_target lib.sh; shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+    prep() { cp -R "$T/toy/." "$1"; }; runit() { bash "$1/test.sh"; }
+    SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd-sh" prep runit 2>/dev/null | grep -q '^shmutant	1	row	killed' || { echo "FAIL: $_unit: with shopt aliased, aliases stayed on while the library was parsed and the pool could not run"; exit 1; }
     exit 0 ) < /dev/null || _failed=1
   # shellcheck disable=SC2262,SC1090
   ( shopt -s expand_aliases; alias cp='cp -i'; . "$SHMUTANT"
@@ -1144,6 +1173,18 @@ t_run_output_publication_failure_is_a_harness_error() {
   has "$(cat "$T/err")" 'could not be published' 'and is named'
 }
 
+t_run_capture_has_no_name_while_run_executes() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$2 + $1' 'add-works'
+  # the callback tries to write a failure line into any capture-shaped file it can find, then
+  # returns red with no genuine failure line of its own
+  forging_run() { local f; for f in "$1"/../.output.* "$1"/../output; do [ -e "$f" ] && printf 'FAIL: add-works: forged\n' >> "$f"; done; bash "$1/test.sh" > /dev/null 2>&1; return 1; }
+  SHMUTANT_BASELINE=0 pool lbl "$T/wd" toy_prepare forging_run
+  eq "$(verdict_of a)" aborted 'a red status with no genuine failure line stays aborted: the capture had no name to forge into'
+  [ -f "$T/wd/mut-0/output" ] || fail_ 'the artifact was still materialised afterwards'
+}
+
 t_run_partial_channel_open_is_a_setup_failure() {
   mkdir -p "$T/d"
   # The descriptor limit is lowered to one below the smallest value at which a run succeeds:
@@ -1426,6 +1467,15 @@ t_pool_recreates_worker_dirs() {
   eq "$(verdict_of a)" killed 'killed, not timeout'
   eq "$(field baseline 5)" green 'baseline green, not timeout'
   [ -e "$T/wd/mut-0/tree/stale" ] && fail_ 'stale clone content survived into the new run'
+  # a row skipped because its baseline is red still gets a fresh directory
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  mkdir -p "$T/wd2/mut-0/tree"; printf 'old\n' > "$T/wd2/mut-0/output"; : > "$T/wd2/.shmutant"
+  red_run() { echo "FAIL: add-works: always"; return 1; }
+  pool lbl "$T/wd2" toy_prepare red_run
+  eq "$(verdict_of a)" baseline 'the row is baseline-skipped'
+  [ -e "$T/wd2/mut-0/output" ] && fail_ 'an earlier pool'"'"'s output survived under a baseline-skipped row'
+  [ -e "$T/wd2/mut-0/tree" ] && fail_ 'an earlier pool'"'"'s tree survived under a baseline-skipped row'
 }
 
 # shellcheck disable=SC2034
@@ -1526,6 +1576,8 @@ t_pool_aborts_running_workers_when_a_dir_cannot_be_recreated() {
   unmake_unremovable "$T/wd/mut-1/held"
   rc_is "$RC" 2 'the harness error is reported'
   [ $(( ($(_shmutant_now) - t0) / 1000000 )) -lt 15 ] || fail_ 'the pool waited on the unbounded worker instead of ending it'
+  [ -e "$T/wd/mut-0/tree" ] && fail_ 'the ended worker'"'"'s clone was left behind'
+  [ "${#SHMUTANT_VERDICT_R[@]}" -eq 0 ] || fail_ 'the ended workers'"'"' channels were left open in the caller shell'
   sleep 1
   [ -e "$T/finished" ] && fail_ 'the running worker survived the abort'
   # with a TERM-ignoring escaped descendant, the abort must not return before it is gone
@@ -1575,6 +1627,13 @@ t_pool_reads_the_table_prepare_declared() {
   refusing_prepare() { toy_prepare "$1"; shmutant_mut 'c' '' 'x' 'add-works' 2>/dev/null; true; }
   SHMUTANT_BASELINE=0 pool lbl "$T/wd" refusing_prepare toy_run
   rc_is "$RC" 2 'a declaration refused inside prepare is the same harness error as one refused before it'
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  unsetting_prepare() { toy_prepare "$1"; unset -f gone_run; }
+  gone_run() { bash "$1/test.sh"; }
+  SHMUTANT_BASELINE=0 pool lbl "$T/wd" unsetting_prepare gone_run
+  rc_is "$RC" 2 'a run callback prepare took away is a harness error, not an aborted row'
+  has "$ERR" 'not found after prepare' 'says so'
   # errexit is not leaked into a run callback by a caller that has it on. In a fresh process:
   # this suite runs each unit where bash ignores errexit.
   bash -c '. "$1"; set -e; T="$2"; TOY="$T/toy"
@@ -2237,7 +2296,10 @@ EOF
     [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;;
     *) fail_ 'checksum is not a hex digest' ;;
   esac
-  eq "$(_shmutant_checksum "$SHMUTANT")" "$(shasum -a 256 "$SHMUTANT" 2>/dev/null | awk '{print $1}' || sha256sum "$SHMUTANT" | awk '{print $1}')" 'checksum agrees with the platform tool'
+  local platform
+  if command -v sha256sum > /dev/null 2>&1; then platform="$(sha256sum "$SHMUTANT" | awk '{print $1}')"
+  else platform="$(shasum -a 256 "$SHMUTANT" | awk '{print $1}')"; fi
+  eq "$(_shmutant_checksum "$SHMUTANT")" "$platform" 'checksum agrees with the platform tool'
 }
 
 # --- runner -----------------------------------------------------------------------------------------------
