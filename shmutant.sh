@@ -298,13 +298,16 @@ shmutant_copy_tree() {
   # drop entries, dotglob would list hidden entries twice.
   (
     set +f; shopt -u failglob dotglob; shopt -s nullglob; unset GLOBIGNORE
+    # An existing destination must be empty: a caller's entry of a source name would be
+    # overwritten by cp, or written through when it is a symlink, and neither is this helper's
+    # to do.
+    for entry in "$dst"/* "$dst"/.[!.]* "$dst"/..?*; do
+      { [ -e "$entry" ] || [ -L "$entry" ]; } && { _shmutant_err "copy_tree: destination $dst is not empty — it is never written into; give an empty or absent directory"; exit 1; }
+    done
     for entry in "$src"/* "$src"/.[!.]* "$src"/..?*; do
       [ -e "$entry" ] || [ -L "$entry" ] || continue
       name="${entry##*/}"
       [ "$name" = .git ] && continue
-      # Any existing entry of that name goes first: cp -P would otherwise open a destination
-      # symlink and write through it to its external referent.
-      { [ -e "$dst/$name" ] || [ -L "$dst/$name" ]; } && command -p rm -rf -- "$dst/$name" 2>/dev/null
       command -p cp -RPp -- "$entry" "$dst/" || rc=1
     done
     exit "$rc"
@@ -439,21 +442,36 @@ shmutant_reset() {
 
 # _shmutant_scan_output <fd> <prefix> <witness> — read the run's captured output once through
 # <fd>, streaming, and set SHMUTANT_RUN_RED (some line starts with <prefix>) and
-# SHMUTANT_RUN_WITNESSED (some such line also carries <witness>; never with an empty witness).
+# SHMUTANT_RUN_WITNESSED (some such line also carries <witness> as a whole token; never with an
+# empty witness). SHMUTANT_RUN_SCAN_FAILED=1 when the scan produced no result: that run is not
+# green, it is unassessed.
 # Per line, so a witness cannot match across a passing assertion's echo; literal matches, not
-# patterns. The text is never held whole: a run that printed until its deadline is scanned in
-# constant memory.
+# patterns. A token: the character before and after the witness, where there is one, is not a
+# letter, a digit, `_`, `-` or `.`, so a label that merely extends the witness does not carry it.
+# The text is never held whole: a run that printed until its deadline is scanned in constant memory.
 _shmutant_scan_output() {
   local got
-  SHMUTANT_RUN_RED=0; SHMUTANT_RUN_WITNESSED=0
+  SHMUTANT_RUN_RED=0; SHMUTANT_RUN_WITNESSED=0; SHMUTANT_RUN_SCAN_FAILED=0
   # Through ENVIRON, never -v: awk would read a backslash escape in the prefix or witness.
   got="$(SHMUTANT_SCAN_P="$2" SHMUTANT_SCAN_W="$3" command -p awk '
+    function witnessed(s, w,   i, off, pre, post) {
+      off = 1
+      while ((i = index(substr(s, off), w)) > 0) {
+        i += off - 1
+        pre = (i > 1) ? substr(s, i - 1, 1) : ""; post = substr(s, i + length(w), 1)
+        if (pre !~ /[A-Za-z0-9_.-]/ && post !~ /[A-Za-z0-9_.-]/) return 1
+        off = i + 1
+      }
+      return 0
+    }
     BEGIN { p = ENVIRON["SHMUTANT_SCAN_P"]; w = ENVIRON["SHMUTANT_SCAN_W"] }
-    index($0, p) == 1 { red = 1; if (w != "" && index($0, w)) { wit = 1; exit } }
+    index($0, p) == 1 { red = 1; if (w != "" && witnessed($0, w)) { wit = 1; exit } }
     END { print red + 0, wit + 0 }' <&"$1" 2>/dev/null)"
   case "$got" in
     "1 1") SHMUTANT_RUN_RED=1; SHMUTANT_RUN_WITNESSED=1 ;;
     "1 0") SHMUTANT_RUN_RED=1 ;;
+    "0 0") ;;
+    *) SHMUTANT_RUN_SCAN_FAILED=1 ;;
   esac
 }
 
@@ -931,6 +949,8 @@ _shmutant_run_bounded() {
     esac
   done
   _shmutant_scan_output "$out_r" "${SHMUTANT_RED_PREFIX:-FAIL: }" "$wit"
+  # An output the scan could not read is not a green run: the row is a harness error.
+  [ "${SHMUTANT_RUN_SCAN_FAILED:-0}" = 0 ] || SHMUTANT_RUN_SETUP_FAILED=1
   # The capture takes its documented name by rename: a symlink a callback planted there is
   # replaced, never written through.
   # A directory planted there would make mv publish INTO it: it goes first, and the result is
@@ -1035,7 +1055,9 @@ _shmutant_worker() {
   status="$SHMUTANT_RUN_STATUS"
   t1="$(_shmutant_now)"
   if [ "${SHMUTANT_RUN_SETUP_FAILED:-0}" = 1 ]; then
-    # The run never started: reported as such, and the pool makes it a harness error.
+    # The run never started, or its output could not be scanned: reported as such, and the
+    # pool makes it a harness error.
+    [ "${SHMUTANT_RUN_SCAN_FAILED:-0}" = 0 ] || _shmutant_err "$label: the run's output could not be scanned; its verdict is not trusted"
     { printf 'setup-failed\n' >&"$SHMUTANT_VERDICT_FD"; } 2>/dev/null
     verdict=lost
   elif [ "$SHMUTANT_RUN_UNSETTLED" = 1 ]; then

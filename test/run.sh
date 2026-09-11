@@ -358,7 +358,9 @@ t_abs_ignores_cdpath() {
 "
   ( cd "$T/nl" && _shmutant_abs "x
 " ); rc_is $? 1 'a name ending in a newline is refused rather than resolved to its sibling'
-  mkdir -p "$T/nl/src"; printf 'x\n' > "$T/nl/src/f"; mkdir -p "$T/nl/dst"; printf 'keep\n' > "$T/nl/dst/g"
+  # the sibling destination is left EMPTY: were the newline trimmed, the copy would land there
+  # and be accepted, which is what the check below would see
+  mkdir -p "$T/nl/src"; printf 'x\n' > "$T/nl/src/f"; mkdir -p "$T/nl/dst"
   shmutant_copy_tree "$T/nl/src" "$T/nl/dst
 " 2>/dev/null; rc_is $? 1 'a copy destination ending in a newline is refused'
   [ -e "$T/nl/dst/f" ] && fail_ 'the copy landed on the sibling without the newline'
@@ -495,6 +497,40 @@ t_verdict_scan_takes_literals_as_bytes() {
   escaping_run() { bash "$1/test.sh" > /dev/null 2>&1; echo 'RED\t: add\nworks here'; return 1; }
   SHMUTANT_BASELINE=0 SHMUTANT_RED_PREFIX='RED\t: ' pool lbl "$T/wd" toy_prepare escaping_run
   eq "$(verdict_of a)" killed 'a prefix and witness holding a literal backslash-t and backslash-n match the same bytes in the output'
+}
+
+t_witness_matches_a_whole_token() {
+  # a witness is carried only as a whole token: a label that extends it is another assertion
+  local fd
+  scan() { exec {fd}< <(printf '%s\n' "$1"); _shmutant_scan_output "$fd" 'FAIL: ' "$2"; exec {fd}<&-; }
+  scan 'FAIL: t_parse: parse-empty-list: got []' parse-empty
+  eq "$SHMUTANT_RUN_RED$SHMUTANT_RUN_WITNESSED" 10 'a label that extends the witness with a hyphen does not carry it'
+  scan 'FAIL: t_x: foobar' foo
+  eq "$SHMUTANT_RUN_RED$SHMUTANT_RUN_WITNESSED" 10 'a label that extends the witness with a letter does not carry it'
+  scan 'FAIL: t_x: xfoo' foo
+  eq "$SHMUTANT_RUN_RED$SHMUTANT_RUN_WITNESSED" 10 'a label the witness ends does not carry it'
+  scan 'FAIL: t_x: foo.sub: y' foo
+  eq "$SHMUTANT_RUN_RED$SHMUTANT_RUN_WITNESSED" 10 'a dotted extension does not carry it'
+  scan 'FAIL: t_parse: parse-empty: got []' parse-empty
+  eq "$SHMUTANT_RUN_RED$SHMUTANT_RUN_WITNESSED" 11 'the witness followed by a colon is carried'
+  scan 'FAIL: parse-empty' parse-empty
+  eq "$SHMUTANT_RUN_RED$SHMUTANT_RUN_WITNESSED" 11 'the witness at the end of the line is carried'
+  scan 'FAIL: t_x: foobar then foo here' foo
+  eq "$SHMUTANT_RUN_RED$SHMUTANT_RUN_WITNESSED" 11 'a later whole-token occurrence is found past an extended one'
+  scan 'FAIL: t_x: [foo]' '[foo]'
+  eq "$SHMUTANT_RUN_RED$SHMUTANT_RUN_WITNESSED" 11 'a witness with its own punctuation is carried'
+  # a scan that produced nothing (its descriptor cannot be read) is not a green run
+  _shmutant_scan_output 199 'FAIL: ' foo 2>/dev/null
+  eq "${SHMUTANT_RUN_SCAN_FAILED:-unset}" 1 'a scan whose descriptor cannot be read reports failure, not green'
+  eq "$SHMUTANT_RUN_RED$SHMUTANT_RUN_WITNESSED" 00 'and asserts nothing'
+  # and the pool makes it a harness error, not a survivor
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  ( _shmutant_scan_output() { SHMUTANT_RUN_RED=0; SHMUTANT_RUN_WITNESSED=0; SHMUTANT_RUN_SCAN_FAILED=1; }
+    SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd" toy_prepare toy_run > "$T/out" 2> "$T/err" ); rc_is $? 2 'a run whose output could not be scanned is a harness error'
+  has "$(cat "$T/err")" 'could not be scanned' 'says why'
+  case "$(cat "$T/out")" in *survived*) fail_ 'an unscanned run was scored a survivor' ;; esac
 }
 
 t_verdict_scans_a_large_output() {
@@ -2048,12 +2084,15 @@ t_copy_tree_excludes_git() {
   # link-free directory, so were the scan to honour it the multiply linked source would pass
   mkdir -p "$T/hlc" "$T/hlc-empty"; printf 'x' > "$T/hlc/a"; ln "$T/hlc/a" "$T/hlc/b"
   ( cd() { builtin cd "$T/hlc-empty"; }; shmutant_copy_tree "$T/hlc" "$T/hlc-copy" 2>/dev/null ); rc_is $? 1 'a caller cd function does not make the hard-link scan pass a multiply linked source'
-  # an existing destination entry colliding with a source entry via a symlink is not written through
+  # an existing destination with an entry of a source name (here a symlink to a caller file) is
+  # refused: the copy neither writes through it nor removes it
   mkdir -p "$T/coll-src" "$T/coll-dst" "$T/coll-victim"; printf 'src\n' > "$T/coll-src/f"; printf 'precious\n' > "$T/coll-victim/f"
   ln -s "$T/coll-victim/f" "$T/coll-dst/f"
-  shmutant_copy_tree "$T/coll-src" "$T/coll-dst"; rc_is $? 0 'copies over a colliding destination symlink'
-  eq "$(cat "$T/coll-victim/f")" precious 'a destination symlink colliding with a source entry is replaced, not written through'
-  eq "$(cat "$T/coll-dst/f")" src 'and the real file is copied in'
+  shmutant_copy_tree "$T/coll-src" "$T/coll-dst" 2>"$T/e3"; rc_is $? 1 'a non-empty destination is refused'
+  has "$(cat "$T/e3")" 'not empty' 'says why'
+  eq "$(cat "$T/coll-victim/f")" precious 'the caller file behind the colliding symlink is untouched'
+  [ -L "$T/coll-dst/f" ] || fail_ 'the colliding destination entry was removed'
+  mkdir -p "$T/coll-empty"; shmutant_copy_tree "$T/coll-src" "$T/coll-empty"; rc_is $? 0 'an existing empty destination is accepted'
   ( set -u; shmutant_mutate "$T/src/sub/f" y 2>"$T/e2" ); rc_is $? 1 'a mutate call missing an argument is a failure even under set -u'
   mkdir -p "$T/nlm
 "; printf 'old\n' > "$T/nlm

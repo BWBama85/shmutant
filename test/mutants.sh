@@ -98,8 +98,8 @@ shmutant_mut 'the witness is checked against the selector' \
   '"$run" "$root" "$sel" "${SHMUTANT_ROWS_SEL[$i]}"' \
   't_verdict_accidental'
 shmutant_mut 'a witness on a non-red line counts' \
-  '    index($0, p) == 1 { red = 1; if (w != "" && index($0, w)) { wit = 1; exit } }' \
-  '    index($0, p) == 1 { red = 1 } w != "" && index($0, w) { wit = 1 }' \
+  '    index($0, p) == 1 { red = 1; if (w != "" && witnessed($0, w)) { wit = 1; exit } }' \
+  '    index($0, p) == 1 { red = 1 } w != "" && witnessed($0, w) { wit = 1 }' \
   't_verdict_accidental'
 shmutant_mut 'exit 1 without a red line is scored accidental' \
   '    elif [ "$SHMUTANT_RUN_RED" = 1 ]; then' \
@@ -742,8 +742,8 @@ shmutant_mut 'an empty copy destination is accepted' \
   '  if [ "$#" -ne 2 ]; then' \
   't_copy_tree_excludes_git'
 shmutant_mut 'the red prefix is matched anywhere in the line' \
-  '    index($0, p) == 1 { red = 1; if (w != "" && index($0, w)) { wit = 1; exit } }' \
-  '    index($0, p) { red = 1; if (w != "" && index($0, w)) { wit = 1; exit } }' \
+  '    index($0, p) == 1 { red = 1; if (w != "" && witnessed($0, w)) { wit = 1; exit } }' \
+  '    index($0, p) { red = 1; if (w != "" && witnessed($0, w)) { wit = 1; exit } }' \
   't_verdict_aborted_no_red_line'
 shmutant_mut 'a freeze that never settles is endured in silence' \
   '    if [ "$rounds" -ge 32 ]; then SHMUTANT_FREEZE_UNSETTLED=1; break; fi' \
@@ -1027,8 +1027,8 @@ shmutant_mut 'the punctuation builtins are not in the shadow list' \
   "  for n in kill wait read trap printf mapfile exec builtin command cd pwd exit return declare local unset set shopt eval readonly export shift true false '[' : . type test; do" \
   '  for n in kill wait read trap printf mapfile exec builtin command cd pwd exit return declare local unset set shopt eval readonly export shift true false; do' \
   't_pool_refuses_shadowed_builtins_and_posix_mode'
-shmutant_mut 'a colliding destination entry is written through' \
-  '      { [ -e "$dst/$name" ] || [ -L "$dst/$name" ]; } && command -p rm -rf -- "$dst/$name" 2>/dev/null' \
+shmutant_mut 'a non-empty destination is written into' \
+  '      { [ -e "$entry" ] || [ -L "$entry" ]; } && { _shmutant_err "copy_tree: destination $dst is not empty — it is never written into; give an empty or absent directory"; exit 1; }' \
   '      :' \
   't_copy_tree_excludes_git'
 shmutant_mut 'the hard-link scan uses a caller cd' \
@@ -1051,3 +1051,17 @@ shmutant_mut 'a prepare root ending in a newline is trimmed to its sibling' \
   "  case \"\$root\" in *\$'\\n'*) _shmutant_err \"\$label: prepare printed a root whose name contains a newline\"; _shmutant_pool_fail \"\$label\" \"\$wd\"; return 2 ;; esac" \
   '  :' \
   't_pool_reads_the_table_prepare_declared'
+
+# --- guards added for the twenty-ninth review round ---
+shmutant_mut 'the witness matches as a substring, not a whole token' \
+  '        if (pre !~ /[A-Za-z0-9_.-]/ && post !~ /[A-Za-z0-9_.-]/) return 1' \
+  '        return 1' \
+  't_witness_matches_a_whole_token'
+shmutant_mut 'a scan that produced nothing is scored green' \
+  '    *) SHMUTANT_RUN_SCAN_FAILED=1 ;;' \
+  '    *) ;;' \
+  't_witness_matches_a_whole_token'
+shmutant_mut 'an unscanned run keeps its callback verdict' \
+  '  [ "${SHMUTANT_RUN_SCAN_FAILED:-0}" = 0 ] || SHMUTANT_RUN_SETUP_FAILED=1' \
+  '  :' \
+  't_witness_matches_a_whole_token'

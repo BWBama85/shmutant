@@ -62,7 +62,10 @@ fi
 Prefix every `FAIL:` line inside a unit with the unit name, and witness and selector are the
 same string. Where a unit holds several assertions and you want the witness to be one exact
 assertion, pass a fifth argument to `shmutant_mut`: the witness is the assertion label, the
-selector is the unit.
+selector is the unit. A witness is matched as a whole token, never as a substring: where a
+character precedes or follows it on the red line, that character is not a letter, a digit, `_`,
+`-` or `.`. So `parse-empty` is carried by `FAIL: t_parse: parse-empty: got []` and not by
+`FAIL: t_parse: parse-empty-list: got []`, whose assertion is a different one.
 
 This repository's own suite (`test/run.sh`) is the reference: `t_*` functions selected by
 name, a runner that exits 2 when nothing matched.
@@ -119,7 +122,8 @@ name nor a `PATH` that `prepare` points at the tree's own `bin` is consulted by 
 callbacks still see the shell as they left it.
 `shmutant_copy_tree` and the per-row clones keep mode, ownership and timestamps, the root
 directory included (a root whose metadata cannot be reproduced is a copy failure); a symlinked
-source root is resolved first and a symlink at the destination is refused; a source with a multiply linked regular file outside its top-level `.git`
+source root is resolved first, a symlink at the destination is refused, and an existing
+destination must be empty (the copy never removes or overwrites a caller's entries); a source with a multiply linked regular file outside its top-level `.git`
 is refused by `shmutant_copy_tree`, since a copy cannot keep the links joined. A pool that
 stops after `prepare` (a target the tree lacks, a setting `prepare` broke) removes the prepared
 tree unless `SHMUTANT_KEEP=1`.
