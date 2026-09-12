@@ -451,6 +451,15 @@ t_pool_refuses_shadowed_builtins_and_posix_mode() {
   wait "$bg" 2>/dev/null
   eq "$(cat "$T/rc9")" 2 'a builtin faker prepare defined does not get a kill shadow past the check'
   has "$(cat "$T/e9")" 'kill is not the builtin' 'says why'
+  # a caller function named return (a special builtin) would turn the check's own refusal into
+  # a no-op: it is removed, from posix mode, before the check relies on it, and the kill
+  # shadow is then refused as usual
+  set -m; ( eval 'return() { :; }'; kill() { :; }; shmutant_pool lbl "$T/wd" toy_prepare toy_run > /dev/null 2>"$T/e10"; echo "$?" > "$T/rc10" ) > /dev/null 2>&1 & bg=$!; set +m; i=0
+  until [ -e "$T/rc10" ]; do i=$((i + 1)); [ "$i" -lt 300 ] || break; sleep 0.1; done
+  [ -e "$T/rc10" ] || { kill -KILL -- -"$bg" 2>/dev/null; wait "$bg" 2>/dev/null; fail_ 'a pool under a caller function named return ran instead of being refused'; return; }
+  wait "$bg" 2>/dev/null
+  eq "$(cat "$T/rc10")" 2 'with return shadowed the refusal still returns'
+  has "$(cat "$T/e10")" 'kill is not the builtin' 'says why'
   # a punctuation builtin the harness relies on: the shadow check names it (the pool's own
   # arity guard, which uses [, would refuse a [ shadow first, so the check is exercised directly)
   ( eval '[() { :; }'; _shmutant_no_shadows lbl 2>"$T/e7" ); rc_is $? 2 'a function named [ is refused by the shadow check'
@@ -664,6 +673,14 @@ t_readonly_settings_do_not_kill_the_caller() {
   ( SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd-ro" readonly_prepare toy_run > /dev/null 2>"$T/e-ro"; echo "rc=$?" > "$T/o-ro" )
   has "$(cat "$T/o-ro")" 'rc=2' 'a prepare that made a pool name readonly is a harness error, and the caller shell survives'
   has "$(cat "$T/e-ro")" "made 'n' readonly" 'says why'
+  # shellcheck disable=SC2034
+  readonly_array_prepare() { toy_prepare "$1"; readonly base_sel=x; }
+  ( SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd-ra" readonly_array_prepare toy_run > /dev/null 2>"$T/e-ra"; echo "rc=$?" > "$T/o-ra" )
+  has "$(cat "$T/o-ra")" 'rc=2' 'a prepare that made a pool array readonly is a harness error too'
+  has "$(cat "$T/e-ra")" "made 'base_sel' readonly" 'says why'
+  # and a refused pool leaves no descriptor behind in the caller shell
+  ( before="$(ls /dev/fd | wc -l | tr -d ' ')"; SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd-fd" readonly_prepare toy_run > /dev/null 2>&1; after="$(ls /dev/fd | wc -l | tr -d ' ')"; echo "$before $after" > "$T/fds" )
+  eq "$(cut -d' ' -f1 "$T/fds")" "$(cut -d' ' -f2 "$T/fds")" "a refused pool closed its prepare capture descriptors: [$(cat "$T/fds")]"
   local phys; phys="$(cd "$T" && pwd -P)"
   ( readonly SHMUTANT_STREAM="$phys/ro.tsv"; SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd4" toy_prepare toy_run > /dev/null 2>/dev/null; echo "rc=$?" > "$T/o4" )
   has "$(cat "$T/o4")" 'rc=0' 'a readonly absolute physical stream path is accepted and the caller shell survives'
@@ -927,6 +944,13 @@ t_pool_refuses_a_workdir_swapped_between_rows() {
   has "$ERR" 'a callback moved or replaced it' 'says why, between rows'
   [ -f "$T/wd/mut-1/keep" ] || fail_ 'the caller directory at the workdir path lost its mut-1 entry'
   rm -rf "$T/wd.moved"
+  # the same swap by a BASELINE callback that then fails: the rows it covers are skipped, and
+  # their directories are recreated only in the workdir this pool marked
+  base_swapping_run() { local w; w="$(cd "$1/../.." && pwd -P)"; mv "$w" "$w.moved" && mkdir -p "$w/mut-0" && printf 'precious\n' > "$w/mut-0/keep"; return 1; }
+  SHMUTANT_JOBS=1 SHMUTANT_BASELINE=1 pool lbl "$T/wd2" toy_prepare base_swapping_run
+  rc_is "$RC" 2 'a workdir swapped by a failing baseline is a harness error'
+  [ -f "$T/wd2/mut-0/keep" ] || fail_ 'the caller directory at the workdir path lost its mut-0 entry on the skipped-row path'
+  rm -rf "$T/wd2.moved"
 }
 
 t_stream_open_failure_is_rolled_back() {
@@ -1058,6 +1082,22 @@ t_a_clone_swapped_by_its_run_is_not_removed() {
   SHMUTANT_BASELINE=1 pool lbl "$T/wd2" toy_prepare swapping_tree_run
   rc_is "$RC" 2 'a baseline clone swapped by its run is a harness error'
   [ -f "$T/wd2/base-0/tree/keep" ] || fail_ 'the directory the baseline run put at the clone path was removed'
+  # a worker that dies (ended by the pool on a sibling's startup failure) after its run swapped
+  # the clone: the collector removes only the clone the worker published, never the replacement
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  shmutant_mut 'b' '$1 + $2' '$1 * $2' 'add-works'
+  swap_then_hang_run() { mv "$1" "$1.moved"; mkdir "$1"; printf 'precious\n' > "$1/keep"; : > "$T/swapped"; sleep 30; }
+  make_unremovable "$T/wd3/mut-1/held" || { echo "note: $_unit: no way to make a directory unremovable here; the dying-worker case is skipped"; return; }
+  : > "$T/wd3/.shmutant"
+  eval "$(declare -f _shmutant_fresh_dir | sed '1s/_shmutant_fresh_dir/_shmutant_fresh_dir_real/')"
+  _shmutant_fresh_dir() { local i=0; case "$1" in */mut-1) until [ -e "$T/swapped" ] || [ "$i" -ge 300 ]; do i=$((i + 1)); sleep 0.1; done ;; esac; _shmutant_fresh_dir_real "$@"; }
+  SHMUTANT_JOBS=2 SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=0 pool lbl "$T/wd3" toy_prepare swap_then_hang_run
+  unmake_unremovable "$T/wd3/mut-1/held"
+  eval "$(declare -f _shmutant_fresh_dir_real | sed '1s/_shmutant_fresh_dir_real/_shmutant_fresh_dir/')"; unset -f _shmutant_fresh_dir_real
+  [ -e "$T/swapped" ] || fail_ 'fixture: the run never swapped its clone'
+  rc_is "$RC" 2 'the startup failure is a harness error'
+  [ -f "$T/wd3/mut-0/tree/keep" ] || fail_ 'the directory a dying worker'"'"'s run put at its clone path was removed by the collector'
 }
 
 t_public_helpers_refuse_a_shadowed_builtin() {
@@ -1718,13 +1758,14 @@ t_pool_interrupted_kills_its_workers() {
   ( SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=0 shmutant_pool lbl "$T/wd" toy_prepare unbounded_run > /dev/null 2>&1 ) & local pp=$!
   wait_for "$T/started" || fail_ 'the run never started'
   kill -TERM "$pp"; wait "$pp" 2>/dev/null
-  sleep 4
+  # past the worker's own four seconds by a margin: a worker left alive touches the marker late
+  sleep 6
   [ -e "$T/finished" ] && fail_ 'a worker outlived the pool that was interrupted with TERM'
   stubborn_run() { set -m; bash -c "trap '' TERM; : > '$T/started2'; sleep 5; touch '$T/stubborn'" & wait; }
   ( SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=0 shmutant_pool lbl "$T/wd2" toy_prepare stubborn_run > /dev/null 2>&1 ) & pp=$!
   wait_for "$T/started2" || fail_ 'the stubborn run never started'
   kill -TERM "$pp"; wait "$pp" 2>/dev/null
-  sleep 5
+  sleep 7
   [ -e "$T/stubborn" ] && fail_ 'a TERM-ignoring escaped descendant outlived the interrupted pool: the TERM victims were not retained for KILL'
   # with nothing readable from the process table, the run's group is still ended by number,
   # through the group and holder the runner reported on its channel
@@ -1733,7 +1774,7 @@ t_pool_interrupted_kills_its_workers() {
     SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=0 shmutant_pool lbl "$T/wd3" toy_prepare plain_run > /dev/null 2>&1 ) & pp=$!
   wait_for "$T/started3" || fail_ 'the no-ps run never started'
   kill -TERM "$pp"; wait "$pp" 2>/dev/null
-  sleep 4
+  sleep 6
   [ -e "$T/finished3" ] && fail_ 'with no process table, an interrupted run outlived the pool: its group was not ended by number'
 }
 

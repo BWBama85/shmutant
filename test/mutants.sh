@@ -926,7 +926,7 @@ shmutant_mut 'selected reads its unit before checking it was given' \
   '  :' \
   't_copy_tree_excludes_git'
 shmutant_mut 'a shadow prepare introduced is not rechecked' \
-  '  _shmutant_no_shadows "$label" || { _shmutant_pool_fail "$label" "$wd"; return 2; }' \
+  '  _shmutant_no_shadows "$label" || { _shmutant_pool_fail "$label" "$wd"; builtin return 2; }' \
   '  :' \
   't_pool_refuses_shadowed_builtins_and_posix_mode'
 shmutant_mut 'sourcing the library fails a caller under errexit' \
@@ -982,8 +982,8 @@ shmutant_mut 'workers ended on a startup failure are neither collected nor clean
   '        wait "${pids[@]}" 2>/dev/null' \
   't_pool_aborts_running_workers_when_a_dir_cannot_be_recreated'
 shmutant_mut 'a killed worker leaves its clone' \
-  '      _shmutant_remove "$dir/tree" "$dir" 2>/dev/null || true' \
-  '      :' \
+  '      else _shmutant_remove "$dir/tree" "$dir" 2>/dev/null || true' \
+  '      else :' \
   't_pool_aborts_running_workers_when_a_dir_cannot_be_recreated'
 shmutant_mut 'a target under an absolute in-tree link passes the preflight' \
   '  _shmutant_no_absolute_link "$1" "$2"' \
@@ -1298,7 +1298,7 @@ shmutant_mut 'an unverified CLI child is escalated on by bare number' \
 
 # --- guards added for the thirty-eighth review round ---
 shmutant_mut 'a standalone mutate trusts the names the caller left' \
-  '  _shmutant_no_shadows mutate || { _shmutant_aliases_back "$mutate_aliases"; return 1; }' \
+  '  _shmutant_no_shadows mutate || { _shmutant_aliases_back "$mutate_aliases"; builtin return 1; }' \
   '  :' \
   't_public_helpers_refuse_a_shadowed_builtin'
 shmutant_mut 'a pool name prepare made readonly is assigned to' \
@@ -1309,3 +1309,25 @@ shmutant_mut 'the pinned relative cd consults CDPATH' \
   '      builtin cd -P -- "./tree$suffix/$(command -p dirname -- "${SHMUTANT_ROWS_FILE[$i]}")" 2>/dev/null || exit 4' \
   '      builtin cd -P -- "tree$suffix/$(command -p dirname -- "${SHMUTANT_ROWS_FILE[$i]}")" 2>/dev/null || exit 4' \
   't_rewrite_is_pinned_against_a_sibling_swap'
+
+# --- guards added for the thirty-ninth review round ---
+shmutant_mut 'the baseline arrays are not in the readonly guard' \
+  '  for _shmutant_pool_v in label wd prep run cap n jobs root suffix i k sel t0 t1 killed rc verdict detail rjrc pout prc errexit_before pout_w pout_r intact base_sel base_verdict; do' \
+  '  for _shmutant_pool_v in label wd prep run cap n jobs root suffix i k sel t0 t1 killed rc verdict detail rjrc pout prc errexit_before pout_w pout_r intact; do' \
+  't_readonly_settings_do_not_kill_the_caller'
+shmutant_mut 'a readonly refusal leaves the prepare capture open' \
+  '      exec {_shmutant_pool_pout_w}>&- {_shmutant_pool_pout_r}<&-' \
+  '      :' \
+  't_readonly_settings_do_not_kill_the_caller'
+shmutant_mut 'a skipped row is recreated in whatever sits at the workdir path' \
+  '        _shmutant_wd_is_marked "$wd" || { _shmutant_pool_fail "$label" "$wd"; return 2; }' \
+  '        :' \
+  't_pool_refuses_a_workdir_swapped_between_rows'
+shmutant_mut 'a dying worker clone is removed by path' \
+  '      elif [ -L "$dir/tree" ] || [ -z "$clone_id" ] || [ "$(_shmutant_dir_id "$dir/tree")" != "$clone_id" ]; then _shmutant_err "refusing to remove $dir/tree: it is not the clone its worker made"' \
+  '      elif false; then :' \
+  't_a_clone_swapped_by_its_run_is_not_removed'
+shmutant_mut 'a function named return swallows the shadow check refusal' \
+  '    case "$kinds" in *builtin*) ;; *) _shmutant_err "$1: $n is not the builtin this harness relies on (a function of that name, or disabled with enable)"; builtin return 2 ;; esac' \
+  '    case "$kinds" in *builtin*) ;; *) _shmutant_err "$1: $n is not the builtin this harness relies on (a function of that name, or disabled with enable)"; return 2 ;; esac' \
+  't_pool_refuses_shadowed_builtins_and_posix_mode'

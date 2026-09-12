@@ -284,10 +284,10 @@ shmutant_copy_tree() {
   local rc copy_tree_aliases; _shmutant_aliases_off copy_tree_aliases
   # The same shadow check as the pool's: a caller's function named printf, cd or [ would
   # otherwise decide what this helper does, with no pool around to refuse it.
-  _shmutant_no_shadows copy_tree || { _shmutant_aliases_back "$copy_tree_aliases"; return 1; }
+  _shmutant_no_shadows copy_tree || { _shmutant_aliases_back "$copy_tree_aliases"; builtin return 1; }
   # A plain call, not a condition: a callback's own errexit is honoured inside, as documented.
   _shmutant_copy_tree_body "$@"; rc=$?
-  _shmutant_aliases_back "$copy_tree_aliases"; return "$rc"
+  _shmutant_aliases_back "$copy_tree_aliases"; builtin return "$rc"
 }
 _shmutant_copy_tree_body() {
   if [ "$#" -ne 2 ] || [ -z "$1" ] || [ -z "$2" ]; then _shmutant_err "copy_tree: usage: shmutant_copy_tree <src> <dst> (neither empty)"; return 1; fi
@@ -432,10 +432,10 @@ _shmutant_mutate_restore() {
 # has no newline keeps that shape: the only change is the literal.
 shmutant_mutate() {
   local rc mutate_aliases; _shmutant_aliases_off mutate_aliases
-  _shmutant_no_shadows mutate || { _shmutant_aliases_back "$mutate_aliases"; return 1; }
+  _shmutant_no_shadows mutate || { _shmutant_aliases_back "$mutate_aliases"; builtin return 1; }
   # A plain call, not a condition: a callback's own errexit is honoured inside, as documented.
   _shmutant_mutate_body "$@"; rc=$?
-  _shmutant_aliases_back "$mutate_aliases"; return "$rc"
+  _shmutant_aliases_back "$mutate_aliases"; builtin return "$rc"
 }
 _shmutant_mutate_body() {
   if [ "$#" -ne 3 ]; then _shmutant_err "mutate: usage: shmutant_mutate <file> <old> <new>"; return 1; fi
@@ -1140,6 +1140,9 @@ _shmutant_worker() {
   # The clone's own identity, from the moment it exists: a callback that renames it away and
   # puts a directory of its own at the path does not get that removed.
   SHMUTANT_CLONE_ID="$(_shmutant_dir_id "$dir/tree")"
+  # Published for the pool: a worker that dies leaves the clone's removal to the collector,
+  # which must not remove what a callback put at the path instead.
+  { printf 'clone %s\n' "$SHMUTANT_CLONE_ID" >&"$SHMUTANT_VERDICT_FD"; } 2>/dev/null
   if ! command -p cp -RPp -- "$wd/pristine/." "$dir/tree/" 2>/dev/null; then
     _shmutant_worker_finish "$dir" unprepared 0 clone; return 0
   fi
@@ -1236,7 +1239,7 @@ _shmutant_dir_id() {
 # SHMUTANT_RES_*[key] (and SHMUTANT_V_*): the last `verdict <v> <us> <status>` line, or `lost`
 # when there is none, the line is damaged, or the worker did not exit 0. Closes the channel.
 _shmutant_collect() {
-  local dir="$1" key="$2" wstatus="$3" line fd unpublished=0 setup_failed=0
+  local dir="$1" key="$2" wstatus="$3" line fd unpublished=0 setup_failed=0 clone_id=""
   SHMUTANT_V_VERDICT=lost; SHMUTANT_V_US=0; SHMUTANT_V_STATUS=""
   fd="${SHMUTANT_VERDICT_R[$key]:-}"
   if [ -n "$fd" ]; then
@@ -1247,6 +1250,7 @@ _shmutant_collect() {
         "verdict "*) line="${line#verdict }"
                      SHMUTANT_V_VERDICT="${line%% *}"; line="${line#* }"
                      SHMUTANT_V_US="${line%% *}"; SHMUTANT_V_STATUS="${line#* }" ;;
+        "clone "*)   clone_id="${line#clone }" ;;
         unpublished) unpublished=1 ;;
         setup-failed) setup_failed=1 ;;
       esac
@@ -1259,8 +1263,15 @@ _shmutant_collect() {
   # remove goes here, from the directory this run created.
   if [ "$wstatus" != 0 ]; then
     SHMUTANT_V_VERDICT=lost; SHMUTANT_V_US=0; SHMUTANT_V_STATUS=""
+    # The identity may have been read off the channel already, by the helper that ended the worker.
+    [ -n "$clone_id" ] || clone_id="${SHMUTANT_RES_CLONE[$key]:-}"
     if [ "${SHMUTANT_KEEP:-0}" != 1 ] && [ ! -L "$dir" ] && [ "$(_shmutant_dir_id "$dir")" = "${SHMUTANT_DIR_IDS[$key]:-}" ]; then
-      _shmutant_remove "$dir/tree" "$dir" 2>/dev/null || true
+      # Only the clone the worker made, by the identity it published; what a callback put at
+      # the path stays, and the pool then finds a tree left behind (a harness error).
+      if [ ! -e "$dir/tree" ] && [ ! -L "$dir/tree" ]; then :
+      elif [ -L "$dir/tree" ] || [ -z "$clone_id" ] || [ "$(_shmutant_dir_id "$dir/tree")" != "$clone_id" ]; then _shmutant_err "refusing to remove $dir/tree: it is not the clone its worker made"
+      else _shmutant_remove "$dir/tree" "$dir" 2>/dev/null || true
+      fi
     fi
   fi
   [ -n "$SHMUTANT_V_VERDICT" ] || SHMUTANT_V_VERDICT=lost
@@ -1304,8 +1315,13 @@ _shmutant_end_workers() {
     key="${SHMUTANT_ACTIVE_KEY[$p]:-}"; holder=""; holderid=""; grp=""
     fd="${SHMUTANT_VERDICT_R[$key]:-}"
     if [ -n "$fd" ]; then
+      # This read moves the descriptor's shared offset past everything the worker wrote: what
+      # the collector will still need from the channel (the clone's identity) is kept for it.
       while IFS= read -r line <&"$fd"; do
-        case "$line" in "group "*) line="${line#group }"; grp="${line%% *}"; line="${line#* }"; holder="${line%% *}"; holderid="${line#* }" ;; esac
+        case "$line" in
+          "group "*) line="${line#group }"; grp="${line%% *}"; line="${line#* }"; holder="${line%% *}"; holderid="${line#* }" ;;
+          "clone "*) SHMUTANT_RES_CLONE["$key"]="${line#clone }" ;;
+        esac
       done
     fi
     SHMUTANT_HELD=()
@@ -1786,7 +1802,8 @@ _shmutant_pool_cleanup() {
 
 # _shmutant_drop_builtin_fn — remove a function named builtin without trusting any command
 # name: an assignment to POSIXLY_CORRECT enters posix mode, where the special builtin `unset`
-# is found before a function of its name. Leaving posix mode resets shell options wholesale
+# is found before a function of its name. With `builtin` real, every other shadow (a function
+# named return included) is refused through `builtin …`, never removed. Leaving posix mode resets shell options wholesale
 # (expand_aliases off, inherit_errexit left on, …), so every option that changed is put back
 # from BASHOPTS and SHELLOPTS, read before and after — variables, which nothing shadows — with
 # the real builtin, which is real again by then. No `local`: that name is not yet checked.
@@ -1836,7 +1853,7 @@ _shmutant_no_shadows() {
     # A caller's alias is no concern: this file's functions were parsed with aliases off.
     kinds="$(builtin type -at -- "$n" 2>/dev/null)"
     case "$kinds" in *function*) kinds="" ;; esac
-    case "$kinds" in *builtin*) ;; *) _shmutant_err "$1: $n is not the builtin this harness relies on (a function of that name, or disabled with enable)"; return 2 ;; esac
+    case "$kinds" in *builtin*) ;; *) _shmutant_err "$1: $n is not the builtin this harness relies on (a function of that name, or disabled with enable)"; builtin return 2 ;; esac
   done
 }
 
@@ -1880,7 +1897,9 @@ shmutant_pool() {
   # The caller's RETURN and DEBUG traps, when the pool held them, go back as this function
   # returns: from its RETURN trap, with the status below already settled.
   [[ -z "${SHMUTANT_TRAPS_PENDING:-}" ]] || builtin trap '_shmutant_traps_last' RETURN
-  return "$rc"
+  # builtin: a caller's function named return, refused by the shadow check, must not swallow
+  # the status the refusal produced.
+  builtin return "$rc"
 }
 _shmutant_pool_body() {
   if [ "$#" -lt 4 ] || [ "$#" -gt 5 ]; then _shmutant_err "pool: usage: shmutant_pool <label> <workdir> <prepare> <run> [cap] (got $# arguments)"; return 2; fi
@@ -1891,7 +1910,7 @@ _shmutant_pool_body() {
   t0="$(_shmutant_now)"
   SHMUTANT_EMIT_FAILED=0; SHMUTANT_CLEANUP_FAILED=0
   declare -gA SHMUTANT_DIR_IDS=() SHMUTANT_VERDICT_W=() SHMUTANT_VERDICT_R=() SHMUTANT_ACTIVE_KEY=() SHMUTANT_ACTIVE_ID=()
-  declare -gA SHMUTANT_RES_VERDICT=() SHMUTANT_RES_US=() SHMUTANT_RES_STATUS=()
+  declare -gA SHMUTANT_RES_VERDICT=() SHMUTANT_RES_US=() SHMUTANT_RES_STATUS=() SHMUTANT_RES_CLONE=()
   if [ "${SHMUTANT_DECL_ERRORS:-0}" -ne 0 ]; then
     _shmutant_err "$label: $SHMUTANT_DECL_ERRORS declaration(s) were refused — a table missing rows it was meant to carry proves nothing"
     return 2
@@ -1899,7 +1918,7 @@ _shmutant_pool_body() {
   # The pool cannot run in POSIX mode: a failing `exec` redirection would end the caller's shell
   # instead of returning, and the run wrapper's `exit` function would be refused.
   if [ -o posix ]; then _shmutant_err "$label: shmutant does not run with POSIX mode on (set +o posix)"; return 2; fi
-  _shmutant_no_shadows "$label" || return 2
+  _shmutant_no_shadows "$label" || builtin return 2
   [ -n "$wd" ] || { _shmutant_err "$label: a workdir is required"; return 2; }
   case "$wd" in *$'\n'*) _shmutant_err "$label: the workdir name contains a newline"; return 2 ;; esac
   command -p mkdir -p -- "$wd" 2>/dev/null || { _shmutant_err "$label: cannot create workdir $wd"; return 2; }
@@ -1947,9 +1966,12 @@ _shmutant_pool_body() {
   # cannot be restored, and any later assignment to it would end a non-interactive caller's
   # shell: reported from the saved copies, which prepare could not reach.
   local _shmutant_pool_v
-  for _shmutant_pool_v in label wd prep run cap n jobs root suffix i k sel t0 t1 killed rc verdict detail rjrc pout prc errexit_before pout_w pout_r intact; do
+  for _shmutant_pool_v in label wd prep run cap n jobs root suffix i k sel t0 t1 killed rc verdict detail rjrc pout prc errexit_before pout_w pout_r intact base_sel base_verdict; do
     if _shmutant_readonly "$_shmutant_pool_v"; then
       _shmutant_err "$_shmutant_pool_label: prepare made '$_shmutant_pool_v' readonly — a name the pool keeps its own state in; declare yours with another name or a local of your own"
+      # The prepare capture descriptors, from the saved numbers: a refused pool must not leave
+      # two descriptors open in a sourcing caller.
+      exec {_shmutant_pool_pout_w}>&- {_shmutant_pool_pout_r}<&-
       _shmutant_pool_fail "$_shmutant_pool_label" "$_shmutant_pool_wd"; return 2
     fi
   done
@@ -1966,7 +1988,7 @@ _shmutant_pool_body() {
   case "$root" in *$'\n'*) _shmutant_err "$label: prepare printed a root whose name contains a newline"; _shmutant_pool_fail "$label" "$wd"; return 2 ;; esac
   # prepare may have defined a function under a builtin's name, or taken the run callback away:
   # checked again before any worker relies on either.
-  _shmutant_no_shadows "$label" || { _shmutant_pool_fail "$label" "$wd"; return 2; }
+  _shmutant_no_shadows "$label" || { _shmutant_pool_fail "$label" "$wd"; builtin return 2; }
   # The workdir itself: prepare could have renamed it away and put another directory at its
   # path. Nothing there is this pool's, so nothing there is removed (the pristine prepare made
   # in it included).
@@ -2043,6 +2065,9 @@ _shmutant_pool_body() {
         SHMUTANT_SKIP[i]=1
         # Recreated although no worker starts: an earlier pool's artifacts under this name would
         # otherwise read as this run's.
+        # The workdir first, by identity, as before every worker: the baseline's callback could
+        # have moved it away and put a caller's directory, with a mut-N of its own, at its path.
+        _shmutant_wd_is_marked "$wd" || { _shmutant_pool_fail "$label" "$wd"; return 2; }
         _shmutant_fresh_dir "$wd/mut-$i" "$wd" || { _shmutant_err "$label: cannot recreate $wd/mut-$i"; _shmutant_pool_fail "$label" "$wd"; return 2; }
         SHMUTANT_RES_VERDICT["mut-$i"]=baseline; SHMUTANT_RES_US["mut-$i"]=0; SHMUTANT_RES_STATUS["mut-$i"]=""
       fi

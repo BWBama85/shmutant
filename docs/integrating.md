@@ -160,7 +160,9 @@ clones, so they are trusted not to; a suite whose callbacks must be mutually unt
 with `SHMUTANT_JOBS=1`, and a rewrite shorter than a watchdog poll with its timestamps forged
 is not seen. A clone that a callback renamed away and replaced is not removed (the pool reports
 a tree left behind), and the CLI's completion marker inside a replaced workdir is left alone. A caller's function named
-`builtin` is removed when the file is sourced and again before the post-prepare shadow check;
+`builtin` is removed when the file is sourced and again, from posix mode where no name can
+stand in for the removal, before each shadow check; every other function named after a builtin
+the harness relies on (`return` included) is refused, the refusal returning through `builtin`;
 the CLI removes every function of a builtin's name planted before it ran (`BASH_ENV`). From the moment
 `prepare` returns until the pool is done, the shell's CHLD, DEBUG, RETURN and ERR traps are
 held (saved, disarmed, put back at the end — RETURN and DEBUG as the pool's outer function
