@@ -359,4 +359,10 @@ One line per resolved review thread, newest last.
 - `path-lookup-ambiguity` `shmutant.sh` `7204d13` `PRRT_kwDOUT7q9s6hugVz` PR #1 2026-09-12
 - `host-shell-option-leak` `shmutant.sh` `7204d13` `PRRT_kwDOUT7q9s6hugV0` PR #1 2026-09-12
 - `host-shell-option-leak` `shmutant.sh` `7204d13` `PRRT_kwDOUT7q9s6hugV1` PR #1 2026-09-12
+- `stale-artifact-reuse` `shmutant.sh` `ceed968` `PRRT_kwDOUT7q9s6hvUhz` PR #1 2026-09-12
+- `path-escapes-root` `shmutant.sh` `ceed968` `PRRT_kwDOUT7q9s6hvUh0` PR #1 2026-09-12
+- `host-shell-option-leak` `shmutant.sh` `ceed968` `PRRT_kwDOUT7q9s6hvUh1` PR #1 2026-09-12
+- `contract-not-honoured` `shmutant.sh` `ceed968` `PRRT_kwDOUT7q9s6hvUh2` PR #1 2026-09-12
+- `path-lookup-ambiguity` `shmutant.sh` `ceed968` `PRRT_kwDOUT7q9s6hvUh4` PR #1 2026-09-12
+- `host-shell-option-leak` `shmutant.sh` `ceed968` `PRRT_kwDOUT7q9s6hvUh5` PR #1 2026-09-12
 <!-- adb:hits:end -->
