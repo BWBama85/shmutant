@@ -324,8 +324,8 @@ shmutant_mut 'the descendant list is split by the caller IFS again' \
   '        _shmutant_held_group "$pid"; _shmutant_kill_tree_twice "${SHMUTANT_HELD[@]}" "$pid:$rootid" $(printf "%s\n" "${victims[@]}")' \
   't_verdict_timeout_kills_a_descendant_seen_then_reparented'
 shmutant_mut 'prepare runs in a subshell' \
-  '"$prep" "$wd/pristine" >&"$pout_w"; prc=$?' \
-  '( "$prep" "$wd/pristine" >&"$pout_w" ); prc=$?' \
+  '"$prep" "$wd/pristine" >&"$pout_w"; _shmutant_pool_prc=$?' \
+  '( "$prep" "$wd/pristine" >&"$pout_w" ); _shmutant_pool_prc=$?' \
   't_pool_runs_prepare_in_its_own_shell'
 shmutant_mut 'surplus mutation arguments are accepted' \
   'if [ "$#" -lt 4 ] || [ "$#" -gt 5 ]; then' \
@@ -346,8 +346,8 @@ shmutant_mut 'the prepare capture is a predictable name again' \
   'pout="$wd/prepare.out" ||' \
   't_pool_prepare_capture_never_follows_a_link'
 shmutant_mut 'prepare runs as a condition, muting its errexit' \
-  '"$prep" "$wd/pristine" >&"$pout_w"; prc=$?' \
-  'if "$prep" "$wd/pristine" >&"$pout_w"; then prc=0; else prc=$?; fi' \
+  '"$prep" "$wd/pristine" >&"$pout_w"; _shmutant_pool_prc=$?' \
+  'if "$prep" "$wd/pristine" >&"$pout_w"; then _shmutant_pool_prc=0; else _shmutant_pool_prc=$?; fi' \
   't_pool_prepare_keeps_its_own_errexit'
 shmutant_mut 'the errexit prepare turned on is left on' \
   'if [ "$errexit_before" = 1 ]; then set -e; else set +e; fi' \
@@ -1330,4 +1330,18 @@ shmutant_mut 'a dying worker clone is removed by path' \
 shmutant_mut 'a function named return swallows the shadow check refusal' \
   '    case "$kinds" in *builtin*) ;; *) _shmutant_err "$1: $n is not the builtin this harness relies on (a function of that name, or disabled with enable)"; builtin return 2 ;; esac' \
   '    case "$kinds" in *builtin*) ;; *) _shmutant_err "$1: $n is not the builtin this harness relies on (a function of that name, or disabled with enable)"; return 2 ;; esac' \
+  't_pool_refuses_shadowed_builtins_and_posix_mode'
+
+# --- guards added for the fortieth review round ---
+shmutant_mut 'the prepare status is captured into a name prepare can make readonly' \
+  '  "$prep" "$wd/pristine" >&"$pout_w"; _shmutant_pool_prc=$?' \
+  '  "$prep" "$wd/pristine" >&"$pout_w"; prc=$?; _shmutant_pool_prc=$prc' \
+  't_readonly_settings_do_not_kill_the_caller'
+shmutant_mut 'an unbounded run has no descendant watchdog' \
+  '        while [ "$timeout" -eq 0 ] || [ "$(_shmutant_now)" -lt "$t_end" ]; do' \
+  '        while [ "$timeout" -ne 0 ] && [ "$(_shmutant_now)" -lt "$t_end" ]; do' \
+  't_unbounded_run_still_tracks_descendants'
+shmutant_mut 'POSIX mode prepare turned on is not rechecked' \
+  '  if [[ -o posix ]]; then' \
+  '  if false; then' \
   't_pool_refuses_shadowed_builtins_and_posix_mode'

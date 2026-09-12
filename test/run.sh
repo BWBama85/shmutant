@@ -440,7 +440,7 @@ t_pool_refuses_shadowed_builtins_and_posix_mode() {
   wait "$bg" 2>/dev/null
   eq "$(cat "$T/rc2")" 2 'a kill function defined by prepare is refused after prepare'
   has "$(cat "$T/e4")" 'is not the builtin' 'says why'
-  has "$(cat "$T/e")" 'POSIX mode' 'says why'
+  has "$(cat "$T/e")" 'does not run with POSIX mode on' 'says why, at entry (not the recheck after prepare)'
   # a function named builtin prepare defined (after the source-time removal) that answers the
   # check's own question — printing "builtin" for type — together with a no-op kill: removed
   # before the check relies on the name, so the kill shadow is still found
@@ -460,6 +460,11 @@ t_pool_refuses_shadowed_builtins_and_posix_mode() {
   wait "$bg" 2>/dev/null
   eq "$(cat "$T/rc10")" 2 'with return shadowed the refusal still returns'
   has "$(cat "$T/e10")" 'kill is not the builtin' 'says why'
+  # POSIX mode turned on by prepare is refused after prepare, as it is at entry
+  posix_prepare() { toy_prepare "$1"; set -o posix; }
+  ( SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd-px" posix_prepare toy_run > /dev/null 2>"$T/e-px"; echo "rc=$?" > "$T/o-px" )
+  has "$(cat "$T/o-px")" 'rc=2' 'a prepare that turned POSIX mode on is a harness error, not aborted rows'
+  has "$(cat "$T/e-px")" 'prepare turned POSIX mode on' 'says why'
   # a punctuation builtin the harness relies on: the shadow check names it (the pool's own
   # arity guard, which uses [, would refuse a [ shadow first, so the check is exercised directly)
   ( eval '[() { :; }'; _shmutant_no_shadows lbl 2>"$T/e7" ); rc_is $? 2 'a function named [ is refused by the shadow check'
@@ -678,6 +683,11 @@ t_readonly_settings_do_not_kill_the_caller() {
   ( SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd-ra" readonly_array_prepare toy_run > /dev/null 2>"$T/e-ra"; echo "rc=$?" > "$T/o-ra" )
   has "$(cat "$T/o-ra")" 'rc=2' 'a prepare that made a pool array readonly is a harness error too'
   has "$(cat "$T/e-ra")" "made 'base_sel' readonly" 'says why'
+  # shellcheck disable=SC2034
+  readonly_prc_prepare() { toy_prepare "$1"; readonly prc=7; }
+  ( SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd-prc" readonly_prc_prepare toy_run > /dev/null 2>"$T/e-prc"; echo "rc=$?" > "$T/o-prc" )
+  has "$(cat "$T/o-prc")" 'rc=2' "a prepare that made 'prc' readonly is a harness error: the status was captured elsewhere first"
+  has "$(cat "$T/e-prc")" "made 'prc' readonly" 'says why'
   # and a refused pool leaves no descriptor behind in the caller shell
   ( before="$(ls /dev/fd | wc -l | tr -d ' ')"; SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd-fd" readonly_prepare toy_run > /dev/null 2>&1; after="$(ls /dev/fd | wc -l | tr -d ' ')"; echo "$before $after" > "$T/fds" )
   eq "$(cut -d' ' -f1 "$T/fds")" "$(cut -d' ' -f2 "$T/fds")" "a refused pool closed its prepare capture descriptors: [$(cat "$T/fds")]"
@@ -1124,6 +1134,23 @@ t_proc_scan_ignores_globignore() {
   local id; id="$( GLOBIGNORE='*'; _shmutant_identity "$root" )"
   [ -n "$id" ] || fail_ "with GLOBIGNORE='*' the /proc identity table gave no identity for a live process"
   kill "$root" 2>/dev/null; wait "$root" 2>/dev/null
+}
+
+t_unbounded_run_still_tracks_descendants() {
+  # SHMUTANT_TIMEOUT=0 disables the deadline, not the watchdog: a helper that lives past a
+  # poll, then puts a grandchild in its own group and exits before the callback returns, is
+  # still named at the post-run kill; seen only at the return, it would already be gone
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  # the helper forks the escapee into its own group, then lives on for a second: the escapee is
+  # a descendant of the run only while the helper lives, and that is when the watchdog sees it
+  escaping_run() { ( set -m; bash -c "sleep 4; touch '$T/escaped'" & sleep 1 ) & sleep 2; bash "$1/test.sh"; }
+  SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=0 pool lbl "$T/wd" toy_prepare escaping_run
+  rc_is "$RC" 0 'the row is killed'
+  sleep 4
+  [ -e "$T/escaped" ] && fail_ 'with the timeout disabled, a grandchild that left the group before the return outlived the pool'
+  pkill -f "touch '$T/escaped'" 2>/dev/null; true
 }
 
 t_verdict_scans_a_large_output() {

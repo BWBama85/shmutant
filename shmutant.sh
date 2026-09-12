@@ -944,7 +944,9 @@ _shmutant_run_bounded() {
     [ -z "${SHMUTANT_VERDICT_FD:-}" ] || { printf 'group %s %s %s\n' "$pid" "$holder" "$holderid" >&"$SHMUTANT_VERDICT_FD"; } 2>/dev/null
     printf 'go\n' >&"$go"
     dog=""
-    if [ "$timeout" -gt 0 ]; then
+    # With or without a deadline: the descendants a run leaves behind are otherwise seen only
+    # at its return, and one that reparented out of the group by then is out of reach.
+    {
       (
         # Descendants are snapshotted every half second while the run is alive, so one that
         # detaches from the leader before the deadline (a new session, a reparented child) is
@@ -956,7 +958,7 @@ _shmutant_run_bounded() {
         declare -A seen=(); tampered=0
         # 10#: a validated value like 08 is still octal to bash arithmetic.
         t_end=$(( $(_shmutant_now) + 10#$timeout * 1000000 ))
-        while [ "$(_shmutant_now)" -lt "$t_end" ]; do
+        while [ "$timeout" -eq 0 ] || [ "$(_shmutant_now)" -lt "$t_end" ]; do
           command -p sleep 0.5 & s=$!
           wait "$s"
           # Each descendant is remembered with the identity it had when first seen, so a pid
@@ -982,7 +984,7 @@ _shmutant_run_bounded() {
         _shmutant_held_group "$pid"; _shmutant_kill_tree_twice "${SHMUTANT_HELD[@]}" "$pid:$rootid" "${victims[@]}"
       ) < /dev/null > /dev/null 2>&1 &
       dog=$!
-    fi
+    }
     if [ -n "$dog" ]; then
       # Whichever ends first. A watchdog that ends before the leader has fired and failed to
       # finish (or died): the leader may be frozen, and waiting on it would never return, so
@@ -1955,9 +1957,10 @@ _shmutant_pool_body() {
   # as its own counter). The bookkeeping still needed afterwards is copied out under names no
   # ordinary callback uses and copied back when it returns.
   local _shmutant_pool_label="$label" _shmutant_pool_wd="$wd" _shmutant_pool_run="$run" _shmutant_pool_cap="$cap"
-  local _shmutant_pool_n="$n" _shmutant_pool_t0="$t0" _shmutant_pool_pout_r="$pout_r" _shmutant_pool_pout_w="$pout_w" _shmutant_pool_errexit="$errexit_before"
+  local _shmutant_pool_n="$n" _shmutant_pool_t0="$t0" _shmutant_pool_pout_r="$pout_r" _shmutant_pool_pout_w="$pout_w" _shmutant_pool_errexit="$errexit_before" _shmutant_pool_prc=0
   _shmutant_report_keep before-prepare
-  "$prep" "$wd/pristine" >&"$pout_w"; prc=$?
+  # The status lands in a name prepare cannot reach: `prc` itself is checked for readonly below.
+  "$prep" "$wd/pristine" >&"$pout_w"; _shmutant_pool_prc=$?
   # First: from here to the pool's return a trap prepare installed (or the caller's) sees no
   # child of this shell but the ones that save it, and DEBUG no command past the saves.
   _shmutant_hold_traps
@@ -1975,7 +1978,13 @@ _shmutant_pool_body() {
       _shmutant_pool_fail "$_shmutant_pool_label" "$_shmutant_pool_wd"; return 2
     fi
   done
-  n="$_shmutant_pool_n"; t0="$_shmutant_pool_t0"; pout_r="$_shmutant_pool_pout_r"; pout_w="$_shmutant_pool_pout_w"; errexit_before="$_shmutant_pool_errexit"
+  n="$_shmutant_pool_n"; t0="$_shmutant_pool_t0"; pout_r="$_shmutant_pool_pout_r"; pout_w="$_shmutant_pool_pout_w"; errexit_before="$_shmutant_pool_errexit"; prc="$_shmutant_pool_prc"
+  # POSIX mode again, now for prepare: a mode it turned on would refuse the run wrapper's own
+  # `exit` function in every worker, and the rows would read as aborted, not as this error.
+  if [[ -o posix ]]; then
+    _shmutant_err "$label: prepare turned POSIX mode on (set -o posix) — shmutant does not run in it"
+    exec {pout_w}>&- {pout_r}<&-; _shmutant_pool_fail "$label" "$wd"; builtin return 2
+  fi
   killed=0; rc=0; base_sel=(); base_verdict=()
   if [ "$errexit_before" = 1 ]; then set -e; else set +e; fi
   if [ "$prc" -ne 0 ]; then
