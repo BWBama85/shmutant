@@ -356,4 +356,7 @@ One line per resolved review thread, newest last.
 - `caller-owned-path-deleted` `shmutant.sh` `ceb7ec7` `PRRT_kwDOUT7q9s6htYc7` PR #1 2026-09-12
 - `early-return-skips-cleanup` `shmutant.sh` `ceb7ec7` `PRRT_kwDOUT7q9s6htYc9` PR #1 2026-09-12
 - `host-shell-option-leak` `shmutant.sh` `ceb7ec7` `PRRT_kwDOUT7q9s6htYc_` PR #1 2026-09-12
+- `path-lookup-ambiguity` `shmutant.sh` `7204d13` `PRRT_kwDOUT7q9s6hugVz` PR #1 2026-09-12
+- `host-shell-option-leak` `shmutant.sh` `7204d13` `PRRT_kwDOUT7q9s6hugV0` PR #1 2026-09-12
+- `host-shell-option-leak` `shmutant.sh` `7204d13` `PRRT_kwDOUT7q9s6hugV1` PR #1 2026-09-12
 <!-- adb:hits:end -->
