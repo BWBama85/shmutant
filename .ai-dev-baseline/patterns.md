@@ -380,4 +380,7 @@ One line per resolved review thread, newest last.
 - `caller-owned-path-deleted` `shmutant.sh` `043ea51` `PRRT_kwDOUT7q9s6hyQQZ` PR #1 2026-09-12
 - `caller-owned-path-deleted` `shmutant.sh` `043ea51` `PRRT_kwDOUT7q9s6hyQQc` PR #1 2026-09-12
 - `host-shell-option-leak` `shmutant.sh` `043ea51` `PRRT_kwDOUT7q9s6hyQQg` PR #1 2026-09-12
+- `host-shell-option-leak` `shmutant.sh` `d54adfa` `PRRT_kwDOUT7q9s6hzXX4` PR #1 2026-09-12
+- `timeout-escalation-cancelled` `shmutant.sh` `d54adfa` `PRRT_kwDOUT7q9s6hzXX7` PR #1 2026-09-12
+- `host-shell-option-leak` `shmutant.sh` `d54adfa` `PRRT_kwDOUT7q9s6hzXYA` PR #1 2026-09-12
 <!-- adb:hits:end -->
