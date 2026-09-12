@@ -2516,9 +2516,17 @@ t_bash_floor() {
   _shmutant_bash_ok 4 4; rc_is $? 1 '4.4 is below the floor'
   _shmutant_bash_ok 3 2; rc_is $? 1 '3.2 is below the floor'
   has "$(_shmutant_install_hint)" 'bash' 'the install hint names bash'
-  # an exported function named builtin, inherited by the CLI, is removed before anything relies
-  # on the qualifier: with it returning failure the CLI still runs its command
-  has "$( builtin() { return 1; }; export -f builtin; bash "$SHMUTANT" version 2>&1 )" 'shmutant 0.1.0' 'an inherited function named builtin does not stop the CLI from running its command'
+  # a sourcing caller's function named builtin is removed before anything relies on the
+  # qualifier (bash itself refuses to IMPORT an exported function of that name, on 3.2 and 5.3
+  # alike, so the CLI cannot inherit one; a caller that defines one in its own shell can)
+  mk_toy "$T/toy"; TOY="$T/toy"
+  local bout
+  # shellcheck disable=SC1090
+  bout="$( builtin() { return 1; }; . "$SHMUTANT" > /dev/null 2>&1 || { echo "source rc=$?"; exit 1; }
+    p() { shmutant_copy_tree "$T/toy" "$1"; }; r() { bash "$1/test.sh"; }
+    shmutant_reset; shmutant_target lib.sh; shmutant_mut a '$1 + $2' '$1 - $2' add-works
+    SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd-b" p r 2>&1 > /dev/null; echo "rc=$?" )"
+  has "$bout" 'rc=0' "a caller's function named builtin is removed at sourcing, so the pool's qualified calls reach the builtin: [$bout]"
   # the final dispatch guard invokes the builtin: a caller's function named [ or test that
   # always succeeds does not make sourcing run the CLI and exit the caller's shell
   # shellcheck disable=SC1090
@@ -2539,9 +2547,6 @@ t_bash_floor() {
     msg="$("$old" -c ". '$SHMUTANT' || exit \$?; echo reached" 2>&1)"; rc_is $? 2 "sourcing under $old returns 2"
     hasnt "$msg" 'reached' 'a caller that checks the source status stops'
     has "$msg" 'below the 5.3 floor' 'sourcing under an old bash says so'
-    # an inherited function named builtin that always succeeds does not make the old bash pass
-    # the floor: the re-exec into a newer bash still happens and the command runs there
-    has "$( builtin() { return 0; }; export -f builtin; "$old" "$SHMUTANT" version 2>&1 )" 'shmutant 0.1.0' 'an inherited builtin function that always succeeds does not make an old bash pass the floor'
     echo "note: $_unit exercised the real floor guard under $old"
     return
   done
