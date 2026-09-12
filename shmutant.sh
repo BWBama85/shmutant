@@ -112,7 +112,7 @@ SHMUTANT_SELECTED_N=0
 SHMUTANT_DECL_ERRORS=0
 
 # _shmutant_err <msg…> — a harness diagnostic on stderr.
-_shmutant_err() { printf 'shmutant: %s\n' "$*" >&2; }
+_shmutant_err() { builtin printf 'shmutant: %s\n' "$*" >&2; }
 
 # _shmutant_refuse <msg…> — a refused declaration: report it, count it, return 2. The count is
 # what lets a plan fail as a whole: sourcing returns only the LAST command's status.
@@ -282,6 +282,9 @@ _shmutant_aliases_back() {
 
 shmutant_copy_tree() {
   local rc copy_tree_aliases; _shmutant_aliases_off copy_tree_aliases
+  # The same shadow check as the pool's: a caller's function named printf, cd or [ would
+  # otherwise decide what this helper does, with no pool around to refuse it.
+  _shmutant_no_shadows copy_tree || { _shmutant_aliases_back "$copy_tree_aliases"; return 1; }
   # A plain call, not a condition: a callback's own errexit is honoured inside, as documented.
   _shmutant_copy_tree_body "$@"; rc=$?
   _shmutant_aliases_back "$copy_tree_aliases"; return "$rc"
@@ -379,7 +382,7 @@ _shmutant_copy_tree_body() {
 _shmutant_apply_root_meta() {
   local rootls rc=0
   rootls="$(command -p ls -ld -- "$1" 2>/dev/null)" || return 1
-  command -p chown -- "$(printf '%s\n' "$rootls" | command -p awk '{ print $3 ":" $4 }')" "$2" 2>/dev/null || rc=1
+  command -p chown -- "$(builtin printf '%s\n' "$rootls" | command -p awk '{ print $3 ":" $4 }')" "$2" 2>/dev/null || rc=1
   command -p chmod -- "$(_shmutant_mode_spec "${rootls%% *}")" "$2" 2>/dev/null || rc=1
   command -p touch -r "$1" -- "$2" 2>/dev/null || rc=1
   return "$rc"
@@ -395,7 +398,7 @@ _shmutant_mode_triple() {
     s) out+=xs ;; S) out+=s ;;
     t) out+=xt ;; T) out+=t ;;
   esac
-  printf '%s=%s' "$who" "$out"
+  builtin printf '%s=%s' "$who" "$out"
 }
 
 # _shmutant_mode_spec <ls-l-mode-string> — a chmod symbolic spec equal to the mode in an
@@ -404,7 +407,7 @@ _shmutant_mode_spec() {
   local m="$1"
   # In a subshell with nocasematch off: `S` and `T` (a set-id or sticky bit without execute)
   # must not fall into the `s` and `t` arms and gain an execute bit.
-  ( shopt -u nocasematch; printf '%s,%s,%s' "$(_shmutant_mode_triple "${m:1:3}" u)" "$(_shmutant_mode_triple "${m:4:3}" g)" "$(_shmutant_mode_triple "${m:7:3}" o)" )
+  ( shopt -u nocasematch; builtin printf '%s,%s,%s' "$(_shmutant_mode_triple "${m:1:3}" u)" "$(_shmutant_mode_triple "${m:4:3}" g)" "$(_shmutant_mode_triple "${m:7:3}" o)" )
 }
 
 # _shmutant_mutate_restore <dir> <ls-mode-or-empty> — put back a directory mode shmutant_mutate
@@ -429,6 +432,7 @@ _shmutant_mutate_restore() {
 # has no newline keeps that shape: the only change is the literal.
 shmutant_mutate() {
   local rc mutate_aliases; _shmutant_aliases_off mutate_aliases
+  _shmutant_no_shadows mutate || { _shmutant_aliases_back "$mutate_aliases"; return 1; }
   # A plain call, not a condition: a callback's own errexit is honoured inside, as documented.
   _shmutant_mutate_body "$@"; rc=$?
   _shmutant_aliases_back "$mutate_aliases"; return "$rc"
@@ -567,7 +571,7 @@ _shmutant_descendants() {
 _shmutant_descendants_started() {
   local table now
   if [ "${SHMUTANT_PROC:-}" = 1 ]; then
-    ( set +f; shopt -u failglob nullglob; command -p cat /proc/[0-9]*/stat 2>/dev/null ) | command -p awk -v root="$1" '
+    ( set +f; shopt -u failglob nullglob; unset GLOBIGNORE; command -p cat /proc/[0-9]*/stat 2>/dev/null ) | command -p awk -v root="$1" '
       $1 ~ /^[0-9]+$/ { s = $0; sub(/^.*\) /, "", s); n = split(s, a, " "); i++; child[i] = $1; parent[i] = a[2]; start[i] = a[20] }
       END {
         want[root] = 1
@@ -647,7 +651,7 @@ _shmutant_identity_table() {
     while IFS= read -r line; do
       # shellcheck disable=SC2034
       [ -n "$line" ] && SHMUTANT_START["${line%% *}"]="${line#* }"
-    done < <( ( set +f; shopt -u failglob nullglob; command -p cat /proc/[0-9]*/stat 2>/dev/null ) | command -p awk '
+    done < <( ( set +f; shopt -u failglob nullglob; unset GLOBIGNORE; command -p cat /proc/[0-9]*/stat 2>/dev/null ) | command -p awk '
       $1 ~ /^[0-9]+$/ { s = $0; sub(/^.*\) /, "", s); n = split(s, a, " "); print $1, a[20] }')
     return 0
   fi
@@ -1158,7 +1162,7 @@ _shmutant_worker() {
     ( builtin cd -P -- "$dir" 2>/dev/null || exit 4
       [ "$(_shmutant_dir_id .)" = "${SHMUTANT_DIR_IDS[$kind-$i]:-}" ] || exit 4
       wroot="$(builtin pwd -P)"
-      builtin cd -P -- "tree$suffix/$(command -p dirname -- "${SHMUTANT_ROWS_FILE[$i]}")" 2>/dev/null || exit 4
+      builtin cd -P -- "./tree$suffix/$(command -p dirname -- "${SHMUTANT_ROWS_FILE[$i]}")" 2>/dev/null || exit 4
       _shmutant_inside "$wroot/tree" "$(builtin pwd -P)" || exit 4
       base="$(command -p basename -- "$target")"
       [ ! -L "$base" ] && [ -f "$base" ] || exit 4
@@ -1681,7 +1685,7 @@ _shmutant_std_bin() {
   [ -n "$p" ] || p=/usr/bin:/bin
   while [ -n "$p" ]; do
     d="${p%%:*}"; case "$p" in *:*) p="${p#*:}" ;; *) p="" ;; esac
-    if [ -n "$d" ] && [ -f "$d/$1" ] && [ -x "$d/$1" ]; then printf '%s' "$d/$1"; return 0; fi
+    if [ -n "$d" ] && [ -f "$d/$1" ] && [ -x "$d/$1" ]; then builtin printf '%s' "$d/$1"; return 0; fi
   done
   return 1
 }
@@ -1939,6 +1943,16 @@ _shmutant_pool_body() {
   # child of this shell but the ones that save it, and DEBUG no command past the saves.
   _shmutant_hold_traps
   label="$_shmutant_pool_label"; wd="$_shmutant_pool_wd"; run="$_shmutant_pool_run"; cap="$_shmutant_pool_cap"
+  # A name of this function's that prepare made readonly (dynamic scope reaches these locals)
+  # cannot be restored, and any later assignment to it would end a non-interactive caller's
+  # shell: reported from the saved copies, which prepare could not reach.
+  local _shmutant_pool_v
+  for _shmutant_pool_v in label wd prep run cap n jobs root suffix i k sel t0 t1 killed rc verdict detail rjrc pout prc errexit_before pout_w pout_r intact; do
+    if _shmutant_readonly "$_shmutant_pool_v"; then
+      _shmutant_err "$_shmutant_pool_label: prepare made '$_shmutant_pool_v' readonly — a name the pool keeps its own state in; declare yours with another name or a local of your own"
+      _shmutant_pool_fail "$_shmutant_pool_label" "$_shmutant_pool_wd"; return 2
+    fi
+  done
   n="$_shmutant_pool_n"; t0="$_shmutant_pool_t0"; pout_r="$_shmutant_pool_pout_r"; pout_w="$_shmutant_pool_pout_w"; errexit_before="$_shmutant_pool_errexit"
   killed=0; rc=0; base_sel=(); base_verdict=()
   if [ "$errexit_before" = 1 ]; then set -e; else set +e; fi

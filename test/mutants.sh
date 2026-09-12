@@ -822,7 +822,7 @@ shmutant_mut 'the jobs setting keeps its leading zeros' \
   '  :' \
   't_settings_take_a_canonical_form'
 shmutant_mut 'the mode spec is computed under the caller nocasematch' \
-  '  ( shopt -u nocasematch; printf '"'"'%s,%s,%s'"'"'' \
+  '  ( shopt -u nocasematch; builtin printf '"'"'%s,%s,%s'"'"'' \
   '  ( printf '"'"'%s,%s,%s'"'"'' \
   't_mode_spec_is_immune_to_nocasematch'
 shmutant_mut 'errtrace is mistaken for errexit under nocasematch' \
@@ -1027,10 +1027,8 @@ shmutant_mut 'a non-empty destination is written into' \
   '      { [ -e "$entry" ] || [ -L "$entry" ]; } && { _shmutant_err "copy_tree: destination $dst is not empty — it is never written into; give an empty or absent directory"; exit 1; }' \
   '      :' \
   't_copy_tree_excludes_git'
-shmutant_mut 'the hard-link scan uses a caller cd' \
-  '  linked="$(builtin cd -- "$src" 2>/dev/null && command -p find . -path ./.git -prune -o -type f -links +1 -print 2>/dev/null)" || frc=$?' \
-  '  linked="$(cd -- "$src" 2>/dev/null && command -p find . -path ./.git -prune -o -type f -links +1 -print 2>/dev/null)" || frc=$?' \
-  't_copy_tree_excludes_git'
+# The hard-link-scan cd row is subsumed: shmutant_copy_tree makes the shadow check on entry
+# and refuses a shell with a function named cd before the scan can run.
 shmutant_mut 'a directory identity is inode only, without the physical path' \
   '  printf '"'"'%s:%s'"'"' "$id" "$phys"' \
   '  printf '"'"'%s'"'"' "$id"' \
@@ -1297,3 +1295,17 @@ shmutant_mut 'an unverified CLI child is escalated on by bare number' \
   '    _shmutant_kill_tree_twice "$SHMUTANT_CLI_CHILD:${SHMUTANT_CLI_CHILD_ID:-}"' \
   '    _shmutant_kill_tree_twice "$SHMUTANT_CLI_CHILD${SHMUTANT_CLI_CHILD_ID:+:$SHMUTANT_CLI_CHILD_ID}"' \
   't_cli_abort_waits_for_the_child_and_names_its_identity'
+
+# --- guards added for the thirty-eighth review round ---
+shmutant_mut 'a standalone mutate trusts the names the caller left' \
+  '  _shmutant_no_shadows mutate || { _shmutant_aliases_back "$mutate_aliases"; return 1; }' \
+  '  :' \
+  't_public_helpers_refuse_a_shadowed_builtin'
+shmutant_mut 'a pool name prepare made readonly is assigned to' \
+  '    if _shmutant_readonly "$_shmutant_pool_v"; then' \
+  '    if false; then' \
+  't_readonly_settings_do_not_kill_the_caller'
+shmutant_mut 'the pinned relative cd consults CDPATH' \
+  '      builtin cd -P -- "./tree$suffix/$(command -p dirname -- "${SHMUTANT_ROWS_FILE[$i]}")" 2>/dev/null || exit 4' \
+  '      builtin cd -P -- "tree$suffix/$(command -p dirname -- "${SHMUTANT_ROWS_FILE[$i]}")" 2>/dev/null || exit 4' \
+  't_rewrite_is_pinned_against_a_sibling_swap'

@@ -172,7 +172,11 @@ refused (status 2) before any worker starts. Inside `shmutant_pool`, `shmutant_c
 `shmutant_mutate` the shell's `expand_aliases` is off (bash parses a command substitution when
 it runs it, so a caller's alias would otherwise reach the library at run time); callbacks run
 there too, with the bodies they were given when defined; the caller's setting is put back on
-return.
+return. The two helpers also make the pool's shadow check on entry and refuse (status 1) a
+shell whose function stands in for a builtin they rely on. A `prepare` that declares one of the
+pool's own names readonly (`readonly n=…`, say — dynamic scope reaches the pool's locals) is
+reported (status 2), never assigned. On Linux the process table is read through a glob over
+`/proc`, with the caller's `GLOBIGNORE` cleared around it.
 
 ```sh
 # test/mutants.sh

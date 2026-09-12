@@ -658,6 +658,12 @@ t_readonly_settings_do_not_kill_the_caller() {
   ( readonly SHMUTANT_SELECT=stale; SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd-sel" toy_prepare toy_run > /dev/null 2>"$T/e-sel"; echo "rc=$?" > "$T/o-sel" )
   has "$(cat "$T/o-sel")" 'rc=2' 'a readonly SHMUTANT_SELECT is refused before any worker starts'
   has "$(cat "$T/e-sel")" 'SHMUTANT_SELECT is readonly' 'says why'
+  # a prepare that declares a common name readonly (n=7, say) reaches the pool's own local of
+  # that name through dynamic scope: reported, with the pool's status, never assigned
+  readonly_prepare() { toy_prepare "$1"; readonly n=7; }
+  ( SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd-ro" readonly_prepare toy_run > /dev/null 2>"$T/e-ro"; echo "rc=$?" > "$T/o-ro" )
+  has "$(cat "$T/o-ro")" 'rc=2' 'a prepare that made a pool name readonly is a harness error, and the caller shell survives'
+  has "$(cat "$T/e-ro")" "made 'n' readonly" 'says why'
   local phys; phys="$(cd "$T" && pwd -P)"
   ( readonly SHMUTANT_STREAM="$phys/ro.tsv"; SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd4" toy_prepare toy_run > /dev/null 2>/dev/null; echo "rc=$?" > "$T/o4" )
   has "$(cat "$T/o4")" 'rc=0' 'a readonly absolute physical stream path is accepted and the caller shell survives'
@@ -705,6 +711,16 @@ t_rewrite_is_pinned_against_a_sibling_swap() {
   eq "$(cat "$T/victim/extra.sh")" precious 'a directory swapped for a link after the check is not rewritten through'
   has "$(cat "$T/out")" $'\trow\tunprepared\ta\t' 'the row is unprepared'
   has "$(cat "$T/err")" 'left the tree' 'says why'
+  # a CDPATH holding a matching tree/… path does not redirect the pinned relative cd, nor
+  # print into the verdict stream
+  mkdir -p "$T/decoy/tree/sub"; printf 'x=1\n' > "$T/decoy/tree/sub/extra.sh"
+  ( CDPATH="$T/decoy"; SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd-cd" toy_prepare toy_run > "$T/out-cd" 2>"$T/err-cd"; echo "rc=$?" > "$T/rc-cd" )
+  # the toy's test never reads extra.sh, so this row is a survivor by design; what matters is
+  # that it was rewritten in its own clone (survived, not unprepared) and nothing else leaked
+  has "$(cat "$T/rc-cd")" 'rc=1' 'a CDPATH with a decoy tree does not derail the rewrite: the pool reports its survivor'
+  has "$(cat "$T/out-cd")" $'\trow\tsurvived\ta\t' 'the row was rewritten in its own clone, not refused as moved'
+  [ "$(grep -vc $'^shmutant\t' "$T/out-cd")" -eq 0 ] || fail_ 'a non-record line reached the verdict stream'
+  eq "$(cat "$T/decoy/tree/sub/extra.sh")" x=1 'the decoy was not rewritten'
 }
 
 t_cli_abort_waits_for_the_child_and_names_its_identity() {
@@ -1044,6 +1060,32 @@ t_a_clone_swapped_by_its_run_is_not_removed() {
   [ -f "$T/wd2/base-0/tree/keep" ] || fail_ 'the directory the baseline run put at the clone path was removed'
 }
 
+t_public_helpers_refuse_a_shadowed_builtin() {
+  # a caller's function named printf reaches a standalone shmutant_mutate or shmutant_copy_tree
+  # with no pool around to refuse it: both refuse it themselves, saying so through the builtin
+  printf 'x=1\n' > "$T/f"; mkdir -p "$T/src"; printf 'y\n' > "$T/src/g"
+  ( printf() { :; }; shmutant_mutate "$T/f" 'x=1' 'x=2' 2>"$T/e1"; echo "rc=$?" > "$T/rc1" )
+  has "$(cat "$T/rc1")" 'rc=1' 'mutate under a printf function is refused'
+  has "$(cat "$T/e1")" 'printf is not the builtin' 'and says why, through the builtin'
+  eq "$(cat "$T/f")" x=1 'the file is untouched'
+  ( printf() { :; }; shmutant_copy_tree "$T/src" "$T/dst" 2>"$T/e2"; echo "rc=$?" > "$T/rc2" )
+  has "$(cat "$T/rc2")" 'rc=1' 'copy_tree under a printf function is refused'
+  has "$(cat "$T/e2")" 'printf is not the builtin' 'and says why'
+}
+
+t_proc_scan_ignores_globignore() {
+  # on Linux the process table is read through a glob over /proc: a caller GLOBIGNORE that
+  # swallows it would leave every descendant unseen
+  if [ "${SHMUTANT_PROC:-0}" != 1 ]; then echo "note: $_unit: no /proc here; the glob is not exercised on this platform"; return; fi
+  ( sleep 5; : ) & local root=$!
+  sleep 0.3
+  local n; n="$( GLOBIGNORE='*'; _shmutant_descendants "$root" | wc -l | tr -d ' ' )"
+  [ "$n" -ge 1 ] || fail_ "with GLOBIGNORE='*' the /proc scan found $n descendants of a process that has one"
+  local id; id="$( GLOBIGNORE='*'; _shmutant_identity "$root" )"
+  [ -n "$id" ] || fail_ "with GLOBIGNORE='*' the /proc identity table gave no identity for a live process"
+  kill "$root" 2>/dev/null; wait "$root" 2>/dev/null
+}
+
 t_verdict_scans_a_large_output() {
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
@@ -1268,7 +1310,7 @@ t_library_is_immune_to_aliases_at_parse_time() {
     SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd" prep runit 2>/dev/null | grep -v '^shmutant	' && { echo "FAIL: $_unit: an aliased utility printed into the verdict stream"; exit 1; }
     exit 0 ) < /dev/null || _failed=1
   # shellcheck disable=SC2262,SC1090
-  ( shopt -s expand_aliases; alias shopt='echo ALIASED-SHOPT'; alias printf='echo ALIASED'
+  ( shopt -s expand_aliases; alias shopt='echo ALIASED-SHOPT'; alias printf='echo ALIASED'; alias command='echo ALIASED'
     . "$SHMUTANT"; builtin shopt -q expand_aliases || { echo "FAIL: $_unit: an aliased shopt broke the restoration"; exit 1; }
     shmutant_reset; shmutant_target lib.sh; shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
     prep() { cp -R "$T/toy/." "$1"; }; runit() { bash "$1/test.sh"; }
@@ -2699,13 +2741,20 @@ t_bash_floor() {
   # that name, on 3.2 and 5.3 alike, so the CLI cannot inherit one; a caller that defines one in
   # its own shell can)
   mk_toy "$T/toy"; TOY="$T/toy"
-  local bout
+  # Bounded and in its own process group: without the guard, the shadowed prologue leaves the
+  # caller's aliases baked into the library and the pool never returns.
+  : > "$T/bout"
+  set -m
   # shellcheck disable=SC1090
-  bout="$( builtin() { return 1; }; shopt -s expand_aliases; alias printf='echo ALIASED'; . "$SHMUTANT" > /dev/null 2>&1 || { echo "source rc=$?"; exit 1; }
+  ( builtin() { return 1; }; shopt -s expand_aliases; alias printf='echo ALIASED'; . "$SHMUTANT" > /dev/null 2>&1 || { echo "source rc=$?"; exit 1; }
     p() { shmutant_copy_tree "$T/toy" "$1"; }; r() { bash "$1/test.sh"; }
     shmutant_reset; shmutant_target lib.sh; shmutant_mut a '$1 + $2' '$1 - $2' add-works
-    SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd-b" p r 2>&1 > /dev/null; echo "rc=$?" )"
-  has "$bout" 'rc=0' "a caller's function named builtin is removed at sourcing, so the pool's qualified calls reach the builtin: [$bout]"
+    SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd-b" p r > /dev/null 2>&1; echo "rc=$?" ) > "$T/bout" 2>&1 & local bg=$! i=0
+  set +m
+  until grep -q '^rc=' "$T/bout" 2>/dev/null || [ "$i" -ge 600 ]; do i=$((i + 1)); sleep 0.1; done
+  grep -q '^rc=' "$T/bout" 2>/dev/null || { kill -KILL -- -"$bg" 2>/dev/null; wait "$bg" 2>/dev/null; fail_ "with a caller function named builtin, sourcing and pooling never returned: [$(head -c 200 "$T/bout")]"; }
+  wait "$bg" 2>/dev/null
+  has "$(cat "$T/bout")" 'rc=0' "a caller's function named builtin is removed at sourcing, so the prologue and the pool's qualified calls reach the builtin: [$(head -c 200 "$T/bout")]"
   # the final dispatch guard invokes the builtin: a caller's function named [ or test that
   # always succeeds does not make sourcing run the CLI and exit the caller's shell
   # shellcheck disable=SC1090
