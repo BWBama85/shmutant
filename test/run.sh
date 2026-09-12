@@ -688,6 +688,28 @@ t_readonly_settings_do_not_kill_the_caller() {
   ( SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd-prc" readonly_prc_prepare toy_run > /dev/null 2>"$T/e-prc"; echo "rc=$?" > "$T/o-prc" )
   has "$(cat "$T/o-prc")" 'rc=2' "a prepare that made 'prc' readonly is a harness error: the status was captured elsewhere first"
   has "$(cat "$T/e-prc")" "made 'prc' readonly" 'says why'
+  # a name an entry point declares local that the calling shell made readonly: bash refuses the
+  # local, and the assignment after it would end a non-interactive shell. Each entry point
+  # refuses first, and the caller survives
+  mkdir -p "$T/ro-src" "$T/ro-dst"; printf 'x=1\n' > "$T/ro-src/f"; printf 'x=1\n' > "$T/ro-dst/f"
+  ( readonly rc=7
+    SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd-ro" toy_prepare toy_run > /dev/null 2>"$T/ro-e"; p=$?
+    shmutant_copy_tree "$T/ro-src" "$T/ro-dst2" 2>>"$T/ro-e"; c=$?
+    shmutant_mutate "$T/ro-dst/f" 'x=1' 'x=2' 2>>"$T/ro-e"; m=$?
+    echo "pool=$p copy=$c mutate=$m" > "$T/ro" )
+  eq "$(cat "$T/ro" 2>/dev/null)" 'pool=2 copy=1 mutate=1' 'with a readonly rc in the calling shell, each entry point refuses and the shell survives'
+  eq "$(grep -c "the calling shell made 'rc' readonly" "$T/ro-e")" 3 'each says why'
+  # a body local (label) and the name the readonly probe itself used to keep a local in (d)
+  ( readonly d=1 label=x
+    SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd-ro2" toy_prepare toy_run > /dev/null 2>"$T/ro-e2"; echo "pool=$?" > "$T/ro2" )
+  eq "$(cat "$T/ro2" 2>/dev/null)" 'pool=2' 'a readonly body local is refused at entry with the probe keeping no local of its own, and the shell survives'
+  has "$(cat "$T/ro-e2")" "the calling shell made 'label' readonly" 'says why'
+  # the last name of the pool's list (st, the alias save): the check reaches the end of it
+  # shellcheck disable=SC2034
+  ( readonly st=1
+    SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd-ro3" toy_prepare toy_run > /dev/null 2>"$T/ro-e3"; echo "pool=$?" > "$T/ro3" )
+  eq "$(cat "$T/ro3" 2>/dev/null)" 'pool=2' 'the last name of the list is checked too, and the shell survives'
+  has "$(cat "$T/ro-e3")" "the calling shell made 'st' readonly" 'says why'
   # and a refused pool leaves no descriptor behind in the caller shell
   ( before="$(ls /dev/fd | wc -l | tr -d ' ')"; SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd-fd" readonly_prepare toy_run > /dev/null 2>&1; after="$(ls /dev/fd | wc -l | tr -d ' ')"; echo "$before $after" > "$T/fds" )
   eq "$(cut -d' ' -f1 "$T/fds")" "$(cut -d' ' -f2 "$T/fds")" "a refused pool closed its prepare capture descriptors: [$(cat "$T/fds")]"
@@ -827,6 +849,18 @@ EOF
   wd="$(cat "$T/toy/wdpath" 2>/dev/null)"
   [ -f "$wd/keep" ] || fail_ 'the interrupted cleanup removed the caller directory at the automatic workdir path'
   has "$(cat "$T/e2")" 'no longer the workdir this run created' 'the interrupted CLI says why it left it'
+  # a completion report that never arrives (the plan closed the channel) after prepare set
+  # SHMUTANT_KEEP=1: the keep channel's last report decides, and the workdir is kept
+  rm -rf "$T/tmpd"; mkdir -p "$T/tmpd"
+  cat > "$T/toy/plan-noreport.sh" <<'EOF'
+prepare() { SHMUTANT_KEEP=1; eval "exec $SHMUTANT_CLI_DONE_FD>&-"; shmutant_copy_tree "$SHMUTANT_PLAN_DIR" "$1"; }
+run() { bash "$1/test.sh"; }
+shmutant_target lib.sh
+shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+EOF
+  TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-noreport.sh" --no-baseline > /dev/null 2>"$T/e3"; rc_is $? 2 'a run whose completion report never arrived is a harness error'
+  [ "$(find "$T/tmpd" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" -ge 1 ] || fail_ 'the workdir was removed although prepare had set SHMUTANT_KEEP=1 and the completion report never arrived'
+  has "$(cat "$T/e3")" 'workdir kept' 'and says so'
 }
 
 t_pool_leaves_a_replaced_workdir_alone() {
@@ -853,6 +887,13 @@ t_pool_leaves_a_replaced_workdir_alone() {
   ( readonly SHMUTANT_KEEP=0; SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd3" swap_prepare toy_run > /dev/null 2>"$T/e3"; echo "rc=$?" > "$T/o3" )
   has "$(cat "$T/o3")" 'rc=2' 'with a readonly SHMUTANT_KEEP the pool still stops, and the caller shell survives'
   [ -f "$T/wd3/pristine/keep" ] || fail_ 'with a readonly SHMUTANT_KEEP the caller directory at the workdir path lost its pristine entry'
+  # the pool's own tree moved into the replacement: the directory at the path is still not the
+  # one the pool marked, and the tree is left where the caller put it
+  swap_prepare_keeping_tree() { local w="${1%/pristine}"; mv "$w" "$w.moved" && mv "$T/victim" "$w" && mv "$w.moved/pristine" "$1"; shmutant_copy_tree "$TOY" "$1"; }
+  rm -rf "$T/victim"; mkdir -p "$T/victim"; printf 'precious\n' > "$T/victim/keep"
+  mkdir -p "$T/wd4"; SHMUTANT_BASELINE=0 pool lbl "$T/wd4" swap_prepare_keeping_tree toy_run
+  rc_is "$RC" 2 'a workdir prepare replaced stops the pool, with the pool'"'"'s own tree moved into the replacement'
+  [ -f "$T/wd4/pristine/lib.sh" ] || fail_ 'the prepared tree was removed from a directory that is not the one the pool marked'
 }
 
 t_rewrite_refuses_a_worker_directory_swapped_after_the_clone() {
@@ -1108,6 +1149,16 @@ t_a_clone_swapped_by_its_run_is_not_removed() {
   [ -e "$T/swapped" ] || fail_ 'fixture: the run never swapped its clone'
   rc_is "$RC" 2 'the startup failure is a harness error'
   [ -f "$T/wd3/mut-0/tree/keep" ] || fail_ 'the directory a dying worker'"'"'s run put at its clone path was removed by the collector'
+  # the prepared tree too: a run that renames pristine away and puts a directory of its own at
+  # the path does not get that removed at the pool's cleanup
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  pristine_swapping_run() { local w; w="$(cd "$1/../.." && pwd -P)"; mv "$w/pristine" "$w/pristine.moved"; mkdir "$w/pristine"; printf 'precious\n' > "$w/pristine/keep"; bash "$1/test.sh"; }
+  SHMUTANT_BASELINE=0 pool lbl "$T/wd4" toy_prepare pristine_swapping_run
+  rc_is "$RC" 2 'a pristine tree swapped by a run is a harness error'
+  has "$ERR" 'not the tree this pool prepared' 'says why'
+  [ -f "$T/wd4/pristine/keep" ] || fail_ 'the directory the run put at the pristine path was removed'
+  rm -rf "$T/wd4/pristine.moved"
 }
 
 t_public_helpers_refuse_a_shadowed_builtin() {
@@ -1151,6 +1202,24 @@ t_unbounded_run_still_tracks_descendants() {
   sleep 4
   [ -e "$T/escaped" ] && fail_ 'with the timeout disabled, a grandchild that left the group before the return outlived the pool'
   pkill -f "touch '$T/escaped'" 2>/dev/null; true
+}
+
+t_watchdog_deadline_is_a_count_of_polls() {
+  # the deadline counts half-second polls, never compares wall-clock instants: with the clock
+  # frozen (a stubbed _shmutant_now), a one-second timeout still fires
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  hanging_run() { : > "$T/started"; sleep 30; bash "$1/test.sh"; }
+  set -m
+  ( _shmutant_now() { printf '%s' 1000000000000000; }
+    SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=1 shmutant_pool lbl "$T/wd" toy_prepare hanging_run > "$T/out" 2>"$T/err"; echo "rc=$?" > "$T/rc" ) > /dev/null 2>&1 & local bg=$! i=0
+  set +m
+  until [ -e "$T/rc" ] || [ "$i" -ge 300 ]; do i=$((i + 1)); sleep 0.1; done
+  [ -e "$T/rc" ] || { kill -KILL -- -"$bg" 2>/dev/null; wait "$bg" 2>/dev/null; fail_ 'with the clock frozen the watchdog never fired: the deadline is a wall-clock instant'; return; }
+  wait "$bg" 2>/dev/null
+  has "$(cat "$T/out")" $'\trow\ttimeout\ta\t' 'the run timed out on the poll count, with the clock frozen'
+  pkill -f "sleep 30" 2>/dev/null; true
 }
 
 t_verdict_scans_a_large_output() {

@@ -1066,7 +1066,7 @@ shmutant_mut 'a pristine tree modified after prepare is cloned anyway' \
   '  if false; then' \
   't_pool_refuses_a_modified_pristine_tree'
 shmutant_mut 'a readonly setting is assigned to' \
-  '  case "$d" in *r*) return 0 ;; esac' \
+  '  case "$1" in *r*) \builtin return 0 ;; esac' \
   '  :' \
   't_readonly_settings_do_not_kill_the_caller'
 shmutant_mut 'an alias passes as a callback' \
@@ -1302,8 +1302,8 @@ shmutant_mut 'a standalone mutate trusts the names the caller left' \
   '  :' \
   't_public_helpers_refuse_a_shadowed_builtin'
 shmutant_mut 'a pool name prepare made readonly is assigned to' \
-  '    if _shmutant_readonly "$_shmutant_pool_v"; then' \
-  '    if false; then' \
+  '  if ! _shmutant_pool_locals_writable "$_shmutant_pool_label" "prepare made"; then' \
+  '  if false; then' \
   't_readonly_settings_do_not_kill_the_caller'
 shmutant_mut 'the pinned relative cd consults CDPATH' \
   '      builtin cd -P -- "./tree$suffix/$(command -p dirname -- "${SHMUTANT_ROWS_FILE[$i]}")" 2>/dev/null || exit 4' \
@@ -1312,12 +1312,12 @@ shmutant_mut 'the pinned relative cd consults CDPATH' \
 
 # --- guards added for the thirty-ninth review round ---
 shmutant_mut 'the baseline arrays are not in the readonly guard' \
-  '  for _shmutant_pool_v in label wd prep run cap n jobs root suffix i k sel t0 t1 killed rc verdict detail rjrc pout prc errexit_before pout_w pout_r intact base_sel base_verdict; do' \
-  '  for _shmutant_pool_v in label wd prep run cap n jobs root suffix i k sel t0 t1 killed rc verdict detail rjrc pout prc errexit_before pout_w pout_r intact; do' \
+  '_shmutant_pool_locals_writable() { _shmutant_locals_writable "$1" "$2" label wd prep run cap n jobs root suffix i k sel t0 t1 killed rc verdict detail rjrc pout prc errexit_before pout_w pout_r intact base_sel base_verdict pool_aliases st; }' \
+  '_shmutant_pool_locals_writable() { _shmutant_locals_writable "$1" "$2" label wd prep run cap n jobs root suffix i k sel t0 t1 killed rc verdict detail rjrc pout prc errexit_before pout_w pout_r intact pool_aliases st; }' \
   't_readonly_settings_do_not_kill_the_caller'
 shmutant_mut 'a readonly refusal leaves the prepare capture open' \
-  '      exec {_shmutant_pool_pout_w}>&- {_shmutant_pool_pout_r}<&-' \
-  '      :' \
+  '    exec {_shmutant_pool_pout_w}>&- {_shmutant_pool_pout_r}<&-' \
+  '    :' \
   't_readonly_settings_do_not_kill_the_caller'
 shmutant_mut 'a skipped row is recreated in whatever sits at the workdir path' \
   '        _shmutant_wd_is_marked "$wd" || { _shmutant_pool_fail "$label" "$wd"; return 2; }' \
@@ -1338,10 +1338,40 @@ shmutant_mut 'the prepare status is captured into a name prepare can make readon
   '  "$prep" "$wd/pristine" >&"$pout_w"; prc=$?; _shmutant_pool_prc=$prc' \
   't_readonly_settings_do_not_kill_the_caller'
 shmutant_mut 'an unbounded run has no descendant watchdog' \
-  '        while [ "$timeout" -eq 0 ] || [ "$(_shmutant_now)" -lt "$t_end" ]; do' \
-  '        while [ "$timeout" -ne 0 ] && [ "$(_shmutant_now)" -lt "$t_end" ]; do' \
+  '        while [ "$timeout" -eq 0 ] || [ "$n" -lt "$polls" ]; do' \
+  '        while [ "$timeout" -ne 0 ] && [ "$n" -lt "$polls" ]; do' \
   't_unbounded_run_still_tracks_descendants'
 shmutant_mut 'POSIX mode prepare turned on is not rechecked' \
   '  if [[ -o posix ]]; then' \
   '  if false; then' \
   't_pool_refuses_shadowed_builtins_and_posix_mode'
+
+# --- guards added for the forty-first review round ---
+shmutant_mut 'the pool declares its locals before the readonly check' \
+  '  _shmutant_pool_locals_writable pool "the calling shell made" || \builtin return 2' \
+  '  :' \
+  't_readonly_settings_do_not_kill_the_caller'
+shmutant_mut 'copy_tree declares its locals before the readonly check' \
+  '  _shmutant_locals_writable copy_tree "the calling shell made" rc copy_tree_aliases st src dst entry name asrc adst probe rest comp norm linked frc made probe2 || \builtin return 1' \
+  '  :' \
+  't_readonly_settings_do_not_kill_the_caller'
+shmutant_mut 'mutate declares its locals before the readonly check' \
+  '  _shmutant_locals_writable mutate "the calling shell made" rc mutate_aliases st f tmp nl mode dir dirmode || \builtin return 1' \
+  '  :' \
+  't_readonly_settings_do_not_kill_the_caller'
+shmutant_mut 'the readonly check skips the last name' \
+  '  while [[ $# -gt 2 ]]; do' \
+  '  while [[ $# -gt 3 ]]; do' \
+  't_readonly_settings_do_not_kill_the_caller'
+shmutant_mut 'a missing completion report ignores the keep channel' \
+  '    if [ -z "$keep_last" ] || [ "$keep_last" = 1 ]; then keep=1; fi' \
+  '    :' \
+  't_cli_removes_only_the_workdir_it_created_by_identity'
+shmutant_mut 'the prepared tree is removed by path at cleanup' \
+  '    elif [ -L "$2/pristine" ] || [ "$(_shmutant_dir_id "$2/pristine")" != "${SHMUTANT_PRISTINE_ID:-}" ]; then _shmutant_err "$1: refusing to remove $2/pristine: it is not the tree this pool prepared"; SHMUTANT_CLEANUP_FAILED=1' \
+  '    elif false; then :' \
+  't_a_clone_swapped_by_its_run_is_not_removed'
+shmutant_mut 'the watchdog deadline is a wall-clock instant' \
+  '        while [ "$timeout" -eq 0 ] || [ "$n" -lt "$polls" ]; do' \
+  '        while [ "$timeout" -eq 0 ] || [ "$(_shmutant_now)" -lt "$(( t0 + 10#$timeout * 1000000 ))" ]; do' \
+  't_watchdog_deadline_is_a_count_of_polls'

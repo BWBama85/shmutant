@@ -281,6 +281,9 @@ _shmutant_aliases_back() {
 }
 
 shmutant_copy_tree() {
+  # Before any local: bash refuses a local over a readonly global, and the assignment that
+  # follows would end a non-interactive caller's shell. The names are this helper's locals.
+  _shmutant_locals_writable copy_tree "the calling shell made" rc copy_tree_aliases st src dst entry name asrc adst probe rest comp norm linked frc made probe2 || \builtin return 1
   local rc copy_tree_aliases; _shmutant_aliases_off copy_tree_aliases
   # The same shadow check as the pool's: a caller's function named printf, cd or [ would
   # otherwise decide what this helper does, with no pool around to refuse it.
@@ -431,6 +434,9 @@ _shmutant_mutate_restore() {
 # `sed -i` (BSD and GNU differ), so a failed rewrite cannot half-write. A target whose last line
 # has no newline keeps that shape: the only change is the literal.
 shmutant_mutate() {
+  # Before any local: bash refuses a local over a readonly global, and the assignment that
+  # follows would end a non-interactive caller's shell. The names are this helper's locals.
+  _shmutant_locals_writable mutate "the calling shell made" rc mutate_aliases st f tmp nl mode dir dirmode || \builtin return 1
   local rc mutate_aliases; _shmutant_aliases_off mutate_aliases
   _shmutant_no_shadows mutate || { _shmutant_aliases_back "$mutate_aliases"; builtin return 1; }
   # A plain call, not a condition: a callback's own errexit is honoured inside, as documented.
@@ -956,9 +962,12 @@ _shmutant_run_bounded() {
         # to clean up whatever the callback left behind.
         trap 'kill "$s" 2>/dev/null; for p in "${!seen[@]}"; do printf "%s:%s\n" "$p" "${seen[$p]}"; done >&"$seen_w"; exit 0' TERM
         declare -A seen=(); tampered=0
-        # 10#: a validated value like 08 is still octal to bash arithmetic.
-        t_end=$(( $(_shmutant_now) + 10#$timeout * 1000000 ))
-        while [ "$timeout" -eq 0 ] || [ "$(_shmutant_now)" -lt "$t_end" ]; do
+        # 10#: a validated value like 08 is still octal to bash arithmetic. The deadline is a
+        # count of half-second polls, not a wall-clock instant: a clock set back while the run
+        # is alive would otherwise extend it, one set forward end it early.
+        polls=$(( 10#$timeout * 2 )); n=0
+        while [ "$timeout" -eq 0 ] || [ "$n" -lt "$polls" ]; do
+          n=$(( n + 1 ))
           command -p sleep 0.5 & s=$!
           wait "$s"
           # Each descendant is remembered with the identity it had when first seen, so a pid
@@ -1665,15 +1674,30 @@ _shmutant_stream_intact() {
   [ "$(command -p tail -c "+$(( ${SHMUTANT_STREAM_BASE:-0} + 1 ))" -- "$SHMUTANT_STREAM" 2>/dev/null | command -p cksum)" = "$(command -p cksum <&"$SHMUTANT_STREAM_COPY_R")" ]
 }
 
-# _shmutant_readonly <name> — true when the caller made <name> readonly; an assignment to it
-# would end a non-interactive shell.
+# _shmutant_readonly <name> — true when <name> is readonly in this shell; an assignment to it
+# would end a non-interactive shell. Positional parameters only: a local of its own could be
+# the readonly name. \builtin: this runs before the alias state is saved.
 _shmutant_readonly() {
-  local d
-  d="$(declare -p -- "$1" 2>/dev/null)" || return 1
-  d="${d#declare -}"; d="${d%% *}"
-  case "$d" in *r*) return 0 ;; esac
-  return 1
+  set -- "$(\builtin declare -p -- "$1" 2>/dev/null)"
+  set -- "${1#declare -}"; set -- "${1%% *}"
+  case "$1" in *r*) \builtin return 0 ;; esac
+  \builtin return 1
 }
+
+# _shmutant_locals_writable <label> <who> <name…> — refuse (status 1, with a message) when a
+# <name> is readonly: bash refuses a local over a readonly global, and the assignment that
+# follows would end a non-interactive caller's shell. Positional parameters only, as above.
+_shmutant_locals_writable() {
+  while [[ $# -gt 2 ]]; do
+    if _shmutant_readonly "$3"; then _shmutant_err "$1: $2 '$3' readonly — a name shmutant keeps its own state in; declare yours with another name or a local of your own"; \builtin return 1; fi
+    set -- "$1" "$2" "${@:4}"
+  done
+  \builtin return 0
+}
+
+# _shmutant_pool_locals_writable <label> <who> — the pool's own names, checked at entry (the
+# calling shell) and after prepare (dynamic scope reaches these locals).
+_shmutant_pool_locals_writable() { _shmutant_locals_writable "$1" "$2" label wd prep run cap n jobs root suffix i k sel t0 t1 killed rc verdict detail rjrc pout prc errexit_before pout_w pout_r intact base_sel base_verdict pool_aliases st; }
 
 # _shmutant_canon <label> <name> <canonical> — set <name> to its canonical value, or, when the
 # caller made it readonly, accept it only if it already is that value.
@@ -1794,7 +1818,12 @@ _shmutant_pool_cleanup() {
   # could have moved the workdir away and put a caller's directory, with a `pristine` entry of
   # its own, at its path.
   if [ "${SHMUTANT_KEEP:-0}" != 1 ] && [ ! -L "$2" ] && [ "$(_shmutant_dir_id "$2")" = "${SHMUTANT_WD_ID:-}" ]; then
-    _shmutant_remove "$2/pristine" "$2" || { _shmutant_err "$1: could not remove $2/pristine"; SHMUTANT_CLEANUP_FAILED=1; }
+    # And the tree itself, by the identity recorded when it was made: a callback that renamed
+    # it away and put a directory of its own at the path does not get that removed.
+    if [ ! -e "$2/pristine" ] && [ ! -L "$2/pristine" ]; then :
+    elif [ -L "$2/pristine" ] || [ "$(_shmutant_dir_id "$2/pristine")" != "${SHMUTANT_PRISTINE_ID:-}" ]; then _shmutant_err "$1: refusing to remove $2/pristine: it is not the tree this pool prepared"; SHMUTANT_CLEANUP_FAILED=1
+    else _shmutant_remove "$2/pristine" "$2" || { _shmutant_err "$1: could not remove $2/pristine"; SHMUTANT_CLEANUP_FAILED=1; }
+    fi
   fi
   if [ -n "${SHMUTANT_STREAM_FD:-}" ]; then exec {SHMUTANT_STREAM_FD}>&-; unset SHMUTANT_STREAM_FD; fi
   _shmutant_close_stream_copy
@@ -1892,6 +1921,9 @@ _shmutant_report_keep() {
 shmutant_pool() {
   # Aliases off for the whole pool, callbacks included (their bodies were parsed when defined);
   # the caller's setting is put back on return.
+  # Before any local: bash refuses a local over a readonly global, and the assignment that
+  # follows would end a non-interactive caller's shell.
+  _shmutant_pool_locals_writable pool "the calling shell made" || \builtin return 2
   local rc pool_aliases; _shmutant_aliases_off pool_aliases
   # A plain call, not a condition: a callback's own errexit is honoured inside, as documented.
   _shmutant_pool_body "$@"; rc=$?
@@ -1936,7 +1968,9 @@ _shmutant_pool_body() {
     *) if [ "${#cap}" -gt 4 ] || [ "$cap" -lt 1 ]; then _shmutant_err "$label: the pool cap must be a positive integer of at most four digits, got [$cap]"; return 2; fi ;;
   esac
   _shmutant_open_stream "$label" || return 2
+  SHMUTANT_PRISTINE_ID=""
   _shmutant_fresh_dir "$wd/pristine" "$wd" || { _shmutant_pool_fail "$label" "$wd"; _shmutant_err "$label: cannot recreate $wd/pristine — stale contents there would be prepared over"; return 2; }
+  SHMUTANT_PRISTINE_ID="$(_shmutant_dir_id "$wd/pristine")" || SHMUTANT_PRISTINE_ID=""
   local pout prc errexit_before=0 pout_w pout_r
   # Every exit past this point goes through _shmutant_pool_fail: the stream descriptor is open
   # and pristine exists.
@@ -1968,16 +2002,12 @@ _shmutant_pool_body() {
   # A name of this function's that prepare made readonly (dynamic scope reaches these locals)
   # cannot be restored, and any later assignment to it would end a non-interactive caller's
   # shell: reported from the saved copies, which prepare could not reach.
-  local _shmutant_pool_v
-  for _shmutant_pool_v in label wd prep run cap n jobs root suffix i k sel t0 t1 killed rc verdict detail rjrc pout prc errexit_before pout_w pout_r intact base_sel base_verdict; do
-    if _shmutant_readonly "$_shmutant_pool_v"; then
-      _shmutant_err "$_shmutant_pool_label: prepare made '$_shmutant_pool_v' readonly — a name the pool keeps its own state in; declare yours with another name or a local of your own"
-      # The prepare capture descriptors, from the saved numbers: a refused pool must not leave
-      # two descriptors open in a sourcing caller.
-      exec {_shmutant_pool_pout_w}>&- {_shmutant_pool_pout_r}<&-
-      _shmutant_pool_fail "$_shmutant_pool_label" "$_shmutant_pool_wd"; return 2
-    fi
-  done
+  if ! _shmutant_pool_locals_writable "$_shmutant_pool_label" "prepare made"; then
+    # The prepare capture descriptors, from the saved numbers: a refused pool must not leave
+    # two descriptors open in a sourcing caller.
+    exec {_shmutant_pool_pout_w}>&- {_shmutant_pool_pout_r}<&-
+    _shmutant_pool_fail "$_shmutant_pool_label" "$_shmutant_pool_wd"; return 2
+  fi
   n="$_shmutant_pool_n"; t0="$_shmutant_pool_t0"; pout_r="$_shmutant_pool_pout_r"; pout_w="$_shmutant_pool_pout_w"; errexit_before="$_shmutant_pool_errexit"; prc="$_shmutant_pool_prc"
   # POSIX mode again, now for prepare: a mode it turned on would refuse the run wrapper's own
   # `exit` function in every worker, and the rows would read as aborted, not as this error.
@@ -2246,7 +2276,7 @@ _shmutant_cli_abort() {
 }
 
 _shmutant_cli_run() {
-  local plan="" wd="" keep=0 made=0 rc done_file marker
+  local plan="" wd="" keep=0 made=0 rc done_file marker keep_last="" line
   # Seeded from the environment for the window before the pool settles the value: an interrupt
   # during plan loading or prepare must not discard artifacts the operator asked to keep.
   [ "${SHMUTANT_KEEP:-0}" = 1 ] && keep=1
@@ -2337,7 +2367,11 @@ _shmutant_cli_run() {
   wait "$SHMUTANT_CLI_CHILD"; rc=$?
   trap - INT TERM
   SHMUTANT_CLI_CHILD=""
-  exec {keep_w}>&- {keep_r}<&-; unset SHMUTANT_CLI_KEEP_R
+  # The keep channel's last report (before and after prepare), kept for a completion report
+  # that did not arrive.
+  exec {keep_w}>&-
+  while IFS= read -r line <&"$keep_r"; do keep_last="$line"; done
+  exec {keep_r}<&-; unset SHMUTANT_CLI_KEEP_R
   marker="$(command -p cat <&"$done_r")"; exec {done_r}<&-
   # The completion path is a name inside the workdir: a plan that moved the workdir away and
   # put a directory of its own there could have put a file of its own at this name.
@@ -2352,6 +2386,10 @@ _shmutant_cli_run() {
       *) _shmutant_err "run: the plan or a callback ended the run before the pool completed (status $rc)" ;;
     esac
     rc=2
+    # No completion report says nothing about the settled SHMUTANT_KEEP: the keep channel's
+    # last report decides, and with none at all the workdir is kept — what it holds is what a
+    # KEEP set by the plan was meant to preserve.
+    if [ -z "$keep_last" ] || [ "$keep_last" = 1 ]; then keep=1; fi
   fi
   # Only a workdir this run created is removed. A caller-supplied one is theirs: the pool's own
   # artifacts stay in it and nothing else in it is touched.
