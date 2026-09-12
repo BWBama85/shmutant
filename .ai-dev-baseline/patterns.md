@@ -365,4 +365,10 @@ One line per resolved review thread, newest last.
 - `contract-not-honoured` `shmutant.sh` `ceed968` `PRRT_kwDOUT7q9s6hvUh2` PR #1 2026-09-12
 - `path-lookup-ambiguity` `shmutant.sh` `ceed968` `PRRT_kwDOUT7q9s6hvUh4` PR #1 2026-09-12
 - `host-shell-option-leak` `shmutant.sh` `ceed968` `PRRT_kwDOUT7q9s6hvUh5` PR #1 2026-09-12
+- `stale-artifact-reuse` `shmutant.sh` `2653b16` `PRRT_kwDOUT7q9s6hwJ0V` PR #1 2026-09-12
+- `stale-artifact-reuse` `shmutant.sh` `2653b16` `PRRT_kwDOUT7q9s6hwJ0a` PR #1 2026-09-12
+- `early-return-skips-cleanup` `shmutant.sh` `2653b16` `PRRT_kwDOUT7q9s6hwJ0b` PR #1 2026-09-12
+- `caller-owned-path-deleted` `shmutant.sh` `2653b16` `PRRT_kwDOUT7q9s6hwJ0c` PR #1 2026-09-12
+- `caller-owned-path-deleted` `shmutant.sh` `2653b16` `PRRT_kwDOUT7q9s6hwJ0e` PR #1 2026-09-12
+- `timeout-escalation-cancelled` `shmutant.sh` `2653b16` `PRRT_kwDOUT7q9s6hwJ0h` PR #1 2026-09-12
 <!-- adb:hits:end -->
