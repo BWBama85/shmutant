@@ -18,12 +18,12 @@ shmutant_target shmutant.sh
 
 # --- the bash floor ---
 shmutant_mut 'the floor accepts any 5.x' \
-  'builtin [ "$1" -gt 5 ] || { builtin [ "$1" -eq 5 ] && builtin [ "$2" -ge 3 ]; }' \
-  'builtin [ "$1" -gt 5 ] || { builtin [ "$1" -eq 5 ] && builtin [ "$2" -ge 0 ]; }' \
+  '[[ "$1" -gt 5 ]] || { [[ "$1" -eq 5 ]] && [[ "$2" -ge 3 ]]; }' \
+  '[[ "$1" -gt 5 ]] || { [[ "$1" -eq 5 ]] && [[ "$2" -ge 0 ]]; }' \
   't_bash_floor'
 shmutant_mut 'the floor accepts bash 4' \
-  '[ "$1" -gt 5 ] || {' \
-  '[ "$1" -gt 3 ] || {' \
+  '[[ "$1" -gt 5 ]] || {' \
+  '[[ "$1" -gt 3 ]] || {' \
   't_bash_floor'
 
 # --- selection ---
@@ -954,8 +954,8 @@ shmutant_mut 'anything named .shmutant marks a workdir as ours' \
   '  if [ -e "$wd/.shmutant" ]; then return 0; fi' \
   't_pool_refuses_a_workdir_it_did_not_create_entries_in'
 shmutant_mut 'the alias setting is not put back when an old bash is refused' \
-  '  if builtin [ "${BASH_SOURCE[0]}" = "$0" ]; then builtin exit 2; fi' \
-  '  if builtin [ "${BASH_SOURCE[0]}" = "$0" ]; then builtin exit 2; else builtin return 2; fi' \
+  '  if [[ "${BASH_SOURCE[0]}" = "$0" ]]; then builtin exit 2; fi' \
+  '  if [[ "${BASH_SOURCE[0]}" = "$0" ]]; then builtin exit 2; else builtin return 2; fi' \
   't_library_restores_alias_state_when_refusing_an_old_bash'
 shmutant_mut 'a workdir created under an initial keep is never tracked for removal' \
   '  [ "$made" = 1 ] && SHMUTANT_CLI_WD_TO_RM="$wd"' \
@@ -1096,7 +1096,7 @@ shmutant_mut 'a DEBUG trap prepare left keeps running through the pool' \
   '  SHMUTANT_TRAPS_HELD=1; trap - CHLD RETURN ERR' \
   't_pool_refuses_shadowed_builtins_and_posix_mode'
 shmutant_mut 'the floor test calls a caller function named [' \
-  '  builtin [ "$1" -gt 5 ] || { builtin [ "$1" -eq 5 ] && builtin [ "$2" -ge 3 ]; }' \
+  '  [[ "$1" -gt 5 ]] || { [[ "$1" -eq 5 ]] && [[ "$2" -ge 3 ]]; }' \
   '  [ "$1" -gt 5 ] || { [ "$1" -eq 5 ] && [ "$2" -ge 3 ]; }' \
   't_bash_floor'
 shmutant_mut 'the rewrite is not re-checked to be inside the tree from its pinned directory' \
@@ -1160,7 +1160,7 @@ shmutant_mut 'the rewrite trusts the worker directory at its path' \
   '      :' \
   't_rewrite_refuses_a_worker_directory_swapped_after_the_clone'
 shmutant_mut 'the final dispatch guard calls a caller function named test' \
-  'if builtin test "${BASH_SOURCE[0]}" = "$0"; then' \
+  'if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then' \
   'if test "${BASH_SOURCE[0]}" = "$0"; then' \
   't_bash_floor'
 shmutant_mut 'DEBUG is handed back before the other traps' \
@@ -1172,22 +1172,48 @@ shmutant_mut 'a readonly selector is accepted' \
   '  :' \
   't_readonly_settings_do_not_kill_the_caller'
 shmutant_mut 'a link chain is followed one hop only' \
-  '        link="$(command -p dirname -- "$link")/$target"' \
-  '        link=""' \
+  '        pending="${base:+$base/}$target${rel:+/$rel}"' \
+  '        pending=""' \
   't_target_through_a_link_chain_to_an_absolute_link_is_refused'
 shmutant_mut 'the pool runs with the caller aliases expanding at run time' \
-  '  local rc; _shmutant_aliases_off pool' \
-  '  local rc' \
+  '  local rc pool_aliases; _shmutant_aliases_off pool_aliases' \
+  '  local rc pool_aliases' \
   't_library_is_immune_to_aliases_at_parse_time'
 shmutant_mut 'copy_tree runs with the caller aliases expanding at run time' \
-  '  local rc; _shmutant_aliases_off copy_tree' \
-  '  local rc' \
+  '  local rc copy_tree_aliases; _shmutant_aliases_off copy_tree_aliases' \
+  '  local rc copy_tree_aliases' \
   't_public_helpers_are_immune_to_aliases_at_run_time'
 shmutant_mut 'mutate runs with the caller aliases expanding at run time' \
-  '  local rc; _shmutant_aliases_off mutate' \
-  '  local rc' \
+  '  local rc mutate_aliases; _shmutant_aliases_off mutate_aliases' \
+  '  local rc mutate_aliases' \
   't_public_helpers_are_immune_to_aliases_at_run_time'
 shmutant_mut 'saving the alias setting ends a caller that has errexit on' \
-  '  SHMUTANT_ALIASES="$(\builtin shopt -p expand_aliases; :)"' \
-  '  SHMUTANT_ALIASES="$(\builtin shopt -p expand_aliases)"' \
+  '  local st; st="$(\builtin shopt -p expand_aliases; :)"' \
+  '  local st; st="$(\builtin shopt -p expand_aliases)"' \
   't_pool_reads_the_table_prepare_declared'
+
+# --- guards added for the thirty-fourth review round ---
+shmutant_mut 'a touch within the minute is not in the fingerprint' \
+  '        && command -p find . -newer "$SHMUTANT_PRISTINE_STAMP" -print \' \
+  '        && : \' \
+  't_pool_refuses_a_modified_pristine_tree'
+shmutant_mut 'the alias state is never put back' \
+  '  [ -z "$1" ] || \builtin eval "$1"' \
+  '  :' \
+  't_public_helpers_are_immune_to_aliases_at_run_time'
+shmutant_mut 'the alias state put back is always off' \
+  '  printf -v "$1" '"'"'%s'"'"' "$st"' \
+  '  printf -v "$1" '"'"'%s'"'"' "shopt -u expand_aliases"' \
+  't_public_helpers_are_immune_to_aliases_at_run_time'
+shmutant_mut 'a worker directory is made in whatever sits at the workdir path' \
+  '    if ! _shmutant_wd_is_marked "$wd" || ! _shmutant_fresh_dir "$wd/$kind-$i" "$wd" || ! SHMUTANT_DIR_IDS["$kind-$i"]="$(_shmutant_dir_id "$wd/$kind-$i")" \' \
+  '    if ! _shmutant_fresh_dir "$wd/$kind-$i" "$wd" || ! SHMUTANT_DIR_IDS["$kind-$i"]="$(_shmutant_dir_id "$wd/$kind-$i")" \' \
+  't_pool_refuses_a_workdir_swapped_between_rows'
+shmutant_mut 'a half-opened stream is left cached' \
+  '  copy="$(command -p mktemp "${TMPDIR:-/tmp}/shmutant-stream.XXXXXX" 2>/dev/null)" || { _shmutant_stream_rollback; _shmutant_err "$label: cannot create the private copy of the verdict stream (in ${TMPDIR:-/tmp})"; return 2; }' \
+  '  copy="$(command -p mktemp "${TMPDIR:-/tmp}/shmutant-stream.XXXXXX" 2>/dev/null)" || { _shmutant_err "$label: cannot create the private copy of the verdict stream (in ${TMPDIR:-/tmp})"; return 2; }' \
+  't_stream_open_failure_is_rolled_back'
+shmutant_mut 'a function named builtin survives the bootstrap' \
+  'unset -f builtin 2>/dev/null' \
+  ':' \
+  't_bash_floor'

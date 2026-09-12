@@ -49,11 +49,17 @@
 # `command -p`: a function a plan defines under a utility's name, a function exported by the
 # invoking environment, or a PATH prepare set to the tree's own bin never stands in for one.
 
+# A function named builtin — one the CLI inherited as an exported function, or a caller's —
+# would stand in for every qualified call below; it goes first. Tests below are the [[ keyword,
+# which no function or alias can stand in for. (`unset` itself has no unshadowable form: a
+# shell that shadows it is beyond this file's reach.)
+unset -f builtin 2>/dev/null
+
 SHMUTANT_VERSION=0.1.0
 # Process identity comes from the kernel's start time in /proc where there is one (Linux):
 # tick resolution, so a reused pid cannot pass for the process it replaced. Elsewhere it is
 # `ps -o etime`, at second resolution, which is the best POSIX ps offers.
-SHMUTANT_PROC=0; builtin [ -r /proc/self/stat ] && SHMUTANT_PROC=1
+SHMUTANT_PROC=0; [[ -r /proc/self/stat ]] && SHMUTANT_PROC=1
 
 # Aliases expand while a file is PARSED: a sourcing shell whose dotfiles alias `cp` or `mkdir`
 # would otherwise bake those flags into every function below. Off for the rest of this file,
@@ -63,10 +69,10 @@ builtin shopt -u expand_aliases
 
 # _shmutant_bash_ok <major> <minor> — is that interpreter version at or above the floor?
 # Defined in bash-3.2 syntax: it runs before the rest of this file is parsed.
-# Every word a builtin, named as one: this runs before _shmutant_no_shadows exists, and a
-# caller's function named [ would otherwise decide whether an old bash is refused.
+# The [[ keyword, which nothing can shadow: this runs before _shmutant_no_shadows exists, and a
+# caller's function named [ (or builtin) would otherwise decide whether an old bash is refused.
 _shmutant_bash_ok() {
-  builtin [ "$1" -gt 5 ] || { builtin [ "$1" -eq 5 ] && builtin [ "$2" -ge 3 ]; }
+  [[ "$1" -gt 5 ]] || { [[ "$1" -eq 5 ]] && [[ "$2" -ge 3 ]]; }
 }
 
 # _shmutant_install_hint — the platform's install command for a modern bash.
@@ -84,17 +90,17 @@ _shmutant_path_bash() {
 }
 
 if ! _shmutant_bash_ok "${BASH_VERSINFO[0]:-0}" "${BASH_VERSINFO[1]:-0}"; then
-  if builtin [ "${BASH_SOURCE[0]}" = "$0" ] && builtin [ -z "${SHMUTANT_REEXEC:-}" ]; then
+  if [[ "${BASH_SOURCE[0]}" = "$0" ]] && [[ -z "${SHMUTANT_REEXEC:-}" ]]; then
     for _shmutant_candidate in /opt/homebrew/bin/bash /usr/local/bin/bash /home/linuxbrew/.linuxbrew/bin/bash "$(_shmutant_path_bash)"; do
-      if builtin [ -n "$_shmutant_candidate" ] && builtin [ -x "$_shmutant_candidate" ] \
-        && "$_shmutant_candidate" -c 'builtin [ "${BASH_VERSINFO[0]}" -gt 5 ] || { builtin [ "${BASH_VERSINFO[0]}" -eq 5 ] && builtin [ "${BASH_VERSINFO[1]}" -ge 3 ]; }' 2>/dev/null; then
+      if [[ -n "$_shmutant_candidate" ]] && [[ -x "$_shmutant_candidate" ]] \
+        && "$_shmutant_candidate" -c '[[ "${BASH_VERSINFO[0]}" -gt 5 ]] || { [[ "${BASH_VERSINFO[0]}" -eq 5 ]] && [[ "${BASH_VERSINFO[1]}" -ge 3 ]]; }' 2>/dev/null; then
         SHMUTANT_REEXEC=1 builtin exec "$_shmutant_candidate" "$0" "$@"
       fi
     done
   fi
   builtin printf 'shmutant: bash %s is below the 5.3 floor and no newer bash was found; %s\n' \
     "${BASH_VERSION:-unknown}" "$(_shmutant_install_hint)" >&2
-  if builtin [ "${BASH_SOURCE[0]}" = "$0" ]; then builtin exit 2; fi
+  if [[ "${BASH_SOURCE[0]}" = "$0" ]]; then builtin exit 2; fi
   builtin eval "$_shmutant_alias_state"; builtin unset _shmutant_alias_state
   builtin return 2
 fi
@@ -211,24 +217,29 @@ _shmutant_target_ok() {
 # _shmutant_no_absolute_link <root> <relative> — true when no directory component of <relative>
 # under <root> is a symlink whose target is absolute.
 _shmutant_no_absolute_link() {
-  local rel="$2" here="$1" comp target
-  rel="$(command -p dirname -- "$rel")"
+  local root="$1" rel here comp target base pending depth=0
+  rel="$(command -p dirname -- "$2")"
   [ "$rel" != . ] || return 0
-  while [ -n "$rel" ]; do
-    comp="${rel%%/*}"; case "$rel" in */*) rel="${rel#*/}" ;; *) rel="" ;; esac
-    [ -n "$comp" ] || continue
-    here="$here/$comp"
-    # A link is followed to its end (bounded): a relative link to an absolute one in the tree
-    # is that absolute link, which a clone would keep pointing back at the prepared tree.
-    if [ -L "$here" ]; then
-      local link="$here" depth=0
-      while [ -L "$link" ]; do
-        depth=$(( depth + 1 )); [ "$depth" -le 40 ] || return 1
-        target="$(command -p readlink -- "$link" 2>/dev/null)" || return 1
+  # A relative link's target is walked component by component from where the link sits, and so
+  # on (bounded): a target of `c/sub` where `c` is an absolute link is that absolute link, which
+  # a clone would keep pointing back at the prepared tree. A `..` that leaves the root ends the
+  # walk: what lies there is not this tree's, and the physical containment check decides.
+  pending="$rel"
+  while [ -n "$pending" ]; do
+    depth=$(( depth + 1 )); [ "$depth" -le 40 ] || return 1
+    here="$root"; rel="$pending"; pending=""
+    while [ -n "$rel" ]; do
+      comp="${rel%%/*}"; case "$rel" in */*) rel="${rel#*/}" ;; *) rel="" ;; esac
+      case "$comp" in ''|.) continue ;; ..) here="${here%/*}"; case "$here" in "$root"|"$root"/*) ;; *) return 0 ;; esac; continue ;; esac
+      here="$here/$comp"
+      if [ -L "$here" ]; then
+        target="$(command -p readlink -- "$here" 2>/dev/null)" || return 1
         case "$target" in /*) return 1 ;; esac
-        link="$(command -p dirname -- "$link")/$target"
-      done
-    fi
+        base="${here%/*}"; base="${base#"$root"}"; base="${base#/}"
+        pending="${base:+$base/}$target${rel:+/$rel}"
+        break
+      fi
+    done
   done
   return 0
 }
@@ -253,21 +264,24 @@ shmutant_selected() {
 # in this file would expand the caller's alias at run time; the prologue covers only parse time.
 # The first word is quoted, so this switch itself is beyond alias expansion. <site> only labels
 # the call.
+# _shmutant_aliases_off <variable> — save the caller's expand_aliases setting into <variable>
+# (the entry point's own local, so a helper called from inside a pool's callback does not
+# overwrite the pool's) and turn the option off; _shmutant_aliases_back <saved> puts it back.
 _shmutant_aliases_off() {
   # `; :` — shopt -p exits 1 for an option that is off, which a caller's errexit would act on.
-  SHMUTANT_ALIASES="$(\builtin shopt -p expand_aliases; :)"
+  local st; st="$(\builtin shopt -p expand_aliases; :)"
+  printf -v "$1" '%s' "$st"
   \builtin shopt -u expand_aliases
 }
 _shmutant_aliases_back() {
-  [ -z "${SHMUTANT_ALIASES:-}" ] || \builtin eval "$SHMUTANT_ALIASES"
-  unset SHMUTANT_ALIASES
+  [ -z "$1" ] || \builtin eval "$1"
 }
 
 shmutant_copy_tree() {
-  local rc; _shmutant_aliases_off copy_tree
+  local rc copy_tree_aliases; _shmutant_aliases_off copy_tree_aliases
   # A plain call, not a condition: a callback's own errexit is honoured inside, as documented.
   _shmutant_copy_tree_body "$@"; rc=$?
-  _shmutant_aliases_back; return "$rc"
+  _shmutant_aliases_back "$copy_tree_aliases"; return "$rc"
 }
 _shmutant_copy_tree_body() {
   if [ "$#" -ne 2 ] || [ -z "$1" ] || [ -z "$2" ]; then _shmutant_err "copy_tree: usage: shmutant_copy_tree <src> <dst> (neither empty)"; return 1; fi
@@ -410,10 +424,10 @@ _shmutant_mutate_restore() {
 # `sed -i` (BSD and GNU differ), so a failed rewrite cannot half-write. A target whose last line
 # has no newline keeps that shape: the only change is the literal.
 shmutant_mutate() {
-  local rc; _shmutant_aliases_off mutate
+  local rc mutate_aliases; _shmutant_aliases_off mutate_aliases
   # A plain call, not a condition: a callback's own errexit is honoured inside, as documented.
   _shmutant_mutate_body "$@"; rc=$?
-  _shmutant_aliases_back; return "$rc"
+  _shmutant_aliases_back "$mutate_aliases"; return "$rc"
 }
 _shmutant_mutate_body() {
   if [ "$#" -ne 3 ]; then _shmutant_err "mutate: usage: shmutant_mutate <file> <old> <new>"; return 1; fi
@@ -1403,7 +1417,9 @@ _shmutant_run_jobs_loop() {
     if [ "$kind" = mut ] && [ "${SHMUTANT_SKIP[$i]:-0}" != 0 ]; then continue; fi
     # Recreated, never reused: a stale timeout marker or tree from an earlier pool in the same
     # workdir would be read as this run's.
-    if ! _shmutant_fresh_dir "$wd/$kind-$i" "$wd" || ! SHMUTANT_DIR_IDS["$kind-$i"]="$(_shmutant_dir_id "$wd/$kind-$i")" \
+    # The workdir first, by identity: a callback that already ran could have moved it away and
+    # put a caller's directory, with a `mut-N` of its own, at its path.
+    if ! _shmutant_wd_is_marked "$wd" || ! _shmutant_fresh_dir "$wd/$kind-$i" "$wd" || ! SHMUTANT_DIR_IDS["$kind-$i"]="$(_shmutant_dir_id "$wd/$kind-$i")" \
       || ! _shmutant_open_channel "$wd" "$kind-$i"; then
       _shmutant_err "cannot recreate $wd/$kind-$i — a stale verdict there could be read as this run's; refusing to continue"
       # The workers already running are ended, not waited for: one of them may be unbounded.
@@ -1549,12 +1565,18 @@ _shmutant_open_stream() {
   SHMUTANT_STREAM_BASE="$(command -p wc -c < "$SHMUTANT_STREAM" 2>/dev/null | command -p tr -d ' ')" || SHMUTANT_STREAM_BASE=0
   _shmutant_close_stream_copy
   local copy
-  copy="$(command -p mktemp "${TMPDIR:-/tmp}/shmutant-stream.XXXXXX" 2>/dev/null)" || { _shmutant_err "$label: cannot create the private copy of the verdict stream"; return 2; }
+  # A failure here rolls the open back: left open and cached, the next pool for the same stream
+  # would skip this function and run without a private copy.
+  copy="$(command -p mktemp "${TMPDIR:-/tmp}/shmutant-stream.XXXXXX" 2>/dev/null)" || { _shmutant_stream_rollback; _shmutant_err "$label: cannot create the private copy of the verdict stream (in ${TMPDIR:-/tmp})"; return 2; }
   # shellcheck disable=SC2093
   if ! { exec {SHMUTANT_STREAM_COPY_W}>>"$copy" {SHMUTANT_STREAM_COPY_R}<"$copy"; } 2>/dev/null; then
-    command -p rm -f -- "$copy"; _shmutant_err "$label: cannot open the private copy of the verdict stream"; return 2
+    command -p rm -f -- "$copy"; _shmutant_stream_rollback; _shmutant_err "$label: cannot open the private copy of the verdict stream"; return 2
   fi
   command -p rm -f -- "$copy"
+}
+_shmutant_stream_rollback() {
+  [ -z "${SHMUTANT_STREAM_FD:-}" ] || exec {SHMUTANT_STREAM_FD}>&-
+  unset SHMUTANT_STREAM_FD SHMUTANT_STREAM_OPENED
 }
 _shmutant_close_stream_copy() {
   [ -z "${SHMUTANT_STREAM_COPY_W:-}" ] || exec {SHMUTANT_STREAM_COPY_W}>&-
@@ -1602,22 +1624,35 @@ _shmutant_callable() {
 
 # _shmutant_pristine_state <dir> — a fingerprint of the tree under <dir>, relative to it: every
 # entry's `ls -ldn` line (mode, owner, group, a file's size, mtime, name, a link's target), the
-# root's included, and every regular file's content and size (POSIX cksum), sorted. Link
-# counts, directory sizes and platform mode suffixes are left out, so a faithful `cp -RPp`
-# clone of a tree, its root given the tree's metadata, has the fingerprint of the tree. Any write, addition, removal or mode change changes it,
-# whatever the timestamps say. Fails, rather than yield a partial listing, when a stage fails —
-# which includes a regular file whose content cannot be read.
+# root's included; every entry newer than the pool's stamp (taken after prepare, so a timestamp
+# moved forward is seen at any precision, where `ls` shows minutes); and every regular file's
+# content and size (POSIX cksum); sorted. Link counts, directory sizes and platform mode
+# suffixes are left out, so a faithful `cp -RPp` clone of a tree (which keeps every timestamp),
+# its root given the tree's metadata, has the fingerprint of the tree. Any write, addition,
+# removal, mode change or touch changes it; a timestamp moved BACK within its minute does not.
+# Fails, rather than yield a partial listing, when a stage fails — which includes a regular file
+# whose content cannot be read, and a stamp that is not the regular file the pool made.
 _shmutant_pristine_state() {
   # find execs a PROGRAM: `command` is a shell builtin (macOS ships a stub of that name, Linux
   # does not), so the utilities are resolved from the standard PATH first and exec'd by path.
   local ls_bin cksum_bin
   ls_bin="$(command -pv ls)" && cksum_bin="$(command -pv cksum)" || return 1
+  [ -f "${SHMUTANT_PRISTINE_STAMP:-}" ] && [ ! -L "$SHMUTANT_PRISTINE_STAMP" ] || return 1
   ( builtin cd -P -- "$1" 2>/dev/null || exit 1
     set -o pipefail
     { command -p find . -exec "$ls_bin" -ldn -- {} + \
+        && command -p find . -newer "$SHMUTANT_PRISTINE_STAMP" -print \
         && command -p find . -type f -exec "$cksum_bin" {} + ; } 2>/dev/null \
-      | command -p awk '/^[0-9]/ { print; next } { sub(/[@+.]$/, "", $1); $2 = "-"; if ($1 ~ /^d/) $5 = "-"; print }' \
+      | command -p awk '/^[0-9]/ || /^\.$/ || /^\.\// { print; next } { sub(/[@+.]$/, "", $1); $2 = "-"; if ($1 ~ /^d/) $5 = "-"; print }' \
       | LC_ALL=C command -p sort )
+}
+
+# _shmutant_wd_is_marked <workdir> — true while <workdir> is, by identity, the directory this
+# pool marked as its own; says so otherwise.
+_shmutant_wd_is_marked() {
+  [ ! -L "$1" ] && [ "$(_shmutant_dir_id "$1")" = "${SHMUTANT_WD_ID:-}" ] && return 0
+  _shmutant_err "$1 is no longer the directory this pool marked as its own — a callback moved or replaced it"
+  return 1
 }
 
 # _shmutant_pool_fail <label> <workdir> — the exit for a pool that stops after prepare: the
@@ -1639,7 +1674,8 @@ _shmutant_pool_cleanup() {
   if [ -n "${SHMUTANT_STREAM_FD:-}" ]; then exec {SHMUTANT_STREAM_FD}>&-; unset SHMUTANT_STREAM_FD; fi
   _shmutant_close_stream_copy
   unset SHMUTANT_STREAM_OPENED
-  unset SHMUTANT_PRISTINE_STATE
+  [ -z "${SHMUTANT_PRISTINE_STAMP:-}" ] || command -p rm -f -- "$SHMUTANT_PRISTINE_STAMP"
+  unset SHMUTANT_PRISTINE_STATE SHMUTANT_PRISTINE_STAMP
 }
 
 # _shmutant_no_shadows <label> — refuse to run while a builtin this harness signals, waits and
@@ -1692,10 +1728,10 @@ _shmutant_report_keep() {
 shmutant_pool() {
   # Aliases off for the whole pool, callbacks included (their bodies were parsed when defined);
   # the caller's setting is put back on return.
-  local rc; _shmutant_aliases_off pool
+  local rc pool_aliases; _shmutant_aliases_off pool_aliases
   # A plain call, not a condition: a callback's own errexit is honoured inside, as documented.
   _shmutant_pool_body "$@"; rc=$?
-  _shmutant_aliases_back; return "$rc"
+  _shmutant_aliases_back "$pool_aliases"; return "$rc"
 }
 _shmutant_pool_body() {
   if [ "$#" -lt 4 ] || [ "$#" -gt 5 ]; then _shmutant_err "pool: usage: shmutant_pool <label> <workdir> <prepare> <run> [cap] (got $# arguments)"; return 2; fi
@@ -1794,6 +1830,7 @@ _shmutant_pool_body() {
   # The tree's state as prepare left it. A callback that later writes into pristine, adds to
   # it, removes from it or changes a mode changes the fingerprint, and no row is cloned from the
   # tree afterwards; every clone is checked against it after the copy.
+  SHMUTANT_PRISTINE_STAMP="$(command -p mktemp "$wd/.stamp.XXXXXX" 2>/dev/null)" || { _shmutant_err "$label: cannot create a stamp in $wd"; _shmutant_pool_fail "$label" "$wd"; return 2; }
   SHMUTANT_PRISTINE_STATE="$(_shmutant_pristine_state "$wd/pristine")" || { _shmutant_err "$label: cannot fingerprint the prepared tree — a stage failed, or it holds a regular file whose content cannot be read"; _shmutant_pool_fail "$label" "$wd"; return 2; }
   [ -n "$root" ] || root="$wd/pristine"
   root="$(_shmutant_abs "$root")" || { _shmutant_err "$label: prepare printed a root that is not a directory"; _shmutant_pool_fail "$label" "$wd"; return 2; }
@@ -2144,9 +2181,9 @@ shmutant_main() {
 
 eval "$_shmutant_alias_state"; unset -v _shmutant_alias_state
 
-# As builtins, like the bootstrap: a caller's function named [ decides neither whether this
-# file is the script being run nor what the CLI exits with.
-if builtin test "${BASH_SOURCE[0]}" = "$0"; then
+# The [[ keyword, like the bootstrap: a caller's function named [ or test decides neither whether
+# this file is the script being run nor what the CLI exits with.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   shmutant_main "$@"
   builtin exit $?
 fi

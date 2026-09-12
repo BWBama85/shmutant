@@ -128,15 +128,18 @@ is refused by `shmutant_copy_tree`, since a copy cannot keep the links joined. A
 stops after `prepare` (a target the tree lacks, a setting `prepare` broke) removes the prepared
 tree unless `SHMUTANT_KEEP=1`. The prepared tree is proven unmodified before every clone, by a
 fingerprint of every entry's metadata and every file's content (POSIX `cksum`) taken after
-`prepare` (the root's own mode, owner and timestamp included), and every clone is checked
-against that fingerprint after the copy: a callback that writes into pristine (say through
-`../../pristine` from its clone), adds to it, removes from it or changes a mode or a timestamp
-— before a clone or while one is being taken — makes the affected rows
+`prepare` (the root's own mode, owner and timestamp included, and whether each entry is newer
+than a stamp taken after `prepare`, so a touch is seen at any precision), and every clone is
+checked against that fingerprint after the copy: a callback that writes into pristine (say
+through `../../pristine` from its clone), adds to it, removes from it, changes a mode or touches
+it — before a clone or while one is being taken — makes the affected rows
 `unprepared`, with the reason, rather than running on what it left, whatever the timestamps
 say. A prepared tree holding a regular file whose content the pool cannot read is refused
 (status 2), since it could not be fingerprinted. A `prepare` that moves the workdir away and
 puts another directory at its path stops the pool (status 2) and nothing at that path is
-removed, by the CLI either. A `SHMUTANT_STREAM` file is checked at the end not only to be the
+removed, by the CLI either; the workdir is checked the same way before every row's directory
+is made, so a callback that does the swap between rows stops the pool too. (A timestamp moved
+back within its minute is the one metadata change the fingerprint does not see.) A `SHMUTANT_STREAM` file is checked at the end not only to be the
 file the records went to but to hold, past what was there when it was opened, exactly the
 records the pool wrote: a callback that truncates, overwrites or appends to it in place is a
 harness error (status 2). The rewrite of a row's target is

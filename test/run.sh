@@ -597,6 +597,13 @@ t_pool_refuses_a_modified_pristine_tree() {
   root_touch_run() { touch -t 203001010000 "$1/../../pristine"; bash "$1/test.sh"; }
   SHMUTANT_JOBS=1 SHMUTANT_BASELINE=0 pool lbl "$T/wd11" toy_prepare root_touch_run
   eq "$(verdict_of b)" unprepared 'a timestamp change on the prepared root is seen'
+  # a plain touch — the same minute, which `ls` cannot tell apart — is seen through the stamp
+  touch_now_run() { touch "$1/../../pristine/lib.sh"; bash "$1/test.sh"; }
+  SHMUTANT_JOBS=1 SHMUTANT_BASELINE=0 pool lbl "$T/wd12" toy_prepare touch_now_run
+  eq "$(verdict_of b)" unprepared 'a touch of a prepared file within the same minute is seen'
+  touch_root_now_run() { touch "$1/../../pristine"; bash "$1/test.sh"; }
+  SHMUTANT_JOBS=1 SHMUTANT_BASELINE=0 pool lbl "$T/wd13" toy_prepare touch_root_now_run
+  eq "$(verdict_of b)" unprepared 'a touch of the prepared root within the same minute is seen'
   # a regular file the pool cannot read makes the fingerprint fail, and the pool refuse
   if [ "$(id -u)" -ne 0 ]; then
     unreadable_prepare() { toy_prepare "$1"; printf 'secret\n' > "$1/unreadable"; chmod 000 "$1/unreadable"; }
@@ -729,7 +736,7 @@ EOF
   local wd; wd="$(cat "$T/toy/wdpath" 2>/dev/null)"
   [ -n "$wd" ] || fail_ 'fixture: the plan did not record the workdir path'
   [ -f "$wd/keep" ] || fail_ 'the caller directory put at the automatic workdir path was removed'
-  has "$(cat "$T/e")" 'no longer the directory this pool marked' 'the pool says why'
+  has "$(cat "$T/e")" 'prepare moved or replaced it' 'the pool says why, after prepare'
   has "$(cat "$T/e")" 'no longer the workdir this run created' 'the CLI says why it left it'
   rm -rf "$T/tmpd"; mkdir -p "$T/tmpd" "$T/toy/victim"; printf 'precious\n' > "$T/toy/victim/keep"
   # the same swap during a prepare that is then interrupted
@@ -759,7 +766,7 @@ t_pool_leaves_a_replaced_workdir_alone() {
   mkdir -p "$T/victim/pristine"; printf 'precious\n' > "$T/victim/keep"
   mkdir -p "$T/wd2"; SHMUTANT_BASELINE=0 pool lbl "$T/wd2" swap_prepare toy_run
   rc_is "$RC" 2 'a workdir prepare replaced stops the pool'
-  has "$ERR" 'no longer the directory this pool marked' 'says why'
+  has "$ERR" 'prepare moved or replaced it' 'says why, after prepare'
   [ -f "$T/wd2/keep" ] && [ -d "$T/wd2/pristine" ] || fail_ 'the caller directory at the workdir path was emptied after prepare succeeded'
   mkdir -p "$T/victim/pristine"; printf 'precious\n' > "$T/victim/pristine/keep"
   mkdir -p "$T/wd3"
@@ -796,6 +803,13 @@ t_target_through_a_link_chain_to_an_absolute_link_is_refused() {
   rc_is "$RC" 2 'a target reached through a relative link to an absolute in-tree link is refused up front'
   has "$ERR" 'absolute one' 'says why'
   case "$OUT" in *$'\trow\t'*) fail_ 'a row ran on a refused table' ;; esac
+  # a relative target with several components, one of which is an absolute link
+  multi_prepare() { toy_prepare "$1"; mkdir -p "$1/real/sub"; cp "$1/lib.sh" "$1/real/sub/lib.sh"; ln -s "$1/real" "$1/c"; ln -s c/sub "$1/a"; }
+  shmutant_reset; shmutant_target a/lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  SHMUTANT_BASELINE=0 pool lbl "$T/wd2" multi_prepare toy_run
+  rc_is "$RC" 2 'a relative link whose target passes through an absolute in-tree link is refused up front'
+  case "$OUT" in *$'\trow\t'*) fail_ 'a row ran on a refused table (multi-component target)' ;; esac
 }
 
 t_public_helpers_are_immune_to_aliases_at_run_time() {
@@ -806,6 +820,7 @@ t_public_helpers_are_immune_to_aliases_at_run_time() {
   # (and must not take this runner's EXIT trap with it), and one whose path resolution spins on
   # aliased output never returns (`timeout` is not portable, so the bound is a poll).
   mkdir -p "$T/src/sub"; printf 'x=1\n' > "$T/src/f"; printf 'x=1\n' > "$T/src/sub/g"
+  mk_toy "$T/toy"
   : > "$T/alias-out"
   set -m
   ( SHMUTANT="$SHMUTANT" T="$T" bash -c '
@@ -813,6 +828,10 @@ t_public_helpers_are_immune_to_aliases_at_run_time() {
     shmutant_copy_tree "$T/src" "$T/dst" 2>&1 || { echo "copy rc=$?"; exit 1; }
     shopt -q expand_aliases || { echo "aliases not put back"; exit 1; }
     shmutant_mutate "$T/dst/f" "x=1" "x=2" 2>&1 || { echo "mutate rc=$?"; exit 1; }
+    prep() { shmutant_copy_tree "$T/toy" "$1"; }; runit() { bash "$1/test.sh"; }
+    shmutant_reset; shmutant_target lib.sh; shmutant_mut a "\$1 + \$2" "\$1 - \$2" add-works
+    SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wdn" prep runit > /dev/null 2>&1 || { echo "pool rc=$?"; exit 1; }
+    shopt -q expand_aliases || { echo "aliases not put back after a pool whose prepare used copy_tree"; exit 1; }
     echo ok' > "$T/alias-out" 2>&1; echo "rc=$?" >> "$T/alias-out" ) 2>/dev/null & local child=$! i=0
   set +m
   until grep -q '^rc=' "$T/alias-out" 2>/dev/null || [ "$i" -ge 600 ]; do i=$((i + 1)); sleep 0.1; done
@@ -822,6 +841,35 @@ t_public_helpers_are_immune_to_aliases_at_run_time() {
   has "$(cat "$T/alias-out")" ok 'and the aliased shell survived them'
   [ -f "$T/dst/sub/g" ] || fail_ 'copy_tree under run-time aliases did not copy'
   eq "$(cat "$T/dst/f" 2>/dev/null)" x=2 'mutate under run-time aliases rewrote the file'
+}
+
+t_pool_refuses_a_workdir_swapped_between_rows() {
+  # a callback that already ran moved the workdir away and put a caller directory, with a
+  # mut-N entry of its own, at its path: the next row's directory is not made (or removed) there
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  shmutant_mut 'b' '$1 + $2' '$1 * $2' 'add-works'
+  swapping_run() { local w; w="$(cd "$1/../.." && pwd -P)"; bash "$1/test.sh"; local rc=$?; mv "$w" "$w.moved" && mkdir -p "$w/mut-1" && printf 'precious\n' > "$w/mut-1/keep"; return "$rc"; }
+  SHMUTANT_JOBS=1 SHMUTANT_BASELINE=0 pool lbl "$T/wd" toy_prepare swapping_run
+  rc_is "$RC" 2 'a workdir swapped between rows is a harness error'
+  has "$ERR" 'a callback moved or replaced it' 'says why, between rows'
+  [ -f "$T/wd/mut-1/keep" ] || fail_ 'the caller directory at the workdir path lost its mut-1 entry'
+  rm -rf "$T/wd.moved"
+}
+
+t_stream_open_failure_is_rolled_back() {
+  # the stream file opens but its private copy cannot be made: the open is rolled back, so the
+  # next pool for the same stream opens it again, with a copy, rather than run without one
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  ( TMPDIR="$T/absent/dir" SHMUTANT_STREAM="$T/s.tsv" SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd" toy_prepare toy_run > /dev/null 2>"$T/e1"; echo "rc=$?" > "$T/rc1"
+    SHMUTANT_STREAM="$T/s.tsv" SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd2" toy_prepare toy_run > /dev/null 2>"$T/e2"; echo "rc=$?" > "$T/rc2" )
+  has "$(cat "$T/rc1")" 'rc=2' 'a stream whose private copy cannot be made is a harness error'
+  has "$(cat "$T/e1")" 'private copy' 'says why'
+  has "$(cat "$T/rc2")" 'rc=0' 'the next pool for the same stream opens it afresh and passes its integrity check'
+  has "$(cat "$T/s.tsv")" $'\trow\tkilled\ta\t' 'and its records went to the stream'
 }
 
 t_verdict_scans_a_large_output() {
@@ -1420,7 +1468,7 @@ t_sibling_cannot_plant_in_another_workers_directory() {
   declare -gA SHMUTANT_DIR_IDS=() SHMUTANT_VERDICT_W=() SHMUTANT_VERDICT_R=() SHMUTANT_RES_VERDICT=() SHMUTANT_RES_US=() SHMUTANT_RES_STATUS=()
   SHMUTANT_DIR_IDS[mut-0]="$(_shmutant_dir_id "$T/wd/mut-0")"; SHMUTANT_PRISTINE_ID="$(_shmutant_dir_id "$T/wd/pristine")"
   # the pool's record of the prepared tree, which the worker checks before cloning
-  SHMUTANT_PRISTINE_STATE="$(_shmutant_pristine_state "$T/wd/pristine")"
+  SHMUTANT_PRISTINE_STAMP="$(mktemp "$T/wd/.stamp.XXXXXX")"; SHMUTANT_PRISTINE_STATE="$(_shmutant_pristine_state "$T/wd/pristine")"
   SHMUTANT_ROWS_SEL=(add-works)
   _shmutant_open_channel "$T/wd" mut-0 || fail_ 'fixture: no channel'
   ( SHMUTANT_TIMEOUT=0 _shmutant_worker mut 0 "$T/wd" toy_run "" )
@@ -2124,6 +2172,14 @@ t_pool_refuses_a_worker_dir_under_a_swapped_workdir() {
   rc_is "$RC" 2 'a swap above the workdir'"'"'s parent is a harness error'
   [ -f "$T/other/wd/mut-1/keep" ] || fail_ 'the caller'"'"'s mut-1 behind an ancestor swap was removed'
   rm -f "$T/nest"; mv "$T/nest.moved" "$T/nest" 2>/dev/null
+  # the removal helper's own guards, which every removal site relies on: the parent is checked
+  # before a path that is not there (a caller about to create it would create it through the
+  # link), and the whole ancestry must still resolve to the physical parent given
+  mkdir -p "$T/elsewhere2"; ln -s "$T/elsewhere2" "$T/plink"
+  _shmutant_remove "$T/plink/gone" 2>/dev/null; rc_is $? 1 'a path that is not there is still refused when its parent is a symlink'
+  mkdir -p "$T/real/p"; printf 'keep\n' > "$T/real/p/f"; ln -s "$T/real" "$T/rlink"
+  _shmutant_remove "$T/rlink/p/f" "$T/not-the-parent" 2>/dev/null; rc_is $? 1 'a path whose ancestry no longer resolves to the physical parent given is refused'
+  [ -f "$T/real/p/f" ] || fail_ 'the file behind the swapped ancestry was removed'
 }
 
 t_pool_refuses_unremovable_worker_dir() {
@@ -2460,6 +2516,9 @@ t_bash_floor() {
   _shmutant_bash_ok 4 4; rc_is $? 1 '4.4 is below the floor'
   _shmutant_bash_ok 3 2; rc_is $? 1 '3.2 is below the floor'
   has "$(_shmutant_install_hint)" 'bash' 'the install hint names bash'
+  # an exported function named builtin, inherited by the CLI, is removed before anything relies
+  # on the qualifier: with it returning failure the CLI still runs its command
+  has "$( builtin() { return 1; }; export -f builtin; bash "$SHMUTANT" version 2>&1 )" 'shmutant 0.1.0' 'an inherited function named builtin does not stop the CLI from running its command'
   # the final dispatch guard invokes the builtin: a caller's function named [ or test that
   # always succeeds does not make sourcing run the CLI and exit the caller's shell
   # shellcheck disable=SC1090
@@ -2480,6 +2539,9 @@ t_bash_floor() {
     msg="$("$old" -c ". '$SHMUTANT' || exit \$?; echo reached" 2>&1)"; rc_is $? 2 "sourcing under $old returns 2"
     hasnt "$msg" 'reached' 'a caller that checks the source status stops'
     has "$msg" 'below the 5.3 floor' 'sourcing under an old bash says so'
+    # an inherited function named builtin that always succeeds does not make the old bash pass
+    # the floor: the re-exec into a newer bash still happens and the command runs there
+    has "$( builtin() { return 0; }; export -f builtin; "$old" "$SHMUTANT" version 2>&1 )" 'shmutant 0.1.0' 'an inherited builtin function that always succeeds does not make an old bash pass the floor'
     echo "note: $_unit exercised the real floor guard under $old"
     return
   done
