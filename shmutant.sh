@@ -1622,26 +1622,43 @@ _shmutant_callable() {
   return 1
 }
 
+# _shmutant_stat_style — how this platform's stat prints an mtime, decided once per pool:
+# gnu-ns (`stat -c %.9Y`), gnu, bsd-ns (`stat -f %Fm`), bsd, or none. Not POSIX, so a platform
+# without either form falls back to the minute `ls` shows.
+_shmutant_stat_style() {
+  local st; st="$(command -pv stat 2>/dev/null)" || { SHMUTANT_STAT_STYLE=none; return 0; }
+  if "$st" -c '%.9Y' / > /dev/null 2>&1; then SHMUTANT_STAT_STYLE=gnu-ns
+  elif "$st" -c '%Y' / > /dev/null 2>&1; then SHMUTANT_STAT_STYLE=gnu
+  elif "$st" -f '%Fm' / > /dev/null 2>&1; then SHMUTANT_STAT_STYLE=bsd-ns
+  elif "$st" -f '%m' / > /dev/null 2>&1; then SHMUTANT_STAT_STYLE=bsd
+  else SHMUTANT_STAT_STYLE=none; fi
+}
+
 # _shmutant_pristine_state <dir> — a fingerprint of the tree under <dir>, relative to it: every
-# entry's `ls -ldn` line (mode, owner, group, a file's size, mtime, name, a link's target), the
-# root's included; every entry newer than the pool's stamp (taken after prepare, so a timestamp
-# moved forward is seen at any precision, where `ls` shows minutes); and every regular file's
-# content and size (POSIX cksum); sorted. Link counts, directory sizes and platform mode
-# suffixes are left out, so a faithful `cp -RPp` clone of a tree (which keeps every timestamp),
-# its root given the tree's metadata, has the fingerprint of the tree. Any write, addition,
-# removal, mode change or touch changes it; a timestamp moved BACK within its minute does not.
-# Fails, rather than yield a partial listing, when a stage fails — which includes a regular file
-# whose content cannot be read, and a stamp that is not the regular file the pool made.
+# entry's `ls -ldn` line (mode, owner, group, a file's size, mtime to the minute, name, a link's
+# target), the root's included; every entry's exact mtime where stat can give one (nanoseconds
+# on GNU and BSD); and every regular file's content and size (POSIX cksum); sorted. Link counts,
+# directory sizes and platform mode suffixes are left out, so a faithful `cp -RPp` clone of a
+# tree (which keeps every timestamp exactly), its root given the tree's metadata, has the
+# fingerprint of the tree. Any write, addition, removal, mode change or touch changes it; where
+# no stat form exists, a timestamp change within its `ls` minute (or day) does not. Fails, rather
+# than yield a partial listing, when a stage fails — which includes a regular file whose content
+# cannot be read.
 _shmutant_pristine_state() {
   # find execs a PROGRAM: `command` is a shell builtin (macOS ships a stub of that name, Linux
   # does not), so the utilities are resolved from the standard PATH first and exec'd by path.
-  local ls_bin cksum_bin
+  local ls_bin cksum_bin stat_bin="" fmt=""
   ls_bin="$(command -pv ls)" && cksum_bin="$(command -pv cksum)" || return 1
-  [ -f "${SHMUTANT_PRISTINE_STAMP:-}" ] && [ ! -L "$SHMUTANT_PRISTINE_STAMP" ] || return 1
+  case "${SHMUTANT_STAT_STYLE:-none}" in
+    gnu-ns) stat_bin="$(command -pv stat)"; fmt='-c%.9Y %n' ;;
+    gnu)    stat_bin="$(command -pv stat)"; fmt='-c%Y %n' ;;
+    bsd-ns) stat_bin="$(command -pv stat)"; fmt='-f%Fm %N' ;;
+    bsd)    stat_bin="$(command -pv stat)"; fmt='-f%m %N' ;;
+  esac
   ( builtin cd -P -- "$1" 2>/dev/null || exit 1
     set -o pipefail
     { command -p find . -exec "$ls_bin" -ldn -- {} + \
-        && command -p find . -newer "$SHMUTANT_PRISTINE_STAMP" -print \
+        && { [ -z "$stat_bin" ] || command -p find . -exec "$stat_bin" "$fmt" {} + ; } \
         && command -p find . -type f -exec "$cksum_bin" {} + ; } 2>/dev/null \
       | command -p awk '/^[0-9]/ || /^\.$/ || /^\.\// { print; next } { sub(/[@+.]$/, "", $1); $2 = "-"; if ($1 ~ /^d/) $5 = "-"; print }' \
       | LC_ALL=C command -p sort )
@@ -1674,8 +1691,7 @@ _shmutant_pool_cleanup() {
   if [ -n "${SHMUTANT_STREAM_FD:-}" ]; then exec {SHMUTANT_STREAM_FD}>&-; unset SHMUTANT_STREAM_FD; fi
   _shmutant_close_stream_copy
   unset SHMUTANT_STREAM_OPENED
-  [ -z "${SHMUTANT_PRISTINE_STAMP:-}" ] || command -p rm -f -- "$SHMUTANT_PRISTINE_STAMP"
-  unset SHMUTANT_PRISTINE_STATE SHMUTANT_PRISTINE_STAMP
+  unset SHMUTANT_PRISTINE_STATE
 }
 
 # _shmutant_no_shadows <label> — refuse to run while a builtin this harness signals, waits and
@@ -1830,7 +1846,7 @@ _shmutant_pool_body() {
   # The tree's state as prepare left it. A callback that later writes into pristine, adds to
   # it, removes from it or changes a mode changes the fingerprint, and no row is cloned from the
   # tree afterwards; every clone is checked against it after the copy.
-  SHMUTANT_PRISTINE_STAMP="$(command -p mktemp "$wd/.stamp.XXXXXX" 2>/dev/null)" || { _shmutant_err "$label: cannot create a stamp in $wd"; _shmutant_pool_fail "$label" "$wd"; return 2; }
+  _shmutant_stat_style
   SHMUTANT_PRISTINE_STATE="$(_shmutant_pristine_state "$wd/pristine")" || { _shmutant_err "$label: cannot fingerprint the prepared tree — a stage failed, or it holds a regular file whose content cannot be read"; _shmutant_pool_fail "$label" "$wd"; return 2; }
   [ -n "$root" ] || root="$wd/pristine"
   root="$(_shmutant_abs "$root")" || { _shmutant_err "$label: prepare printed a root that is not a directory"; _shmutant_pool_fail "$label" "$wd"; return 2; }

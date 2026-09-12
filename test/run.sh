@@ -597,13 +597,21 @@ t_pool_refuses_a_modified_pristine_tree() {
   root_touch_run() { touch -t 203001010000 "$1/../../pristine"; bash "$1/test.sh"; }
   SHMUTANT_JOBS=1 SHMUTANT_BASELINE=0 pool lbl "$T/wd11" toy_prepare root_touch_run
   eq "$(verdict_of b)" unprepared 'a timestamp change on the prepared root is seen'
-  # a plain touch — the same minute, which `ls` cannot tell apart — is seen through the stamp
-  touch_now_run() { touch "$1/../../pristine/lib.sh"; bash "$1/test.sh"; }
-  SHMUTANT_JOBS=1 SHMUTANT_BASELINE=0 pool lbl "$T/wd12" toy_prepare touch_now_run
-  eq "$(verdict_of b)" unprepared 'a touch of a prepared file within the same minute is seen'
-  touch_root_now_run() { touch "$1/../../pristine"; bash "$1/test.sh"; }
-  SHMUTANT_JOBS=1 SHMUTANT_BASELINE=0 pool lbl "$T/wd13" toy_prepare touch_root_now_run
-  eq "$(verdict_of b)" unprepared 'a touch of the prepared root within the same minute is seen'
+  # a timestamp moved by seconds, within what `ls` shows (a day, for a file that old), on a
+  # file and on the root: only an exact mtime tells them apart, where the platform has one
+  # the platform's own capability, probed here and not through the library: a library that
+  # failed to detect it must be caught, not deferred to
+  if stat -c '%Y' / > /dev/null 2>&1 || stat -f '%m' / > /dev/null 2>&1; then
+    touch -t 202001011200.00 "$T/toy/lib.sh" "$T/toy"
+    seconds_run() { touch -t 202001011200.30 "$1/../../pristine/lib.sh"; bash "$1/test.sh"; }
+    SHMUTANT_JOBS=1 SHMUTANT_BASELINE=0 pool lbl "$T/wd12" toy_prepare seconds_run
+    eq "$(verdict_of b)" unprepared 'a timestamp moved by seconds on a prepared file is seen'
+    root_seconds_run() { touch -t 202001011200.30 "$1/../../pristine"; bash "$1/test.sh"; }
+    SHMUTANT_JOBS=1 SHMUTANT_BASELINE=0 pool lbl "$T/wd13" toy_prepare root_seconds_run
+    eq "$(verdict_of b)" unprepared 'a timestamp moved by seconds on the prepared root is seen'
+  else
+    echo "note: $_unit: no stat form here; exact timestamps are not in the fingerprint on this platform"
+  fi
   # a regular file the pool cannot read makes the fingerprint fail, and the pool refuse
   if [ "$(id -u)" -ne 0 ]; then
     unreadable_prepare() { toy_prepare "$1"; printf 'secret\n' > "$1/unreadable"; chmod 000 "$1/unreadable"; }
@@ -1468,7 +1476,7 @@ t_sibling_cannot_plant_in_another_workers_directory() {
   declare -gA SHMUTANT_DIR_IDS=() SHMUTANT_VERDICT_W=() SHMUTANT_VERDICT_R=() SHMUTANT_RES_VERDICT=() SHMUTANT_RES_US=() SHMUTANT_RES_STATUS=()
   SHMUTANT_DIR_IDS[mut-0]="$(_shmutant_dir_id "$T/wd/mut-0")"; SHMUTANT_PRISTINE_ID="$(_shmutant_dir_id "$T/wd/pristine")"
   # the pool's record of the prepared tree, which the worker checks before cloning
-  SHMUTANT_PRISTINE_STAMP="$(mktemp "$T/wd/.stamp.XXXXXX")"; SHMUTANT_PRISTINE_STATE="$(_shmutant_pristine_state "$T/wd/pristine")"
+  _shmutant_stat_style; SHMUTANT_PRISTINE_STATE="$(_shmutant_pristine_state "$T/wd/pristine")"
   SHMUTANT_ROWS_SEL=(add-works)
   _shmutant_open_channel "$T/wd" mut-0 || fail_ 'fixture: no channel'
   ( SHMUTANT_TIMEOUT=0 _shmutant_worker mut 0 "$T/wd" toy_run "" )

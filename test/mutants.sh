@@ -1193,9 +1193,13 @@ shmutant_mut 'saving the alias setting ends a caller that has errexit on' \
   't_pool_reads_the_table_prepare_declared'
 
 # --- guards added for the thirty-fourth review round ---
-shmutant_mut 'a touch within the minute is not in the fingerprint' \
-  '        && command -p find . -newer "$SHMUTANT_PRISTINE_STAMP" -print \' \
+shmutant_mut 'exact timestamps are left out of the fingerprint' \
+  '        && { [ -z "$stat_bin" ] || command -p find . -exec "$stat_bin" "$fmt" {} + ; } \' \
   '        && : \' \
+  't_pool_refuses_a_modified_pristine_tree'
+shmutant_mut 'the stat form is never detected' \
+  '  local st; st="$(command -pv stat 2>/dev/null)" || { SHMUTANT_STAT_STYLE=none; return 0; }' \
+  '  SHMUTANT_STAT_STYLE=none; return 0' \
   't_pool_refuses_a_modified_pristine_tree'
 shmutant_mut 'the alias state is never put back' \
   '  [ -z "$1" ] || \builtin eval "$1"' \
