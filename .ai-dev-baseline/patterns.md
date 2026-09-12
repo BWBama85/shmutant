@@ -350,4 +350,10 @@ One line per resolved review thread, newest last.
 - `host-shell-option-leak` `shmutant.sh` `928518c` `PRRT_kwDOUT7q9s6hsFRW` PR #1 2026-09-12
 - `path-escapes-root` `shmutant.sh` `928518c` `PRRT_kwDOUT7q9s6hsFRY` PR #1 2026-09-12
 - `host-shell-option-leak` `shmutant.sh` `928518c` `sweep-r33-host-shell-option-leak-1` PR #1 2026-09-12
+- `stale-artifact-reuse` `shmutant.sh` `ceb7ec7` `PRRT_kwDOUT7q9s6htYc0` PR #1 2026-09-12
+- `path-escapes-root` `shmutant.sh` `ceb7ec7` `PRRT_kwDOUT7q9s6htYc2` PR #1 2026-09-12
+- `host-shell-option-leak` `shmutant.sh` `ceb7ec7` `PRRT_kwDOUT7q9s6htYc4` PR #1 2026-09-12
+- `caller-owned-path-deleted` `shmutant.sh` `ceb7ec7` `PRRT_kwDOUT7q9s6htYc7` PR #1 2026-09-12
+- `early-return-skips-cleanup` `shmutant.sh` `ceb7ec7` `PRRT_kwDOUT7q9s6htYc9` PR #1 2026-09-12
+- `host-shell-option-leak` `shmutant.sh` `ceb7ec7` `PRRT_kwDOUT7q9s6htYc_` PR #1 2026-09-12
 <!-- adb:hits:end -->
