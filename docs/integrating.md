@@ -128,9 +128,10 @@ is refused by `shmutant_copy_tree`, since a copy cannot keep the links joined. A
 stops after `prepare` (a target the tree lacks, a setting `prepare` broke) removes the prepared
 tree unless `SHMUTANT_KEEP=1`. The prepared tree is proven unmodified before every clone, by a
 fingerprint of every entry's metadata and every file's content (POSIX `cksum`) taken after
-`prepare`, and every clone is checked against that fingerprint after the copy: a callback that
-writes into pristine (say through `../../pristine` from its clone), adds to it, removes from it
-or changes a mode — before a clone or while one is being taken — makes the affected rows
+`prepare` (the root's own mode, owner and timestamp included), and every clone is checked
+against that fingerprint after the copy: a callback that writes into pristine (say through
+`../../pristine` from its clone), adds to it, removes from it or changes a mode or a timestamp
+— before a clone or while one is being taken — makes the affected rows
 `unprepared`, with the reason, rather than running on what it left, whatever the timestamps
 say. A prepared tree holding a regular file whose content the pool cannot read is refused
 (status 2), since it could not be fingerprinted. A `prepare` that moves the workdir away and
@@ -147,7 +148,12 @@ executables: an alias, which cannot be called by name, is refused (status 2). Fr
 held (saved, disarmed, put back at the end): a handler `prepare` left cannot run inside the
 pool. A setting the caller made `readonly` is accepted when it is already canonical (a plain
 decimal; for `SHMUTANT_STREAM`, an absolute physical path) and refused with status 2 otherwise,
-never assigned.
+never assigned. `SHMUTANT_SELECT` is set by the pool for every run, so a readonly one is
+refused (status 2) before any worker starts. Inside `shmutant_pool`, `shmutant_copy_tree` and
+`shmutant_mutate` the shell's `expand_aliases` is off (bash parses a command substitution when
+it runs it, so a caller's alias would otherwise reach the library at run time); callbacks run
+there too, with the bodies they were given when defined; the caller's setting is put back on
+return.
 
 ```sh
 # test/mutants.sh
@@ -175,7 +181,8 @@ Rules a row must satisfy, all enforced when the row is appended or the pool star
 - the target file is relative to the tree root, carries no `..` component, and exists in the
   prepared tree as a regular file with one hard link (a symlink, a path whose physical location
   lies outside the tree because a directory component is a symlink, or a multiply linked file is
-  refused; a symlinked directory that stays inside the tree resolves to the real file);
+  refused, as is a directory component that is an absolute symlink, or a chain of links ending
+  in one; a relative symlinked directory that stays inside the tree resolves to the real file);
 - the witness is non-empty.
 
 A refused declaration is counted, and a pool whose table carries one exits 2 rather than running

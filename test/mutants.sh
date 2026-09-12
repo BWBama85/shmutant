@@ -550,7 +550,7 @@ shmutant_mut 'a validation failure after prepare keeps the pristine tree' \
   '      return 2' \
   't_pool_failure_after_prepare_removes_pristine'
 shmutant_mut 'the destination root does not get the source root mode' \
-  '  command -p chmod -- "$(_shmutant_mode_spec "${rootls%% *}")" "$dst" 2>/dev/null' \
+  '  command -p chmod -- "$(_shmutant_mode_spec "${rootls%% *}")" "$2" 2>/dev/null || rc=1' \
   '  :' \
   't_pool_clone_keeps_metadata'
 
@@ -734,8 +734,8 @@ shmutant_mut 'the prepared root is read back by path after prepare' \
   '  root="$(command -p cat "$wd"/.prepare.* 2>/dev/null; builtin printf x)"; root="${root%x}"; exec {pout_w}>&- {pout_r}<&-' \
   't_prepare_cannot_redirect_its_own_capture'
 shmutant_mut 'a stream removed or replaced during the run is not noticed' \
-  '  if [ "$intact" -eq 0 ]; then' \
-  '  if false; then' \
+  '  elif [ "$intact" -eq 0 ]; then' \
+  '  elif false; then' \
   't_stream_descriptor_survives_a_callback_swapping_the_path'
 shmutant_mut 'an empty copy destination is accepted' \
   '  if [ "$#" -ne 2 ] || [ -z "$1" ] || [ -z "$2" ]; then' \
@@ -1088,7 +1088,7 @@ shmutant_mut 'the pristine fingerprint ignores file content' \
   '        && : ; } 2>/dev/null \' \
   't_pool_refuses_a_modified_pristine_tree'
 shmutant_mut 'the pristine fingerprint ignores metadata' \
-  '    { command -p find . ! -name . -exec "$ls_bin" -ldn -- {} + \' \
+  '    { command -p find . -exec "$ls_bin" -ldn -- {} + \' \
   '    { : \' \
   't_pool_refuses_a_modified_pristine_tree'
 shmutant_mut 'a DEBUG trap prepare left keeps running through the pool' \
@@ -1100,7 +1100,7 @@ shmutant_mut 'the floor test calls a caller function named [' \
   '  [ "$1" -gt 5 ] || { [ "$1" -eq 5 ] && [ "$2" -ge 3 ]; }' \
   't_bash_floor'
 shmutant_mut 'the rewrite is not re-checked to be inside the tree from its pinned directory' \
-  '      _shmutant_inside "$(_shmutant_abs "$root")" "$(builtin pwd -P)" || exit 4' \
+  '      _shmutant_inside "$wroot/tree" "$(builtin pwd -P)" || exit 4' \
   '      :' \
   't_rewrite_is_pinned_against_a_sibling_swap'
 shmutant_mut 'a readonly stream setting is assigned to' \
@@ -1126,7 +1126,7 @@ shmutant_mut 'the interrupted CLI removes whatever sits at its workdir path' \
   '    elif false; then :' \
   't_cli_removes_only_the_workdir_it_created_by_identity'
 shmutant_mut 'the pool goes on in a workdir prepare replaced' \
-  '  if [ -L "$wd" ] || [ "$(_shmutant_dir_id "$wd")" != "${SHMUTANT_WD_ID:-}" ]; then _shmutant_err "$label: $wd is no longer the directory this pool marked as its own — prepare moved or replaced it"; SHMUTANT_KEEP=1 _shmutant_pool_fail "$label" "$wd"; return 2; fi' \
+  '  if [ -L "$wd" ] || [ "$(_shmutant_dir_id "$wd")" != "${SHMUTANT_WD_ID:-}" ]; then _shmutant_err "$label: $wd is no longer the directory this pool marked as its own — prepare moved or replaced it"; _shmutant_pool_fail "$label" "$wd"; return 2; fi' \
   '  :' \
   't_cli_removes_only_the_workdir_it_created_by_identity'
 shmutant_mut 'a clone is not checked against the prepared tree after the copy' \
@@ -1145,3 +1145,49 @@ shmutant_mut 'the verdict stream contents are not checked at the end' \
   '  [ "$(command -p tail -c "+$(( ${SHMUTANT_STREAM_BASE:-0} + 1 ))" -- "$SHMUTANT_STREAM" 2>/dev/null | command -p cksum)" = "$(command -p cksum <&"$SHMUTANT_STREAM_COPY_R")" ]' \
   '  true' \
   't_stream_altered_in_place_is_reported'
+
+# --- guards added for the thirty-third review round ---
+shmutant_mut 'the prepared tree is removed from whatever directory sits at the workdir path' \
+  '  if [ "${SHMUTANT_KEEP:-0}" != 1 ] && [ ! -L "$2" ] && [ "$(_shmutant_dir_id "$2")" = "${SHMUTANT_WD_ID:-}" ]; then' \
+  '  if [ "${SHMUTANT_KEEP:-0}" != 1 ]; then' \
+  't_pool_leaves_a_replaced_workdir_alone'
+shmutant_mut 'the root entry is left out of the pristine fingerprint' \
+  '    { command -p find . -exec "$ls_bin" -ldn -- {} + \' \
+  '    { command -p find . ! -name . -exec "$ls_bin" -ldn -- {} + \' \
+  't_pool_refuses_a_modified_pristine_tree'
+shmutant_mut 'the rewrite trusts the worker directory at its path' \
+  '      [ "$(_shmutant_dir_id .)" = "${SHMUTANT_DIR_IDS[$kind-$i]:-}" ] || exit 4' \
+  '      :' \
+  't_rewrite_refuses_a_worker_directory_swapped_after_the_clone'
+shmutant_mut 'the final dispatch guard calls a caller function named test' \
+  'if builtin test "${BASH_SOURCE[0]}" = "$0"; then' \
+  'if test "${BASH_SOURCE[0]}" = "$0"; then' \
+  't_bash_floor'
+shmutant_mut 'DEBUG is handed back before the other traps' \
+  '  if [ -n "${SHMUTANT_TRAP_CHLD:-}" ]; then eval "$SHMUTANT_TRAP_CHLD"; else trap - CHLD; fi' \
+  '  if [ -n "$debug" ]; then eval "$debug"; fi; if [ -n "${SHMUTANT_TRAP_CHLD:-}" ]; then eval "$SHMUTANT_TRAP_CHLD"; else trap - CHLD; fi' \
+  't_pool_refuses_shadowed_builtins_and_posix_mode'
+shmutant_mut 'a readonly selector is accepted' \
+  '  if _shmutant_readonly SHMUTANT_SELECT; then _shmutant_err "$label: SHMUTANT_SELECT is readonly — the pool sets it for every run; leave it writable"; return 2; fi' \
+  '  :' \
+  't_readonly_settings_do_not_kill_the_caller'
+shmutant_mut 'a link chain is followed one hop only' \
+  '        link="$(command -p dirname -- "$link")/$target"' \
+  '        link=""' \
+  't_target_through_a_link_chain_to_an_absolute_link_is_refused'
+shmutant_mut 'the pool runs with the caller aliases expanding at run time' \
+  '  local rc; _shmutant_aliases_off pool' \
+  '  local rc' \
+  't_library_is_immune_to_aliases_at_parse_time'
+shmutant_mut 'copy_tree runs with the caller aliases expanding at run time' \
+  '  local rc; _shmutant_aliases_off copy_tree' \
+  '  local rc' \
+  't_public_helpers_are_immune_to_aliases_at_run_time'
+shmutant_mut 'mutate runs with the caller aliases expanding at run time' \
+  '  local rc; _shmutant_aliases_off mutate' \
+  '  local rc' \
+  't_public_helpers_are_immune_to_aliases_at_run_time'
+shmutant_mut 'saving the alias setting ends a caller that has errexit on' \
+  '  SHMUTANT_ALIASES="$(\builtin shopt -p expand_aliases; :)"' \
+  '  SHMUTANT_ALIASES="$(\builtin shopt -p expand_aliases)"' \
+  't_pool_reads_the_table_prepare_declared'

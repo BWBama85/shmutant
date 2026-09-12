@@ -218,9 +218,16 @@ _shmutant_no_absolute_link() {
     comp="${rel%%/*}"; case "$rel" in */*) rel="${rel#*/}" ;; *) rel="" ;; esac
     [ -n "$comp" ] || continue
     here="$here/$comp"
+    # A link is followed to its end (bounded): a relative link to an absolute one in the tree
+    # is that absolute link, which a clone would keep pointing back at the prepared tree.
     if [ -L "$here" ]; then
-      target="$(command -p readlink -- "$here" 2>/dev/null)" || return 1
-      case "$target" in /*) return 1 ;; esac
+      local link="$here" depth=0
+      while [ -L "$link" ]; do
+        depth=$(( depth + 1 )); [ "$depth" -le 40 ] || return 1
+        target="$(command -p readlink -- "$link" 2>/dev/null)" || return 1
+        case "$target" in /*) return 1 ;; esac
+        link="$(command -p dirname -- "$link")/$target"
+      done
     fi
   done
   return 0
@@ -240,7 +247,29 @@ shmutant_selected() {
 # shmutant_copy_tree <src> <dst> — copy <src> to <dst> (created), skipping a top-level .git
 # and keeping symlinks as symlinks, modes, ownership and timestamps. Returns 1 when anything
 # fails to copy, or when <dst> lies inside <src>.
+# _shmutant_aliases_off <site> — expand_aliases off for the rest of a public entry point, the
+# caller's setting saved in SHMUTANT_ALIASES for _shmutant_aliases_back. Bash parses a command
+# substitution when it RUNS it, so with the option on in the caller's shell every `$(printf …)`
+# in this file would expand the caller's alias at run time; the prologue covers only parse time.
+# The first word is quoted, so this switch itself is beyond alias expansion. <site> only labels
+# the call.
+_shmutant_aliases_off() {
+  # `; :` — shopt -p exits 1 for an option that is off, which a caller's errexit would act on.
+  SHMUTANT_ALIASES="$(\builtin shopt -p expand_aliases; :)"
+  \builtin shopt -u expand_aliases
+}
+_shmutant_aliases_back() {
+  [ -z "${SHMUTANT_ALIASES:-}" ] || \builtin eval "$SHMUTANT_ALIASES"
+  unset SHMUTANT_ALIASES
+}
+
 shmutant_copy_tree() {
+  local rc; _shmutant_aliases_off copy_tree
+  # A plain call, not a condition: a callback's own errexit is honoured inside, as documented.
+  _shmutant_copy_tree_body "$@"; rc=$?
+  _shmutant_aliases_back; return "$rc"
+}
+_shmutant_copy_tree_body() {
   if [ "$#" -ne 2 ] || [ -z "$1" ] || [ -z "$2" ]; then _shmutant_err "copy_tree: usage: shmutant_copy_tree <src> <dst> (neither empty)"; return 1; fi
   # A newline in either name would be stripped by the substitutions that split it, and the
   # copy would land on the sibling.
@@ -323,12 +352,18 @@ shmutant_copy_tree() {
   ) || rc=1
   # The root directory's own metadata, which the per-entry copy never touches, applied LAST:
   # adding entries resets a directory's mtime, and a read-only root would refuse them.
-  local rootls
-  rootls="$(command -p ls -ld -- "$src" 2>/dev/null)"
-  command -p chown -- "$(printf '%s\n' "$rootls" | command -p awk '{ print $3 ":" $4 }')" "$dst" 2>/dev/null || rc=1
-  command -p chmod -- "$(_shmutant_mode_spec "${rootls%% *}")" "$dst" 2>/dev/null || rc=1
-  command -p touch -r "$src" -- "$dst" 2>/dev/null || rc=1
+  _shmutant_apply_root_meta "$src" "$dst" || rc=1
   [ "$rc" -eq 0 ] || _shmutant_err "copy_tree: could not reproduce the root directory's owner, mode or timestamp on $dst"
+  return "$rc"
+}
+
+# _shmutant_apply_root_meta <src> <dst> — give directory <dst> the owner, mode and mtime of <src>.
+_shmutant_apply_root_meta() {
+  local rootls rc=0
+  rootls="$(command -p ls -ld -- "$1" 2>/dev/null)" || return 1
+  command -p chown -- "$(printf '%s\n' "$rootls" | command -p awk '{ print $3 ":" $4 }')" "$2" 2>/dev/null || rc=1
+  command -p chmod -- "$(_shmutant_mode_spec "${rootls%% *}")" "$2" 2>/dev/null || rc=1
+  command -p touch -r "$1" -- "$2" 2>/dev/null || rc=1
   return "$rc"
 }
 
@@ -375,6 +410,12 @@ _shmutant_mutate_restore() {
 # `sed -i` (BSD and GNU differ), so a failed rewrite cannot half-write. A target whose last line
 # has no newline keeps that shape: the only change is the literal.
 shmutant_mutate() {
+  local rc; _shmutant_aliases_off mutate
+  # A plain call, not a condition: a callback's own errexit is honoured inside, as documented.
+  _shmutant_mutate_body "$@"; rc=$?
+  _shmutant_aliases_back; return "$rc"
+}
+_shmutant_mutate_body() {
   if [ "$#" -ne 3 ]; then _shmutant_err "mutate: usage: shmutant_mutate <file> <old> <new>"; return 1; fi
   case "$1" in *$'\n'*) _shmutant_err "mutate: a path containing a newline is refused"; return 1 ;; esac
   local f="$1" tmp nl=1 rc mode dir dirmode=""
@@ -1056,21 +1097,27 @@ _shmutant_worker() {
     || ! command -p mkdir -- "$dir/tree" 2>/dev/null || ! command -p cp -RPp -- "$wd/pristine/." "$dir/tree/" 2>/dev/null; then
     _shmutant_worker_finish "$dir" unprepared 0 clone; return 0
   fi
-  # The clone itself is checked against the recorded state: a callback already running could
-  # have written into pristine between the check above and the copy, or during it, and put it
-  # back before the next worker looked.
+  # The clone's root takes the prepared root's owner, mode and mtime (cp never sets them on an
+  # existing destination), and the clone itself is then checked against the recorded state: a
+  # callback already running could have written into pristine between the check above and the
+  # copy, or during it, and put it back before the next worker looked.
+  _shmutant_apply_root_meta "$wd/pristine" "$dir/tree" || { _shmutant_worker_finish "$dir" unprepared 0 clone; return 0; }
   if ! state="$(_shmutant_pristine_state "$dir/tree")" || [ "$state" != "${SHMUTANT_PRISTINE_STATE-}" ]; then
     _shmutant_worker_finish "$dir" unprepared 0 raced; return 0
   fi
   if [ "$kind" = mut ]; then
     target="$root/${SHMUTANT_ROWS_FILE[$i]}"
     _shmutant_target_ok "$root" "${SHMUTANT_ROWS_FILE[$i]}" || { _shmutant_worker_finish "$dir" unprepared 0 missing; return 0; }
-    # Rewritten with the working directory pinned to the target's directory (physically) and
-    # re-checked to be inside the tree from there, naming the target by its base name alone: a
-    # sibling's callback that swaps a directory component for a link after the check above has
-    # no component left to redirect.
-    ( builtin cd -P -- "$(command -p dirname -- "$target")" 2>/dev/null || exit 4
-      _shmutant_inside "$(_shmutant_abs "$root")" "$(builtin pwd -P)" || exit 4
+    # Rewritten from a working directory pinned FIRST to this worker's own directory, verified
+    # by identity (a sibling's callback could have renamed it away and put another directory at
+    # its path), then to the target's directory relative to that, re-checked to be inside this
+    # clone physically, naming the target by its base name alone: nothing named by path after
+    # the identity check can be redirected by a sibling.
+    ( builtin cd -P -- "$dir" 2>/dev/null || exit 4
+      [ "$(_shmutant_dir_id .)" = "${SHMUTANT_DIR_IDS[$kind-$i]:-}" ] || exit 4
+      wroot="$(builtin pwd -P)"
+      builtin cd -P -- "tree$suffix/$(command -p dirname -- "${SHMUTANT_ROWS_FILE[$i]}")" 2>/dev/null || exit 4
+      _shmutant_inside "$wroot/tree" "$(builtin pwd -P)" || exit 4
       base="$(command -p basename -- "$target")"
       [ ! -L "$base" ] && [ -f "$base" ] || exit 4
       shmutant_mutate "$base" "${SHMUTANT_ROWS_OLD[$i]}" "${SHMUTANT_ROWS_NEW[$i]}" ); rc=$?
@@ -1320,11 +1367,14 @@ _shmutant_hold_traps() {
 }
 _shmutant_release_traps() {
   [ -n "${SHMUTANT_TRAPS_HELD:-}" ] || return 0
+  local debug="${SHMUTANT_TRAP_DEBUG:-}"
   if [ -n "${SHMUTANT_TRAP_CHLD:-}" ]; then eval "$SHMUTANT_TRAP_CHLD"; else trap - CHLD; fi
-  if [ -n "${SHMUTANT_TRAP_DEBUG:-}" ]; then eval "$SHMUTANT_TRAP_DEBUG"; else trap - DEBUG; fi
   if [ -n "${SHMUTANT_TRAP_RETURN:-}" ]; then eval "$SHMUTANT_TRAP_RETURN"; else trap - RETURN; fi
   if [ -n "${SHMUTANT_TRAP_ERR:-}" ]; then eval "$SHMUTANT_TRAP_ERR"; else trap - ERR; fi
   unset SHMUTANT_TRAPS_HELD SHMUTANT_TRAP_CHLD SHMUTANT_TRAP_DEBUG SHMUTANT_TRAP_RETURN SHMUTANT_TRAP_ERR
+  # DEBUG last of all: it runs before every command that follows it, and the pool's return is
+  # the only command that does.
+  if [ -n "$debug" ]; then eval "$debug"; else trap - DEBUG; fi
 }
 
 # _shmutant_saved_trap <signal> — the caller's current trap declaration for <signal> as
@@ -1442,6 +1492,9 @@ _shmutant_validate_settings() {
   if [ -n "${SHMUTANT_RED_STATUS+x}" ]; then _shmutant_canon "$label" SHMUTANT_RED_STATUS "$(( 10#$v_red ))" || return 2; fi
   if [ -n "$v_jobs" ]; then _shmutant_canon "$label" SHMUTANT_JOBS "$(( 10#$v_jobs ))" || return 2; fi
   case "${SHMUTANT_BASELINE:-1}" in 0|1) ;; *) _shmutant_err "$label: SHMUTANT_BASELINE must be 0 or 1, got [${SHMUTANT_BASELINE:-}]"; return 2 ;; esac
+  # The pool sets SHMUTANT_SELECT for every run; a readonly one would keep a stale selector
+  # (or end the run's shell) under a callback that reads the variable rather than its argument.
+  if _shmutant_readonly SHMUTANT_SELECT; then _shmutant_err "$label: SHMUTANT_SELECT is readonly — the pool sets it for every run; leave it writable"; return 2; fi
   case "${SHMUTANT_KEEP:-0}" in 0|1) ;; *) _shmutant_err "$label: SHMUTANT_KEEP must be 0 or 1, got [${SHMUTANT_KEEP:-}]"; return 2 ;; esac
   if [ -n "${SHMUTANT_RED_PREFIX+x}" ] && [ -z "$SHMUTANT_RED_PREFIX" ]; then
     _shmutant_err "$label: SHMUTANT_RED_PREFIX is empty — every line would count as a red line"; return 2
@@ -1548,10 +1601,10 @@ _shmutant_callable() {
 }
 
 # _shmutant_pristine_state <dir> — a fingerprint of the tree under <dir>, relative to it: every
-# entry's `ls -ldn` line (mode, owner, group, a file's size, mtime, name, a link's target) and
-# every regular file's content and size (POSIX cksum), sorted. The root entry, link counts,
-# directory sizes and platform mode suffixes are left out, so a faithful `cp -RPp` clone of a
-# tree has the fingerprint of the tree. Any write, addition, removal or mode change changes it,
+# entry's `ls -ldn` line (mode, owner, group, a file's size, mtime, name, a link's target), the
+# root's included, and every regular file's content and size (POSIX cksum), sorted. Link
+# counts, directory sizes and platform mode suffixes are left out, so a faithful `cp -RPp`
+# clone of a tree, its root given the tree's metadata, has the fingerprint of the tree. Any write, addition, removal or mode change changes it,
 # whatever the timestamps say. Fails, rather than yield a partial listing, when a stage fails —
 # which includes a regular file whose content cannot be read.
 _shmutant_pristine_state() {
@@ -1561,7 +1614,7 @@ _shmutant_pristine_state() {
   ls_bin="$(command -pv ls)" && cksum_bin="$(command -pv cksum)" || return 1
   ( builtin cd -P -- "$1" 2>/dev/null || exit 1
     set -o pipefail
-    { command -p find . ! -name . -exec "$ls_bin" -ldn -- {} + \
+    { command -p find . -exec "$ls_bin" -ldn -- {} + \
         && command -p find . -type f -exec "$cksum_bin" {} + ; } 2>/dev/null \
       | command -p awk '/^[0-9]/ { print; next } { sub(/[@+.]$/, "", $1); $2 = "-"; if ($1 ~ /^d/) $5 = "-"; print }' \
       | LC_ALL=C command -p sort )
@@ -1570,15 +1623,23 @@ _shmutant_pristine_state() {
 # _shmutant_pool_fail <label> <workdir> — the exit for a pool that stops after prepare: the
 # pristine tree goes unless SHMUTANT_KEEP=1, and the stream descriptor is closed.
 _shmutant_pool_fail() {
-  if [ "${SHMUTANT_KEEP:-0}" != 1 ]; then
+  _shmutant_pool_cleanup "$@"
+  # Last: from here to the pool's return nothing forks, so a handler sees no child of the pool.
+  _shmutant_release_traps
+}
+# _shmutant_pool_cleanup <label> <workdir> — everything _shmutant_pool_fail does but hand the
+# traps back; the pool's tail does that itself, after its last check.
+_shmutant_pool_cleanup() {
+  # The prepared tree is removed only from the workdir this pool marked as its own: prepare
+  # could have moved the workdir away and put a caller's directory, with a `pristine` entry of
+  # its own, at its path.
+  if [ "${SHMUTANT_KEEP:-0}" != 1 ] && [ ! -L "$2" ] && [ "$(_shmutant_dir_id "$2")" = "${SHMUTANT_WD_ID:-}" ]; then
     _shmutant_remove "$2/pristine" "$2" || { _shmutant_err "$1: could not remove $2/pristine"; SHMUTANT_CLEANUP_FAILED=1; }
   fi
   if [ -n "${SHMUTANT_STREAM_FD:-}" ]; then exec {SHMUTANT_STREAM_FD}>&-; unset SHMUTANT_STREAM_FD; fi
   _shmutant_close_stream_copy
   unset SHMUTANT_STREAM_OPENED
   unset SHMUTANT_PRISTINE_STATE
-  # Last: from here to the pool's return nothing forks, so a handler sees no child of the pool.
-  _shmutant_release_traps
 }
 
 # _shmutant_no_shadows <label> — refuse to run while a builtin this harness signals, waits and
@@ -1629,6 +1690,14 @@ _shmutant_report_keep() {
 # 2 when the harness itself could not run (a refused declaration, empty table, bad workdir,
 # prepare failed, root outside the workdir, or a verdict-stream write that failed).
 shmutant_pool() {
+  # Aliases off for the whole pool, callbacks included (their bodies were parsed when defined);
+  # the caller's setting is put back on return.
+  local rc; _shmutant_aliases_off pool
+  # A plain call, not a condition: a callback's own errexit is honoured inside, as documented.
+  _shmutant_pool_body "$@"; rc=$?
+  _shmutant_aliases_back; return "$rc"
+}
+_shmutant_pool_body() {
   if [ "$#" -lt 4 ] || [ "$#" -gt 5 ]; then _shmutant_err "pool: usage: shmutant_pool <label> <workdir> <prepare> <run> [cap] (got $# arguments)"; return 2; fi
   local label="$1" wd="$2" prep="$3" run="$4" cap="${5:-}"
   local n jobs root suffix i k sel t0 t1 killed=0 rc=0 verdict detail rjrc
@@ -1706,7 +1775,7 @@ shmutant_pool() {
   # The workdir itself: prepare could have renamed it away and put another directory at its
   # path. Nothing there is this pool's, so nothing there is removed (the pristine prepare made
   # in it included).
-  if [ -L "$wd" ] || [ "$(_shmutant_dir_id "$wd")" != "${SHMUTANT_WD_ID:-}" ]; then _shmutant_err "$label: $wd is no longer the directory this pool marked as its own — prepare moved or replaced it"; SHMUTANT_KEEP=1 _shmutant_pool_fail "$label" "$wd"; return 2; fi
+  if [ -L "$wd" ] || [ "$(_shmutant_dir_id "$wd")" != "${SHMUTANT_WD_ID:-}" ]; then _shmutant_err "$label: $wd is no longer the directory this pool marked as its own — prepare moved or replaced it"; _shmutant_pool_fail "$label" "$wd"; return 2; fi
   _shmutant_callable "$run" || { _shmutant_err "$label: run callback not found after prepare: $run"; _shmutant_pool_fail "$label" "$wd"; return 2; }
   # prepare may have declared rows or had one refused: the table is read again here, and a
   # refusal after prepare is the same harness error as one before it.
@@ -1809,19 +1878,17 @@ shmutant_pool() {
   _shmutant_err "$label: $killed/$n mutation(s) killed on their own witness (jobs=$jobs, $(_shmutant_secs "$(( t1 - t0 ))")s)"
   # Read before _shmutant_pool_fail, which hands the caller's CHLD trap back: the check forks.
   local intact=1; _shmutant_stream_intact || intact=0
-  _shmutant_pool_fail "$label" "$wd"
+  _shmutant_pool_cleanup "$label" "$wd"
   if [ "${SHMUTANT_CLEANUP_FAILED:-0}" -ne 0 ]; then
-    _shmutant_err "$label: a worker did not run or finish as promised (a run not set up, a tree not removed, or an output not published) — see above"
-    return 2
+    _shmutant_err "$label: a worker did not run or finish as promised (a run not set up, a tree not removed, or an output not published) — see above"; rc=2
+  elif [ "$intact" -eq 0 ]; then
+    _shmutant_err "$label: SHMUTANT_STREAM no longer names the file the records were written to, as they were written (${SHMUTANT_STREAM:-}) — it was removed, replaced, truncated, overwritten or appended to during the run"; rc=2
+  elif [ "$SHMUTANT_EMIT_FAILED" -ne 0 ]; then
+    _shmutant_err "$label: the verdict stream could not be written (${SHMUTANT_STREAM:-stdout}) — the records above are incomplete"; rc=2
   fi
-  if [ "$intact" -eq 0 ]; then
-    _shmutant_err "$label: SHMUTANT_STREAM no longer names the file the records were written to, as they were written (${SHMUTANT_STREAM:-}) — it was removed, replaced, truncated, overwritten or appended to during the run"
-    return 2
-  fi
-  if [ "$SHMUTANT_EMIT_FAILED" -ne 0 ]; then
-    _shmutant_err "$label: the verdict stream could not be written (${SHMUTANT_STREAM:-stdout}) — the records above are incomplete"
-    return 2
-  fi
+  # The traps go back only now, with the status settled: nothing of the pool's runs after this
+  # but its return.
+  _shmutant_release_traps
   return "$rc"
 }
 
@@ -2064,6 +2131,7 @@ shmutant_main() {
   # This process is the CLI's own: options inherited through SHELLOPTS/BASHOPTS/POSIXLY_CORRECT
   # (errexit, nounset, noclobber, posix mode) are reset before anything else runs.
   set +e +u +C +o posix; unset POSIXLY_CORRECT
+  \builtin shopt -u expand_aliases
   case "${1:-}" in
     run)          shift; _shmutant_cli_run "$@" ;;
     version)      printf 'shmutant %s\n' "$SHMUTANT_VERSION" ;;
@@ -2076,7 +2144,9 @@ shmutant_main() {
 
 eval "$_shmutant_alias_state"; unset -v _shmutant_alias_state
 
-if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+# As builtins, like the bootstrap: a caller's function named [ decides neither whether this
+# file is the script being run nor what the CLI exits with.
+if builtin test "${BASH_SOURCE[0]}" = "$0"; then
   shmutant_main "$@"
-  exit $?
+  builtin exit $?
 fi
