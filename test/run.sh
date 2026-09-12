@@ -716,6 +716,10 @@ t_cli_abort_waits_for_the_child_and_names_its_identity() {
   eq "$out" 'pending=TERM alive' 'a signal during the spawn window is recorded, not acted on'
   out="$(SHMUTANT="$SHMUTANT" bash -c '. "$SHMUTANT"; sleep 30 & SHMUTANT_CLI_CHILD=$!; SHMUTANT_CLI_CHILD_ID="$(_shmutant_identity "$!")"; _shmutant_kill_tree_twice() { printf "%s\n" "$1"; }; _shmutant_cli_abort TERM' 2>/dev/null)"
   case "$out" in [0-9]*:[0-9]*) ;; *) fail_ "the CLI abort escalated with [$out], not pid:identity" ;; esac
+  # an identity that could not be taken at the spawn is passed as pid: (unverified, and so left
+  # alone by the helper), never as a bare pid the helper would treat as certainly the child's
+  out="$(SHMUTANT="$SHMUTANT" bash -c '. "$SHMUTANT"; sleep 30 & SHMUTANT_CLI_CHILD=$!; SHMUTANT_CLI_CHILD_ID=""; _shmutant_kill_tree_twice() { printf "%s\n" "$1"; }; _shmutant_cli_abort TERM' 2>/dev/null)"
+  case "$out" in [0-9]*:) ;; *) fail_ "with no identity the CLI abort escalated with [$out], not pid: (unverified)" ;; esac
 }
 
 t_mutate_takes_a_bare_relative_target_as_a_path() {
@@ -756,7 +760,7 @@ t_cli_removes_only_the_workdir_it_created_by_identity() {
   mk_toy "$T/toy"; TOY="$T/toy"
   mkdir -p "$T/toy/victim"; printf 'precious\n' > "$T/toy/victim/keep"
   cat > "$T/toy/plan-swap.sh" <<'EOF'
-prepare() { printf '%s' "$SHMUTANT_CLI_WD" > "$SHMUTANT_PLAN_DIR/wdpath"; mv "$SHMUTANT_CLI_WD" "$SHMUTANT_CLI_WD.moved" && mv "$SHMUTANT_PLAN_DIR/victim" "$SHMUTANT_CLI_WD"; shmutant_copy_tree "$SHMUTANT_PLAN_DIR" "$1"; }
+prepare() { printf '%s' "$SHMUTANT_CLI_WD" > "$SHMUTANT_PLAN_DIR/wdpath"; mv "$SHMUTANT_CLI_WD" "$SHMUTANT_CLI_WD.moved" && mv "$SHMUTANT_PLAN_DIR/victim" "$SHMUTANT_CLI_WD"; printf '%s' "$SHMUTANT_CLI_DONE_PATH" > "$SHMUTANT_PLAN_DIR/donepath"; printf 'precious\n' > "$SHMUTANT_CLI_DONE_PATH"; shmutant_copy_tree "$SHMUTANT_PLAN_DIR" "$1"; }
 run() { bash "$1/test.sh"; }
 shmutant_target lib.sh
 shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
@@ -767,6 +771,8 @@ EOF
   [ -n "$wd" ] || fail_ 'fixture: the plan did not record the workdir path'
   [ -f "$wd/keep" ] || fail_ 'the caller directory put at the automatic workdir path was removed'
   has "$(cat "$T/e")" 'prepare moved or replaced it' 'the pool says why, after prepare'
+  local dp; dp="$(cat "$T/toy/donepath" 2>/dev/null)"
+  [ -n "$dp" ] && [ "$(cat "$dp" 2>/dev/null)" = precious ] || fail_ 'the caller file planted at the completion path inside the replaced workdir was removed'
   has "$(cat "$T/e")" 'no longer the workdir this run created' 'the CLI says why it left it'
   rm -rf "$T/tmpd"; mkdir -p "$T/tmpd" "$T/toy/victim"; printf 'precious\n' > "$T/toy/victim/keep"
   # the same swap during a prepare that is then interrupted
@@ -963,8 +969,35 @@ t_a_target_rewritten_during_the_run_is_not_trusted() {
   SHMUTANT_JOBS=2 SHMUTANT_BASELINE=0 pool lbl "$T/wd" toy_prepare meddling_run
   [ -e "$T/restored" ] || fail_ 'fixture: the meddling callback never restored the sibling target'
   rc_is "$RC" 2 'a target rewritten during its run is a harness error'
-  has "$ERR" 'rewritten during the run' 'says why'
+  has "$ERR" 'not as the pool wrote it' 'says why'
   case "$OUT" in *$'\trow\tsurvived\tb\t'*) fail_ 'the row whose target was put back was scored a survivor' ;; esac
+  # a TRANSIENT rewrite: the old literal put back for the test and the mutant reinjected, with
+  # the file's timestamp forged back, before the callback returns — only the watchdog's
+  # half-second sample of the target can see it
+  rm -f "$T/restored" "$T/b-started"
+  transient_run() {
+    local w i=0; w="$(cd "$1/../.." && pwd -P)"
+    case "$1" in
+      */mut-0/*) until [ -e "$T/b-started" ] || [ "$i" -ge 300 ]; do i=$((i + 1)); sleep 0.1; done
+                 cp -p "$w/mut-1/tree/lib.sh" "$T/mutant.copy"
+                 sed 's/\$1 \* \$2/$1 + $2/' "$w/mut-1/tree/lib.sh" > "$T/restored.n" && cat "$T/restored.n" > "$w/mut-1/tree/lib.sh"; touch -r "$T/mutant.copy" "$w/mut-1/tree/lib.sh"; : > "$T/restored"
+                 i=0; until [ -e "$T/b-done" ] || [ "$i" -ge 300 ]; do i=$((i + 1)); sleep 0.1; done
+                 cat "$T/mutant.copy" > "$w/mut-1/tree/lib.sh"; touch -r "$T/mutant.copy" "$w/mut-1/tree/lib.sh"; : > "$T/reinjected" ;;
+      */mut-1/*) : > "$T/b-started"; until [ -e "$T/restored" ] || [ "$i" -ge 300 ]; do i=$((i + 1)); sleep 0.1; done
+                 bash "$1/test.sh"; local rc=$?; sleep 1.2; : > "$T/b-done"
+                 i=0; until [ -e "$T/reinjected" ] || [ "$i" -ge 300 ]; do i=$((i + 1)); sleep 0.1; done; return "$rc" ;;
+    esac
+    bash "$1/test.sh"
+  }
+  SHMUTANT_JOBS=2 SHMUTANT_BASELINE=0 pool lbl "$T/wd2" toy_prepare transient_run
+  [ -e "$T/reinjected" ] || fail_ 'fixture: the mutant was never reinjected'
+  rc_is "$RC" 2 'a target rewritten and put back within its run, timestamps forged, is still a harness error'
+  case "$OUT" in *$'\trow\tsurvived\tb\t'*) fail_ 'the row whose target was put back for its test was scored a survivor' ;; esac
+  # a change to the target's metadata alone (its own callback, here) is not accepted either
+  chmod_run() { chmod +x "$1/lib.sh"; bash "$1/test.sh"; }
+  SHMUTANT_JOBS=1 SHMUTANT_BASELINE=0 pool lbl "$T/wd3" toy_prepare chmod_run
+  rc_is "$RC" 2 'a target whose mode changed during its run is a harness error'
+  has "$ERR" 'content or metadata' 'says why'
 }
 
 t_checksum_uses_the_digest_file_not_a_function() {
@@ -991,6 +1024,24 @@ EOF
   local out; out="$(BASH_ENV="$T/env.sh" bash "$SHMUTANT" run "$T/toy/plan.sh" --no-baseline --workdir "$T/wd" 2>"$T/e"; echo "rc=$?")"
   has "$out" $'\trow\tkilled\ta\t' "the CLI ran its plan with wait, trap and kill planted through BASH_ENV: [$(head -c 200 "$T/e")]"
   has "$out" 'rc=0' 'and exited as the plan did'
+}
+
+t_a_clone_swapped_by_its_run_is_not_removed() {
+  # a run callback renames its clone away and puts a directory of its own at the path: the
+  # clone is removed only while the path still names the clone this run made, so what sits
+  # there stays and the pool reports a tree left behind (a harness error, not a removal)
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  swapping_tree_run() { mv "$1" "$1.moved"; mkdir "$1"; printf 'precious\n' > "$1/keep"; bash "$1.moved/test.sh"; }
+  SHMUTANT_BASELINE=0 pool lbl "$T/wd" toy_prepare swapping_tree_run
+  rc_is "$RC" 2 'a clone swapped by its run is a harness error'
+  [ -f "$T/wd/mut-0/tree/keep" ] || fail_ 'the directory the run put at the clone path was removed'
+  rm -rf "$T/wd/mut-0/tree.moved"
+  # the baseline worker too, which makes no target check of its own
+  SHMUTANT_BASELINE=1 pool lbl "$T/wd2" toy_prepare swapping_tree_run
+  rc_is "$RC" 2 'a baseline clone swapped by its run is a harness error'
+  [ -f "$T/wd2/base-0/tree/keep" ] || fail_ 'the directory the baseline run put at the clone path was removed'
 }
 
 t_verdict_scans_a_large_output() {
@@ -2570,6 +2621,11 @@ t_copy_tree_excludes_git() {
   eq "$(cat "$T/coll-victim/f")" precious 'the caller file behind the colliding symlink is untouched'
   [ -L "$T/coll-dst/f" ] || fail_ 'the colliding destination entry was removed'
   mkdir -p "$T/coll-empty"; shmutant_copy_tree "$T/coll-src" "$T/coll-empty"; rc_is $? 0 'an existing empty destination is accepted'
+  # a refused destination keeps its own mode: the source root's metadata is not applied to it
+  mkdir -p "$T/ro-src" "$T/full-dst"; printf 'x\n' > "$T/ro-src/f"; printf 'theirs\n' > "$T/full-dst/g"; chmod 555 "$T/ro-src"; chmod 700 "$T/full-dst"
+  shmutant_copy_tree "$T/ro-src" "$T/full-dst" 2>/dev/null; rc_is $? 1 'a non-empty destination is refused'
+  eq "$(ls -ld "$T/full-dst" | cut -c1-10)" 'drwx------' 'and its mode is left as it was, not made the source root'"'"'s'
+  chmod 755 "$T/ro-src"
   ( set -u; shmutant_mutate "$T/src/sub/f" y 2>"$T/e2" ); rc_is $? 1 'a mutate call missing an argument is a failure even under set -u'
   mkdir -p "$T/nlm
 "; printf 'old\n' > "$T/nlm

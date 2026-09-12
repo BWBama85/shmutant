@@ -150,9 +150,16 @@ concurrent callback that swaps a directory component of a sibling's clone for a 
 redirect it (that row is `unprepared`). Both callbacks must be functions or
 executables: an alias, which cannot be called by name, and a builtin (`exit` or `return` would
 end or leave the pool's shell) are refused (status 2). A row's target is read again after its
-run and must be exactly what the pool wrote: a callback that rewrites it during the run (a
-concurrent callback reaching into another worker's clone, say) makes the row a harness error
-(status 2), never a verdict on code that was not the mutant. A caller's function named
+run — content, mode, owner, size and exact mtime — and sampled the same way every half second
+by the watchdog while the run is alive (with a timeout set), and must be exactly what the pool
+wrote: a callback that rewrites it during the run (a concurrent callback reaching into another
+worker's clone, say), even one that puts the mutant back before returning, makes the row a
+harness error (status 2), never a verdict on code that was not the mutant. That is the whole
+of what the pool can do here: callbacks in one pool run as one user and can reach one another's
+clones, so they are trusted not to; a suite whose callbacks must be mutually untrusted runs
+with `SHMUTANT_JOBS=1`, and a rewrite shorter than a watchdog poll with its timestamps forged
+is not seen. A clone that a callback renamed away and replaced is not removed (the pool reports
+a tree left behind), and the CLI's completion marker inside a replaced workdir is left alone. A caller's function named
 `builtin` is removed when the file is sourced and again before the post-prepare shadow check;
 the CLI removes every function of a builtin's name planted before it ran (`BASH_ENV`). From the moment
 `prepare` returns until the pool is done, the shell's CHLD, DEBUG, RETURN and ERR traps are

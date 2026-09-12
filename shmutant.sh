@@ -366,12 +366,13 @@ _shmutant_copy_tree_body() {
       command -p cp -RPp -- "$entry" "$dst/" || rc=1
     done
     exit "$rc"
-  ) || rc=1
+  ) || return 1
   # The root directory's own metadata, which the per-entry copy never touches, applied LAST:
-  # adding entries resets a directory's mtime, and a read-only root would refuse them.
-  _shmutant_apply_root_meta "$src" "$dst" || rc=1
-  [ "$rc" -eq 0 ] || _shmutant_err "copy_tree: could not reproduce the root directory's owner, mode or timestamp on $dst"
-  return "$rc"
+  # adding entries resets a directory's mtime, and a read-only root would refuse them. Only
+  # after a copy that succeeded: a destination refused (not empty) or half-copied is not made
+  # over in the source's image.
+  _shmutant_apply_root_meta "$src" "$dst" || { _shmutant_err "copy_tree: could not reproduce the root directory's owner, mode or timestamp on $dst"; return 1; }
+  return 0
 }
 
 # _shmutant_apply_root_meta <src> <dst> — give directory <dst> the owner, mode and mtime of <src>.
@@ -872,7 +873,7 @@ _shmutant_snapshot() {
 # control on, bash reports the reaped job there when the pool itself runs under `$(...)`.
 _shmutant_run_bounded() {
   local dir="$1" run="$2" root="$3" sel="$4" wit="${5:-}" timeout mark fifo fd left seen outf line
-  local left_w left_r seen_w seen_r fired out_w out_r out_r2 hold hp go holder holderid err_fd
+  local left_w left_r seen_w seen_r fired out_w out_r out_r2 hold hp go holder holderid err_fd l kept
   timeout="$(_shmutant_pos_int "${SHMUTANT_TIMEOUT:-300}")" || timeout=0
   SHMUTANT_RUN_FIRED=0; SHMUTANT_RUN_RED=0; SHMUTANT_RUN_WITNESSED=0; SHMUTANT_RUN_UNSETTLED=0; SHMUTANT_RUN_PUBLISHED=1
   # Until the runner reports its own status the run has not started: a setup failure (a channel
@@ -948,7 +949,7 @@ _shmutant_run_bounded() {
         # Cancelled (the run returned): what was seen is left for the runner, which still has
         # to clean up whatever the callback left behind.
         trap 'kill "$s" 2>/dev/null; for p in "${!seen[@]}"; do printf "%s:%s\n" "$p" "${seen[$p]}"; done >&"$seen_w"; exit 0' TERM
-        declare -A seen=()
+        declare -A seen=(); tampered=0
         # 10#: a validated value like 08 is still octal to bash arithmetic.
         t_end=$(( $(_shmutant_now) + 10#$timeout * 1000000 ))
         while [ "$(_shmutant_now)" -lt "$t_end" ]; do
@@ -961,6 +962,11 @@ _shmutant_run_bounded() {
             [ -n "${seen[${p%%:*}]:-}" ] && continue
             seen["${p%%:*}"]="${p#*:}"
           done < <(_shmutant_snapshot "$pid")
+          # The target too, on every pass: a rewrite put back before the run returns would pass
+          # the check made afterwards; one that lasts a poll or more is seen here.
+          if [ -n "${SHMUTANT_TARGET_CK:-}" ] && [ "$tampered" = 0 ]; then
+            [ "$(_shmutant_target_ck "$dir" "$SHMUTANT_TARGET_REL" "$SHMUTANT_TARGET_KEY")" = "$SHMUTANT_TARGET_CK" ] || { tampered=1; printf 'tampered\n' >&"$seen_w"; }
+          fi
         done
         # Committed: a TERM from the runner (which may have seen the run return in the same
         # instant) must not stop the freeze halfway and leave stopped processes behind.
@@ -999,6 +1005,12 @@ _shmutant_run_bounded() {
       leftovers=()
       mapfile -t leftovers <&"$left_r"
       mapfile -t -O "${#leftovers[@]}" leftovers <&"$seen_r"
+      # The sightings channel also carries the watchdog's notes (a target it found changed):
+      # those are not pids, and go back on the channel for the reader below, which shares this
+      # descriptor's offset and would otherwise never see them.
+      kept=()
+      for l in "${leftovers[@]}"; do case "$l" in tampered|unsettled) printf '%s\n' "$l" >&"$seen_w" ;; *) kept+=("$l") ;; esac; done
+      leftovers=("${kept[@]}")
       _shmutant_held_group "$pid"
       [ "${#SHMUTANT_HELD[@]}" -gt 0 ] || _shmutant_err "the run's process group could not be verified as its own; what it left behind is not signalled by number" 2>&"$err_fd"
       _shmutant_kill_tree_twice "${SHMUTANT_HELD[@]}" "$pid:$rootid" "${leftovers[@]}"
@@ -1015,6 +1027,7 @@ _shmutant_run_bounded() {
     case "$line" in
       "status "*) case "${line#status }" in ''|*[!0-9]*) ;; *) SHMUTANT_RUN_STATUS="${line#status }"; SHMUTANT_RUN_SETUP_FAILED=0 ;; esac ;;
       unsettled)  SHMUTANT_RUN_UNSETTLED=1 ;;
+      tampered)   SHMUTANT_RUN_TAMPERED=1 ;;
     esac
   done
   _shmutant_scan_output "$out_r" "${SHMUTANT_RED_PREFIX:-FAIL: }" "$wit"
@@ -1076,7 +1089,12 @@ _shmutant_worker_finish() {
   # suppress the verdict.
   [ -w "$1" ] || command -p chmod -- u+rwx "$1" 2>/dev/null
   if [ "${SHMUTANT_KEEP:-0}" != 1 ]; then
-    _shmutant_remove "$1/tree" || _shmutant_err "could not remove $1/tree"
+    # Only the clone this run made, by identity: what a callback put at its path stays, and the
+    # pool then finds a tree left behind — a harness error, not a removal.
+    if [ ! -e "$1/tree" ] && [ ! -L "$1/tree" ]; then :
+    elif [ -L "$1/tree" ] || [ "$(_shmutant_dir_id "$1/tree")" != "${SHMUTANT_CLONE_ID:-}" ]; then _shmutant_err "refusing to remove $1/tree: it is no longer the clone this run made"
+    else _shmutant_remove "$1/tree" || _shmutant_err "could not remove $1/tree"
+    fi
   fi
   # The verdict goes down the channel the pool opened for this worker before it forked, on a
   # file that no longer has a name: nothing planted in the directory can stand in for it.
@@ -1110,8 +1128,15 @@ _shmutant_worker() {
   if ! state="$(_shmutant_pristine_state "$wd/pristine")" || [ "$state" != "${SHMUTANT_PRISTINE_STATE-}" ]; then
     _shmutant_worker_finish "$dir" unprepared 0 modified; return 0
   fi
+  SHMUTANT_CLONE_ID=""
   if [ "$(_shmutant_dir_id "$wd/pristine")" != "${SHMUTANT_PRISTINE_ID:-}" ] || [ -L "$wd/pristine" ] \
-    || ! command -p mkdir -- "$dir/tree" 2>/dev/null || ! command -p cp -RPp -- "$wd/pristine/." "$dir/tree/" 2>/dev/null; then
+    || ! command -p mkdir -- "$dir/tree" 2>/dev/null; then
+    _shmutant_worker_finish "$dir" unprepared 0 clone; return 0
+  fi
+  # The clone's own identity, from the moment it exists: a callback that renames it away and
+  # puts a directory of its own at the path does not get that removed.
+  SHMUTANT_CLONE_ID="$(_shmutant_dir_id "$dir/tree")"
+  if ! command -p cp -RPp -- "$wd/pristine/." "$dir/tree/" 2>/dev/null; then
     _shmutant_worker_finish "$dir" unprepared 0 clone; return 0
   fi
   # The clone's root takes the prepared root's owner, mode and mtime (cp never sets them on an
@@ -1149,12 +1174,13 @@ _shmutant_worker() {
     # would otherwise have the row scored against code that was not the mutant.
     target_ck="$(_shmutant_target_ck "$dir" "tree$suffix/${SHMUTANT_ROWS_FILE[$i]}" "$kind-$i")" || { _shmutant_worker_finish "$dir" unprepared 0 rewrite; return 0; }
   fi
-  SHMUTANT_RUN_TARGET_REWRITTEN=0
+  SHMUTANT_RUN_TARGET_REWRITTEN=0; SHMUTANT_RUN_TAMPERED=0
+  SHMUTANT_TARGET_CK="$target_ck"; SHMUTANT_TARGET_REL="tree$suffix/${SHMUTANT_ROWS_FILE[$i]:-}"; SHMUTANT_TARGET_KEY="$kind-$i"
   if [ "$kind" = mut ]; then _shmutant_run_bounded "$dir" "$run" "$root" "$sel" "${SHMUTANT_ROWS_WIT[$i]}"
   else _shmutant_run_bounded "$dir" "$run" "$root" "$sel"; fi
   if [ "$kind" = mut ] && [ "${SHMUTANT_RUN_SETUP_FAILED:-0}" = 0 ]; then
     after_ck="$(_shmutant_target_ck "$dir" "tree$suffix/${SHMUTANT_ROWS_FILE[$i]}" "$kind-$i")" || after_ck=""
-    [ "$after_ck" = "$target_ck" ] || { SHMUTANT_RUN_SETUP_FAILED=1; SHMUTANT_RUN_TARGET_REWRITTEN=1; }
+    [ "$after_ck" = "$target_ck" ] && [ "${SHMUTANT_RUN_TAMPERED:-0}" = 0 ] || { SHMUTANT_RUN_SETUP_FAILED=1; SHMUTANT_RUN_TARGET_REWRITTEN=1; }
   fi
   status="$SHMUTANT_RUN_STATUS"
   t1="$(_shmutant_now)"
@@ -1162,7 +1188,7 @@ _shmutant_worker() {
     # The run never started, or its output could not be scanned: reported as such, and the
     # pool makes it a harness error.
     [ "${SHMUTANT_RUN_SCAN_FAILED:-0}" = 0 ] || _shmutant_err "$label: the run's output could not be scanned; its verdict is not trusted"
-    [ "${SHMUTANT_RUN_TARGET_REWRITTEN:-0}" = 0 ] || _shmutant_err "$label: the target was rewritten during the run — a callback wrote into this worker's tree; its verdict is not trusted"
+    [ "${SHMUTANT_RUN_TARGET_REWRITTEN:-0}" = 0 ] || _shmutant_err "$label: the target was not as the pool wrote it, in content or metadata, during or after the run — a callback wrote into this worker's tree; its verdict is not trusted"
     { printf 'setup-failed\n' >&"$SHMUTANT_VERDICT_FD"; } 2>/dev/null
     verdict=lost
   elif [ "$SHMUTANT_RUN_UNSETTLED" = 1 ]; then
@@ -1706,10 +1732,22 @@ _shmutant_pristine_state() {
 # worker's own directory, pinned and verified by identity as for the rewrite; failure when it
 # is not a regular file there.
 _shmutant_target_ck() {
+  local ls_bin stat_bin="" fmt=""
+  ls_bin="$(_shmutant_std_bin ls)" || return 1
+  case "${SHMUTANT_STAT_STYLE:-none}" in
+    gnu-ns) stat_bin="$(_shmutant_std_bin stat)" || return 1; fmt='-c%.9Y' ;;
+    gnu)    stat_bin="$(_shmutant_std_bin stat)" || return 1; fmt='-c%Y' ;;
+    bsd-ns) stat_bin="$(_shmutant_std_bin stat)" || return 1; fmt='-f%Fm' ;;
+    bsd)    stat_bin="$(_shmutant_std_bin stat)" || return 1; fmt='-f%m' ;;
+  esac
   ( builtin cd -P -- "$1" 2>/dev/null || exit 1
     [ "$(_shmutant_dir_id .)" = "${SHMUTANT_DIR_IDS[$3]:-}" ] || exit 1
     [ ! -L "$2" ] && [ -f "$2" ] || exit 1
-    command -p cksum < "$2" )
+    # Mode, owner, size and the mtime (exact where stat gives one) as well as the content: a
+    # test sensitive to any of them must see the file as the pool wrote it.
+    { "$ls_bin" -ldn -- "$2" | command -p awk '{ sub(/[@+.]$/, "", $1); $2 = "-"; print $1, $3, $4, $5 }'
+      [ -z "$stat_bin" ] || "$stat_bin" "$fmt" "$2"
+      command -p cksum < "$2"; } 2>/dev/null )
 }
 
 # _shmutant_wd_is_marked <workdir> — true while <workdir> is, by identity, the directory this
@@ -2137,7 +2175,7 @@ _shmutant_cli_abort() {
     for (( i = 0; i < 50; i++ )); do kill -0 "$SHMUTANT_CLI_CHILD" 2>/dev/null || break; command -p sleep 0.1; done
     # With the identity taken at the spawn: a child that went on TERM and was reaped inside bash
     # may have given its number to someone else by now, who is then neither stopped nor killed.
-    _shmutant_kill_tree_twice "$SHMUTANT_CLI_CHILD${SHMUTANT_CLI_CHILD_ID:+:$SHMUTANT_CLI_CHILD_ID}"
+    _shmutant_kill_tree_twice "$SHMUTANT_CLI_CHILD:${SHMUTANT_CLI_CHILD_ID:-}"
     wait "$SHMUTANT_CLI_CHILD" 2>/dev/null
   fi
   # The last SHMUTANT_KEEP the plan subshell reported (after loading, and around prepare)
@@ -2146,7 +2184,7 @@ _shmutant_cli_abort() {
   if [ -n "${SHMUTANT_CLI_KEEP_R:-}" ]; then
     while IFS= read -r line <&"$SHMUTANT_CLI_KEEP_R"; do keep_last="$line"; done
   fi
-  [ -n "${SHMUTANT_CLI_DONE_FILE:-}" ] && command -p rm -f -- "$SHMUTANT_CLI_DONE_FILE"
+  [ -n "${SHMUTANT_CLI_DONE_FILE:-}" ] && _shmutant_cli_wd_is_ours "${SHMUTANT_CLI_WD_PATH:-}" && command -p rm -f -- "$SHMUTANT_CLI_DONE_FILE"
   if [ -n "${SHMUTANT_CLI_WD_TO_RM:-}" ]; then
     if [ "$keep_last" = 1 ]; then
       _shmutant_err "workdir kept: $SHMUTANT_CLI_WD_TO_RM"
@@ -2226,7 +2264,7 @@ _shmutant_cli_run() {
   # Seeded with the operator's own setting: an interrupt before the plan reports anything reads
   # that, and every later report is what the run settled since.
   printf '%s\n' "$keep" >&"$keep_w"
-  SHMUTANT_CLI_KEEP_R="$keep_r"; SHMUTANT_CLI_DONE_FILE="$done_file"
+  SHMUTANT_CLI_KEEP_R="$keep_r"; SHMUTANT_CLI_DONE_FILE="$done_file"; SHMUTANT_CLI_WD_PATH="$wd"
   # Settings given on the command line or in the environment are checked before the plan's own
   # code runs: a bad --jobs must not first execute a plan.
   if ! _shmutant_validate_settings run "$wd"; then
@@ -2253,7 +2291,9 @@ _shmutant_cli_run() {
   SHMUTANT_CLI_CHILD=""
   exec {keep_w}>&- {keep_r}<&-; unset SHMUTANT_CLI_KEEP_R
   marker="$(command -p cat <&"$done_r")"; exec {done_r}<&-
-  command -p rm -f -- "$done_file"
+  # The completion path is a name inside the workdir: a plan that moved the workdir away and
+  # put a directory of its own there could have put a file of its own at this name.
+  if _shmutant_cli_wd_is_ours "$wd"; then command -p rm -f -- "$done_file"; fi
   if [ -n "$marker" ] && [ "${marker%% *}" = "$rc" ]; then
     # The settled SHMUTANT_KEEP (a plan or prepare may have assigned it either way inside the
     # subshell) is what the workers honoured, and what decides the workdir here.

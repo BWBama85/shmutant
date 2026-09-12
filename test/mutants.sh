@@ -566,8 +566,8 @@ shmutant_mut 'a symlink destination is written through' \
   '  if false; then _shmutant_err "copy_tree: destination $dst is a symlink' \
   't_copy_tree_excludes_git'
 shmutant_mut 'a failed root metadata restore is a silent success' \
-  '  [ "$rc" -eq 0 ] || _shmutant_err "copy_tree: could not reproduce' \
-  '  rc=0; [ "$rc" -eq 0 ] || _shmutant_err "copy_tree: could not reproduce' \
+  '  _shmutant_apply_root_meta "$src" "$dst" || { _shmutant_err "copy_tree: could not reproduce the root directory'"'"'s owner, mode or timestamp on $dst"; return 1; }' \
+  '  _shmutant_apply_root_meta "$src" "$dst" || true' \
   't_pool_clone_keeps_metadata'
 shmutant_mut 'a directory that cannot be recreated waits on running workers' \
   '        _shmutant_end_workers "${pids[@]}"' \
@@ -838,8 +838,8 @@ shmutant_mut 'the alias setting of the sourcing shell is not put back' \
   'unset -v _shmutant_alias_state' \
   't_library_is_immune_to_aliases_at_parse_time'
 shmutant_mut 'the clone directory is made with -p and follows a planted link' \
-  '    || ! command -p mkdir -- "$dir/tree" 2>/dev/null || ! command -p cp -RPp -- "$wd/pristine/." "$dir/tree/" 2>/dev/null; then' \
-  '    || ! command -p mkdir -p -- "$dir/tree" 2>/dev/null || ! command -p cp -RPp -- "$wd/pristine/." "$dir/tree/" 2>/dev/null; then' \
+  '    || ! command -p mkdir -- "$dir/tree" 2>/dev/null; then' \
+  '    || ! command -p mkdir -p -- "$dir/tree" 2>/dev/null; then' \
   't_sibling_cannot_plant_in_another_workers_directory'
 shmutant_mut 'the run output is written by its documented name' \
   '      _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; trap - EXIT; builtin exit "$rrc" ) < /dev/null >&"$out_w" 2>&1 &' \
@@ -1110,7 +1110,7 @@ shmutant_mut 'a signal during the CLI spawn window is acted on at once' \
   '  :' \
   't_cli_abort_waits_for_the_child_and_names_its_identity'
 shmutant_mut 'the CLI child is escalated on by number alone' \
-  '    _shmutant_kill_tree_twice "$SHMUTANT_CLI_CHILD${SHMUTANT_CLI_CHILD_ID:+:$SHMUTANT_CLI_CHILD_ID}"' \
+  '    _shmutant_kill_tree_twice "$SHMUTANT_CLI_CHILD:${SHMUTANT_CLI_CHILD_ID:-}"' \
   '    _shmutant_kill_tree_twice "$SHMUTANT_CLI_CHILD"' \
   't_cli_abort_waits_for_the_child_and_names_its_identity'
 
@@ -1244,7 +1244,7 @@ shmutant_mut 'the held traps are never handed back' \
 
 # --- guards added for the thirty-sixth review round ---
 shmutant_mut 'a target rewritten during its run is scored as it ran' \
-  '    [ "$after_ck" = "$target_ck" ] || { SHMUTANT_RUN_SETUP_FAILED=1; SHMUTANT_RUN_TARGET_REWRITTEN=1; }' \
+  '    [ "$after_ck" = "$target_ck" ] && [ "${SHMUTANT_RUN_TAMPERED:-0}" = 0 ] || { SHMUTANT_RUN_SETUP_FAILED=1; SHMUTANT_RUN_TARGET_REWRITTEN=1; }' \
   '    :' \
   't_a_target_rewritten_during_the_run_is_not_trusted'
 shmutant_mut 'a link chain that leaves the root is accepted when it comes back' \
@@ -1271,3 +1271,29 @@ shmutant_mut 'leaving posix mode leaves the shell options as it reset them' \
   '  POSIXLY_CORRECT=1; unset -f builtin 2>/dev/null; unset POSIXLY_CORRECT' \
   '  POSIXLY_CORRECT=1; unset -f builtin 2>/dev/null; unset POSIXLY_CORRECT; return 0' \
   't_pool_reads_the_table_prepare_declared'
+
+# --- guards added for the thirty-seventh review round ---
+shmutant_mut 'a transient rewrite of the target is not sampled while the run is alive' \
+  '            [ "$(_shmutant_target_ck "$dir" "$SHMUTANT_TARGET_REL" "$SHMUTANT_TARGET_KEY")" = "$SHMUTANT_TARGET_CK" ] || { tampered=1; printf '"'"'tampered\n'"'"' >&"$seen_w"; }' \
+  '            :' \
+  't_a_target_rewritten_during_the_run_is_not_trusted'
+shmutant_mut 'the target check covers content alone' \
+  '    { "$ls_bin" -ldn -- "$2" | command -p awk '"'"'{ sub(/[@+.]$/, "", $1); $2 = "-"; print $1, $3, $4, $5 }'"'"'' \
+  '    { :' \
+  't_a_target_rewritten_during_the_run_is_not_trusted'
+shmutant_mut 'a refused destination is given the source root metadata' \
+  '  ) || return 1' \
+  '  ) || rc=1' \
+  't_copy_tree_excludes_git'
+shmutant_mut 'the completion path is unlinked whatever now sits at the workdir' \
+  '  if _shmutant_cli_wd_is_ours "$wd"; then command -p rm -f -- "$done_file"; fi' \
+  '  command -p rm -f -- "$done_file"' \
+  't_cli_removes_only_the_workdir_it_created_by_identity'
+shmutant_mut 'a clone swapped by its run is removed by path' \
+  '    elif [ -L "$1/tree" ] || [ "$(_shmutant_dir_id "$1/tree")" != "${SHMUTANT_CLONE_ID:-}" ]; then _shmutant_err "refusing to remove $1/tree: it is no longer the clone this run made"' \
+  '    elif false; then :' \
+  't_a_clone_swapped_by_its_run_is_not_removed'
+shmutant_mut 'an unverified CLI child is escalated on by bare number' \
+  '    _shmutant_kill_tree_twice "$SHMUTANT_CLI_CHILD:${SHMUTANT_CLI_CHILD_ID:-}"' \
+  '    _shmutant_kill_tree_twice "$SHMUTANT_CLI_CHILD${SHMUTANT_CLI_CHILD_ID:+:$SHMUTANT_CLI_CHILD_ID}"' \
+  't_cli_abort_waits_for_the_child_and_names_its_identity'
