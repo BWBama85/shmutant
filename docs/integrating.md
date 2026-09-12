@@ -147,8 +147,14 @@ records the pool wrote: a callback that truncates, overwrites or appends to it i
 harness error (status 2). The rewrite of a row's target is
 pinned to the target's directory and re-checked to be inside the tree from there, so a
 concurrent callback that swaps a directory component of a sibling's clone for a link cannot
-redirect it (that row is `unprepared`). Both callbacks must be functions, builtins or
-executables: an alias, which cannot be called by name, is refused (status 2). From the moment
+redirect it (that row is `unprepared`). Both callbacks must be functions or
+executables: an alias, which cannot be called by name, and a builtin (`exit` or `return` would
+end or leave the pool's shell) are refused (status 2). A row's target is read again after its
+run and must be exactly what the pool wrote: a callback that rewrites it during the run (a
+concurrent callback reaching into another worker's clone, say) makes the row a harness error
+(status 2), never a verdict on code that was not the mutant. A caller's function named
+`builtin` is removed when the file is sourced and again before the post-prepare shadow check;
+the CLI removes every function of a builtin's name planted before it ran (`BASH_ENV`). From the moment
 `prepare` returns until the pool is done, the shell's CHLD, DEBUG, RETURN and ERR traps are
 held (saved, disarmed, put back at the end — RETURN and DEBUG as the pool's outer function
 returns, from its own RETURN trap, once the pool's status is settled): a handler `prepare` left
@@ -187,8 +193,9 @@ Rules a row must satisfy, all enforced when the row is appended or the pool star
 - the target file is relative to the tree root, carries no `..` component, and exists in the
   prepared tree as a regular file with one hard link (a symlink, a path whose physical location
   lies outside the tree because a directory component is a symlink, or a multiply linked file is
-  refused, as is a directory component that is an absolute symlink, or a chain of links ending
-  in one; a relative symlinked directory that stays inside the tree resolves to the real file);
+  refused, as is a directory component that is an absolute symlink, a chain of links ending in
+  one, or a chain that leaves the tree at any point, even to come back; a relative symlinked
+  directory that stays inside the tree resolves to the real file);
 - the witness is non-empty.
 
 A refused declaration is counted, and a pool whose table carries one exits 2 rather than running

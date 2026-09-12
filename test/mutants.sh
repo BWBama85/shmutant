@@ -245,10 +245,8 @@ shmutant_mut 'a symlink target passes the pool precheck' \
   't_pool_refuses_symlink_target'
 
 # --- guards added for the third review round ---
-shmutant_mut 'a symlinked parent directory passes the target check' \
-  '  _shmutant_inside "$root" "$dir" || return 1' \
-  '  :' \
-  't_pool_refuses_target_under_symlinked_dir'
+# The physical-containment row on _shmutant_target_ok is subsumed: the lexical link walk
+# refuses every escape from the root first, so no staged input reaches that check.
 shmutant_mut 'a destination inside the source is copied into itself' \
   'if _shmutant_inside "$asrc" "$adst"; then' \
   'if false; then' \
@@ -1074,7 +1072,7 @@ shmutant_mut 'a readonly setting is assigned to' \
   '  :' \
   't_readonly_settings_do_not_kill_the_caller'
 shmutant_mut 'an alias passes as a callback' \
-  '  case "$(builtin type -t -- "$1" 2>/dev/null)" in function|builtin|file) return 0 ;; esac' \
+  '  case "$(builtin type -t -- "$1" 2>/dev/null)" in function|file) return 0 ;; esac' \
   '  return 0' \
   't_pool_refuses_alias_only_callbacks'
 shmutant_mut 'a function named bash is taken for the PATH interpreter' \
@@ -1243,3 +1241,33 @@ shmutant_mut 'the held traps are never handed back' \
   '  [[ -z "${SHMUTANT_TRAPS_PENDING:-}" ]] || builtin trap '"'"'_shmutant_traps_last'"'"' RETURN' \
   '  :' \
   't_pool_status_survives_a_handler_that_shadows_return'
+
+# --- guards added for the thirty-sixth review round ---
+shmutant_mut 'a target rewritten during its run is scored as it ran' \
+  '    [ "$after_ck" = "$target_ck" ] || { SHMUTANT_RUN_SETUP_FAILED=1; SHMUTANT_RUN_TARGET_REWRITTEN=1; }' \
+  '    :' \
+  't_a_target_rewritten_during_the_run_is_not_trusted'
+shmutant_mut 'a link chain that leaves the root is accepted when it comes back' \
+  '      case "$comp" in '"'"''"'"'|.) continue ;; ..) here="${here%/*}"; case "$here" in "$root"|"$root"/*) ;; *) return 1 ;; esac; continue ;; esac' \
+  '      case "$comp" in '"'"''"'"'|.) continue ;; ..) here="${here%/*}"; case "$here" in "$root"|"$root"/*) ;; *) return 0 ;; esac; continue ;; esac' \
+  't_target_through_a_link_chain_to_an_absolute_link_is_refused'
+shmutant_mut 'a function named builtin prepare defined answers the shadow check' \
+  '  _shmutant_drop_builtin_fn' \
+  '  :' \
+  't_pool_refuses_shadowed_builtins_and_posix_mode'
+shmutant_mut 'a builtin passes as a callback' \
+  '  case "$(builtin type -t -- "$1" 2>/dev/null)" in function|file) return 0 ;; esac' \
+  '  case "$(builtin type -t -- "$1" 2>/dev/null)" in function|builtin|file) return 0 ;; esac' \
+  't_pool_refuses_alias_only_callbacks'
+shmutant_mut 'the digest tool is taken by name' \
+  '  if tool="$(_shmutant_std_bin sha256sum)"; then out="$("$tool" -- "$1" 2>/dev/null)"' \
+  '  if command -pv sha256sum > /dev/null 2>&1; then out="$(sha256sum -- "$1" 2>/dev/null)"' \
+  't_checksum_uses_the_digest_file_not_a_function'
+shmutant_mut 'the CLI trusts the names it inherited' \
+  '  builtin unset -f kill wait read trap printf mapfile exec command cd pwd exit return declare local unset set shopt eval readonly export shift true false '"'"'['"'"' : . type test 2>/dev/null' \
+  '  :' \
+  't_cli_removes_shadows_planted_before_it_ran'
+shmutant_mut 'leaving posix mode leaves the shell options as it reset them' \
+  '  POSIXLY_CORRECT=1; unset -f builtin 2>/dev/null; unset POSIXLY_CORRECT' \
+  '  POSIXLY_CORRECT=1; unset -f builtin 2>/dev/null; unset POSIXLY_CORRECT; return 0' \
+  't_pool_reads_the_table_prepare_declared'

@@ -416,7 +416,7 @@ t_pool_refuses_shadowed_builtins_and_posix_mode() {
   shmutant_reset; shmutant_target lib.sh
   shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
   # bounded: a pool that ran with kill neutralised could never end its own helpers
-  set -m; ( kill() { :; }; shmutant_pool lbl "$T/wd" toy_prepare toy_run > /dev/null 2>"$T/e"; echo "$?" > "$T/rc" ) 2>/dev/null & local bg=$! i=0; set +m
+  set -m; ( kill() { :; }; shmutant_pool lbl "$T/wd" toy_prepare toy_run > /dev/null 2>"$T/e"; echo "$?" > "$T/rc" ) > /dev/null 2>&1 & local bg=$! i=0; set +m
   until [ -e "$T/rc" ]; do i=$((i + 1)); [ "$i" -lt 100 ] || break; sleep 0.1; done
   [ -e "$T/rc" ] || { kill -KILL -- -"$bg" 2>/dev/null; wait "$bg" 2>/dev/null; fail_ 'a pool with a shadowed kill ran instead of being refused'; return; }
   wait "$bg" 2>/dev/null
@@ -425,7 +425,7 @@ t_pool_refuses_shadowed_builtins_and_posix_mode() {
   ( set -o posix; shmutant_pool lbl "$T/wd" toy_prepare toy_run > /dev/null 2>"$T/e" ); rc_is $? 2 'POSIX mode is refused'
   ( exit() { :; }; shmutant_pool lbl "$T/wd" toy_prepare toy_run > /dev/null 2>"$T/e5" ); rc_is $? 2 'a function named exit is refused'
   # bounded: a pool that ran with wait disabled could spin or hang
-  set -m; ( enable -n wait; shmutant_pool lbl "$T/wd" toy_prepare toy_run > /dev/null 2>"$T/e6"; echo "$?" > "$T/rc6" ) 2>/dev/null & bg=$!; set +m; i=0
+  set -m; ( enable -n wait; shmutant_pool lbl "$T/wd" toy_prepare toy_run > /dev/null 2>"$T/e6"; echo "$?" > "$T/rc6" ) > /dev/null 2>&1 & bg=$!; set +m; i=0
   until [ -e "$T/rc6" ]; do i=$((i + 1)); [ "$i" -lt 100 ] || break; sleep 0.1; done
   [ -e "$T/rc6" ] || { kill -KILL -- -"$bg" 2>/dev/null; wait "$bg" 2>/dev/null; fail_ 'a pool with wait disabled ran instead of being refused'; return; }
   wait "$bg" 2>/dev/null
@@ -434,13 +434,23 @@ t_pool_refuses_shadowed_builtins_and_posix_mode() {
   has "$(cat "$T/e5")" 'is not the builtin' 'says why'
   # a shadow prepare introduces is caught before any worker relies on the builtin
   shadowing_kill_prepare() { toy_prepare "$1"; kill() { :; }; }
-  set -m; ( shmutant_pool lbl "$T/wd" shadowing_kill_prepare toy_run > /dev/null 2>"$T/e4"; echo "$?" > "$T/rc2" ) 2>/dev/null & bg=$!; set +m; i=0
+  set -m; ( shmutant_pool lbl "$T/wd" shadowing_kill_prepare toy_run > /dev/null 2>"$T/e4"; echo "$?" > "$T/rc2" ) > /dev/null 2>&1 & bg=$!; set +m; i=0
   until [ -e "$T/rc2" ]; do i=$((i + 1)); [ "$i" -lt 100 ] || break; sleep 0.1; done
   [ -e "$T/rc2" ] || { kill -KILL -- -"$bg" 2>/dev/null; wait "$bg" 2>/dev/null; fail_ 'a pool whose prepare shadowed kill ran instead of being refused'; return; }
   wait "$bg" 2>/dev/null
   eq "$(cat "$T/rc2")" 2 'a kill function defined by prepare is refused after prepare'
   has "$(cat "$T/e4")" 'is not the builtin' 'says why'
   has "$(cat "$T/e")" 'POSIX mode' 'says why'
+  # a function named builtin prepare defined (after the source-time removal) that answers the
+  # check's own question — printing "builtin" for type — together with a no-op kill: removed
+  # before the check relies on the name, so the kill shadow is still found
+  faking_prepare() { toy_prepare "$1"; eval 'builtin() { case "$1:$2" in type:-at) echo builtin ;; *) command "$@" ;; esac; }'; kill() { :; }; }
+  set -m; ( shmutant_pool lbl "$T/wd" faking_prepare toy_run > /dev/null 2>"$T/e9"; echo "$?" > "$T/rc9" ) > /dev/null 2>&1 & bg=$!; set +m; i=0
+  until [ -e "$T/rc9" ]; do i=$((i + 1)); [ "$i" -lt 100 ] || break; sleep 0.1; done
+  [ -e "$T/rc9" ] || { kill -KILL -- -"$bg" 2>/dev/null; wait "$bg" 2>/dev/null; fail_ 'a pool whose prepare faked builtin ran instead of being refused'; return; }
+  wait "$bg" 2>/dev/null
+  eq "$(cat "$T/rc9")" 2 'a builtin faker prepare defined does not get a kill shadow past the check'
+  has "$(cat "$T/e9")" 'kill is not the builtin' 'says why'
   # a punctuation builtin the harness relies on: the shadow check names it (the pool's own
   # arity guard, which uses [, would refuse a [ shadow first, so the check is exercised directly)
   ( eval '[() { :; }'; _shmutant_no_shadows lbl 2>"$T/e7" ); rc_is $? 2 'a function named [ is refused by the shadow check'
@@ -673,6 +683,12 @@ t_pool_refuses_alias_only_callbacks() {
     SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd2" aliased_prep toy_run > /dev/null 2>"$T/e2"; echo "rc=$?" > "$T/rc2" )
   has "$(cat "$T/rc2")" 'rc=2' 'an alias-only prepare callback is a harness error'
   has "$(cat "$T/e2")" 'prepare callback not found' 'says why'
+  # a builtin is not a callback either: exit would end this shell, return would leave the pool
+  ( SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd3" exit toy_run > /dev/null 2>"$T/e3"; echo "rc=$?" > "$T/rc3" )
+  has "$(cat "$T/rc3")" 'rc=2' 'exit as a prepare callback is refused, and the caller shell survives'
+  has "$(cat "$T/e3")" 'a builtin such as exit or return' 'says why'
+  ( SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd4" toy_prepare return > /dev/null 2>"$T/e4"; echo "rc=$?" > "$T/rc4" )
+  has "$(cat "$T/rc4")" 'rc=2' 'return as a run callback is refused'
 }
 
 t_rewrite_is_pinned_against_a_sibling_swap() {
@@ -824,6 +840,13 @@ t_target_through_a_link_chain_to_an_absolute_link_is_refused() {
   SHMUTANT_BASELINE=0 pool lbl "$T/wd2" multi_prepare toy_run
   rc_is "$RC" 2 'a relative link whose target passes through an absolute in-tree link is refused up front'
   case "$OUT" in *$'\trow\t'*) fail_ 'a row ran on a refused table (multi-component target)' ;; esac
+  # a chain that leaves the root and comes back in: what lies outside is not cloned
+  out_prepare() { toy_prepare "$1"; mkdir -p "$1/real" "$1/../outside"; cp "$1/lib.sh" "$1/real/lib.sh"; ln -s ../outside "$1/a"; ln -s ../pristine/real "$1/../outside/b"; }
+  shmutant_reset; shmutant_target a/b/lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  SHMUTANT_BASELINE=0 pool lbl "$T/wd3" out_prepare toy_run
+  rc_is "$RC" 2 'a link chain that leaves the root and re-enters it is refused up front, not left for a clone to miss'
+  case "$OUT" in *$'\trow\t'*) fail_ 'a row ran on a refused table (chain through outside)' ;; esac
 }
 
 t_public_helpers_are_immune_to_aliases_at_run_time() {
@@ -915,6 +938,57 @@ t_pool_status_survives_a_handler_that_shadows_return() {
   ( SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd2" debug_prepare2 toy_run > "$T/out2" 2>"$T/err2"; rc=$?
     trap - DEBUG; echo "rc=$rc" > "$T/rc2"; exit 0 )
   has "$(cat "$T/rc2")" 'rc=1' "a surviving row's status 1 survives a DEBUG handler that shadows return"
+}
+
+t_a_target_rewritten_during_the_run_is_not_trusted() {
+  # with two workers, one row's callback reaches into the other's clone (through ../..), puts
+  # the old literal back once that row's mutation is in, and lets its run go ahead: the target
+  # is read again after the run, and a row whose target changed is a harness error, never a
+  # survivor scored against code that was not the mutant
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  shmutant_mut 'b' '$1 + $2' '$1 * $2' 'add-works'
+  meddling_run() {
+    local w i=0; w="$(cd "$1/../.." && pwd -P)"
+    case "$1" in
+      */mut-0/*) until grep -q '\$1 \* \$2' "$w/mut-1/tree/lib.sh" 2>/dev/null || [ "$i" -ge 150 ]; do i=$((i + 1)); sleep 0.1; done
+                 sed 's/\$1 \* \$2/$1 + $2/' "$w/mut-1/tree/lib.sh" > "$T/restored.n" && cat "$T/restored.n" > "$w/mut-1/tree/lib.sh"; : > "$T/restored" ;;
+      */mut-1/*) until [ -e "$T/restored" ] || [ "$i" -ge 200 ]; do i=$((i + 1)); sleep 0.1; done ;;
+    esac
+    bash "$1/test.sh"
+  }
+  SHMUTANT_JOBS=2 SHMUTANT_BASELINE=0 pool lbl "$T/wd" toy_prepare meddling_run
+  [ -e "$T/restored" ] || fail_ 'fixture: the meddling callback never restored the sibling target'
+  rc_is "$RC" 2 'a target rewritten during its run is a harness error'
+  has "$ERR" 'rewritten during the run' 'says why'
+  case "$OUT" in *$'\trow\tsurvived\tb\t'*) fail_ 'the row whose target was put back was scored a survivor' ;; esac
+}
+
+t_checksum_uses_the_digest_file_not_a_function() {
+  # a function of a digest tool's name (inherited by the CLI: these are not builtin names, so
+  # bash imports them) is not the tool: the executable on the standard path is
+  local want got
+  want="$(bash "$SHMUTANT" checksum)"
+  got="$( sha256sum() { :; }; shasum() { :; }; openssl() { :; }; export -f sha256sum shasum openssl; bash "$SHMUTANT" checksum 2>/dev/null )"
+  eq "$got" "$want" 'the checksum is the same with functions named after every digest tool exported'
+  [ -n "$want" ] || fail_ 'fixture: no digest at all'
+}
+
+t_cli_removes_shadows_planted_before_it_ran() {
+  # BASH_ENV runs before the script: functions named wait and trap planted there would stand
+  # in for the CLI's own control primitives; the CLI removes every such name first
+  mk_toy "$T/toy"; TOY="$T/toy"
+  cat > "$T/toy/plan.sh" <<'EOF'
+prepare() { shmutant_copy_tree "$SHMUTANT_PLAN_DIR" "$1"; }
+run() { bash "$1/test.sh"; }
+shmutant_target lib.sh
+shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+EOF
+  printf 'wait() { :; }\ntrap() { :; }\nkill() { :; }\n' > "$T/env.sh"
+  local out; out="$(BASH_ENV="$T/env.sh" bash "$SHMUTANT" run "$T/toy/plan.sh" --no-baseline --workdir "$T/wd" 2>"$T/e"; echo "rc=$?")"
+  has "$out" $'\trow\tkilled\ta\t' "the CLI ran its plan with wait, trap and kill planted through BASH_ENV: [$(head -c 200 "$T/e")]"
+  has "$out" 'rc=0' 'and exited as the plan did'
 }
 
 t_verdict_scans_a_large_output() {
@@ -2562,12 +2636,14 @@ t_bash_floor() {
   _shmutant_bash_ok 3 2; rc_is $? 1 '3.2 is below the floor'
   has "$(_shmutant_install_hint)" 'bash' 'the install hint names bash'
   # a sourcing caller's function named builtin is removed before anything relies on the
-  # qualifier (bash itself refuses to IMPORT an exported function of that name, on 3.2 and 5.3
-  # alike, so the CLI cannot inherit one; a caller that defines one in its own shell can)
+  # qualifier — the prologue's `builtin shopt -u expand_aliases` first, so a caller alias is not
+  # baked into the library at parse time (bash itself refuses to IMPORT an exported function of
+  # that name, on 3.2 and 5.3 alike, so the CLI cannot inherit one; a caller that defines one in
+  # its own shell can)
   mk_toy "$T/toy"; TOY="$T/toy"
   local bout
   # shellcheck disable=SC1090
-  bout="$( builtin() { return 1; }; . "$SHMUTANT" > /dev/null 2>&1 || { echo "source rc=$?"; exit 1; }
+  bout="$( builtin() { return 1; }; shopt -s expand_aliases; alias printf='echo ALIASED'; . "$SHMUTANT" > /dev/null 2>&1 || { echo "source rc=$?"; exit 1; }
     p() { shmutant_copy_tree "$T/toy" "$1"; }; r() { bash "$1/test.sh"; }
     shmutant_reset; shmutant_target lib.sh; shmutant_mut a '$1 + $2' '$1 - $2' add-works
     SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd-b" p r 2>&1 > /dev/null; echo "rc=$?" )"

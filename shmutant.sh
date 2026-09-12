@@ -222,15 +222,16 @@ _shmutant_no_absolute_link() {
   [ "$rel" != . ] || return 0
   # A relative link's target is walked component by component from where the link sits, and so
   # on (bounded): a target of `c/sub` where `c` is an absolute link is that absolute link, which
-  # a clone would keep pointing back at the prepared tree. A `..` that leaves the root ends the
-  # walk: what lies there is not this tree's, and the physical containment check decides.
+  # a clone would keep pointing back at the prepared tree. A `..` that leaves the root is
+  # refused even when the chain comes back in: what lies outside is not cloned, so the clone's
+  # copy of that link points at nothing.
   pending="$rel"
   while [ -n "$pending" ]; do
     depth=$(( depth + 1 )); [ "$depth" -le 40 ] || return 1
     here="$root"; rel="$pending"; pending=""
     while [ -n "$rel" ]; do
       comp="${rel%%/*}"; case "$rel" in */*) rel="${rel#*/}" ;; *) rel="" ;; esac
-      case "$comp" in ''|.) continue ;; ..) here="${here%/*}"; case "$here" in "$root"|"$root"/*) ;; *) return 0 ;; esac; continue ;; esac
+      case "$comp" in ''|.) continue ;; ..) here="${here%/*}"; case "$here" in "$root"|"$root"/*) ;; *) return 1 ;; esac; continue ;; esac
       here="$here/$comp"
       if [ -L "$here" ]; then
         target="$(command -p readlink -- "$here" 2>/dev/null)" || return 1
@@ -1089,7 +1090,7 @@ _shmutant_worker_finish() {
 # `<verdict>\n<microseconds>\n<status>` to <workdir>/<kind>-<index>/verdict. Always returns 0:
 # the pool reaps by pid, and a non-zero worker would be mistaken for a lost verdict.
 _shmutant_worker() {
-  local kind="$1" i="$2" wd="$3" run="$4" suffix="$5"
+  local kind="$1" i="$2" wd="$3" run="$4" suffix="$5" target_ck="" after_ck=""
   local dir="$3/$1-$2" root sel verdict status t0 t1 target rc red
   set +e
   t0="$(_shmutant_now)"
@@ -1143,15 +1144,25 @@ _shmutant_worker() {
       4) _shmutant_worker_finish "$dir" unprepared 0 moved; return 0 ;;
       *) _shmutant_worker_finish "$dir" unprepared 0 rewrite; return 0 ;;
     esac
+    # The target as written, read from this worker's own directory: checked again after the run,
+    # since a sibling's callback that put the old literal back while this run read the file
+    # would otherwise have the row scored against code that was not the mutant.
+    target_ck="$(_shmutant_target_ck "$dir" "tree$suffix/${SHMUTANT_ROWS_FILE[$i]}" "$kind-$i")" || { _shmutant_worker_finish "$dir" unprepared 0 rewrite; return 0; }
   fi
+  SHMUTANT_RUN_TARGET_REWRITTEN=0
   if [ "$kind" = mut ]; then _shmutant_run_bounded "$dir" "$run" "$root" "$sel" "${SHMUTANT_ROWS_WIT[$i]}"
   else _shmutant_run_bounded "$dir" "$run" "$root" "$sel"; fi
+  if [ "$kind" = mut ] && [ "${SHMUTANT_RUN_SETUP_FAILED:-0}" = 0 ]; then
+    after_ck="$(_shmutant_target_ck "$dir" "tree$suffix/${SHMUTANT_ROWS_FILE[$i]}" "$kind-$i")" || after_ck=""
+    [ "$after_ck" = "$target_ck" ] || { SHMUTANT_RUN_SETUP_FAILED=1; SHMUTANT_RUN_TARGET_REWRITTEN=1; }
+  fi
   status="$SHMUTANT_RUN_STATUS"
   t1="$(_shmutant_now)"
   if [ "${SHMUTANT_RUN_SETUP_FAILED:-0}" = 1 ]; then
     # The run never started, or its output could not be scanned: reported as such, and the
     # pool makes it a harness error.
     [ "${SHMUTANT_RUN_SCAN_FAILED:-0}" = 0 ] || _shmutant_err "$label: the run's output could not be scanned; its verdict is not trusted"
+    [ "${SHMUTANT_RUN_TARGET_REWRITTEN:-0}" = 0 ] || _shmutant_err "$label: the target was rewritten during the run — a callback wrote into this worker's tree; its verdict is not trusted"
     { printf 'setup-failed\n' >&"$SHMUTANT_VERDICT_FD"; } 2>/dev/null
     verdict=lost
   elif [ "$SHMUTANT_RUN_UNSETTLED" = 1 ]; then
@@ -1626,10 +1637,12 @@ _shmutant_canon() {
   printf -v "$2" '%s' "$3"
 }
 
-# _shmutant_callable <name> — true when <name> is a function, a builtin or an executable file:
-# what an invocation by variable can call. An alias is not (aliases expand at parse time).
+# _shmutant_callable <name> — true when <name> is a function or an executable file: what an
+# invocation by variable can call and return from. An alias is not (aliases expand at parse
+# time); a builtin is not either (`exit`, `exec` or `return` as a callback would end or leave
+# the pool's own shell rather than return to it).
 _shmutant_callable() {
-  case "$(builtin type -t -- "$1" 2>/dev/null)" in function|builtin|file) return 0 ;; esac
+  case "$(builtin type -t -- "$1" 2>/dev/null)" in function|file) return 0 ;; esac
   return 1
 }
 
@@ -1689,6 +1702,16 @@ _shmutant_pristine_state() {
       | LC_ALL=C command -p sort )
 }
 
+# _shmutant_target_ck <workerdir> <relative target> <key> — the cksum of the target read from the
+# worker's own directory, pinned and verified by identity as for the rewrite; failure when it
+# is not a regular file there.
+_shmutant_target_ck() {
+  ( builtin cd -P -- "$1" 2>/dev/null || exit 1
+    [ "$(_shmutant_dir_id .)" = "${SHMUTANT_DIR_IDS[$3]:-}" ] || exit 1
+    [ ! -L "$2" ] && [ -f "$2" ] || exit 1
+    command -p cksum < "$2" )
+}
+
 # _shmutant_wd_is_marked <workdir> — true while <workdir> is, by identity, the directory this
 # pool marked as its own; says so otherwise.
 _shmutant_wd_is_marked() {
@@ -1719,13 +1742,52 @@ _shmutant_pool_cleanup() {
   unset SHMUTANT_PRISTINE_STATE
 }
 
+# _shmutant_drop_builtin_fn — remove a function named builtin without trusting any command
+# name: an assignment to POSIXLY_CORRECT enters posix mode, where the special builtin `unset`
+# is found before a function of its name. Leaving posix mode resets shell options wholesale
+# (expand_aliases off, inherit_errexit left on, …), so every option that changed is put back
+# from BASHOPTS and SHELLOPTS, read before and after — variables, which nothing shadows — with
+# the real builtin, which is real again by then. No `local`: that name is not yet checked.
+_shmutant_drop_builtin_fn() {
+  _shmutant_bo="$BASHOPTS"; _shmutant_so="$SHELLOPTS"
+  POSIXLY_CORRECT=1; unset -f builtin 2>/dev/null; unset POSIXLY_CORRECT
+  _shmutant_o="$_shmutant_bo"
+  while [[ -n "$_shmutant_o" ]]; do
+    _shmutant_n="${_shmutant_o%%:*}"; case "$_shmutant_o" in *:*) _shmutant_o="${_shmutant_o#*:}" ;; *) _shmutant_o="" ;; esac
+    case ":$BASHOPTS:" in *":$_shmutant_n:"*) ;; *) builtin shopt -s "$_shmutant_n" 2>/dev/null ;; esac
+  done
+  _shmutant_o="$BASHOPTS"
+  while [[ -n "$_shmutant_o" ]]; do
+    _shmutant_n="${_shmutant_o%%:*}"; case "$_shmutant_o" in *:*) _shmutant_o="${_shmutant_o#*:}" ;; *) _shmutant_o="" ;; esac
+    case ":$_shmutant_bo:" in *":$_shmutant_n:"*) ;; *) builtin shopt -u "$_shmutant_n" 2>/dev/null ;; esac
+  done
+  _shmutant_o="$_shmutant_so"
+  while [[ -n "$_shmutant_o" ]]; do
+    _shmutant_n="${_shmutant_o%%:*}"; case "$_shmutant_o" in *:*) _shmutant_o="${_shmutant_o#*:}" ;; *) _shmutant_o="" ;; esac
+    case ":$SHELLOPTS:" in *":$_shmutant_n:"*) ;; *) builtin set -o "$_shmutant_n" 2>/dev/null ;; esac
+  done
+  _shmutant_o="$SHELLOPTS"
+  while [[ -n "$_shmutant_o" ]]; do
+    _shmutant_n="${_shmutant_o%%:*}"; case "$_shmutant_o" in *:*) _shmutant_o="${_shmutant_o#*:}" ;; *) _shmutant_o="" ;; esac
+    case ":$_shmutant_so:" in *":$_shmutant_n:"*) ;; *) builtin set +o "$_shmutant_n" 2>/dev/null ;; esac
+  done
+  # Two options BASHOPTS does not report reliably around this toggle: leaving posix mode turns
+  # expand_aliases off, and leaves inherit_errexit on when errexit is on. Both from before.
+  case ":$_shmutant_bo:" in *:expand_aliases:*) builtin shopt -s expand_aliases ;; *) builtin shopt -u expand_aliases ;; esac
+  case ":$_shmutant_bo:" in *:inherit_errexit:*) builtin shopt -s inherit_errexit ;; *) builtin shopt -u inherit_errexit ;; esac
+  builtin unset -v _shmutant_bo _shmutant_so _shmutant_o _shmutant_n
+}
+
 # _shmutant_no_shadows <label> — refuse to run while a builtin this harness signals, waits and
 # reads with is not itself: a function of that name, or one disabled with `enable -n`, would
 # decide what lives. External utilities are already reached through `command -p`.
 _shmutant_no_shadows() {
   local n kinds
-  # The check after prepare runs with CHLD held (_shmutant_hold_chld): a trap that defines a
-  # shadow on a later invocation would otherwise fire on the forks below or on any later one.
+  # A function named builtin (prepare could have defined one since the source-time removal)
+  # goes first, so that `builtin type` below is the real thing.
+  _shmutant_drop_builtin_fn
+  # The check after prepare runs with the traps held (_shmutant_hold_traps): a handler that
+  # defines a shadow on a later invocation would otherwise fire on the forks below or later.
   # `[` and `:` are shadowable and load-bearing; every builtin the harness invokes is listed.
   for n in kill wait read trap printf mapfile exec builtin command cd pwd exit return declare local unset set shopt eval readonly export shift true false '[' : . type test; do
     # An enabled builtin, not a function of that name and not one switched off with `enable -n`.
@@ -1802,8 +1864,8 @@ _shmutant_pool_body() {
   wd="$(_shmutant_abs "$wd")" || { _shmutant_err "$label: cannot resolve workdir"; return 2; }
   _shmutant_workdir_owned "$label" "$wd" || return 2
   SHMUTANT_WD_ID="$(_shmutant_dir_id "$wd")"
-  _shmutant_callable "$prep" || { _shmutant_err "$label: prepare callback not found: $prep (a function, builtin or executable; an alias cannot be called by name)"; return 2; }
-  _shmutant_callable "$run" || { _shmutant_err "$label: run callback not found: $run (a function, builtin or executable; an alias cannot be called by name)"; return 2; }
+  _shmutant_callable "$prep" || { _shmutant_err "$label: prepare callback not found: $prep (a function or an executable; an alias cannot be called by name, and a builtin such as exit or return would end or leave this shell)"; return 2; }
+  _shmutant_callable "$run" || { _shmutant_err "$label: run callback not found: $run (a function or an executable; an alias cannot be called by name, and a builtin such as exit or return would end or leave this shell)"; return 2; }
   _shmutant_validate_settings "$label" "$wd" || return 2
   case "$cap" in
     '') ;;
@@ -2007,9 +2069,12 @@ _shmutant_flag_value() {
 # failure, never an empty digest reported as success.
 _shmutant_checksum() {
   local out=""
-  if command -pv sha256sum > /dev/null 2>&1; then out="$(command -p sha256sum -- "$1" 2>/dev/null)"
-  elif command -pv shasum > /dev/null 2>&1; then out="$(command -p shasum -a 256 -- "$1" 2>/dev/null)"
-  elif command -pv openssl > /dev/null 2>&1; then out="$(command -p openssl dgst -sha256 -- "$1" 2>/dev/null)"; out="${out##* }"
+  # Each candidate an executable file on the standard path, run by that path: a function of
+  # the name (inherited, or a caller's) would otherwise be taken for the tool.
+  local tool
+  if tool="$(_shmutant_std_bin sha256sum)"; then out="$("$tool" -- "$1" 2>/dev/null)"
+  elif tool="$(_shmutant_std_bin shasum)"; then out="$("$tool" -a 256 -- "$1" 2>/dev/null)"
+  elif tool="$(_shmutant_std_bin openssl)"; then out="$("$tool" dgst -sha256 -- "$1" 2>/dev/null)"; out="${out##* }"
   else _shmutant_err "no sha256sum, shasum or openssl on PATH"; return 2
   fi
   # A tool that could not read the file prints nothing: that is a failure, never an empty digest.
@@ -2210,8 +2275,15 @@ _shmutant_cli_run() {
 }
 
 shmutant_main() {
-  # This process is the CLI's own: options inherited through SHELLOPTS/BASHOPTS/POSIXLY_CORRECT
-  # (errexit, nounset, noclobber, posix mode) are reset before anything else runs.
+  # This process is the CLI's own. A function of a builtin's name planted before this file ran
+  # (BASH_ENV; bash does not import exported functions of those names) would stand in for
+  # trap, exec or wait below: every name the harness relies on is unset first, from posix
+  # mode, where the special builtin `unset` is found before any function — an assignment enters
+  # that mode, so nothing this line trusts can be shadowed.
+  _shmutant_drop_builtin_fn
+  builtin unset -f kill wait read trap printf mapfile exec command cd pwd exit return declare local unset set shopt eval readonly export shift true false '[' : . type test 2>/dev/null
+  # Options inherited through SHELLOPTS/BASHOPTS/POSIXLY_CORRECT (errexit, nounset, noclobber,
+  # posix mode) are reset before anything else runs.
   set +e +u +C +o posix; unset POSIXLY_CORRECT
   \builtin shopt -u expand_aliases
   case "${1:-}" in
