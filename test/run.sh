@@ -802,18 +802,24 @@ t_public_helpers_are_immune_to_aliases_at_run_time() {
   # bash parses a command substitution when it runs: with expand_aliases on in the caller's
   # shell, a `$(printf …)` inside the library would expand the caller's alias at run time. Each
   # public entry point turns the option off for its duration and puts it back. In a separate
-  # bash: a shell that hits a run-time parse error exits, and must not take this runner's
-  # EXIT trap (and temp directory) with it.
+  # bash, in its own process group and bounded: a shell that hits a run-time parse error exits
+  # (and must not take this runner's EXIT trap with it), and one whose path resolution spins on
+  # aliased output never returns (`timeout` is not portable, so the bound is a poll).
   mkdir -p "$T/src/sub"; printf 'x=1\n' > "$T/src/f"; printf 'x=1\n' > "$T/src/sub/g"
-  local out rc
-  out="$(SHMUTANT="$SHMUTANT" T="$T" timeout 60 bash -c '
+  : > "$T/alias-out"
+  set -m
+  ( SHMUTANT="$SHMUTANT" T="$T" bash -c '
     . "$SHMUTANT"; shopt -s expand_aliases; alias printf="echo ALIASED"; alias command="echo ALIASED"; alias ls="echo ALIASED"
     shmutant_copy_tree "$T/src" "$T/dst" 2>&1 || { echo "copy rc=$?"; exit 1; }
     shopt -q expand_aliases || { echo "aliases not put back"; exit 1; }
     shmutant_mutate "$T/dst/f" "x=1" "x=2" 2>&1 || { echo "mutate rc=$?"; exit 1; }
-    echo ok' 2>&1)"; rc=$?
-  eq "$rc" 0 "copy_tree and mutate run under run-time aliases: [$out]"
-  has "$out" ok 'and the aliased shell survived them'
+    echo ok' > "$T/alias-out" 2>&1; echo "rc=$?" >> "$T/alias-out" ) 2>/dev/null & local child=$! i=0
+  set +m
+  until grep -q '^rc=' "$T/alias-out" 2>/dev/null || [ "$i" -ge 600 ]; do i=$((i + 1)); sleep 0.1; done
+  grep -q '^rc=' "$T/alias-out" 2>/dev/null || { kill -KILL -- -"$child" 2>/dev/null; wait "$child" 2>/dev/null; fail_ 'copy_tree or mutate under run-time aliases never returned'; return; }
+  wait "$child" 2>/dev/null
+  has "$(cat "$T/alias-out")" 'rc=0' "copy_tree and mutate run under run-time aliases: [$(cat "$T/alias-out")]"
+  has "$(cat "$T/alias-out")" ok 'and the aliased shell survived them'
   [ -f "$T/dst/sub/g" ] || fail_ 'copy_tree under run-time aliases did not copy'
   eq "$(cat "$T/dst/f" 2>/dev/null)" x=2 'mutate under run-time aliases rewrote the file'
 }
