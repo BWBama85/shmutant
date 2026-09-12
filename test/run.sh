@@ -949,12 +949,14 @@ t_a_target_rewritten_during_the_run_is_not_trusted() {
   shmutant_reset; shmutant_target lib.sh
   shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
   shmutant_mut 'b' '$1 + $2' '$1 * $2' 'add-works'
+  # Row b's callback announces that its run has started (so the pool has already recorded the
+  # target as written) and waits; row a's restores b's literal only then, and lets b go on.
   meddling_run() {
     local w i=0; w="$(cd "$1/../.." && pwd -P)"
     case "$1" in
-      */mut-0/*) until grep -q '\$1 \* \$2' "$w/mut-1/tree/lib.sh" 2>/dev/null || [ "$i" -ge 150 ]; do i=$((i + 1)); sleep 0.1; done
+      */mut-0/*) until [ -e "$T/b-started" ] || [ "$i" -ge 300 ]; do i=$((i + 1)); sleep 0.1; done
                  sed 's/\$1 \* \$2/$1 + $2/' "$w/mut-1/tree/lib.sh" > "$T/restored.n" && cat "$T/restored.n" > "$w/mut-1/tree/lib.sh"; : > "$T/restored" ;;
-      */mut-1/*) until [ -e "$T/restored" ] || [ "$i" -ge 200 ]; do i=$((i + 1)); sleep 0.1; done ;;
+      */mut-1/*) : > "$T/b-started"; until [ -e "$T/restored" ] || [ "$i" -ge 300 ]; do i=$((i + 1)); sleep 0.1; done ;;
     esac
     bash "$1/test.sh"
   }
