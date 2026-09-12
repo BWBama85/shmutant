@@ -270,11 +270,13 @@ shmutant_selected() {
 _shmutant_aliases_off() {
   # `; :` — shopt -p exits 1 for an option that is off, which a caller's errexit would act on.
   local st; st="$(\builtin shopt -p expand_aliases; :)"
-  printf -v "$1" '%s' "$st"
+  # The builtin and the keyword: this runs before (and after) the shadow check, and a caller's
+  # printf or [ function would otherwise leave the setting unsaved or unrestored.
+  \builtin printf -v "$1" '%s' "$st"
   \builtin shopt -u expand_aliases
 }
 _shmutant_aliases_back() {
-  [ -z "$1" ] || \builtin eval "$1"
+  [[ -z "$1" ]] || \builtin eval "$1"
 }
 
 shmutant_copy_tree() {
@@ -1381,14 +1383,23 @@ _shmutant_hold_traps() {
 }
 _shmutant_release_traps() {
   [ -n "${SHMUTANT_TRAPS_HELD:-}" ] || return 0
-  local debug="${SHMUTANT_TRAP_DEBUG:-}"
   if [ -n "${SHMUTANT_TRAP_CHLD:-}" ]; then eval "$SHMUTANT_TRAP_CHLD"; else trap - CHLD; fi
-  if [ -n "${SHMUTANT_TRAP_RETURN:-}" ]; then eval "$SHMUTANT_TRAP_RETURN"; else trap - RETURN; fi
   if [ -n "${SHMUTANT_TRAP_ERR:-}" ]; then eval "$SHMUTANT_TRAP_ERR"; else trap - ERR; fi
+  # RETURN and DEBUG are not handed back here: a RETURN handler runs when this very function
+  # returns, and a DEBUG handler before every command after it, while harness functions still
+  # return and the pool's status is still to be returned. They are left pending for the RETURN
+  # trap of the outer entry point, which runs once that status is settled.
+  SHMUTANT_TRAP_RETURN_PENDING="${SHMUTANT_TRAP_RETURN:-}"; SHMUTANT_TRAP_DEBUG_PENDING="${SHMUTANT_TRAP_DEBUG:-}"; SHMUTANT_TRAPS_PENDING=1
   unset SHMUTANT_TRAPS_HELD SHMUTANT_TRAP_CHLD SHMUTANT_TRAP_DEBUG SHMUTANT_TRAP_RETURN SHMUTANT_TRAP_ERR
-  # DEBUG last of all: it runs before every command that follows it, and the pool's return is
-  # the only command that does.
-  if [ -n "$debug" ]; then eval "$debug"; else trap - DEBUG; fi
+}
+# _shmutant_traps_last — the RETURN trap of shmutant_pool: the caller's RETURN and DEBUG traps
+# go back here, when the pool's status is already settled and no harness command follows —
+# whatever a handler does now cannot change what the pool returned. DEBUG last of all.
+_shmutant_traps_last() {
+  local ret="${SHMUTANT_TRAP_RETURN_PENDING:-}" dbg="${SHMUTANT_TRAP_DEBUG_PENDING:-}"
+  builtin unset SHMUTANT_TRAP_RETURN_PENDING SHMUTANT_TRAP_DEBUG_PENDING SHMUTANT_TRAPS_PENDING
+  if [[ -n "$ret" ]]; then builtin eval "$ret"; else builtin trap - RETURN; fi
+  if [[ -n "$dbg" ]]; then builtin eval "$dbg"; else builtin trap - DEBUG; fi
 }
 
 # _shmutant_saved_trap <signal> — the caller's current trap declaration for <signal> as
@@ -1622,11 +1633,25 @@ _shmutant_callable() {
   return 1
 }
 
+# _shmutant_std_bin <name> — the executable file <name> on the standard utility path, or
+# failure. `command -pv` would report a caller's function of that name, and find execs a
+# program: the file is what the fingerprint hands it.
+_shmutant_std_bin() {
+  local p d
+  p="$(command -p getconf PATH 2>/dev/null)" || p=""
+  [ -n "$p" ] || p=/usr/bin:/bin
+  while [ -n "$p" ]; do
+    d="${p%%:*}"; case "$p" in *:*) p="${p#*:}" ;; *) p="" ;; esac
+    if [ -n "$d" ] && [ -f "$d/$1" ] && [ -x "$d/$1" ]; then printf '%s' "$d/$1"; return 0; fi
+  done
+  return 1
+}
+
 # _shmutant_stat_style — how this platform's stat prints an mtime, decided once per pool:
 # gnu-ns (`stat -c %.9Y`), gnu, bsd-ns (`stat -f %Fm`), bsd, or none. Not POSIX, so a platform
 # without either form falls back to the minute `ls` shows.
 _shmutant_stat_style() {
-  local st; st="$(command -pv stat 2>/dev/null)" || { SHMUTANT_STAT_STYLE=none; return 0; }
+  local st; st="$(_shmutant_std_bin stat)" || { SHMUTANT_STAT_STYLE=none; return 0; }
   if "$st" -c '%.9Y' / > /dev/null 2>&1; then SHMUTANT_STAT_STYLE=gnu-ns
   elif "$st" -c '%Y' / > /dev/null 2>&1; then SHMUTANT_STAT_STYLE=gnu
   elif "$st" -f '%Fm' / > /dev/null 2>&1; then SHMUTANT_STAT_STYLE=bsd-ns
@@ -1648,12 +1673,12 @@ _shmutant_pristine_state() {
   # find execs a PROGRAM: `command` is a shell builtin (macOS ships a stub of that name, Linux
   # does not), so the utilities are resolved from the standard PATH first and exec'd by path.
   local ls_bin cksum_bin stat_bin="" fmt=""
-  ls_bin="$(command -pv ls)" && cksum_bin="$(command -pv cksum)" || return 1
+  ls_bin="$(_shmutant_std_bin ls)" && cksum_bin="$(_shmutant_std_bin cksum)" || return 1
   case "${SHMUTANT_STAT_STYLE:-none}" in
-    gnu-ns) stat_bin="$(command -pv stat)"; fmt='-c%.9Y %n' ;;
-    gnu)    stat_bin="$(command -pv stat)"; fmt='-c%Y %n' ;;
-    bsd-ns) stat_bin="$(command -pv stat)"; fmt='-f%Fm %N' ;;
-    bsd)    stat_bin="$(command -pv stat)"; fmt='-f%m %N' ;;
+    gnu-ns) stat_bin="$(_shmutant_std_bin stat)" || return 1; fmt='-c%.9Y %n' ;;
+    gnu)    stat_bin="$(_shmutant_std_bin stat)" || return 1; fmt='-c%Y %n' ;;
+    bsd-ns) stat_bin="$(_shmutant_std_bin stat)" || return 1; fmt='-f%Fm %N' ;;
+    bsd)    stat_bin="$(_shmutant_std_bin stat)" || return 1; fmt='-f%m %N' ;;
   esac
   ( builtin cd -P -- "$1" 2>/dev/null || exit 1
     set -o pipefail
@@ -1747,7 +1772,11 @@ shmutant_pool() {
   local rc pool_aliases; _shmutant_aliases_off pool_aliases
   # A plain call, not a condition: a callback's own errexit is honoured inside, as documented.
   _shmutant_pool_body "$@"; rc=$?
-  _shmutant_aliases_back "$pool_aliases"; return "$rc"
+  _shmutant_aliases_back "$pool_aliases"
+  # The caller's RETURN and DEBUG traps, when the pool held them, go back as this function
+  # returns: from its RETURN trap, with the status below already settled.
+  [[ -z "${SHMUTANT_TRAPS_PENDING:-}" ]] || builtin trap '_shmutant_traps_last' RETURN
+  return "$rc"
 }
 _shmutant_pool_body() {
   if [ "$#" -lt 4 ] || [ "$#" -gt 5 ]; then _shmutant_err "pool: usage: shmutant_pool <label> <workdir> <prepare> <run> [cap] (got $# arguments)"; return 2; fi

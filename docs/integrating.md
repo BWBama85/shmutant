@@ -150,8 +150,9 @@ concurrent callback that swaps a directory component of a sibling's clone for a 
 redirect it (that row is `unprepared`). Both callbacks must be functions, builtins or
 executables: an alias, which cannot be called by name, is refused (status 2). From the moment
 `prepare` returns until the pool is done, the shell's CHLD, DEBUG, RETURN and ERR traps are
-held (saved, disarmed, put back at the end): a handler `prepare` left cannot run inside the
-pool. A setting the caller made `readonly` is accepted when it is already canonical (a plain
+held (saved, disarmed, put back at the end — RETURN and DEBUG as the pool's outer function
+returns, from its own RETURN trap, once the pool's status is settled): a handler `prepare` left
+cannot run inside the pool nor change what it returned. A setting the caller made `readonly` is accepted when it is already canonical (a plain
 decimal; for `SHMUTANT_STREAM`, an absolute physical path) and refused with status 2 otherwise,
 never assigned. `SHMUTANT_SELECT` is set by the pool for every run, so a readonly one is
 refused (status 2) before any worker starts. Inside `shmutant_pool`, `shmutant_copy_tree` and

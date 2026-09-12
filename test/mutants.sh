@@ -1165,7 +1165,7 @@ shmutant_mut 'the final dispatch guard calls a caller function named test' \
   't_bash_floor'
 shmutant_mut 'DEBUG is handed back before the other traps' \
   '  if [ -n "${SHMUTANT_TRAP_CHLD:-}" ]; then eval "$SHMUTANT_TRAP_CHLD"; else trap - CHLD; fi' \
-  '  if [ -n "$debug" ]; then eval "$debug"; fi; if [ -n "${SHMUTANT_TRAP_CHLD:-}" ]; then eval "$SHMUTANT_TRAP_CHLD"; else trap - CHLD; fi' \
+  '  if [ -n "${SHMUTANT_TRAP_DEBUG:-}" ]; then eval "$SHMUTANT_TRAP_DEBUG"; fi; if [ -n "${SHMUTANT_TRAP_CHLD:-}" ]; then eval "$SHMUTANT_TRAP_CHLD"; else trap - CHLD; fi' \
   't_pool_refuses_shadowed_builtins_and_posix_mode'
 shmutant_mut 'a readonly selector is accepted' \
   '  if _shmutant_readonly SHMUTANT_SELECT; then _shmutant_err "$label: SHMUTANT_SELECT is readonly — the pool sets it for every run; leave it writable"; return 2; fi' \
@@ -1198,16 +1198,16 @@ shmutant_mut 'exact timestamps are left out of the fingerprint' \
   '        && : \' \
   't_pool_refuses_a_modified_pristine_tree'
 shmutant_mut 'the stat form is never detected' \
-  '  local st; st="$(command -pv stat 2>/dev/null)" || { SHMUTANT_STAT_STYLE=none; return 0; }' \
+  '  local st; st="$(_shmutant_std_bin stat)" || { SHMUTANT_STAT_STYLE=none; return 0; }' \
   '  SHMUTANT_STAT_STYLE=none; return 0' \
   't_pool_refuses_a_modified_pristine_tree'
 shmutant_mut 'the alias state is never put back' \
-  '  [ -z "$1" ] || \builtin eval "$1"' \
+  '  [[ -z "$1" ]] || \builtin eval "$1"' \
   '  :' \
   't_public_helpers_are_immune_to_aliases_at_run_time'
 shmutant_mut 'the alias state put back is always off' \
-  '  printf -v "$1" '"'"'%s'"'"' "$st"' \
-  '  printf -v "$1" '"'"'%s'"'"' "shopt -u expand_aliases"' \
+  '  \builtin printf -v "$1" '"'"'%s'"'"' "$st"' \
+  '  \builtin printf -v "$1" '"'"'%s'"'"' "shopt -u expand_aliases"' \
   't_public_helpers_are_immune_to_aliases_at_run_time'
 shmutant_mut 'a worker directory is made in whatever sits at the workdir path' \
   '    if ! _shmutant_wd_is_marked "$wd" || ! _shmutant_fresh_dir "$wd/$kind-$i" "$wd" || ! SHMUTANT_DIR_IDS["$kind-$i"]="$(_shmutant_dir_id "$wd/$kind-$i")" \' \
@@ -1221,3 +1221,25 @@ shmutant_mut 'a function named builtin survives the bootstrap' \
   'unset -f builtin 2>/dev/null' \
   ':' \
   't_bash_floor'
+
+# --- guards added for the thirty-fifth review round ---
+shmutant_mut 'the stat form is probed through whatever the name resolves to' \
+  '  local st; st="$(_shmutant_std_bin stat)" || { SHMUTANT_STAT_STYLE=none; return 0; }' \
+  '  local st; st="$(command -pv stat 2>/dev/null)" || { SHMUTANT_STAT_STYLE=none; return 0; }' \
+  't_pool_refuses_a_modified_pristine_tree'
+shmutant_mut 'the alias setting is saved through a caller printf' \
+  '  \builtin printf -v "$1" '"'"'%s'"'"' "$st"' \
+  '  printf -v "$1" '"'"'%s'"'"' "$st"' \
+  't_public_helpers_are_immune_to_aliases_at_run_time'
+shmutant_mut 'the alias setting is put back through a caller [' \
+  '  [[ -z "$1" ]] || \builtin eval "$1"' \
+  '  [ -z "$1" ] || \builtin eval "$1"' \
+  't_public_helpers_are_immune_to_aliases_at_run_time'
+shmutant_mut 'RETURN is handed back inside the release' \
+  '  if [ -n "${SHMUTANT_TRAP_ERR:-}" ]; then eval "$SHMUTANT_TRAP_ERR"; else trap - ERR; fi' \
+  '  if [ -n "${SHMUTANT_TRAP_ERR:-}" ]; then eval "$SHMUTANT_TRAP_ERR"; else trap - ERR; fi; if [ -n "${SHMUTANT_TRAP_RETURN:-}" ]; then eval "$SHMUTANT_TRAP_RETURN"; fi' \
+  't_pool_status_survives_a_handler_that_shadows_return'
+shmutant_mut 'the held traps are never handed back' \
+  '  [[ -z "${SHMUTANT_TRAPS_PENDING:-}" ]] || builtin trap '"'"'_shmutant_traps_last'"'"' RETURN' \
+  '  :' \
+  't_pool_status_survives_a_handler_that_shadows_return'

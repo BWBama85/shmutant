@@ -465,10 +465,11 @@ t_pool_refuses_shadowed_builtins_and_posix_mode() {
     fires="$(grep -c . "$T/dbg" 2>/dev/null || echo 0)"
     [ "$rc" -eq 0 ] || { echo "FAIL: $_unit: the pool failed ($rc) under a DEBUG trap prepare left: $(cat "$T/dbg-out")"; exit 1; }
     [ "$fires" -le 40 ] || { echo "FAIL: $_unit: a DEBUG trap prepare left ran $fires times after prepare returned"; exit 1; }
-    # and once handed back, the first command it sees is the pool's return: every other command
-    # of the pool, the other traps' restoration included, ran before it was handed back
+    # and once handed back, the first command it sees is this caller's own (the rc=$? after the
+    # pool call): every command of the pool, its return and the other traps' restoration
+    # included, ran before it was handed back
     after="$(awk 'found { print; exit } /^trap - CHLD DEBUG RETURN ERR$/ { found = 1 }' "$T/dbg")"
-    [ "$after" = 'return "$rc"' ] || { echo "FAIL: $_unit: the first command a DEBUG trap saw once handed back was [$after], not the pool's return"; exit 1; }
+    [ "$after" = 'rc=$?' ] || { echo "FAIL: $_unit: the first command a DEBUG trap saw once handed back was [$after], not this caller's own"; exit 1; }
     exit 0 ) || _failed=1
   # utilities are reached through command -p: a plan's function or a PATH prepare set to the
   # tree's bin does not stand in for ps, awk or ls
@@ -609,6 +610,11 @@ t_pool_refuses_a_modified_pristine_tree() {
     root_seconds_run() { touch -t 202001011200.30 "$1/../../pristine"; bash "$1/test.sh"; }
     SHMUTANT_JOBS=1 SHMUTANT_BASELINE=0 pool lbl "$T/wd13" toy_prepare root_seconds_run
     eq "$(verdict_of b)" unprepared 'a timestamp moved by seconds on the prepared root is seen'
+    # a caller's function named stat (or ls, or cksum) neither decides the stat form nor stands
+    # in for the utility find execs: the file on the standard path does
+    ( stat() { return 1; }; ls() { return 1; }; cksum() { return 1; }
+      SHMUTANT_JOBS=1 SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd14" toy_prepare seconds_run > "$T/out14" 2>"$T/err14" )
+    has "$(cat "$T/out14")" $'\trow\tunprepared\tb\t' "with caller functions named stat, ls and cksum the fingerprint still uses the utilities and sees the change: [$(head -c 200 "$T/err14")]"
   else
     echo "note: $_unit: no stat form here; exact timestamps are not in the fingerprint on this platform"
   fi
@@ -849,6 +855,18 @@ t_public_helpers_are_immune_to_aliases_at_run_time() {
   has "$(cat "$T/alias-out")" ok 'and the aliased shell survived them'
   [ -f "$T/dst/sub/g" ] || fail_ 'copy_tree under run-time aliases did not copy'
   eq "$(cat "$T/dst/f" 2>/dev/null)" x=2 'mutate under run-time aliases rewrote the file'
+  # a caller whose printf or [ is a function: the pool refuses the shadow (status 2), and the
+  # caller's expand_aliases is still on afterwards — the alias helpers use the builtin and
+  # the keyword, not the shadowed names
+  shmutant_reset; shmutant_target lib.sh; shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  ( shopt -s expand_aliases; printf() { :; }
+    SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wdp" toy_prepare toy_run > /dev/null 2>&1; rc=$?
+    if shopt -q expand_aliases; then echo "on rc=$rc"; else echo "off rc=$rc"; fi > "$T/alias-printf" )
+  eq "$(cat "$T/alias-printf")" 'on rc=2' "a printf function: the pool refuses it and the caller's expand_aliases is put back"
+  ( shopt -s expand_aliases; eval '[() { return 0; }'
+    SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wdb" toy_prepare toy_run > /dev/null 2>&1; rc=$?
+    if shopt -q expand_aliases; then echo "on rc=$rc"; else echo "off rc=$rc"; fi > "$T/alias-bracket" )
+  eq "$(cat "$T/alias-bracket")" 'on rc=2' "a [ function: the pool refuses it and the caller's expand_aliases is put back"
 }
 
 t_pool_refuses_a_workdir_swapped_between_rows() {
@@ -878,6 +896,25 @@ t_stream_open_failure_is_rolled_back() {
   has "$(cat "$T/e1")" 'private copy' 'says why'
   has "$(cat "$T/rc2")" 'rc=0' 'the next pool for the same stream opens it afresh and passes its integrity check'
   has "$(cat "$T/s.tsv")" $'\trow\tkilled\ta\t' 'and its records went to the stream'
+}
+
+t_pool_status_survives_a_handler_that_shadows_return() {
+  # a RETURN (or DEBUG) handler prepare leaves, with function tracing on, that defines a
+  # function named return once verdicts exist: handed back only as the pool's outer function
+  # returns, with its status settled, it cannot turn a survivor's status 1 into 0
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  shmutant_mut 'b' '$1 + $2' '$2 + $1' 'add-works'
+  return_prepare() { toy_prepare "$1"; set -T; trap 'if [ -n "${SHMUTANT_RES_VERDICT[*]:-}" ]; then return() { :; }; fi' RETURN; }
+  ( SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd" return_prepare toy_run > "$T/out" 2>"$T/err"; rc=$?
+    echo "rc=$rc" > "$T/rc"; trap -p RETURN > "$T/trap"; exit 0 )
+  has "$(cat "$T/rc")" 'rc=1' "a surviving row's status 1 survives a RETURN handler that shadows return: [$(head -c 200 "$T/err")]"
+  has "$(cat "$T/trap")" 'RETURN' "and the caller's RETURN trap was put back"
+  debug_prepare2() { toy_prepare "$1"; set -T; trap 'if [ -n "${SHMUTANT_RES_VERDICT[*]:-}" ] && [ "$(type -t return)" != function ]; then return() { :; }; fi' DEBUG; }
+  ( SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd2" debug_prepare2 toy_run > "$T/out2" 2>"$T/err2"; rc=$?
+    trap - DEBUG; echo "rc=$rc" > "$T/rc2"; exit 0 )
+  has "$(cat "$T/rc2")" 'rc=1' "a surviving row's status 1 survives a DEBUG handler that shadows return"
 }
 
 t_verdict_scans_a_large_output() {
