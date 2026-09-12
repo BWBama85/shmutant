@@ -342,4 +342,12 @@ One line per resolved review thread, newest last.
 - `path-lookup-ambiguity` `shmutant.sh` `a1704b9` `PRRT_kwDOUT7q9s6hnuve` PR #1 2026-09-11
 - `write-failure-swallowed` `shmutant.sh` `a1704b9` `PRRT_kwDOUT7q9s6hnuvi` PR #1 2026-09-11
 - `stale-artifact-reuse` `shmutant.sh` `a1704b9` `PRRT_kwDOUT7q9s6hnuvs` PR #1 2026-09-11
+- `caller-owned-path-deleted` `shmutant.sh` `928518c` `PRRT_kwDOUT7q9s6hsFRF` PR #1 2026-09-12
+- `stale-artifact-reuse` `shmutant.sh` `928518c` `PRRT_kwDOUT7q9s6hsFRI` PR #1 2026-09-12
+- `path-escapes-root` `shmutant.sh` `928518c` `PRRT_kwDOUT7q9s6hsFRM` PR #1 2026-09-12
+- `host-shell-option-leak` `shmutant.sh` `928518c` `PRRT_kwDOUT7q9s6hsFRP` PR #1 2026-09-12
+- `host-shell-option-leak` `shmutant.sh` `928518c` `PRRT_kwDOUT7q9s6hsFRT` PR #1 2026-09-12
+- `host-shell-option-leak` `shmutant.sh` `928518c` `PRRT_kwDOUT7q9s6hsFRW` PR #1 2026-09-12
+- `path-escapes-root` `shmutant.sh` `928518c` `PRRT_kwDOUT7q9s6hsFRY` PR #1 2026-09-12
+- `host-shell-option-leak` `shmutant.sh` `928518c` `sweep-r33-host-shell-option-leak-1` PR #1 2026-09-12
 <!-- adb:hits:end -->
