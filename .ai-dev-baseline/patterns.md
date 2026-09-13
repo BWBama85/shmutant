@@ -387,4 +387,7 @@ One line per resolved review thread, newest last.
 - `write-failure-swallowed` `shmutant.sh` `3d7734e` `PRRT_kwDOUT7q9s6h0Ixu` PR #1 2026-09-12
 - `caller-owned-path-deleted` `shmutant.sh` `3d7734e` `PRRT_kwDOUT7q9s6h0Ixw` PR #1 2026-09-12
 - `clock-dependent-deadline` `shmutant.sh` `3d7734e` `PRRT_kwDOUT7q9s6h0Ixz` PR #1 2026-09-12
+- `host-shell-option-leak` `shmutant.sh` `d202848` `PRRT_kwDOUT7q9s6h0gQ1` PR #1 2026-09-13
+- `host-shell-option-leak` `shmutant.sh` `d202848` `PRRT_kwDOUT7q9s6h0gQ4` PR #1 2026-09-13
+- `stale-artifact-reuse` `shmutant.sh` `d202848` `PRRT_kwDOUT7q9s6h0gQ6` PR #1 2026-09-13
 <!-- adb:hits:end -->
