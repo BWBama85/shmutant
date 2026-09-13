@@ -98,7 +98,7 @@ shmutant_mut 'the witness is checked against the selector' \
   '"$run" "$root" "$sel" "${SHMUTANT_ROWS_SEL[$i]}"' \
   't_verdict_accidental'
 shmutant_mut 'a witness on a non-red line counts' \
-  '    index($0, p) == 1 { red = 1; if (w != "" && witnessed($0, w)) { wit = 1; exit } }' \
+  '    index($0, p) == 1 { red = 1; if (w != "" && witnessed(substr($0, length(p) + 1), w)) { wit = 1; exit } }' \
   '    index($0, p) == 1 { red = 1 } w != "" && witnessed($0, w) { wit = 1 }' \
   't_verdict_accidental'
 shmutant_mut 'exit 1 without a red line is scored accidental' \
@@ -740,8 +740,8 @@ shmutant_mut 'an empty copy destination is accepted' \
   '  if [ "$#" -ne 2 ]; then' \
   't_copy_tree_excludes_git'
 shmutant_mut 'the red prefix is matched anywhere in the line' \
-  '    index($0, p) == 1 { red = 1; if (w != "" && witnessed($0, w)) { wit = 1; exit } }' \
-  '    index($0, p) { red = 1; if (w != "" && witnessed($0, w)) { wit = 1; exit } }' \
+  '    index($0, p) == 1 { red = 1; if (w != "" && witnessed(substr($0, length(p) + 1), w)) { wit = 1; exit } }' \
+  '    index($0, p) { red = 1; if (w != "" && witnessed(substr($0, length(p) + 1), w)) { wit = 1; exit } }' \
   't_verdict_aborted_no_red_line'
 shmutant_mut 'a freeze that never settles is endured in silence' \
   '    if [ "$rounds" -ge 32 ]; then SHMUTANT_FREEZE_UNSETTLED=1; break; fi' \
@@ -1497,3 +1497,21 @@ shmutant_mut 'the bytes the stream already held are not checked' \
   '    [ "$(command -p dd if="$SHMUTANT_STREAM" bs="$SHMUTANT_STREAM_BASE" count=1 2>/dev/null | command -p cksum)" = "${SHMUTANT_STREAM_PREFIX_CK:-}" ] || return 1' \
   '    :' \
   't_stream_prefix_overwritten_in_place_is_noticed'
+
+# --- guards added for the forty-seventh review round ---
+shmutant_mut 'a hard link elsewhere in the prepared tree is cloned apart' \
+  '  case "$linked" in ?*)' \
+  '  case "$linked" in "")' \
+  't_pool_refuses_a_prepared_tree_with_a_hard_link'
+shmutant_mut 'the witness is looked for in the prefix too' \
+  '    index($0, p) == 1 { red = 1; if (w != "" && witnessed(substr($0, length(p) + 1), w)) { wit = 1; exit } }' \
+  '    index($0, p) == 1 { red = 1; if (w != "" && witnessed($0, w)) { wit = 1; exit } }' \
+  't_witness_matches_a_whole_token'
+shmutant_mut 'a run callback inherits the selection count' \
+  '      SHMUTANT_SELECTED_N=0; export SHMUTANT_SELECT="$sel"; "$run" "$root" "$sel"; rrc=$?' \
+  '      export SHMUTANT_SELECT="$sel"; "$run" "$root" "$sel"; rrc=$?' \
+  't_run_callback_sees_a_fresh_selection_counter'
+shmutant_mut 'a negative span renders as a malformed number' \
+  '  [ "$us" -ge 0 ] 2>/dev/null || us=0' \
+  '  :' \
+  't_stream_format'

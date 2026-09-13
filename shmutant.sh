@@ -192,6 +192,9 @@ _shmutant_now() {
 # _shmutant_secs <microseconds> — render a microsecond count as seconds with three decimals.
 _shmutant_secs() {
   local us="$1" ms
+  # EPOCHREALTIME is wall-clock: a clock set back between two readings gives a negative span,
+  # which would render as `-1.-999`; the record carries 0.000 instead, never a malformed number.
+  [ "$us" -ge 0 ] 2>/dev/null || us=0
   ms=$(( (us + 500) / 1000 ))
   printf '%d.%03d' "$(( ms / 1000 ))" "$(( ms % 1000 ))"
 }
@@ -569,7 +572,7 @@ _shmutant_scan_output() {
     }
     BEGIN { p = ENVIRON["SHMUTANT_SCAN_P"]; w = ENVIRON["SHMUTANT_SCAN_W"] }
     BEGIN { SEP = " \t!\"#$%&'"'"'()*+,/:;<=>?@[\\]^`{|}~" }
-    index($0, p) == 1 { red = 1; if (w != "" && witnessed($0, w)) { wit = 1; exit } }
+    index($0, p) == 1 { red = 1; if (w != "" && witnessed(substr($0, length(p) + 1), w)) { wit = 1; exit } }
     END { print red + 0, wit + 0 }' <&"$1" 2>/dev/null)"
   case "$got" in
     "1 1") SHMUTANT_RUN_RED=1; SHMUTANT_RUN_WITNESSED=1 ;;
@@ -980,7 +983,9 @@ _shmutant_run_bounded() {
       read -t 30 -r _ <&"$go" || builtin exit 127
       trap '_shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"' EXIT
       exit() { local s=$?; _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; if [ "$#" -eq 0 ]; then builtin exit "$s"; else builtin exit "$@"; fi; }
-      export SHMUTANT_SELECT="$sel"; "$run" "$root" "$sel"; rrc=$?
+      # The counter describes this run: what the sourcing shell counted before the pool is not
+      # this callback's, and a suite that refuses to pass on zero must be able to see zero.
+      SHMUTANT_SELECTED_N=0; export SHMUTANT_SELECT="$sel"; "$run" "$root" "$sel"; rrc=$?
       _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; trap - EXIT; builtin exit "$rrc" ) < /dev/null >&"$out_w" 2>&1 &
     pid=$!
     # The holder's pid arrives on the FIFO, or nothing does: a wrapper that died before
@@ -2092,7 +2097,7 @@ shmutant_pool() {
 _shmutant_pool_body() {
   if [ "$#" -lt 4 ] || [ "$#" -gt 5 ]; then _shmutant_err "pool: usage: shmutant_pool <label> <workdir> <prepare> <run> [cap] (got $# arguments)"; return 2; fi
   local label="$1" wd="$2" prep="$3" run="$4" cap="${5:-}"
-  local n jobs root suffix i k sel t0 t1 killed=0 rc=0 verdict detail rjrc
+  local n jobs root suffix i k sel t0 t1 killed=0 rc=0 verdict detail rjrc linked
   local -a base_sel=() base_verdict=()
   n="${#SHMUTANT_ROWS_NAME[@]}"
   t0="$(_shmutant_now)"
@@ -2230,6 +2235,15 @@ _shmutant_pool_body() {
       _shmutant_pool_fail "$label" "$wd"; return 2
     fi
   done
+  # And anywhere else in the prepared tree: the clone (cp -RPp) gives every hard link its own
+  # inode, so a fixture the tests write through one name and read through another would behave
+  # differently in the clone than in the tree prepare built. Scanned as shmutant_copy_tree
+  # scans its source (.git pruned).
+  linked="$(builtin cd -- "$wd/pristine" 2>/dev/null && command -p find . -path ./.git -prune -o -type f -links +1 -print 2>/dev/null)" || linked="?"
+  case "$linked" in ?*)
+    _shmutant_err "$label: the prepared tree holds a regular file with more than one hard link (${linked%%$'\n'*}) — a clone cannot keep them joined; prepare a tree without them"
+    _shmutant_pool_fail "$label" "$wd"; return 2 ;;
+  esac
 
   if [ "${SHMUTANT_BASELINE:-1}" != 0 ]; then
     for (( i = 0; i < n; i++ )); do

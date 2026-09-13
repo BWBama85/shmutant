@@ -580,6 +580,15 @@ t_witness_matches_a_whole_token() {
   eq "$SHMUTANT_RUN_RED$SHMUTANT_RUN_WITNESSED" 11 'ASCII punctuation around the witness carries it'
   scan 'FAIL: t_x: café: y' café
   eq "$SHMUTANT_RUN_RED$SHMUTANT_RUN_WITNESSED" 11 'a non-ASCII witness is carried as a whole token'
+  # the witness is looked for after the prefix only: a witness that is a token of the prefix
+  # itself is not carried by every red line
+  scanp() { exec {fd}< <(printf '%s\n' "$1"); _shmutant_scan_output "$fd" "$2" "$3"; exec {fd}<&-; }
+  scanp 'FAIL: t_x: oops' 'FAIL: ' FAIL
+  eq "$SHMUTANT_RUN_RED$SHMUTANT_RUN_WITNESSED" 10 'a witness equal to the prefix word is not carried by the prefix'
+  scanp 'FAIL: t_x: FAIL' 'FAIL: ' FAIL
+  eq "$SHMUTANT_RUN_RED$SHMUTANT_RUN_WITNESSED" 11 'but it is carried when it follows the prefix'
+  scanp 'not ok 1 - parse' 'not ok ' ok
+  eq "$SHMUTANT_RUN_RED$SHMUTANT_RUN_WITNESSED" 10 'the TAP prefix does not carry a witness named ok'
   # a scan that produced nothing (its descriptor cannot be read) is not a green run
   _shmutant_scan_output 199 'FAIL: ' foo 2>/dev/null
   eq "${SHMUTANT_RUN_SCAN_FAILED:-unset}" 1 'a scan whose descriptor cannot be read reports failure, not green'
@@ -1495,6 +1504,33 @@ t_proc_scan_reads_each_stat_file_as_one_record() {
   local n; n="$(_shmutant_descendants_started "$$" | awk -v p="$nlpid" '$1 == p' | wc -l | tr -d ' ')"
   [ "$n" -eq 1 ] || fail_ 'the newline-named process is not among the descendants with a start time'
   kill -KILL "$nlpid" "$holder" 2>/dev/null; wait "$holder" 2>/dev/null; true
+}
+
+t_pool_refuses_a_prepared_tree_with_a_hard_link() {
+  # a hard-linked pair anywhere in the prepared tree (not only a target): the clone would give
+  # each name its own inode, and a test writing through one name and reading the other would
+  # see a different tree from the one prepare built
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  linking_prepare() { toy_prepare "$@" && printf 'fixture\n' > "$1/fixture" && ln "$1/fixture" "$1/fixture-alias"; }
+  SHMUTANT_BASELINE=0 pool lbl "$T/wd" linking_prepare toy_run
+  rc_is "$RC" 2 'a prepared tree holding a hard-linked pair is a harness error'
+  has "$ERR" 'more than one hard link' 'says why'
+  has "$ERR" 'fixture' 'and names one of them'
+}
+
+t_run_callback_sees_a_fresh_selection_counter() {
+  # a run callback that is a function inherits the sourcing shell'"'"'s SHMUTANT_SELECTED_N: the
+  # runner resets it, so a suite that refuses to pass when nothing was selected can see zero
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  shmutant_selected "$_unit" > /dev/null || true
+  [ "${SHMUTANT_SELECTED_N:-0}" -gt 0 ] || fail_ 'fixture: the sourcing shell has no selection count to inherit'
+  counting_run() { shmutant_selected no-such-unit > /dev/null || true; [ "${SHMUTANT_SELECTED_N:-0}" -gt 0 ] || return 2; bash "$1/test.sh"; }
+  SHMUTANT_BASELINE=0 pool lbl "$T/wd" toy_prepare counting_run
+  eq "$(verdict_of a)" aborted 'a run whose selector matched nothing sees a zero counter and aborts, whatever the sourcing shell counted'
 }
 
 t_verdict_scans_a_large_output() {
@@ -2489,7 +2525,8 @@ t_pool_refuses_hard_linked_target() {
   shmutant_reset; shmutant_target lib.sh; shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
   pool lbl "$T/wd" linking_prepare toy_run
   rc_is "$RC" 2 'a target with a second hard link is refused before any run'
-  has "$ERR" 'hard link' 'says why'
+  # the row-specific check, ahead of the whole-tree scan that would also refuse this tree
+  has "$ERR" "row 'a' targets lib.sh, which has more than one hard link" 'says why, naming the row'
 }
 
 t_pool_recreates_worker_dirs() {
@@ -2942,6 +2979,8 @@ t_stream_format() {
   eq "$(_shmutant_esc $'a\\b\tc\nd')" 'a\\b\tc\nd' 'escaping covers backslash, tab and newline'
   eq "$(_shmutant_secs 1500)" '0.002' 'microseconds round to milliseconds'
   eq "$(_shmutant_secs 2500000)" '2.500' 'seconds render with three decimals'
+  eq "$(_shmutant_secs -1500000)" '0.000' 'a negative span (a clock set back) renders as zero, never as a malformed number'
+  eq "$(_shmutant_secs -1)" '0.000' 'even a tiny one'
 }
 
 t_stream_write_failure_is_a_harness_error() {
