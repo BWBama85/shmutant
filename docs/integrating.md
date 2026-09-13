@@ -154,7 +154,9 @@ concurrent callback that swaps a directory component of a sibling's clone for a 
 redirect it (that row is `unprepared`). A run that renamed its clone away and put another
 directory at the path gets `unprepared` (`swapped`) whether or not `SHMUTANT_KEEP=1` keeps the
 tree: only the removal waits on that setting. Both callbacks must be functions or
-executables: an alias, which cannot be called by name, and a builtin (`exit` or `return` would
+executables (an executable named by a relative path is resolved to its absolute physical path
+when the pool starts, so a `prepare` that changes the working directory does not change which
+program runs): an alias, which cannot be called by name, and a builtin (`exit` or `return` would
 end or leave the pool's shell) are refused (status 2). A row's target is read again after its
 run — content, mode, owner, size and exact mtime — and sampled the same way every half second
 by the watchdog while the run is alive (with a timeout set), and must be exactly what the pool
@@ -268,11 +270,17 @@ Keep `SHMUTANT_KEEP=1` and `--workdir` on a CI failure to upload `mut-<n>/output
 artifact: it is the full output of the run that produced the verdict. A `--workdir` you supply
 is never removed; the pool's `base-<n>`, `mut-<n>` and `pristine` entries inside it are recreated
 on every run. Those entries are only ever removed from a workdir shmutant marked as its own on
-first use (a `.shmutant` file): a directory that already holds entries by those names and no
-marker is refused, not emptied. Each worker reports its verdict on a descriptor the pool opened
+first use (a `.shmutant` file holding the line `shmutant workdir`): a directory that already
+holds entries by those names and no marker, or a `.shmutant` of the caller's own with anything
+else in it, is refused, not emptied. Each worker reports its verdict on a descriptor the pool opened
 before the worker forked, on a file with no name; nothing planted in a worker directory, by that
 worker or by a sibling, can stand in for it, and a worker that did not exit normally is `lost`. A workdir the CLI created for itself is removed unless `--keep`, read-only trees
-included; one that cannot be removed is reported and the run exits 2.
+included; one that cannot be removed is reported and the run exits 2. What the plan file or a callback
+left running (a helper backgrounded from the plan, a service `prepare` started) is ended with
+KILL when the run ends, whether the pool completed or the plan left early: the plan runs in a
+process group of its own, held until then. The plan reads no terminal (its standard input is
+`/dev/null`). A process that put itself in another session is out of reach, as for a timed-out
+run.
 
 ## 6. Tuning
 

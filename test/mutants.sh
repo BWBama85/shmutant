@@ -794,8 +794,8 @@ shmutant_mut 'a caller function named cd stands in for the builtin' \
   '  ( cd -P -- "$d" 2>/dev/null && pwd -P )' \
   't_abs_ignores_cdpath'
 shmutant_mut 'a caller workdir holding entries shmutant did not make is emptied' \
-  '  if [ -f "$wd/.shmutant" ] && [ ! -L "$wd/.shmutant" ]; then return 0; fi' \
-  '  return 0' \
+  '    for e in "$wd"/pristine "$wd"/base-* "$wd"/mut-*; do' \
+  '    for e in; do' \
   't_pool_refuses_a_workdir_it_did_not_create_entries_in'
 shmutant_mut 'the workdir ownership check runs under the caller glob options' \
   '  ( set +f; shopt -u failglob; shopt -s nullglob; unset GLOBIGNORE' \
@@ -948,8 +948,8 @@ shmutant_mut 'a run that could not be set up is scored on the row' \
   '    :' \
   't_run_partial_channel_open_is_a_setup_failure'
 shmutant_mut 'anything named .shmutant marks a workdir as ours' \
-  '  if [ -f "$wd/.shmutant" ] && [ ! -L "$wd/.shmutant" ]; then return 0; fi' \
-  '  if [ -e "$wd/.shmutant" ]; then return 0; fi' \
+  '  if [ -f "$wd/.shmutant" ] && [ ! -L "$wd/.shmutant" ]; then' \
+  '  if [ -e "$wd/.shmutant" ] || [ -L "$wd/.shmutant" ]; then return 0; elif false; then' \
   't_pool_refuses_a_workdir_it_did_not_create_entries_in'
 shmutant_mut 'the alias setting is not put back when an old bash is refused' \
   '  if [[ "${BASH_SOURCE[0]}" = "$0" ]]; then builtin exit 2; fi' \
@@ -1437,3 +1437,25 @@ shmutant_mut 'a worker local is missing from the pool preflight' \
   '    table target target_ck targets timeout tmp unpublished us v v_jobs v_red v_timeout \' \
   '    table target_ck targets timeout tmp unpublished us v v_jobs v_red v_timeout \' \
   't_readonly_preflight_names_every_local'
+
+# --- guards added for the forty-fourth review round ---
+shmutant_mut 'a relative run callback is looked up again after prepare' \
+  '  run="$(_shmutant_pin_callback "$run")" || { _shmutant_err "$label: run callback cannot be resolved to a program: $run"; return 2; }' \
+  '  :' \
+  't_pool_pins_relative_executable_callbacks'
+shmutant_mut 'a caller file named .shmutant marks the workdir' \
+  '    [ "$line" = "shmutant workdir" ] && return 0' \
+  '    return 0' \
+  't_pool_refuses_a_workdir_it_did_not_create_entries_in'
+shmutant_mut 'the marker shmutant writes is empty' \
+  '    printf '"'"'shmutant workdir\n'"'"' >| "$wd/.shmutant" 2>/dev/null || { _shmutant_err "$label: cannot mark $wd as a shmutant workdir"; exit 2; } )' \
+  '    : >| "$wd/.shmutant" 2>/dev/null || { _shmutant_err "$label: cannot mark $wd as a shmutant workdir"; exit 2; } )' \
+  't_pool_refuses_a_workdir_it_did_not_create_entries_in'
+shmutant_mut 'what the plan left running outlives the CLI' \
+  '  _shmutant_cli_end_group "$SHMUTANT_CLI_CHILD" "$plan_holder"' \
+  '  :' \
+  't_cli_ends_what_the_plan_left_running'
+shmutant_mut 'the plan subshell shares the CLI process group' \
+  '  builtin set -m' \
+  '  builtin set +m' \
+  't_cli_ends_what_the_plan_left_running'

@@ -402,6 +402,18 @@ t_pool_refuses_a_workdir_it_did_not_create_entries_in() {
   mkdir -p "$T/wd5/pristine"; ln -s "$T/nowhere" "$T/wd5/.shmutant"
   pool lbl "$T/wd5" toy_prepare toy_run
   rc_is "$RC" 2 'a symlink named .shmutant is not the marker'
+  # a caller's own .shmutant (a config file, an empty sentinel) beside a pristine of theirs is
+  # not the marker either: the marker shmutant writes carries a recognisable line
+  mkdir -p "$T/wd6/pristine"; printf 'mine\n' > "$T/wd6/pristine/precious"; printf 'config=1\n' > "$T/wd6/.shmutant"
+  pool lbl "$T/wd6" toy_prepare toy_run
+  rc_is "$RC" 2 'a caller file named .shmutant is not the marker'
+  has "$ERR" 'not the marker shmutant writes' 'says why'
+  eq "$(cat "$T/wd6/pristine/precious")" mine 'and the caller'"'"'s pristine stayed'
+  mkdir -p "$T/wd7/pristine"; printf 'mine\n' > "$T/wd7/pristine/precious"; : > "$T/wd7/.shmutant"
+  pool lbl "$T/wd7" toy_prepare toy_run
+  rc_is "$RC" 2 'an empty file named .shmutant is not the marker'
+  eq "$(cat "$T/wd7/pristine/precious")" mine 'and that pristine stayed too'
+  eq "$(cat "$T/wd3/.shmutant")" 'shmutant workdir' 'the marker shmutant writes is the recognisable line'
 }
 
 t_target_refuses_a_newline() {
@@ -1192,7 +1204,7 @@ t_a_clone_swapped_by_its_run_is_not_removed() {
   shmutant_mut 'b' '$1 + $2' '$1 * $2' 'add-works'
   swap_then_hang_run() { mv "$1" "$1.moved"; mkdir "$1"; printf 'precious\n' > "$1/keep"; : > "$T/swapped"; sleep 30; }
   make_unremovable "$T/wd3/mut-1/held" || { echo "note: $_unit: no way to make a directory unremovable here; the dying-worker case is skipped"; return; }
-  : > "$T/wd3/.shmutant"
+  printf 'shmutant workdir\n' > "$T/wd3/.shmutant"
   eval "$(declare -f _shmutant_fresh_dir | sed '1s/_shmutant_fresh_dir/_shmutant_fresh_dir_real/')"
   _shmutant_fresh_dir() { local i=0; case "$1" in */mut-1) until [ -e "$T/swapped" ] || [ "$i" -ge 300 ]; do i=$((i + 1)); sleep 0.1; done ;; esac; _shmutant_fresh_dir_real "$@"; }
   SHMUTANT_JOBS=2 SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=0 pool lbl "$T/wd3" toy_prepare swap_then_hang_run
@@ -1334,6 +1346,48 @@ t_helpers_restore_posixly_correct() {
   eq "$(cat "$T/pc1")" custom 'a caller value of POSIXLY_CORRECT survives the shadow check exactly'
   ( unset POSIXLY_CORRECT; shmutant_copy_tree "$T/pc-src" "$T/pc-dst2" > /dev/null 2>&1; printf '%s' "${POSIXLY_CORRECT-unset}" > "$T/pc2" )
   eq "$(cat "$T/pc2")" unset 'an unset POSIXLY_CORRECT stays unset'
+}
+
+t_pool_pins_relative_executable_callbacks() {
+  # an executable run callback given by a relative path is resolved when the pool starts: a
+  # prepare that changes the working directory does not make a decoy at the same relative
+  # path the program that produces the verdicts
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  mkdir -p "$T/cb/decoy"
+  printf '#!/bin/sh\nexec bash "$1/test.sh"\n' > "$T/cb/runner"; chmod +x "$T/cb/runner"
+  printf '#!/bin/sh\nexit 0\n' > "$T/cb/decoy/runner"; chmod +x "$T/cb/decoy/runner"
+  cd_then_prepare() { cd "$T/cb/decoy" || return 1; toy_prepare "$@"; }
+  ( cd "$T/cb" && SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd" cd_then_prepare ./runner > "$T/out" 2>"$T/err"; echo "rc=$?" > "$T/rc" )
+  eq "$(cat "$T/rc")" 'rc=0' 'the pool ran with a relative executable run callback and a prepare that changed directory'
+  has "$(cat "$T/out")" $'\trow\tkilled\ta\t' 'the program the caller named produced the verdict, not the decoy prepare moved beside'
+}
+
+t_cli_ends_what_the_plan_left_running() {
+  # what the plan file or prepare backgrounds is ended when the run ends, whether the pool
+  # completed or the plan left early: the plan subshell runs in a held process group of its own
+  mk_toy "$T/toy"; TOY="$T/toy"; rm -rf "$T/tmpd"; mkdir -p "$T/tmpd"
+  local i
+  cat > "$T/toy/plan-leaves.sh" <<EOF
+command -p sleep 30 & echo \$! > "$T/left-plan"
+exit 0
+EOF
+  TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-leaves.sh" --no-baseline > /dev/null 2>"$T/e-left"; rc_is $? 2 'a plan that exits before the pool is a harness error'
+  [ -s "$T/left-plan" ] || fail_ 'fixture: the plan did not background anything'
+  i=0; while kill -0 "$(cat "$T/left-plan")" 2>/dev/null && [ "$i" -lt 30 ]; do i=$((i + 1)); sleep 0.1; done
+  kill -0 "$(cat "$T/left-plan")" 2>/dev/null && { kill -KILL "$(cat "$T/left-plan")" 2>/dev/null; fail_ 'a process the plan backgrounded outlived the CLI'; }
+  cat > "$T/toy/plan-helper.sh" <<EOF
+prepare() { command -p sleep 30 & echo \$! > "$T/left-prep"; shmutant_copy_tree "\$SHMUTANT_PLAN_DIR" "\$1"; }
+run() { bash "\$1/test.sh"; }
+shmutant_target lib.sh
+shmutant_mut 'a' '\$1 + \$2' '\$1 - \$2' 'add-works'
+EOF
+  TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-helper.sh" --no-baseline > /dev/null 2>"$T/e-help"; rc_is $? 0 'a completed pool whose prepare left a helper running'
+  [ -s "$T/left-prep" ] || fail_ 'fixture: prepare did not background anything'
+  i=0; while kill -0 "$(cat "$T/left-prep")" 2>/dev/null && [ "$i" -lt 30 ]; do i=$((i + 1)); sleep 0.1; done
+  kill -0 "$(cat "$T/left-prep")" 2>/dev/null && { kill -KILL "$(cat "$T/left-prep")" 2>/dev/null; fail_ 'a helper prepare backgrounded outlived the CLI'; }
+  true
 }
 
 t_verdict_scans_a_large_output() {
@@ -2335,7 +2389,7 @@ t_pool_recreates_worker_dirs() {
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
   shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
-  mkdir -p "$T/wd/mut-0/tree/stale" "$T/wd/base-0"; : > "$T/wd/.shmutant"
+  mkdir -p "$T/wd/mut-0/tree/stale" "$T/wd/base-0"; printf 'shmutant workdir\n' > "$T/wd/.shmutant"
   : > "$T/wd/mut-0/timeout"; : > "$T/wd/base-0/timeout"
   pool lbl "$T/wd" toy_prepare toy_run
   rc_is "$RC" 0 'a stale timeout marker from an earlier pool does not poison the verdict'
@@ -2345,7 +2399,7 @@ t_pool_recreates_worker_dirs() {
   # a row skipped because its baseline is red still gets a fresh directory
   shmutant_reset; shmutant_target lib.sh
   shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
-  mkdir -p "$T/wd2/mut-0/tree"; printf 'old\n' > "$T/wd2/mut-0/output"; : > "$T/wd2/.shmutant"
+  mkdir -p "$T/wd2/mut-0/tree"; printf 'old\n' > "$T/wd2/mut-0/output"; printf 'shmutant workdir\n' > "$T/wd2/.shmutant"
   red_run() { echo "FAIL: add-works: always"; return 1; }
   pool lbl "$T/wd2" toy_prepare red_run
   eq "$(verdict_of a)" baseline 'the row is baseline-skipped'
@@ -2445,7 +2499,7 @@ t_pool_aborts_running_workers_when_a_dir_cannot_be_recreated() {
   shmutant_mut 'b' '$1 + $2' '$1 * $2' 'add-works'
   hanging_run() { : > "$T/started"; bash -c "sleep 30; touch '$T/finished'"; }
   make_unremovable "$T/wd/mut-1/held" || { echo "note: $_unit: no way to make a directory unremovable here; skipped"; return; }
-  : > "$T/wd/.shmutant"
+  printf 'shmutant workdir\n' > "$T/wd/.shmutant"
   # The startup failure on mut-1 is held until mut-0 is RUNNING its callback: the abort must
   # then end a live worker and remove a clone that exists, which is what the assertions below
   # observe (a worker still fingerprinting pristine when aborted has neither).
@@ -2464,7 +2518,7 @@ t_pool_aborts_running_workers_when_a_dir_cannot_be_recreated() {
   # with a TERM-ignoring escaped descendant, the abort must not return before it is gone
   stubborn_hanging_run() { : > "$T/started2"; set -m; bash -c "trap '' TERM; sleep 30; touch '$T/finished2'" & wait; }
   make_unremovable "$T/wd2/mut-1/held" || { eval "$(declare -f _shmutant_fresh_dir_real | sed '1s/_shmutant_fresh_dir_real/_shmutant_fresh_dir/')"; unset -f _shmutant_fresh_dir_real; return; }
-  : > "$T/wd2/.shmutant"
+  printf 'shmutant workdir\n' > "$T/wd2/.shmutant"
   WAIT_FOR=started2 SHMUTANT_JOBS=2 SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=0 pool lbl "$T/wd2" toy_prepare stubborn_hanging_run
   unmake_unremovable "$T/wd2/mut-1/held"
   eval "$(declare -f _shmutant_fresh_dir_real | sed '1s/_shmutant_fresh_dir_real/_shmutant_fresh_dir/')"; unset -f _shmutant_fresh_dir_real
@@ -2477,7 +2531,7 @@ t_pool_refuses_unremovable_pristine() {
   shmutant_reset; shmutant_target lib.sh
   shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
   make_unremovable "$T/wd/pristine/held" || { echo "note: $_unit: no way to make a directory unremovable here; skipped"; return; }
-  : > "$T/wd/.shmutant"
+  printf 'shmutant workdir\n' > "$T/wd/.shmutant"
   pool lbl "$T/wd" toy_prepare toy_run
   unmake_unremovable "$T/wd/pristine/held"
   rc_is "$RC" 2 'a pristine directory that cannot be recreated aborts the pool'
@@ -2533,7 +2587,7 @@ t_pool_reads_the_table_prepare_declared() {
   has "$(cat "$T/out")" 'rc=0' 'and the caller shell survived a pool status under set -e'
   # a harness error from the row pool (a worker directory that cannot be recreated) under the
   # caller's set -e still passes through the pool's own cleanup: the prepared tree is gone
-  mkdir -p "$T/wd7"; : > "$T/wd7/.shmutant"
+  mkdir -p "$T/wd7"; printf 'shmutant workdir\n' > "$T/wd7/.shmutant"
   if make_unremovable "$T/wd7/mut-0/held"; then
     bash -c '. "$1"; set -e; T="$2"; TOY="$T/toy"
       toy_prepare() { shmutant_copy_tree "$TOY" "$1"; }
@@ -2651,7 +2705,7 @@ t_pool_refuses_unremovable_worker_dir() {
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
   shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
-  mkdir -p "$T/wd/mut-0"; printf 'killed\n1\n1\n' > "$T/wd/mut-0/verdict"; : > "$T/wd/.shmutant"
+  mkdir -p "$T/wd/mut-0"; printf 'killed\n1\n1\n' > "$T/wd/mut-0/verdict"; printf 'shmutant workdir\n' > "$T/wd/.shmutant"
   make_unremovable "$T/wd/mut-0/held" || { echo "note: $_unit: no way to make a directory unremovable here; skipped"; return; }
   # with a long caller job of its own, so a bare wait in the failure path would block on it
   sleep 30 & local job=$!

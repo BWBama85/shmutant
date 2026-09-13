@@ -1773,6 +1773,24 @@ _shmutant_callable() {
   return 1
 }
 
+# _shmutant_pin_callback <name> — a function's name as given; an executable file's absolute
+# physical path, resolved now: prepare may change the working directory, and a relative path
+# looked up again from there (by the check after prepare, by a worker) could name another
+# program. Fails for anything else, and for a name with a newline in it.
+_shmutant_pin_callback() {
+  case "$1" in *$'\n'*) return 1 ;; esac
+  case "$(builtin type -t -- "$1" 2>/dev/null)" in
+    function) printf '%s' "$1"; return 0 ;;
+    file) ;;
+    *) return 1 ;;
+  esac
+  local f d
+  case "$1" in */*) f="$1" ;; *) f="$(builtin type -P -- "$1" 2>/dev/null)" || return 1 ;; esac
+  [ -n "$f" ] || return 1
+  d="$(builtin cd -P -- "$(command -p dirname -- "$f")" 2>/dev/null && command -p pwd -P)" || return 1
+  printf '%s/%s' "$d" "$(command -p basename -- "$f")"
+}
+
 # _shmutant_std_bin <name> — the executable file <name> on the standard utility path, or
 # failure. `command -pv` would report a caller's function of that name, and find execs a
 # program: the file is what the fingerprint hands it.
@@ -1951,8 +1969,14 @@ _shmutant_no_shadows() {
 # mut-N) are removed only from a workdir shmutant marked as its own on first use; a caller's
 # directory that happens to carry those names is refused, not emptied.
 _shmutant_workdir_owned() {
-  local label="$1" wd="$2"
-  if [ -f "$wd/.shmutant" ] && [ ! -L "$wd/.shmutant" ]; then return 0; fi
+  local label="$1" wd="$2" line=""
+  if [ -f "$wd/.shmutant" ] && [ ! -L "$wd/.shmutant" ]; then
+    # The marker carries a recognisable line: a caller's own .shmutant (a config, a sentinel)
+    # does not make the pristine, base-N and mut-N entries beside it disposable.
+    IFS= read -r -n 64 line < "$wd/.shmutant" 2>/dev/null || :
+    [ "$line" = "shmutant workdir" ] && return 0
+    _shmutant_err "$label: $wd/.shmutant is not the marker shmutant writes — refusing to treat the workdir as shmutant's"; return 2
+  fi
   if [ -e "$wd/.shmutant" ] || [ -L "$wd/.shmutant" ]; then _shmutant_err "$label: $wd/.shmutant is not the regular file shmutant writes — refusing to treat the workdir as shmutant's"; return 2; fi
   # The caller's glob settings neutralised in a subshell, as in shmutant_copy_tree.
   ( set +f; shopt -u failglob; shopt -s nullglob; unset GLOBIGNORE
@@ -1961,7 +1985,7 @@ _shmutant_workdir_owned() {
         _shmutant_err "$label: $wd holds $(command -p basename -- "$e") but was not created by shmutant (no $wd/.shmutant) — refusing to remove a caller's entries; use an empty workdir"; exit 2
       fi
     done
-    : >| "$wd/.shmutant" 2>/dev/null || { _shmutant_err "$label: cannot mark $wd as a shmutant workdir"; exit 2; } )
+    printf 'shmutant workdir\n' >| "$wd/.shmutant" 2>/dev/null || { _shmutant_err "$label: cannot mark $wd as a shmutant workdir"; exit 2; } )
 }
 
 # _shmutant_report_keep <when> — tell a CLI parent the SHMUTANT_KEEP in force now, on the
@@ -2020,6 +2044,10 @@ _shmutant_pool_body() {
   SHMUTANT_WD_ID="$(_shmutant_dir_id "$wd")"
   _shmutant_callable "$prep" || { _shmutant_err "$label: prepare callback not found: $prep (a function or an executable; an alias cannot be called by name, and a builtin such as exit or return would end or leave this shell)"; return 2; }
   _shmutant_callable "$run" || { _shmutant_err "$label: run callback not found: $run (a function or an executable; an alias cannot be called by name, and a builtin such as exit or return would end or leave this shell)"; return 2; }
+  # Executables by absolute physical path from here: a prepare that changes the working
+  # directory must not change which program the workers run.
+  prep="$(_shmutant_pin_callback "$prep")" || { _shmutant_err "$label: prepare callback cannot be resolved to a program: $prep"; return 2; }
+  run="$(_shmutant_pin_callback "$run")" || { _shmutant_err "$label: run callback cannot be resolved to a program: $run"; return 2; }
   _shmutant_validate_settings "$label" "$wd" || return 2
   case "$cap" in
     '') ;;
@@ -2293,6 +2321,17 @@ _shmutant_cli_wd_is_ours() {
   [ ! -L "$1" ] && [ "$(_shmutant_dir_id "$1")" = "${SHMUTANT_CLI_WD_ID:-}" ]
 }
 
+# _shmutant_cli_end_group <pgid> <holder-pid> — end what the plan subshell left in its process
+# group (a helper backgrounded from the plan, a service prepare started), the holder with it.
+# The holder keeps the group in being, so its number cannot have been reused; with no live
+# holder (the plan never reported one) nothing is signalled by number.
+_shmutant_cli_end_group() {
+  [ -n "$2" ] && kill -0 "$2" 2>/dev/null || return 0
+  kill -KILL -- -"$1" 2>/dev/null
+  kill -KILL "$2" 2>/dev/null
+  return 0
+}
+
 # _shmutant_cli_abort <signal> — INT or TERM reached the CLI while its plan subshell was running:
 # kill the child's tree, remove a workdir this run created, and re-deliver the signal.
 _shmutant_cli_abort() {
@@ -2317,10 +2356,12 @@ _shmutant_cli_abort() {
   fi
   # The last SHMUTANT_KEEP the plan subshell reported (after loading, and around prepare)
   # decides the workdir here, so a plan or prepare that asked to keep it is honoured.
-  local keep_last="" line
+  local keep_last="" line holder=""
   if [ -n "${SHMUTANT_CLI_KEEP_R:-}" ]; then
-    while IFS= read -r line <&"$SHMUTANT_CLI_KEEP_R"; do keep_last="$line"; done
+    while IFS= read -r line <&"$SHMUTANT_CLI_KEEP_R"; do case "$line" in "holder "*) holder="${line#holder }" ;; *) keep_last="$line" ;; esac; done
   fi
+  [ -z "${SHMUTANT_CLI_CHILD:-}" ] || _shmutant_cli_end_group "$SHMUTANT_CLI_CHILD" "$holder"
+  [ -z "${SHMUTANT_CLI_HOLD:-}" ] || { exec {SHMUTANT_CLI_HOLD}>&-; SHMUTANT_CLI_HOLD=""; }
   [ -n "${SHMUTANT_CLI_DONE_FILE:-}" ] && _shmutant_cli_wd_is_ours "${SHMUTANT_CLI_WD_PATH:-}" && command -p rm -f -- "$SHMUTANT_CLI_DONE_FILE"
   if [ -n "${SHMUTANT_CLI_WD_TO_RM:-}" ]; then
     if [ "$keep_last" = 1 ]; then
@@ -2335,7 +2376,7 @@ _shmutant_cli_abort() {
 }
 
 _shmutant_cli_run() {
-  local plan="" wd="" keep=0 made=0 rc done_file marker keep_last="" line
+  local plan="" wd="" keep=0 made=0 rc done_file marker keep_last="" line plan_holder=""
   # Seeded from the environment for the window before the pool settles the value: an interrupt
   # during plan loading or prepare must not discard artifacts the operator asked to keep.
   [ "${SHMUTANT_KEEP:-0}" = 1 ] && keep=1
@@ -2407,30 +2448,51 @@ _shmutant_cli_run() {
   if ! _shmutant_validate_settings run "$wd"; then
     exec {keep_w}>&- {keep_r}<&- {done_r}<&-; command -p rm -f -- "$done_file"; [ "$made" = 1 ] && command -p rm -rf -- "$wd"; return 2
   fi
+  # The hold channel: a FIFO this shell keeps a writing end of, read by a holder in the plan's
+  # process group through a reading end of its own (the holder closes the writing end it
+  # inherits, or it would keep itself alive). The holder lives until every writer has gone —
+  # this shell, which closes it once the group is ended, and whatever the plan left running
+  # that inherited it — so it holds no output descriptor and cannot outlive the run, and it
+  # keeps the group in being meanwhile. <> first: opening a FIFO to read alone would block.
+  local hold hold_r
+  if ! command -p mkfifo -- "$done_file.hold" 2>/dev/null || ! exec {hold}<>"$done_file.hold" {hold_r}<"$done_file.hold"; then
+    _shmutant_err "run: cannot create the hold channel in $wd"; [ -n "${hold:-}" ] && exec {hold}>&-; command -p rm -f -- "$done_file.hold"; exec {keep_w}>&- {keep_r}<&- {done_r}<&-; command -p rm -f -- "$done_file"; [ "$made" = 1 ] && command -p rm -rf -- "$wd"; return 2
+  fi
+  command -p rm -f -- "$done_file.hold"
+  SHMUTANT_CLI_HOLD="$hold"
   trap '_shmutant_cli_abort INT' INT
   trap '_shmutant_cli_abort TERM' TERM
   # Signals are held from here until the child and its identity are registered.
   SHMUTANT_CLI_SPAWNING=1
+  # The plan subshell in a process group of its own (job control, for this spawn only), kept
+  # in being by the holder until the run is over: what the plan or prepare left running is
+  # ended by group number when the run ends, and the holder makes that number unreusable
+  # meanwhile. Stdin from /dev/null: a background group reading the terminal would be stopped.
+  builtin set -m
   (
     # `trap -p` in a subshell reports the parent's traps although none is active: the pool
     # would save this shell's abort handler as the plan subshell's own and re-raise into it.
     trap - INT TERM
+    ( read -r _ <&"$hold_r" ) < /dev/null > /dev/null 2>&1 {keep_w}>&- {keep_r}<&- {hold}>&- & printf 'holder %s\n' "$!" >&"$keep_w"
     readonly SHMUTANT_CLI_WD="$wd" SHMUTANT_CLI_KEEP_FD="$keep_w"
     export SHMUTANT_CLI_KEEP_FD
     SHMUTANT_CLI_DONE_PATH="$done_file"
     _shmutant_cli_load "$SHMUTANT_PLAN_DIR/$(command -p basename -- "$plan")"
-  ) & SHMUTANT_CLI_CHILD=$!
+  ) < /dev/null & SHMUTANT_CLI_CHILD=$!
+  builtin set +m
   SHMUTANT_CLI_CHILD_ID="$(_shmutant_identity "$SHMUTANT_CLI_CHILD" 2>/dev/null)" || SHMUTANT_CLI_CHILD_ID=""
   SHMUTANT_CLI_SPAWNING=0
   [ -z "${SHMUTANT_CLI_ABORT_PENDING:-}" ] || { local p="$SHMUTANT_CLI_ABORT_PENDING"; SHMUTANT_CLI_ABORT_PENDING=""; _shmutant_cli_abort "$p"; }
   wait "$SHMUTANT_CLI_CHILD"; rc=$?
   trap - INT TERM
-  SHMUTANT_CLI_CHILD=""
   # The keep channel's last report (before and after prepare), kept for a completion report
-  # that did not arrive.
+  # that did not arrive; and the holder's number, for the group to end.
   exec {keep_w}>&-
-  while IFS= read -r line <&"$keep_r"; do keep_last="$line"; done
+  while IFS= read -r line <&"$keep_r"; do case "$line" in "holder "*) plan_holder="${line#holder }" ;; *) keep_last="$line" ;; esac; done
   exec {keep_r}<&-; unset SHMUTANT_CLI_KEEP_R
+  _shmutant_cli_end_group "$SHMUTANT_CLI_CHILD" "$plan_holder"
+  exec {hold}>&- {hold_r}<&-; SHMUTANT_CLI_HOLD=""
+  SHMUTANT_CLI_CHILD=""
   marker="$(command -p cat <&"$done_r")"; exec {done_r}<&-
   # The completion path is a name inside the workdir: a plan that moved the workdir away and
   # put a directory of its own there could have put a file of its own at this name.
