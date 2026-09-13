@@ -138,7 +138,8 @@ through `../../pristine` from its clone), adds to it, removes from it, changes a
 it — before a clone or while one is being taken — makes the affected rows
 `unprepared`, with the reason, rather than running on what it left, whatever the timestamps
 say. A prepared tree holding a regular file whose content the pool cannot read is refused
-(status 2), since it could not be fingerprinted. The prepared tree is removed at the pool's end
+(status 2), since it could not be fingerprinted; so is a tree holding a name with a newline in
+it, which the fingerprint's line records could not carry unambiguously. The prepared tree is removed at the pool's end
 only while it is, by identity, the tree the pool made; a directory a callback put at its path
 stays and is reported (status 2). A `prepare` that moves the workdir away and
 puts another directory at its path stops the pool (status 2) and nothing at that path is
@@ -188,7 +189,11 @@ refuse first (status 2 for the pool, 1 for the helpers) a shell that made one of
 keep their own state in readonly: bash refuses a local over a readonly global, and the assignment
 that follows would end a non-interactive caller's shell. The names checked are every name the harness declares local
 anywhere the entry point runs, the pool's workers included (a readonly global reaches a
-subshell too); the suite checks the lists against the source. That check uses no `set`, no
+subshell too), and every `SHMUTANT_*` global it keeps its bookkeeping in; the settings you own
+are canonicalised instead, as above. `shmutant_reset`, `shmutant_target` and `shmutant_mut`
+make the same check on the table's own arrays (status 2), and sourcing the file refuses (status
+2) a shell that made one of the names it assigns when sourced readonly. The suite checks the lists against
+the source. That check uses no `set`, no
 `return` and no local of its own, so a caller's function of those names cannot make it loop or
 answer wrong before the shadow check refuses it; and the status `prepare` returns arrives as a positional parameter, so a `prepare` that made the pool's status name
 readonly is refused (status 2) rather than ending the shell. A `prepare` that declares one of the

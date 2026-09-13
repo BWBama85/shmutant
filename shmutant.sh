@@ -57,12 +57,6 @@
 # stand in for the dispatcher until the line below turns them off.
 \unset -f builtin 2>/dev/null
 
-SHMUTANT_VERSION=0.1.0
-# Process identity comes from the kernel's start time in /proc where there is one (Linux):
-# tick resolution, so a reused pid cannot pass for the process it replaced. Elsewhere it is
-# `ps -o etime`, at second resolution, which is the best POSIX ps offers.
-SHMUTANT_PROC=0; [[ -r /proc/self/stat ]] && SHMUTANT_PROC=1
-
 # Aliases expand while a file is PARSED: a sourcing shell whose dotfiles alias `cp` or `mkdir`
 # would otherwise bake those flags into every function below. Off for the rest of this file,
 # and the caller's setting put back at its end.
@@ -107,6 +101,28 @@ if ! _shmutant_bash_ok "${BASH_VERSINFO[0]:-0}" "${BASH_VERSINFO[1]:-0}"; then
   builtin return 2
 fi
 
+# A name this file assigns when sourced that the calling shell made readonly beforehand: the
+# assignment would end a non-interactive shell, so the file refuses first. One name at a time:
+# the attribute field of its `declare -p` line is the word after `declare -`.
+for _shmutant_v in SHMUTANT_VERSION SHMUTANT_PROC SHMUTANT_SELECTED_N SHMUTANT_DECL_ERRORS SHMUTANT_TARGET SHMUTANT_ROWS_NAME SHMUTANT_ROWS_FILE SHMUTANT_ROWS_OLD SHMUTANT_ROWS_NEW SHMUTANT_ROWS_WIT SHMUTANT_ROWS_SEL; do
+  # `; :` — declare -p exits 1 for a name not yet set, which a caller's errexit would act on.
+  _shmutant_d="$(\builtin declare -p "$_shmutant_v" 2>/dev/null; :)"; _shmutant_d="${_shmutant_d#declare -}"
+  case "${_shmutant_d%% *}" in
+    *r*)
+      \builtin printf 'shmutant: %s is readonly in this shell, and this file assigns it when sourced — declare yours with another name\n' "$_shmutant_v" >&2
+      if [[ "${BASH_SOURCE[0]}" = "$0" ]]; then \builtin exit 2; fi
+      \builtin unset -v _shmutant_v _shmutant_d
+      \builtin eval "$_shmutant_alias_state"; \builtin unset _shmutant_alias_state
+      \builtin return 2 ;;
+  esac
+done
+\builtin unset -v _shmutant_v _shmutant_d
+
+SHMUTANT_VERSION=0.1.0
+# Process identity comes from the kernel's start time in /proc where there is one (Linux):
+# tick resolution, so a reused pid cannot pass for the process it replaced. Elsewhere it is
+# `ps -o etime`, at second resolution, which is the best POSIX ps offers.
+SHMUTANT_PROC=0; [[ -r /proc/self/stat ]] && SHMUTANT_PROC=1
 SHMUTANT_ROWS_NAME=(); SHMUTANT_ROWS_FILE=(); SHMUTANT_ROWS_OLD=(); SHMUTANT_ROWS_NEW=()
 SHMUTANT_ROWS_WIT=(); SHMUTANT_ROWS_SEL=()
 SHMUTANT_TARGET=""
@@ -490,6 +506,7 @@ _shmutant_mutate_body() {
 
 # shmutant_target <file> — the tree-relative file that rows appended after this call mutate.
 shmutant_target() {
+  _shmutant_decl_writable target || return 2
   [ "$#" -eq 1 ] || { _shmutant_refuse "target: exactly one file, got $# arguments — an unquoted path?"; return 2; }
   [ -n "$1" ] || { _shmutant_refuse "target: a file is required"; return 2; }
   case "$1" in /*) _shmutant_refuse "target: must be relative to the tree root: $1"; return 2 ;; esac
@@ -502,6 +519,7 @@ shmutant_target() {
 # <old> and <new> are literals. <witness> is the text a red line must carry. <select> is what
 # `run` receives to narrow the suite; it defaults to <witness>.
 shmutant_mut() {
+  _shmutant_decl_writable mut || return 2
   if [ "$#" -lt 4 ] || [ "$#" -gt 5 ]; then _shmutant_refuse "mut: usage: shmutant_mut <name> <old> <new> <witness> [select] (got $# arguments — an unquoted witness?)"; return 2; fi
   [ -n "$SHMUTANT_TARGET" ] || { _shmutant_refuse "mut '$1': no target — call shmutant_target first"; return 2; }
   [ -n "$1" ] || { _shmutant_refuse "mut: a row needs a name"; return 2; }
@@ -516,6 +534,7 @@ shmutant_mut() {
 
 # shmutant_reset — empty the table, forget the current target and the refusals counted so far.
 shmutant_reset() {
+  _shmutant_decl_writable reset || return 2
   SHMUTANT_ROWS_NAME=(); SHMUTANT_ROWS_FILE=(); SHMUTANT_ROWS_OLD=(); SHMUTANT_ROWS_NEW=()
   SHMUTANT_ROWS_WIT=(); SHMUTANT_ROWS_SEL=()
   SHMUTANT_TARGET=""
@@ -577,13 +596,36 @@ _shmutant_descendants() {
     }'
 }
 
+# _shmutant_proc_table — one line per process from /proc, `pid ppid starttime`. Each stat file is
+# one record: grep prefixes every line with its file name (a comm holding a newline spans lines,
+# and the pid comes from the name, never from the content), and the fields are taken after the
+# LAST `)` (a comm may hold one). A file gone between the glob and the read is skipped, not
+# fatal. Globbed with the caller's options neutralised.
+_shmutant_proc_table() {
+  ( set +f; shopt -u failglob nullglob; unset GLOBIGNORE; command -p grep '' /proc/[0-9]*/stat 2>/dev/null ) | command -p awk '
+    function flush(   pid, s, k, n, a) {
+      if (cur == "") return
+      pid = cur; sub(/^\/proc\//, "", pid); sub(/\/stat$/, "", pid)
+      if (pid !~ /^[0-9]+$/) return
+      s = rec
+      if (index(s, ")") == 0) return
+      while ((k = index(s, ")")) > 0) s = substr(s, k + 1)
+      n = split(s, a, " ")
+      if (n >= 20) print pid, a[2], a[20]
+    }
+    { p = index($0, ":"); if (p == 0) next
+      f = substr($0, 1, p - 1); l = substr($0, p + 1)
+      if (f != cur) { flush(); cur = f; rec = l } else rec = rec "\n" l }
+    END { flush() }'
+}
+
 # _shmutant_descendants_started <pid> — print `pid start` for every descendant of <pid>, from one
 # `ps -A -o pid= -o ppid= -o etime=` pass, so each is carried with the identity it had when found.
 _shmutant_descendants_started() {
   local table now
   if [ "${SHMUTANT_PROC:-}" = 1 ]; then
-    ( set +f; shopt -u failglob nullglob; unset GLOBIGNORE; command -p cat /proc/[0-9]*/stat 2>/dev/null ) | command -p awk -v root="$1" '
-      $1 ~ /^[0-9]+$/ { s = $0; sub(/^.*\) /, "", s); n = split(s, a, " "); i++; child[i] = $1; parent[i] = a[2]; start[i] = a[20] }
+    _shmutant_proc_table | command -p awk -v root="$1" '
+      { i++; child[i] = $1; parent[i] = $2; start[i] = $3 }
       END {
         want[root] = 1
         do {
@@ -638,9 +680,10 @@ _shmutant_etime_secs() {
 _shmutant_identity() {
   local etime now
   if [ "${SHMUTANT_PROC:-}" = 1 ]; then
-    # The kernel's own start time in clock ticks (field 22 of /proc/<pid>/stat, after the
-    # parenthesised name): two processes cannot share a pid and a tick.
-    etime="$(command -p awk '{ s = $0; sub(/^.*\) /, "", s); n = split(s, a, " "); print a[20] }' "/proc/$1/stat" 2>/dev/null)" || return 1
+    # The kernel's own start time in clock ticks (field 22 of /proc/<pid>/stat, after the LAST
+    # `)` of the parenthesised name, which may hold a newline or a `)` of its own; the file is
+    # read as one record): two processes cannot share a pid and a tick.
+    etime="$(command -p awk 'BEGIN { RS = "\001" } { s = $0; while ((k = index(s, ")")) > 0) s = substr(s, k + 1); n = split(s, a, " "); if (n >= 20) print a[20] }' "/proc/$1/stat" 2>/dev/null)" || return 1
     case "$etime" in ''|*[!0-9]*) return 1 ;; esac
     printf '%s' "$etime"; return 0
   fi
@@ -657,13 +700,10 @@ _shmutant_identity_table() {
   local line now
   SHMUTANT_START=()
   if [ "${SHMUTANT_PROC:-}" = 1 ]; then
-    # cat, not awk's own file list: a process gone between the glob and the read is skipped, not
-    # fatal; the pid is the line's first field. Globbed with the caller's options neutralised.
     while IFS= read -r line; do
       # shellcheck disable=SC2034
       [ -n "$line" ] && SHMUTANT_START["${line%% *}"]="${line#* }"
-    done < <( ( set +f; shopt -u failglob nullglob; unset GLOBIGNORE; command -p cat /proc/[0-9]*/stat 2>/dev/null ) | command -p awk '
-      $1 ~ /^[0-9]+$/ { s = $0; sub(/^.*\) /, "", s); n = split(s, a, " "); print $1, a[20] }')
+    done < <(_shmutant_proc_table | command -p awk '{ print $1, $3 }')
     return 0
   fi
   now="$(_shmutant_now)"; now=$(( now / 1000000 ))
@@ -1751,7 +1791,27 @@ _shmutant_pool_locals_writable() {
     roots rounds run s sdir sec seen seen_r seen_w sel setup_failed sig \
     spec st stat_bin state status stillours stillpids suffix swapped t t0 t1 \
     table target target_ck targets timeout tmp unpublished us v v_jobs v_red v_timeout \
-    verdict vr vw wd who wit wrc wstatus
+    verdict vr vw wd who wit wrc wstatus \
+    SHMUTANT_ABORT_PENDING SHMUTANT_ACTIVE SHMUTANT_ACTIVE_ID SHMUTANT_ACTIVE_KEY SHMUTANT_BASE_SEL \
+    SHMUTANT_CLEANUP_FAILED SHMUTANT_CLONE_ID SHMUTANT_DIR_ID SHMUTANT_DIR_IDS SHMUTANT_EMIT_FAILED \
+    SHMUTANT_FROZEN_NOW SHMUTANT_HELD SHMUTANT_MUT_NEW SHMUTANT_MUT_NL SHMUTANT_MUT_OLD \
+    SHMUTANT_PRISTINE_ID SHMUTANT_PRISTINE_STATE SHMUTANT_RES_CLONE SHMUTANT_RES_STATUS SHMUTANT_RES_US \
+    SHMUTANT_RES_VERDICT SHMUTANT_RUN_FIRED SHMUTANT_RUN_PUBLISHED SHMUTANT_RUN_RED SHMUTANT_RUN_SCAN_FAILED \
+    SHMUTANT_RUN_SETUP_FAILED SHMUTANT_RUN_STATUS SHMUTANT_RUN_TAMPERED SHMUTANT_RUN_TARGET_REWRITTEN \
+    SHMUTANT_RUN_UNSETTLED SHMUTANT_RUN_WITNESSED SHMUTANT_SCAN_P SHMUTANT_SCAN_W SHMUTANT_SKIP \
+    SHMUTANT_SPAWNING SHMUTANT_STAT_STYLE SHMUTANT_STREAM_BASE SHMUTANT_STREAM_INO SHMUTANT_STREAM_OPENED \
+    SHMUTANT_TARGET_CK SHMUTANT_TARGET_KEY SHMUTANT_TARGET_REL SHMUTANT_TRAPS_HELD SHMUTANT_TRAPS_PENDING \
+    SHMUTANT_TRAP_CHLD SHMUTANT_TRAP_DEBUG SHMUTANT_TRAP_DEBUG_PENDING SHMUTANT_TRAP_ERR SHMUTANT_TRAP_INT \
+    SHMUTANT_TRAP_RETURN SHMUTANT_TRAP_RETURN_PENDING SHMUTANT_TRAP_TERM SHMUTANT_VERDICT_FD SHMUTANT_VERDICT_R \
+    SHMUTANT_VERDICT_W SHMUTANT_V_STATUS SHMUTANT_V_US SHMUTANT_V_VERDICT SHMUTANT_WD_ID \
+    SHMUTANT_ROWS_NAME SHMUTANT_ROWS_FILE SHMUTANT_ROWS_OLD SHMUTANT_ROWS_NEW SHMUTANT_ROWS_WIT SHMUTANT_ROWS_SEL \
+    SHMUTANT_TARGET SHMUTANT_DECL_ERRORS SHMUTANT_SELECTED_N
+}
+
+# _shmutant_decl_writable <label> — the table's own names, checked by each declaration entry
+# point before it assigns: a readonly one would end the plan's shell at the first row.
+_shmutant_decl_writable() {
+  _shmutant_locals_writable "$1" "the calling shell made" SHMUTANT_ROWS_NAME SHMUTANT_ROWS_FILE SHMUTANT_ROWS_OLD SHMUTANT_ROWS_NEW SHMUTANT_ROWS_WIT SHMUTANT_ROWS_SEL SHMUTANT_TARGET SHMUTANT_DECL_ERRORS
 }
 
 # _shmutant_canon <label> <name> <canonical> — set <name> to its canonical value, or, when the
@@ -1830,7 +1890,7 @@ _shmutant_stat_style() {
 _shmutant_pristine_state() {
   # find execs a PROGRAM: `command` is a shell builtin (macOS ships a stub of that name, Linux
   # does not), so the utilities are resolved from the standard PATH first and exec'd by path.
-  local ls_bin cksum_bin stat_bin="" fmt=""
+  local ls_bin cksum_bin stat_bin="" fmt="" nl=$'\n'
   ls_bin="$(_shmutant_std_bin ls)" && cksum_bin="$(_shmutant_std_bin cksum)" || return 1
   case "${SHMUTANT_STAT_STYLE:-none}" in
     gnu-ns) stat_bin="$(_shmutant_std_bin stat)" || return 1; fmt='-c%.9Y %n' ;;
@@ -1840,6 +1900,9 @@ _shmutant_pristine_state() {
   esac
   ( builtin cd -P -- "$1" 2>/dev/null || exit 1
     set -o pipefail
+    # A name with a newline in it would span records below and be sorted apart from them, so
+    # two such names could trade places under the same fingerprint: refused instead.
+    command -p find . -name "*$nl*" 2>/dev/null | command -p awk 'END { exit NR > 0 }' || exit 1
     { command -p find . -exec "$ls_bin" -ldn -- {} + \
         && { [ -z "$stat_bin" ] || command -p find . -exec "$stat_bin" "$fmt" {} + ; } \
         && command -p find . -type f -exec "$cksum_bin" {} + ; } 2>/dev/null \
@@ -2138,7 +2201,7 @@ _shmutant_pool_body() {
   # it, removes from it or changes a mode changes the fingerprint, and no row is cloned from the
   # tree afterwards; every clone is checked against it after the copy.
   _shmutant_stat_style
-  SHMUTANT_PRISTINE_STATE="$(_shmutant_pristine_state "$wd/pristine")" || { _shmutant_err "$label: cannot fingerprint the prepared tree — a stage failed, or it holds a regular file whose content cannot be read"; _shmutant_pool_fail "$label" "$wd"; return 2; }
+  SHMUTANT_PRISTINE_STATE="$(_shmutant_pristine_state "$wd/pristine")" || { _shmutant_err "$label: cannot fingerprint the prepared tree — a stage failed, it holds a regular file whose content cannot be read, or a name with a newline in it"; _shmutant_pool_fail "$label" "$wd"; return 2; }
   [ -n "$root" ] || root="$wd/pristine"
   root="$(_shmutant_abs "$root")" || { _shmutant_err "$label: prepare printed a root that is not a directory"; _shmutant_pool_fail "$label" "$wd"; return 2; }
   if ! _shmutant_inside "$wd/pristine" "$root"; then

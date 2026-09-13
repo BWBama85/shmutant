@@ -725,12 +725,13 @@ t_readonly_settings_do_not_kill_the_caller() {
     SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd-ro2" toy_prepare toy_run > /dev/null 2>"$T/ro-e2"; echo "pool=$?" > "$T/ro2" )
   eq "$(cat "$T/ro2" 2>/dev/null)" 'pool=2' 'a readonly body local is refused at entry with the probe keeping no local of its own, and the shell survives'
   has "$(cat "$T/ro-e2")" "the calling shell made 'd' readonly" 'says why, naming the first of them'
-  # the last name of the pool's list (wstatus, in the sorted list): the check reaches the end
-  # shellcheck disable=SC2034
-  ( readonly wstatus=1
+  # the last name of the pool's list, whatever it is today: the check reaches the end of it
+  local last; last="$(declare -f _shmutant_pool_locals_writable | awk '/^}/ { exit } { w = $NF } END { print w }')"
+  [ -n "$last" ] && [ "$last" != '\' ] || fail_ "fixture: could not read the last name of the pool list: [$last]"
+  ( readonly "$last"=1
     SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd-ro3" toy_prepare toy_run > /dev/null 2>"$T/ro-e3"; echo "pool=$?" > "$T/ro3" )
-  eq "$(cat "$T/ro3" 2>/dev/null)" 'pool=2' 'the last name of the list is checked too, and the shell survives'
-  has "$(cat "$T/ro-e3")" "the calling shell made 'wstatus' readonly" 'says why'
+  eq "$(cat "$T/ro3" 2>/dev/null)" 'pool=2' "the last name of the list ($last) is checked too, and the shell survives"
+  has "$(cat "$T/ro-e3")" "the calling shell made '$last' readonly" 'says why'
   # the prefixed name prepare's status is stashed in, made readonly by prepare: dynamic scope
   # reaches it too, so the status arrives as a positional parameter and the name is checked first
   ro_stash_prepare() { readonly _shmutant_pool_prc=7; toy_prepare "$@"; }
@@ -766,6 +767,16 @@ t_readonly_settings_do_not_kill_the_caller() {
   ( readonly dir=x; shmutant_mutate "$T/ro-dst/f" 'x=1' 'x=2' 2>"$T/e-dir"; echo "mutate=$?" > "$T/o-dir" )
   eq "$(cat "$T/o-dir" 2>/dev/null)" 'mutate=1' 'a readonly name of the mutate body is refused'
   has "$(cat "$T/e-dir")" "the calling shell made 'dir' readonly" 'says why'
+  # a global the pool keeps its bookkeeping in (SHMUTANT_DIR_IDS), made readonly by the caller:
+  # refused with status 2 before the pool's own reset of it, not a bare status 1
+  ( readonly -A SHMUTANT_DIR_IDS 2>/dev/null || declare -Ar SHMUTANT_DIR_IDS=(); SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd-gl" toy_prepare toy_run > /dev/null 2>"$T/e-gl"; echo "pool=$?" > "$T/o-gl" )
+  eq "$(cat "$T/o-gl" 2>/dev/null)" 'pool=2' 'a readonly bookkeeping global is refused at entry, and the shell survives'
+  has "$(cat "$T/e-gl")" "the calling shell made 'SHMUTANT_DIR_IDS' readonly" 'says why'
+  # the table's own arrays, made readonly: each declaration entry point refuses (2) instead of
+  # ending the plan's shell at the first row
+  ( declare -ar SHMUTANT_ROWS_NAME=(); shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works' 2>"$T/e-decl"; echo "mut=$?" > "$T/o-decl"; shmutant_target lib.sh 2>>"$T/e-decl"; echo "target=$?" >> "$T/o-decl"; shmutant_reset 2>>"$T/e-decl"; echo "reset=$?" >> "$T/o-decl" )
+  eq "$(cat "$T/o-decl" 2>/dev/null)" $'mut=2\ntarget=2\nreset=2' 'shmutant_mut, shmutant_target and shmutant_reset refuse a readonly table array, and the shell survives'
+  eq "$(grep -c "made 'SHMUTANT_ROWS_NAME' readonly" "$T/e-decl")" 3 'each says why'
   [ -z "$(grep -c readonly "$T/e-set2" | grep -v '^0$')" ] || fail_ 'copy_tree under a set function reported a false readonly collision'
   # and a refused pool leaves no descriptor behind in the caller shell
   ( before="$(ls /dev/fd | wc -l | tr -d ' ')"; SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd-fd" readonly_prepare toy_run > /dev/null 2>&1; after="$(ls /dev/fd | wc -l | tr -d ' ')"; echo "$before $after" > "$T/fds" )
@@ -1319,7 +1330,21 @@ t_readonly_preflight_names_every_local() {
   listed="$(declare -f _shmutant_pool_locals_writable shmutant_copy_tree shmutant_mutate | tr -s ' \t\\' '\n\n\n')"
   for n in $names; do printf '%s\n' "$listed" | grep -qx -- "$n" || missing="$missing $n"; done
   [ -z "$missing" ] || fail_ "local names in no preflight list:$missing"
-  echo "note: $_unit: $count local names checked against the preflight lists"
+  # and every SHMUTANT_* global the same functions assign (the settings the caller owns are
+  # canonicalised instead, and SHMUTANT_SELECT has its own check)
+  local globals gcount
+  globals="$(awk '
+    /^[A-Za-z_][A-Za-z0-9_]*\(\) \{/ { f = $1; sub(/\(\).*/, "", f) }
+    /^\}/ { f = "" }
+    f != "" && f !~ /^_shmutant_cli_/ && f != "shmutant_main" && f != "_shmutant_checksum" { if ($0 ~ /^[ \t]*#/) next; print }
+  ' "$SHMUTANT" | grep -oE 'SHMUTANT_[A-Z_]+(\[[^]]*\])?\+?=' | grep -oE 'SHMUTANT_[A-Z_]+' | sort -u \
+    | grep -vxE 'SHMUTANT_(KEEP|TIMEOUT|JOBS|RED_STATUS|RED_PREFIX|STREAM|BASELINE|SELECT)')"
+  gcount="$(printf '%s\n' "$globals" | grep -c .)"
+  [ "$gcount" -ge 50 ] || fail_ "fixture: the extraction found only $gcount assigned globals"
+  missing=""
+  for n in $globals; do printf '%s\n' "$listed" | grep -qx -- "$n" || missing="$missing $n"; done
+  [ -z "$missing" ] || fail_ "globals in no preflight list:$missing"
+  echo "note: $_unit: $count local names and $gcount globals checked against the preflight lists"
 }
 
 t_bootstrap_is_immune_to_a_builtin_alias() {
@@ -1336,6 +1361,24 @@ t_bootstrap_is_immune_to_a_builtin_alias() {
   printf 'shopt -s expand_aliases\nalias builtin=false\n' > "$T/bash_env"
   BASH_ENV="$T/bash_env" bash "$SHMUTANT" version > "$T/v-out" 2>"$T/v-err"; rc_is $? 0 'the CLI under a BASH_ENV alias named builtin still runs version'
   [ -s "$T/v-out" ] || fail_ 'and prints it'
+}
+
+t_library_refuses_a_readonly_name_it_assigns_when_sourced() {
+  # a caller that made one of the names this file assigns at source time readonly (the table
+  # arrays, the counters, the version): sourcing refuses with status 2 instead of ending the
+  # shell at that assignment
+  local out
+  out="$(bash -c 'readonly SHMUTANT_ROWS_NAME=x; . "$1" 2>"$2"; echo "rc=$?"' _ "$SHMUTANT" "$T/e1")"
+  eq "$out" 'rc=2' 'sourcing under a readonly table array is refused and the shell survives'
+  has "$(cat "$T/e1")" 'SHMUTANT_ROWS_NAME is readonly in this shell' 'says why, naming it'
+  # sourced a second time into a shell where the names exist and are writable (a suite that
+  # sources the library once and again per unit): accepted
+  out="$(bash -c '. "$1" && . "$1"; echo "rc=$?"' _ "$SHMUTANT" 2>&1)"
+  eq "$out" 'rc=0' 'sourcing twice is accepted'
+  out="$(bash -c 'readonly SHMUTANT_VERSION=9; . "$1" 2>"$2"; echo "rc=$?"' _ "$SHMUTANT" "$T/e2")"
+  eq "$out" 'rc=2' 'sourcing under a readonly version is refused and the shell survives'
+  out="$(bash -c 'SHMUTANT_ROWS_NAME=(x); . "$1" 2>"$2"; echo "rc=$? n=${#SHMUTANT_ROWS_NAME[@]}"' _ "$SHMUTANT" "$T/e3")"
+  eq "$out" 'rc=0 n=0' 'a writable table array of the caller is simply reset, as before'
 }
 
 t_helpers_restore_posixly_correct() {
@@ -1388,6 +1431,40 @@ EOF
   i=0; while kill -0 "$(cat "$T/left-prep")" 2>/dev/null && [ "$i" -lt 30 ]; do i=$((i + 1)); sleep 0.1; done
   kill -0 "$(cat "$T/left-prep")" 2>/dev/null && { kill -KILL "$(cat "$T/left-prep")" 2>/dev/null; fail_ 'a helper prepare backgrounded outlived the CLI'; }
   true
+}
+
+t_pool_refuses_a_prepared_tree_with_a_newline_name() {
+  # a name with a newline would span the fingerprint's records: two such names could trade
+  # places under the same fingerprint, so the tree is refused instead of fingerprinted
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  newline_prepare() { toy_prepare "$@" && printf 'x\n' > "$1/a"$'\n'"x"; }
+  SHMUTANT_BASELINE=0 pool lbl "$T/wd" toy_prepare toy_run
+  rc_is "$RC" 0 'fixture: the plain tree runs'
+  SHMUTANT_BASELINE=0 pool lbl "$T/wd2" newline_prepare toy_run
+  rc_is "$RC" 2 'a prepared tree holding a name with a newline is a harness error'
+  has "$ERR" 'a name with a newline' 'says why'
+}
+
+t_proc_scan_reads_each_stat_file_as_one_record() {
+  # on Linux a process whose comm holds a newline (a program run through such a file name) has
+  # a stat file spanning lines; it is still found with its parent and its start time
+  if [ "${SHMUTANT_PROC:-0}" != 1 ]; then echo "note: $_unit: no /proc here; the stat records are not exercised on this platform"; return; fi
+  local sl nlsleep; sl="$(command -v sleep)"; nlsleep="$T/sl"$'\n'"eep"; cp "$sl" "$nlsleep"; chmod +x "$nlsleep"
+  ( "$nlsleep" 30 & echo $! > "$T/nlpid"; wait ) & local holder=$!
+  local i=0; until [ -s "$T/nlpid" ] || [ "$i" -ge 50 ]; do i=$((i + 1)); sleep 0.1; done
+  local nlpid; nlpid="$(cat "$T/nlpid")"
+  [ -n "$nlpid" ] && kill -0 "$nlpid" 2>/dev/null || { kill -KILL "$holder" 2>/dev/null; fail_ 'fixture: the newline-named process did not start'; return; }
+  grep -q . "/proc/$nlpid/stat" && [ "$(wc -l < "/proc/$nlpid/stat")" -ge 2 ] || echo "note: $_unit: the kernel did not put a newline in comm; the multi-line case is not exercised"
+  local rec; rec="$(_shmutant_proc_table | awk -v p="$nlpid" '$1 == p')"
+  [ -n "$rec" ] || fail_ 'the newline-named process is missing from the proc table'
+  case "$rec" in *" $holder "*) ;; *) fail_ "the newline-named process carries the wrong parent: [$rec], parent should be $holder" ;; esac
+  local id; id="$(_shmutant_identity "$nlpid")"
+  case "$id" in ''|*[!0-9]*) fail_ "the newline-named process has no numeric identity: [$id]" ;; esac
+  local n; n="$(_shmutant_descendants_started "$$" | awk -v p="$nlpid" '$1 == p' | wc -l | tr -d ' ')"
+  [ "$n" -eq 1 ] || fail_ 'the newline-named process is not among the descendants with a start time'
+  kill -KILL "$nlpid" "$holder" 2>/dev/null; wait "$holder" 2>/dev/null; true
 }
 
 t_verdict_scans_a_large_output() {

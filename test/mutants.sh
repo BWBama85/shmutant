@@ -1459,3 +1459,27 @@ shmutant_mut 'the plan subshell shares the CLI process group' \
   '  builtin set -m' \
   '  builtin set +m' \
   't_cli_ends_what_the_plan_left_running'
+
+# --- guards added for the forty-fifth review round ---
+shmutant_mut 'a name with a newline is fingerprinted anyway' \
+  '    command -p find . -name "*$nl*" 2>/dev/null | command -p awk '"'"'END { exit NR > 0 }'"'"' || exit 1' \
+  '    :' \
+  't_pool_refuses_a_prepared_tree_with_a_newline_name'
+shmutant_mut 'the bookkeeping arrays are not in the readonly preflight' \
+  '    SHMUTANT_CLEANUP_FAILED SHMUTANT_CLONE_ID SHMUTANT_DIR_ID SHMUTANT_DIR_IDS SHMUTANT_EMIT_FAILED \' \
+  '    SHMUTANT_CLEANUP_FAILED SHMUTANT_CLONE_ID SHMUTANT_DIR_ID SHMUTANT_EMIT_FAILED \' \
+  't_readonly_settings_do_not_kill_the_caller'
+shmutant_mut 'a row is declared into a readonly table' \
+  '  _shmutant_decl_writable mut || return 2' \
+  '  :' \
+  't_readonly_settings_do_not_kill_the_caller'
+# (no rows on the /proc record reader: its witness runs on Linux only, and a row that survives
+# wherever /proc is absent would read as a defect endured)
+shmutant_mut 'a readonly name is assigned when the file is sourced' \
+  '  case "${_shmutant_d%% *}" in' \
+  '  case "" in' \
+  't_library_refuses_a_readonly_name_it_assigns_when_sourced'
+shmutant_mut 'the source-time readonly probe fails a caller under errexit' \
+  '  _shmutant_d="$(\builtin declare -p "$_shmutant_v" 2>/dev/null; :)"; _shmutant_d="${_shmutant_d#declare -}"' \
+  '  _shmutant_d="$(\builtin declare -p "$_shmutant_v" 2>/dev/null)"; _shmutant_d="${_shmutant_d#declare -}"' \
+  't_library_sources_under_errexit'
