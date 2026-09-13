@@ -397,4 +397,7 @@ One line per resolved review thread, newest last.
 - `path-lookup-ambiguity` `shmutant.sh` `9d877a2` `PRRT_kwDOUT7q9s6h10xB` PR #1 2026-09-13
 - `caller-owned-path-deleted` `shmutant.sh` `9d877a2` `PRRT_kwDOUT7q9s6h10xE` PR #1 2026-09-13
 - `timeout-escalation-cancelled` `shmutant.sh` `9d877a2` `PRRT_kwDOUT7q9s6h10xH` PR #1 2026-09-13
+- `host-shell-option-leak` `shmutant.sh` `9122095` `PRRT_kwDOUT7q9s6h2utc` PR #1 2026-09-13
+- `stale-artifact-reuse` `shmutant.sh` `9122095` `PRRT_kwDOUT7q9s6h2utf` PR #1 2026-09-13
+- `timeout-escalation-cancelled` `shmutant.sh` `9122095` `PRRT_kwDOUT7q9s6h2uth` PR #1 2026-09-13
 <!-- adb:hits:end -->
