@@ -589,6 +589,11 @@ t_witness_matches_a_whole_token() {
   eq "$SHMUTANT_RUN_RED$SHMUTANT_RUN_WITNESSED" 11 'but it is carried when it follows the prefix'
   scanp 'not ok 1 - parse' 'not ok ' ok
   eq "$SHMUTANT_RUN_RED$SHMUTANT_RUN_WITNESSED" 10 'the TAP prefix does not carry a witness named ok'
+  # every ASCII whitespace character is a boundary: CRLF output leaves a carriage return
+  scan $'FAIL: add-works\r' add-works
+  eq "$SHMUTANT_RUN_RED$SHMUTANT_RUN_WITNESSED" 11 'a carriage return after the witness (CRLF output) is a boundary'
+  scan $'FAIL: x\fadd-works\vy' add-works
+  eq "$SHMUTANT_RUN_RED$SHMUTANT_RUN_WITNESSED" 11 'form feed and vertical tab are boundaries too'
   # a scan that produced nothing (its descriptor cannot be read) is not a green run
   _shmutant_scan_output 199 'FAIL: ' foo 2>/dev/null
   eq "${SHMUTANT_RUN_SCAN_FAILED:-unset}" 1 'a scan whose descriptor cannot be read reports failure, not green'
@@ -1531,6 +1536,77 @@ t_run_callback_sees_a_fresh_selection_counter() {
   counting_run() { shmutant_selected no-such-unit > /dev/null || true; [ "${SHMUTANT_SELECTED_N:-0}" -gt 0 ] || return 2; bash "$1/test.sh"; }
   SHMUTANT_BASELINE=0 pool lbl "$T/wd" toy_prepare counting_run
   eq "$(verdict_of a)" aborted 'a run whose selector matched nothing sees a zero counter and aborts, whatever the sourcing shell counted'
+}
+
+t_baseline_red_status_without_a_red_line_is_aborted() {
+  # the baseline follows the row contract: the red status with no red line is a runner that
+  # aborted, not a pre-existing assertion failure
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  silent_red_run() { echo "runner: could not start"; return 1; }
+  pool lbl "$T/wd" toy_prepare silent_red_run
+  rc_is "$RC" 1 'a baseline that aborted fails the pool'
+  eq "$(field baseline 5)" aborted 'the baseline record says aborted, not red'
+  has "$ERR" 'neither green nor red' 'and explains it'
+  eq "$(verdict_of a)" baseline 'the row is skipped on it'
+}
+
+t_cli_keeps_the_workdir_a_plan_asked_to_keep_before_leaving() {
+  # a plan that sets SHMUTANT_KEEP=1 and then leaves while loading (exit) never reaches the
+  # pool's own reports: the plan subshell reports its keep on exit, and the workdir stays
+  mk_toy "$T/toy"; TOY="$T/toy"; rm -rf "$T/tmpd"; mkdir -p "$T/tmpd"
+  cat > "$T/toy/plan-keep-exit.sh" <<'EOF'
+SHMUTANT_KEEP=1
+printf 'diagnostic\n' > "$SHMUTANT_CLI_WD/loader-note"
+exit 0
+EOF
+  TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-keep-exit.sh" --no-baseline > /dev/null 2>"$T/e"; rc_is $? 2 'a plan that leaves while loading is a harness error'
+  has "$(cat "$T/e")" 'workdir kept' 'the workdir it asked to keep is kept'
+  [ "$(find "$T/tmpd" -mindepth 2 -maxdepth 2 -name loader-note | wc -l | tr -d ' ')" -eq 1 ] || fail_ 'the diagnostic the plan wrote while loading was removed'
+  cat > "$T/toy/plan-keep-fail.sh" <<'EOF'
+set -e
+SHMUTANT_KEEP=1
+false
+EOF
+  rm -rf "$T/tmpd"; mkdir -p "$T/tmpd"
+  TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-keep-fail.sh" --no-baseline > /dev/null 2>"$T/e2"; rc_is $? 2 'a plan that fails under its own errexit is a harness error'
+  has "$(cat "$T/e2")" 'workdir kept' 'and its keep is honoured too'
+}
+
+t_cli_abort_keeps_the_workdir_the_environment_asked_to_keep() {
+  # SHMUTANT_KEEP=1 in the environment, a plan that ignores TERM while loading and never
+  # reports: the abort escalates to KILL, no report ever arrives (no EXIT trap runs on KILL),
+  # and the seed the CLI put on the keep channel before the plan ran decides — kept
+  mk_toy "$T/toy"; TOY="$T/toy"; rm -rf "$T/tmpd"; mkdir -p "$T/tmpd"
+  cat > "$T/toy/plan-hang.sh" <<'EOF'
+trap '' TERM
+: > "$SHMUTANT_CLI_WD/loading"
+sleep 60
+EOF
+  SHMUTANT_KEEP=1 TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-hang.sh" --no-baseline > /dev/null 2>"$T/e" & local cli=$! i=0
+  until [ "$(find "$T/tmpd" -mindepth 2 -maxdepth 2 -name loading 2>/dev/null | wc -l | tr -d ' ')" -ge 1 ] || [ "$i" -ge 100 ]; do i=$((i + 1)); sleep 0.1; done
+  [ "$i" -lt 100 ] || { kill -KILL "$cli" 2>/dev/null; wait "$cli" 2>/dev/null; fail_ 'fixture: the plan never started loading'; return; }
+  # TERM, not INT: a non-interactive shell starts a background job with INT ignored, and an
+  # ignored signal cannot be trapped by the CLI
+  kill -TERM "$cli"
+  i=0; while kill -0 "$cli" 2>/dev/null && [ "$i" -lt 200 ]; do i=$((i + 1)); sleep 0.1; done
+  kill -0 "$cli" 2>/dev/null && { kill -KILL "$cli" 2>/dev/null; fail_ 'the interrupted CLI did not end within 20 s'; }
+  wait "$cli" 2>/dev/null
+  has "$(cat "$T/e")" 'workdir kept' 'with no report from the plan, the environment keep decides'
+  [ "$(find "$T/tmpd" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" -ge 1 ] || fail_ 'the workdir was removed despite SHMUTANT_KEEP=1 in the environment'
+  true
+}
+
+t_pool_refuses_a_hard_link_under_git_in_the_prepared_tree() {
+  # .git is copied into every clone like the rest, so a hard link under it is refused too
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  git_linking_prepare() { toy_prepare "$@" && mkdir -p "$1/.git/objects" && printf 'blob\n' > "$1/.git/objects/a" && ln "$1/.git/objects/a" "$1/.git/objects/b"; }
+  SHMUTANT_BASELINE=0 pool lbl "$T/wd" git_linking_prepare toy_run
+  rc_is "$RC" 2 'a hard-linked pair under .git in the prepared tree is a harness error'
+  has "$ERR" 'more than one hard link' 'says why'
 }
 
 t_verdict_scans_a_large_output() {

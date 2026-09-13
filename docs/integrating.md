@@ -313,7 +313,9 @@ bookkeeping is protected from a `prepare` that uses ordinary names (`n`, `label`
 own variables. While workers run, the pool traps INT and TERM to kill every active worker's
 process tree, then restores the caller's own traps verbatim and re-delivers the signal. The CLI
 does the same around its plan subshell, and removes a workdir it created unless `SHMUTANT_KEEP=1`.
-A `SHMUTANT_KEEP=1` assigned inside the plan or `prepare` is honoured by the CLI's cleanup too. A baseline run that exits with a
+A `SHMUTANT_KEEP=1` assigned inside the plan or `prepare` is honoured by the CLI's cleanup too,
+also when the plan leaves while loading (an `exit`, a failure under its own `set -e`): the plan
+subshell reports the value in force as it ends. A baseline run that exits with a
 status that is neither green nor red is recorded as `aborted`, not `red`.
 
 ## 7. Migrating a `check-lib.sh`-style harness

@@ -418,7 +418,7 @@ shmutant_mut 'a multiline red prefix is accepted' \
   'case "${SHMUTANT_RED_PREFIX:-}" in never-matches)' \
   't_pool_revalidates_settings_after_prepare'
 shmutant_mut 'a non-red baseline exit is scored red' \
-  '    elif [ "$status" -eq "$red" ]; then verdict=red' \
+  '    elif [ "$status" -eq "$red" ] && [ "$SHMUTANT_RUN_RED" = 1 ]; then verdict=red' \
   '    elif true; then verdict=red' \
   't_baseline_non_red_exit_is_aborted'
 shmutant_mut 'a reused pid is signalled anyway' \
@@ -576,7 +576,7 @@ shmutant_mut 'a directory that cannot be recreated waits on running workers' \
 shmutant_mut 'the CLI ignores SHMUTANT_KEEP=1 before the pool settles it' \
   '  [ "${SHMUTANT_KEEP:-0}" = 1 ] && keep=1' \
   '  [ "${SHMUTANT_KEEP:-0}" = 2 ] && keep=1' \
-  't_cli_run'
+  't_cli_abort_keeps_the_workdir_the_environment_asked_to_keep'
 
 # --- guards added for the sixteenth review round ---
 shmutant_mut 'the leftover record is written by path after the callback' \
@@ -1515,3 +1515,21 @@ shmutant_mut 'a negative span renders as a malformed number' \
   '  [ "$us" -ge 0 ] 2>/dev/null || us=0' \
   '  :' \
   't_stream_format'
+
+# --- guards added for the forty-eighth review round ---
+shmutant_mut 'a baseline red status without a red line is scored red' \
+  '    elif [ "$status" -eq "$red" ] && [ "$SHMUTANT_RUN_RED" = 1 ]; then verdict=red' \
+  '    elif [ "$status" -eq "$red" ]; then verdict=red' \
+  't_baseline_red_status_without_a_red_line_is_aborted'
+shmutant_mut 'a plan that leaves while loading reports no keep' \
+  '  trap '"'"'_shmutant_report_keep at-exit'"'"' EXIT' \
+  '  :' \
+  't_cli_keeps_the_workdir_a_plan_asked_to_keep_before_leaving'
+shmutant_mut 'hard links under .git in the prepared tree are exempt' \
+  '  linked="$(builtin cd -- "$wd/pristine" 2>/dev/null && command -p find . -type f -links +1 -print 2>/dev/null)" || linked="?"' \
+  '  linked="$(builtin cd -- "$wd/pristine" 2>/dev/null && command -p find . -path ./.git -prune -o -type f -links +1 -print 2>/dev/null)" || linked="?"' \
+  't_pool_refuses_a_hard_link_under_git_in_the_prepared_tree'
+shmutant_mut 'a carriage return is a witness character' \
+  '    BEGIN { SEP = " \t\r\f\v!\"#$%&" sprintf("%c", 39) "()*+,/:;<=>?@[\\]^`{|}~" }' \
+  '    BEGIN { SEP = " \t!\"#$%&" sprintf("%c", 39) "()*+,/:;<=>?@[\\]^`{|}~" }' \
+  't_witness_matches_a_whole_token'

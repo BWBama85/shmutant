@@ -571,7 +571,7 @@ _shmutant_scan_output() {
       return 0
     }
     BEGIN { p = ENVIRON["SHMUTANT_SCAN_P"]; w = ENVIRON["SHMUTANT_SCAN_W"] }
-    BEGIN { SEP = " \t!\"#$%&'"'"'()*+,/:;<=>?@[\\]^`{|}~" }
+    BEGIN { SEP = " \t\r\f\v!\"#$%&" sprintf("%c", 39) "()*+,/:;<=>?@[\\]^`{|}~" }
     index($0, p) == 1 { red = 1; if (w != "" && witnessed(substr($0, length(p) + 1), w)) { wit = 1; exit } }
     END { print red + 0, wit + 0 }' <&"$1" 2>/dev/null)"
   case "$got" in
@@ -1273,8 +1273,9 @@ _shmutant_worker() {
     verdict=timeout
   elif [ "$kind" = base ]; then
     red="${SHMUTANT_RED_STATUS:-1}"
+    # Red only with a red line, as for a row: the red status alone is a runner that aborted.
     if [ "$status" -eq 0 ]; then verdict=green
-    elif [ "$status" -eq "$red" ]; then verdict=red
+    elif [ "$status" -eq "$red" ] && [ "$SHMUTANT_RUN_RED" = 1 ]; then verdict=red
     else verdict=aborted; fi
   elif [ "$status" -eq "${SHMUTANT_RED_STATUS:-1}" ]; then
     if [ "$SHMUTANT_RUN_WITNESSED" = 1 ]; then
@@ -2235,11 +2236,10 @@ _shmutant_pool_body() {
       _shmutant_pool_fail "$label" "$wd"; return 2
     fi
   done
-  # And anywhere else in the prepared tree: the clone (cp -RPp) gives every hard link its own
-  # inode, so a fixture the tests write through one name and read through another would behave
-  # differently in the clone than in the tree prepare built. Scanned as shmutant_copy_tree
-  # scans its source (.git pruned).
-  linked="$(builtin cd -- "$wd/pristine" 2>/dev/null && command -p find . -path ./.git -prune -o -type f -links +1 -print 2>/dev/null)" || linked="?"
+  # And anywhere else in the prepared tree, .git included: the clone (cp -RPp) copies it all
+  # and gives every hard link its own inode, so a fixture the tests write through one name and
+  # read through another would behave differently in the clone than in the tree prepare built.
+  linked="$(builtin cd -- "$wd/pristine" 2>/dev/null && command -p find . -type f -links +1 -print 2>/dev/null)" || linked="?"
   case "$linked" in ?*)
     _shmutant_err "$label: the prepared tree holds a regular file with more than one hard link (${linked%%$'\n'*}) — a clone cannot keep them joined; prepare a tree without them"
     _shmutant_pool_fail "$label" "$wd"; return 2 ;;
@@ -2379,6 +2379,10 @@ _shmutant_checksum() {
 # meaning what it says.
 _shmutant_cli_load() {
   local plan="$1" rc done_w
+  # The SHMUTANT_KEEP in force when this subshell ends, whichever way: a plan that assigns it
+  # and then leaves while loading (exit, a failure under its errexit) never reaches the pool's
+  # own reports, and the parent would read only the seed.
+  trap '_shmutant_report_keep at-exit' EXIT
   unset -f prepare run
   shmutant_reset
   # The completion channel is a descriptor on a file unlinked before

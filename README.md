@@ -36,7 +36,7 @@ exactly the way the tests it checks do:
 | Verdict | Meaning |
 |---|---|
 | `unapplied` | The old literal matched nothing. The row injected no defect and tests **nothing**. |
-| `baseline` | The selected tests were already red before any defect was injected. A red result would prove nothing. |
+| `baseline` | The selected tests were not green before any defect was injected (red, or aborted: the red status with no red line). A red result would prove nothing. |
 
 And four that describe a run that never produced an answer: `aborted` (the suite exited
 with a status other than green or red, or red without a failure line), `timeout`, `unsettled`
@@ -104,7 +104,7 @@ The predecessor of this tool ran the **entire suite for every mutant**. On one p
 118-row table took 4,600 to 5,200 seconds per pass. The coverage map was already there, every
 row declared its witness, but nothing used it to select work. `shmutant` passes the row's
 selector to `run` and ships `shmutant_selected` so a hand-rolled suite can honour it in one line.
-Its own 343-row self-mutation pass finishes in three to seven minutes against a suite that takes 15 seconds to run once.
+Its own 347-row self-mutation pass finishes in three to seven minutes against a suite that takes 15 seconds to run once.
 
 ## Installation
 
@@ -152,7 +152,7 @@ could not run.
 ## Testing shmutant
 
 ```sh
-bash test/run.sh                     # the suite, 160 units
+bash test/run.sh                     # the suite, 164 units
 bash shmutant.sh run test/mutants.sh # the suite, mutation-tested by shmutant itself
 ```
 
