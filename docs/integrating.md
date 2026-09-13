@@ -63,9 +63,11 @@ Prefix every `FAIL:` line inside a unit with the unit name, and witness and sele
 same string. Where a unit holds several assertions and you want the witness to be one exact
 assertion, pass a fifth argument to `shmutant_mut`: the witness is the assertion label, the
 selector is the unit. A witness is matched as a whole token, never as a substring: where a
-character precedes or follows it on the red line, that character is not a letter, a digit, `_`,
-`-` or `.`. So `parse-empty` is carried by `FAIL: t_parse: parse-empty: got []` and not by
-`FAIL: t_parse: parse-empty-list: got []`, whose assertion is a different one.
+character precedes or follows it on the red line, that character is ASCII whitespace or
+punctuation other than `_`, `-` and `.`; letters, digits and every non-ASCII character extend
+the witness, in any locale. So `parse-empty` is carried by `FAIL: t_parse: parse-empty: got []`
+and not by `FAIL: t_parse: parse-empty-list: got []`, whose assertion is a different one, and
+`foo` is not carried by `FAIL: caféfoo`.
 
 This repository's own suite (`test/run.sh`) is the reference: `t_*` functions selected by
 name, a runner that exits 2 when nothing matched.
@@ -182,9 +184,11 @@ return. The two helpers also make the pool's shadow check on entry and refuse (s
 shell whose function stands in for a builtin they rely on. All three, the pool included,
 refuse first (status 2 for the pool, 1 for the helpers) a shell that made one of the names they
 keep their own state in readonly: bash refuses a local over a readonly global, and the assignment
-that follows would end a non-interactive caller's shell. That check uses no `set`, no `return` and no local of its
-own, so a caller's function of those names cannot make it loop or answer wrong before the
-shadow check refuses it; and the status `prepare` returns arrives as a positional parameter, so a `prepare` that made the pool's status name
+that follows would end a non-interactive caller's shell. The names checked are every name the harness declares local
+anywhere the entry point runs, the pool's workers included (a readonly global reaches a
+subshell too); the suite checks the lists against the source. That check uses no `set`, no
+`return` and no local of its own, so a caller's function of those names cannot make it loop or
+answer wrong before the shadow check refuses it; and the status `prepare` returns arrives as a positional parameter, so a `prepare` that made the pool's status name
 readonly is refused (status 2) rather than ending the shell. A `prepare` that declares one of the
 pool's own names readonly (`readonly n=…`, say — dynamic scope reaches the pool's locals) is
 reported (status 2), never assigned; one that turns POSIX mode on is refused after it returns,

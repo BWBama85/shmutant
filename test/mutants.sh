@@ -930,8 +930,8 @@ shmutant_mut 'a shadow prepare introduced is not rechecked' \
   '  :' \
   't_pool_refuses_shadowed_builtins_and_posix_mode'
 shmutant_mut 'sourcing the library fails a caller under errexit' \
-  '_shmutant_alias_state="$(builtin shopt -p expand_aliases; :)"' \
-  '_shmutant_alias_state="$(builtin shopt -p expand_aliases)"' \
+  '_shmutant_alias_state="$(\builtin shopt -p expand_aliases; :)"' \
+  '_shmutant_alias_state="$(\builtin shopt -p expand_aliases)"' \
   't_library_sources_under_errexit'
 
 # --- guards added for the twenty-fifth review round ---
@@ -970,7 +970,7 @@ shmutant_mut 'a relative copy destination is rebased on the PWD variable' \
 
 # --- guards added for the twenty-sixth review round ---
 shmutant_mut 'the prologue runs whatever shopt the caller aliased' \
-  'builtin shopt -u expand_aliases' \
+  '\builtin shopt -u expand_aliases' \
   'shopt -u expand_aliases' \
   't_library_is_immune_to_aliases_at_parse_time'
 shmutant_mut 'a builtin disabled with enable passes the shadow check' \
@@ -1048,7 +1048,7 @@ shmutant_mut 'a prepare root ending in a newline is trimmed to its sibling' \
 
 # --- guards added for the twenty-ninth review round ---
 shmutant_mut 'the witness matches as a substring, not a whole token' \
-  '        if (pre !~ /[A-Za-z0-9_.-]/ && post !~ /[A-Za-z0-9_.-]/) return 1' \
+  '        if (boundary(pre) && boundary(post)) return 1' \
   '        return 1' \
   't_witness_matches_a_whole_token'
 shmutant_mut 'a scan that produced nothing is scored green' \
@@ -1312,8 +1312,8 @@ shmutant_mut 'the pinned relative cd consults CDPATH' \
 
 # --- guards added for the thirty-ninth review round ---
 shmutant_mut 'the baseline arrays are not in the readonly guard' \
-  '_shmutant_pool_locals_writable() { _shmutant_locals_writable "$1" "$2" label wd prep run cap n jobs root suffix i k sel t0 t1 killed rc verdict detail rjrc pout prc errexit_before pout_w pout_r intact base_sel base_verdict pool_aliases st; }' \
-  '_shmutant_pool_locals_writable() { _shmutant_locals_writable "$1" "$2" label wd prep run cap n jobs root suffix i k sel t0 t1 killed rc verdict detail rjrc pout prc errexit_before pout_w pout_r intact pool_aliases st; }' \
+  '    _shmutant_pool_t0 _shmutant_pool_wd after_ck base base_sel base_verdict cap cksum_bin clone_id comp copy d \' \
+  '    _shmutant_pool_t0 _shmutant_pool_wd after_ck base cap cksum_bin clone_id comp copy d \' \
   't_readonly_settings_do_not_kill_the_caller'
 shmutant_mut 'a readonly refusal leaves the prepare capture open' \
   '    exec {_shmutant_pool_pout_w}>&- {_shmutant_pool_pout_r}<&-' \
@@ -1352,16 +1352,16 @@ shmutant_mut 'the pool declares its locals before the readonly check' \
   '  :' \
   't_readonly_settings_do_not_kill_the_caller'
 shmutant_mut 'copy_tree declares its locals before the readonly check' \
-  '  _shmutant_locals_writable copy_tree "the calling shell made" rc copy_tree_aliases st src dst entry name asrc adst probe rest comp norm linked frc made probe2 || \builtin return 1' \
+  '  _shmutant_locals_writable copy_tree "the calling shell made" adst asrc comp copy_tree_aliases d dst entry frc kinds linked m made n name norm out probe probe2 rc rest rootls src st t who || \builtin return 1' \
   '  :' \
   't_readonly_settings_do_not_kill_the_caller'
 shmutant_mut 'mutate declares its locals before the readonly check' \
-  '  _shmutant_locals_writable mutate "the calling shell made" rc mutate_aliases st f tmp nl mode dir dirmode || \builtin return 1' \
+  '  _shmutant_locals_writable mutate "the calling shell made" dir dirmode f kinds m mode mutate_aliases n nl out rc st t tmp who || \builtin return 1' \
   '  :' \
   't_readonly_settings_do_not_kill_the_caller'
 shmutant_mut 'the readonly check skips the last name' \
-  '  if [[ $# -le 2 ]]; then :' \
   '  if [[ $# -le 3 ]]; then :' \
+  '  if [[ $# -le 4 ]]; then :' \
   't_readonly_settings_do_not_kill_the_caller'
 shmutant_mut 'a missing completion report ignores the keep channel' \
   '    if [ -z "$keep_last" ] || [ "$keep_last" = 1 ]; then keep=1; fi' \
@@ -1409,3 +1409,31 @@ shmutant_mut 'a swapped kept clone is not a harness error' \
   '        swapped)     swapped=1 ;;' \
   '        swapped)     : ;;' \
   't_a_clone_swapped_by_its_run_is_not_removed'
+
+# --- guards added for the forty-third review round ---
+shmutant_mut 'a non-ASCII letter is a witness boundary' \
+  '        if (boundary(pre) && boundary(post)) return 1' \
+  '        if (pre !~ /[A-Za-z0-9_.-]/ && post !~ /[A-Za-z0-9_.-]/) return 1' \
+  't_witness_matches_a_whole_token'
+shmutant_mut 'the bootstrap turns aliases off through an alias-expandable word' \
+  '\builtin shopt -u expand_aliases' \
+  'builtin shopt -u expand_aliases' \
+  't_bootstrap_is_immune_to_a_builtin_alias'
+shmutant_mut 'the bootstrap drops a builtin function through an alias-expandable word' \
+  '\unset -f builtin 2>/dev/null' \
+  'unset -f builtin 2>/dev/null' \
+  't_bootstrap_is_immune_to_a_builtin_alias'
+shmutant_mut 'POSIXLY_CORRECT is left as set -o posix wrote it' \
+  '  case "$_shmutant_pc" in set:*) POSIXLY_CORRECT="${_shmutant_pc#set:}" ;; *) [[ -z "${POSIXLY_CORRECT+set}" ]] || builtin unset -v POSIXLY_CORRECT ;; esac' \
+  '  :' \
+  't_helpers_restore_posixly_correct'
+# (no row on the POSIXLY_CORRECT unset guard: its only effect, expand_aliases turned off, is put
+# back by every entry point's own alias restore, so no unit can see it)
+shmutant_mut 'the readonly preflight probes nothing readonly -p did not mention' \
+  '_shmutant_locals_writable() { _shmutant_locals_writable_in "$1" "$2" "$(readonly -p 2>/dev/null)" "${@:3}"; }' \
+  '_shmutant_locals_writable() { _shmutant_locals_writable_in "$1" "$2" "" "${@:3}"; }' \
+  't_readonly_settings_do_not_kill_the_caller'
+shmutant_mut 'a worker local is missing from the pool preflight' \
+  '    table target target_ck targets timeout tmp unpublished us v v_jobs v_red v_timeout \' \
+  '    table target_ck targets timeout tmp unpublished us v v_jobs v_red v_timeout \' \
+  't_readonly_preflight_names_every_local'

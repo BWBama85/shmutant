@@ -559,6 +559,15 @@ t_witness_matches_a_whole_token() {
   eq "$SHMUTANT_RUN_RED$SHMUTANT_RUN_WITNESSED" 11 'a later whole-token occurrence is found past an extended one'
   scan 'FAIL: t_x: [foo]' '[foo]'
   eq "$SHMUTANT_RUN_RED$SHMUTANT_RUN_WITNESSED" 11 'a witness with its own punctuation is carried'
+  # non-ASCII letters are token characters, whatever the locale or the awk
+  scan 'FAIL: caféfoo: unrelated' foo
+  eq "$SHMUTANT_RUN_RED$SHMUTANT_RUN_WITNESSED" 10 'a label that extends the witness with a non-ASCII letter does not carry it'
+  scan 'FAIL: fooé: unrelated' foo
+  eq "$SHMUTANT_RUN_RED$SHMUTANT_RUN_WITNESSED" 10 'nor one the witness begins before a non-ASCII letter'
+  scan 'FAIL: t_x: (foo) café' foo
+  eq "$SHMUTANT_RUN_RED$SHMUTANT_RUN_WITNESSED" 11 'ASCII punctuation around the witness carries it'
+  scan 'FAIL: t_x: café: y' café
+  eq "$SHMUTANT_RUN_RED$SHMUTANT_RUN_WITNESSED" 11 'a non-ASCII witness is carried as a whole token'
   # a scan that produced nothing (its descriptor cannot be read) is not a green run
   _shmutant_scan_output 199 'FAIL: ' foo 2>/dev/null
   eq "${SHMUTANT_RUN_SCAN_FAILED:-unset}" 1 'a scan whose descriptor cannot be read reports failure, not green'
@@ -699,17 +708,17 @@ t_readonly_settings_do_not_kill_the_caller() {
     echo "pool=$p copy=$c mutate=$m" > "$T/ro" )
   eq "$(cat "$T/ro" 2>/dev/null)" 'pool=2 copy=1 mutate=1' 'with a readonly rc in the calling shell, each entry point refuses and the shell survives'
   eq "$(grep -c "the calling shell made 'rc' readonly" "$T/ro-e")" 3 'each says why'
-  # a body local (label) and the name the readonly probe itself used to keep a local in (d)
+  # the name the readonly probe itself once kept a local in (d), and a body local (label)
   ( readonly d=1 label=x
     SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd-ro2" toy_prepare toy_run > /dev/null 2>"$T/ro-e2"; echo "pool=$?" > "$T/ro2" )
   eq "$(cat "$T/ro2" 2>/dev/null)" 'pool=2' 'a readonly body local is refused at entry with the probe keeping no local of its own, and the shell survives'
-  has "$(cat "$T/ro-e2")" "the calling shell made 'label' readonly" 'says why'
-  # the last name of the pool's list (st, the alias save): the check reaches the end of it
+  has "$(cat "$T/ro-e2")" "the calling shell made 'd' readonly" 'says why, naming the first of them'
+  # the last name of the pool's list (wstatus, in the sorted list): the check reaches the end
   # shellcheck disable=SC2034
-  ( readonly st=1
+  ( readonly wstatus=1
     SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd-ro3" toy_prepare toy_run > /dev/null 2>"$T/ro-e3"; echo "pool=$?" > "$T/ro3" )
   eq "$(cat "$T/ro3" 2>/dev/null)" 'pool=2' 'the last name of the list is checked too, and the shell survives'
-  has "$(cat "$T/ro-e3")" "the calling shell made 'st' readonly" 'says why'
+  has "$(cat "$T/ro-e3")" "the calling shell made 'wstatus' readonly" 'says why'
   # the prefixed name prepare's status is stashed in, made readonly by prepare: dynamic scope
   # reaches it too, so the status arrives as a positional parameter and the name is checked first
   ro_stash_prepare() { readonly _shmutant_pool_prc=7; toy_prepare "$@"; }
@@ -722,18 +731,29 @@ t_readonly_settings_do_not_kill_the_caller() {
   # name is still seen, and a helper under a set function is refused as a shadow, not as a
   # false readonly collision
   set -m
-  ( set() { :; }; readonly rc=7; SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd-set" toy_prepare toy_run > /dev/null 2>"$T/e-set"; echo "pool=$?" > "$T/o-set" ) > /dev/null 2>&1 & local bg=$! i=0
+  # (d: a name without an r in it, which a probe that read its own argument back would pass)
+  ( set() { :; }; readonly d=1; SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd-set" toy_prepare toy_run > /dev/null 2>"$T/e-set"; echo "pool=$?" > "$T/o-set" ) > /dev/null 2>&1 & local bg=$! i=0
   ( enable -n set; SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd-set2" toy_prepare toy_run > /dev/null 2>"$T/e-set3"; echo "pool2=$?" > "$T/o-set3" ) > /dev/null 2>&1 & local bg3=$!
   ( set() { :; }; shmutant_copy_tree "$T/ro-src" "$T/ro-dst3" 2>"$T/e-set2"; echo "copy=$?" > "$T/o-set2" ) > /dev/null 2>&1 & local bg2=$!
   set +m
   until { [ -s "$T/o-set" ] && [ -s "$T/o-set2" ] && [ -s "$T/o-set3" ]; } || [ "$i" -ge 300 ]; do i=$((i + 1)); sleep 0.1; done
   kill -KILL -- -"$bg" -"$bg2" -"$bg3" 2>/dev/null; wait "$bg" "$bg2" "$bg3" 2>/dev/null
   eq "$(cat "$T/o-set" 2>/dev/null)" 'pool=2' 'a set function never loops the preflight: the pool refuses and the shell survives'
-  has "$(cat "$T/e-set")" "the calling shell made 'rc' readonly" 'the readonly name is still seen past a set function'
+  has "$(cat "$T/e-set")" "the calling shell made 'd' readonly" 'the readonly name is still seen past a set function'
   eq "$(cat "$T/o-set3" 2>/dev/null)" 'pool2=2' 'a disabled set never loops the preflight either: the pool refuses and the shell survives'
   has "$(cat "$T/e-set3")" 'set is not the builtin' 'a disabled set is refused as a shadow'
   eq "$(cat "$T/o-set2" 2>/dev/null)" 'copy=1' 'copy_tree under a set function is refused'
   has "$(cat "$T/e-set2")" 'set is not the builtin' 'as a shadow'
+  # a name a worker declares local (target), readonly in the calling shell: refused at entry
+  # with status 2, not a worker dying and a row reported lost
+  # shellcheck disable=SC2034
+  ( readonly target=mine; SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd-tg" toy_prepare toy_run > /dev/null 2>"$T/e-tg"; echo "pool=$?" > "$T/o-tg" )
+  eq "$(cat "$T/o-tg" 2>/dev/null)" 'pool=2' 'a readonly worker local is refused before any worker starts'
+  has "$(cat "$T/e-tg")" "the calling shell made 'target' readonly" 'says why'
+  # shellcheck disable=SC2034
+  ( readonly dir=x; shmutant_mutate "$T/ro-dst/f" 'x=1' 'x=2' 2>"$T/e-dir"; echo "mutate=$?" > "$T/o-dir" )
+  eq "$(cat "$T/o-dir" 2>/dev/null)" 'mutate=1' 'a readonly name of the mutate body is refused'
+  has "$(cat "$T/e-dir")" "the calling shell made 'dir' readonly" 'says why'
   [ -z "$(grep -c readonly "$T/e-set2" | grep -v '^0$')" ] || fail_ 'copy_tree under a set function reported a false readonly collision'
   # and a refused pool leaves no descriptor behind in the caller shell
   ( before="$(ls /dev/fd | wc -l | tr -d ' ')"; SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd-fd" readonly_prepare toy_run > /dev/null 2>&1; after="$(ls /dev/fd | wc -l | tr -d ' ')"; echo "$before $after" > "$T/fds" )
@@ -1267,6 +1287,53 @@ t_watchdog_deadline_survives_clock_steps() {
   [ -e "$T/short-done" ] || fail_ 'a clock jumping forward cut a one-second run short of a thirty-second timeout'
   has "$(cat "$T/out")" $'\trow\tkilled\ta\t' 'the run completed and its verdict stands, with the clock jumping forward'
   true
+}
+
+t_readonly_preflight_names_every_local() {
+  # every name the harness declares local outside the CLI is in an entry point's preflight
+  # list: the lists are literal, and a local added without its name would end a caller's shell
+  # that made that name readonly. The extraction strips comments and quoted or parenthesised
+  # values, then takes the words after `local` and its flags.
+  local names listed n missing="" count
+  names="$(awk '
+    /^[A-Za-z_][A-Za-z0-9_]*\(\) \{/ { f = $1; sub(/\(\).*/, "", f) }
+    /^\}/ { f = "" }
+    f != "" && f !~ /^_shmutant_cli_/ && f != "shmutant_main" && f != "_shmutant_checksum" { if ($0 ~ /^[ \t]*#/) next; sub(/[ \t]#[^"'"'"']*$/, ""); print }
+  ' "$SHMUTANT" | sed -E 's/"([^"\\]|\\.)*"//g; s/'"'"'[^'"'"']*'"'"'//g; s/\([^)]*\)//g' \
+    | grep -oE '(^|[;{&|]|then|do|else)[[:space:]]*local([[:space:]]+-[a-zA-Z]+)*([[:space:]]+[A-Za-z_][A-Za-z0-9_]*(=[^[:space:];|&]*)?)+' \
+    | sed -E 's/^.*local//; s/[[:space:]]-[a-zA-Z]+//g; s/=[^[:space:]]*//g' | tr -s ' \t' '\n' | grep -v '^$' | sort -u)"
+  count="$(printf '%s\n' "$names" | grep -c .)"
+  [ "$count" -ge 120 ] || fail_ "fixture: the extraction found only $count local names"
+  listed="$(declare -f _shmutant_pool_locals_writable shmutant_copy_tree shmutant_mutate | tr -s ' \t\\' '\n\n\n')"
+  for n in $names; do printf '%s\n' "$listed" | grep -qx -- "$n" || missing="$missing $n"; done
+  [ -z "$missing" ] || fail_ "local names in no preflight list:$missing"
+  echo "note: $_unit: $count local names checked against the preflight lists"
+}
+
+t_bootstrap_is_immune_to_a_builtin_alias() {
+  # the bootstrap runs while the caller'"'"'s aliases are still on: an alias named builtin must
+  # not stand in for the dispatcher that turns them off
+  mkdir -p "$T/a-src"; printf 'x\n' > "$T/a-src/f"
+  bash -c $'shopt -s expand_aliases; alias builtin=false\nsource "$1" || exit 9\nshmutant_copy_tree "$2" "$3"; echo "rc=$?"' _ "$SHMUTANT" "$T/a-src" "$T/a-dst" > "$T/a-out" 2>"$T/a-err"
+  eq "$(cat "$T/a-out")" 'rc=0' 'sourced under an alias named builtin, copy_tree still works'
+  [ -f "$T/a-dst/f" ] || fail_ 'and copied the tree'
+  # a function named builtin already planted, with unset aliased: the bootstrap drops the
+  # function through a word the alias cannot reach, and the dispatcher is real again
+  bash -c $'builtin() { false; }; shopt -s expand_aliases; alias unset=false\nsource "$1" || exit 9\nshmutant_copy_tree "$2" "$3"; echo "rc=$?"' _ "$SHMUTANT" "$T/a-src" "$T/a-dst2" > "$T/a-out2" 2>"$T/a-err2"
+  eq "$(cat "$T/a-out2")" 'rc=0' 'sourced with a builtin function planted and unset aliased, copy_tree still works'
+  printf 'shopt -s expand_aliases\nalias builtin=false\n' > "$T/bash_env"
+  BASH_ENV="$T/bash_env" bash "$SHMUTANT" version > "$T/v-out" 2>"$T/v-err"; rc_is $? 0 'the CLI under a BASH_ENV alias named builtin still runs version'
+  [ -s "$T/v-out" ] || fail_ 'and prints it'
+}
+
+t_helpers_restore_posixly_correct() {
+  # the shadow check toggles POSIX mode to drop a builtin function; the caller'"'"'s POSIXLY_CORRECT
+  # comes back exactly (its value, or its absence), not as the y that set -o posix writes
+  mkdir -p "$T/pc-src"; printf 'x\n' > "$T/pc-src/f"
+  ( POSIXLY_CORRECT=custom; shmutant_copy_tree "$T/pc-src" "$T/pc-dst" > /dev/null 2>&1; printf '%s' "${POSIXLY_CORRECT-unset}" > "$T/pc1" )
+  eq "$(cat "$T/pc1")" custom 'a caller value of POSIXLY_CORRECT survives the shadow check exactly'
+  ( unset POSIXLY_CORRECT; shmutant_copy_tree "$T/pc-src" "$T/pc-dst2" > /dev/null 2>&1; printf '%s' "${POSIXLY_CORRECT-unset}" > "$T/pc2" )
+  eq "$(cat "$T/pc2")" unset 'an unset POSIXLY_CORRECT stays unset'
 }
 
 t_verdict_scans_a_large_output() {

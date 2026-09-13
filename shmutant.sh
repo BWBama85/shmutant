@@ -52,8 +52,10 @@
 # A function named builtin — one the CLI inherited as an exported function, or a caller's —
 # would stand in for every qualified call below; it goes first. Tests below are the [[ keyword,
 # which no function or alias can stand in for. (`unset` itself has no unshadowable form: a
-# shell that shadows it is beyond this file's reach.)
-unset -f builtin 2>/dev/null
+# shell that shadows it is beyond this file's reach.) Backslash-prefixed words are never
+# alias-expanded: aliases are still on here, and a caller's `alias builtin=…` would otherwise
+# stand in for the dispatcher until the line below turns them off.
+\unset -f builtin 2>/dev/null
 
 SHMUTANT_VERSION=0.1.0
 # Process identity comes from the kernel's start time in /proc where there is one (Linux):
@@ -64,8 +66,8 @@ SHMUTANT_PROC=0; [[ -r /proc/self/stat ]] && SHMUTANT_PROC=1
 # Aliases expand while a file is PARSED: a sourcing shell whose dotfiles alias `cp` or `mkdir`
 # would otherwise bake those flags into every function below. Off for the rest of this file,
 # and the caller's setting put back at its end.
-_shmutant_alias_state="$(builtin shopt -p expand_aliases; :)"
-builtin shopt -u expand_aliases
+_shmutant_alias_state="$(\builtin shopt -p expand_aliases; :)"
+\builtin shopt -u expand_aliases
 
 # _shmutant_bash_ok <major> <minor> — is that interpreter version at or above the floor?
 # Defined in bash-3.2 syntax: it runs before the rest of this file is parsed.
@@ -283,7 +285,7 @@ _shmutant_aliases_back() {
 shmutant_copy_tree() {
   # Before any local: bash refuses a local over a readonly global, and the assignment that
   # follows would end a non-interactive caller's shell. The names are this helper's locals.
-  _shmutant_locals_writable copy_tree "the calling shell made" rc copy_tree_aliases st src dst entry name asrc adst probe rest comp norm linked frc made probe2 || \builtin return 1
+  _shmutant_locals_writable copy_tree "the calling shell made" adst asrc comp copy_tree_aliases d dst entry frc kinds linked m made n name norm out probe probe2 rc rest rootls src st t who || \builtin return 1
   local rc copy_tree_aliases; _shmutant_aliases_off copy_tree_aliases
   # The same shadow check as the pool's: a caller's function named printf, cd or [ would
   # otherwise decide what this helper does, with no pool around to refuse it.
@@ -436,7 +438,7 @@ _shmutant_mutate_restore() {
 shmutant_mutate() {
   # Before any local: bash refuses a local over a readonly global, and the assignment that
   # follows would end a non-interactive caller's shell. The names are this helper's locals.
-  _shmutant_locals_writable mutate "the calling shell made" rc mutate_aliases st f tmp nl mode dir dirmode || \builtin return 1
+  _shmutant_locals_writable mutate "the calling shell made" dir dirmode f kinds m mode mutate_aliases n nl out rc st t tmp who || \builtin return 1
   local rc mutate_aliases; _shmutant_aliases_off mutate_aliases
   _shmutant_no_shadows mutate || { _shmutant_aliases_back "$mutate_aliases"; builtin return 1; }
   # A plain call, not a condition: a callback's own errexit is honoured inside, as documented.
@@ -526,25 +528,28 @@ shmutant_reset() {
 # empty witness). SHMUTANT_RUN_SCAN_FAILED=1 when the scan produced no result: that run is not
 # green, it is unassessed.
 # Per line, so a witness cannot match across a passing assertion's echo; literal matches, not
-# patterns. A token: the character before and after the witness, where there is one, is not a
-# letter, a digit, `_`, `-` or `.`, so a label that merely extends the witness does not carry it.
+# patterns. A token: the character before and after the witness, where there is one, is ASCII
+# whitespace or punctuation other than `_`, `-` and `.`; letters, digits and every non-ASCII
+# character (in any locale, byte- or character-based awk) extend the witness and do not carry it.
 # The text is never held whole: a run that printed until its deadline is scanned in constant memory.
 _shmutant_scan_output() {
   local got
   SHMUTANT_RUN_RED=0; SHMUTANT_RUN_WITNESSED=0; SHMUTANT_RUN_SCAN_FAILED=0
   # Through ENVIRON, never -v: awk would read a backslash escape in the prefix or witness.
   got="$(SHMUTANT_SCAN_P="$2" SHMUTANT_SCAN_W="$3" command -p awk '
+    function boundary(c) { return c == "" || index(SEP, c) > 0 }
     function witnessed(s, w,   i, off, pre, post) {
       off = 1
       while ((i = index(substr(s, off), w)) > 0) {
         i += off - 1
         pre = (i > 1) ? substr(s, i - 1, 1) : ""; post = substr(s, i + length(w), 1)
-        if (pre !~ /[A-Za-z0-9_.-]/ && post !~ /[A-Za-z0-9_.-]/) return 1
+        if (boundary(pre) && boundary(post)) return 1
         off = i + 1
       }
       return 0
     }
     BEGIN { p = ENVIRON["SHMUTANT_SCAN_P"]; w = ENVIRON["SHMUTANT_SCAN_W"] }
+    BEGIN { SEP = " \t!\"#$%&'"'"'()*+,/:;<=>?@[\\]^`{|}~" }
     index($0, p) == 1 { red = 1; if (w != "" && witnessed($0, w)) { wit = 1; exit } }
     END { print red + 0, wit + 0 }' <&"$1" 2>/dev/null)"
   case "$got" in
@@ -1703,10 +1708,15 @@ _shmutant_attr_field_has_r() { case "${1%% *}" in *r*) [[ 1 -eq 1 ]] ;; *) [[ 1 
 # <name> is readonly: bash refuses a local over a readonly global, and the assignment that
 # follows would end a non-interactive caller's shell. Positional parameters only, as above;
 # one name per call, by recursion, so nothing here can loop.
-_shmutant_locals_writable() {
-  if [[ $# -le 2 ]]; then :
-  elif _shmutant_readonly "$3"; then _shmutant_err "$1: $2 '$3' readonly — a name shmutant keeps its own state in; declare yours with another name or a local of your own"; [[ 1 -eq 0 ]]
-  else _shmutant_locals_writable "$1" "$2" "${@:4}"
+# The list is long (every name declared local anywhere the entry point runs, its workers
+# included: a readonly global reaches a subshell too), so `readonly -p` is read once and only
+# a name it mentions is probed exactly.
+_shmutant_locals_writable() { _shmutant_locals_writable_in "$1" "$2" "$(readonly -p 2>/dev/null)" "${@:3}"; }
+_shmutant_locals_writable_in() {
+  if [[ $# -le 3 ]]; then :
+  elif [[ "$3" == *" $4="* || "$3" == *" $4" || "$3" == *" $4"$'\n'* ]] && _shmutant_readonly "$4"; then
+    _shmutant_err "$1: $2 '$4' readonly — a name shmutant keeps its own state in; declare yours with another name or a local of your own"; [[ 1 -eq 0 ]]
+  else _shmutant_locals_writable_in "$1" "$2" "$3" "${@:5}"
   fi
 }
 
@@ -1724,9 +1734,25 @@ _shmutant_pool_stash() {
   fi
 }
 
-# _shmutant_pool_locals_writable <label> <who> — the pool's own names, checked at entry (the
-# calling shell) and after prepare (dynamic scope reaches these locals).
-_shmutant_pool_locals_writable() { _shmutant_locals_writable "$1" "$2" label wd prep run cap n jobs root suffix i k sel t0 t1 killed rc verdict detail rjrc pout prc errexit_before pout_w pout_r intact base_sel base_verdict pool_aliases st; }
+# _shmutant_pool_locals_writable <label> <who> — every name declared local by the pool and by
+# what it runs, workers included, checked at entry (the calling shell) and after prepare
+# (dynamic scope reaches the pool's own). The suite checks this list against the source.
+_shmutant_pool_locals_writable() {
+  _shmutant_locals_writable "$1" "$2" \
+    SHMUTANT_FREEZE_UNSETTLED SHMUTANT_KILL_GROUP SHMUTANT_START SHMUTANT_UNSETTLED_FD _shmutant_pool_cap _shmutant_pool_errexit _shmutant_pool_label _shmutant_pool_n _shmutant_pool_pout_r _shmutant_pool_pout_w _shmutant_pool_prc _shmutant_pool_run \
+    _shmutant_pool_t0 _shmutant_pool_wd after_ck base base_sel base_verdict cap cksum_bin clone_id comp copy d \
+    dbg depth detail dir dirmode done_pid err_fd errexit_before etime f fd fifo \
+    fired fmt found frozen go got grp h have held helpers here \
+    hms hold holder holderid hp i id intact jobs k kept key \
+    killed kind kinds l label left left_r left_w line ls_bin m mark \
+    mode ms mutate_aliases n new nl now out out_r out_r2 out_w outf \
+    p parent path pending phys pid pids pool_aliases pout pout_r pout_w prc \
+    prep r rc red rel rest ret rjrc root root_ok rootid rootls \
+    roots rounds run s sdir sec seen seen_r seen_w sel setup_failed sig \
+    spec st stat_bin state status stillours stillpids suffix swapped t t0 t1 \
+    table target target_ck targets timeout tmp unpublished us v v_jobs v_red v_timeout \
+    verdict vr vw wd who wit wrc wstatus
+}
 
 # _shmutant_canon <label> <name> <canonical> — set <name> to its canonical value, or, when the
 # caller made it readonly, accept it only if it already is that value.
@@ -1868,7 +1894,7 @@ _shmutant_pool_cleanup() {
 # from BASHOPTS and SHELLOPTS, read before and after — variables, which nothing shadows — with
 # the real builtin, which is real again by then. No `local`: that name is not yet checked.
 _shmutant_drop_builtin_fn() {
-  _shmutant_bo="$BASHOPTS"; _shmutant_so="$SHELLOPTS"
+  _shmutant_bo="$BASHOPTS"; _shmutant_so="$SHELLOPTS"; _shmutant_pc="${POSIXLY_CORRECT+set}:${POSIXLY_CORRECT-}"
   POSIXLY_CORRECT=1; unset -f builtin 2>/dev/null; unset POSIXLY_CORRECT
   _shmutant_o="$_shmutant_bo"
   while [[ -n "$_shmutant_o" ]]; do
@@ -1894,7 +1920,11 @@ _shmutant_drop_builtin_fn() {
   # expand_aliases off, and leaves inherit_errexit on when errexit is on. Both from before.
   case ":$_shmutant_bo:" in *:expand_aliases:*) builtin shopt -s expand_aliases ;; *) builtin shopt -u expand_aliases ;; esac
   case ":$_shmutant_bo:" in *:inherit_errexit:*) builtin shopt -s inherit_errexit ;; *) builtin shopt -u inherit_errexit ;; esac
-  builtin unset -v _shmutant_bo _shmutant_so _shmutant_o _shmutant_n
+  # POSIXLY_CORRECT exactly as the caller had it: `set -o posix` above recreates it as `y`, and
+  # the caller's own value, or its absence, is what the caller's later commands read. Unset only
+  # when it is set: unsetting it leaves posix mode, which turns expand_aliases off again.
+  case "$_shmutant_pc" in set:*) POSIXLY_CORRECT="${_shmutant_pc#set:}" ;; *) [[ -z "${POSIXLY_CORRECT+set}" ]] || builtin unset -v POSIXLY_CORRECT ;; esac
+  builtin unset -v _shmutant_bo _shmutant_so _shmutant_o _shmutant_n _shmutant_pc
 }
 
 # _shmutant_no_shadows <label> — refuse to run while a builtin this harness signals, waits and
@@ -2454,8 +2484,9 @@ shmutant_main() {
 eval "$_shmutant_alias_state"; unset -v _shmutant_alias_state
 
 # The [[ keyword, like the bootstrap: a caller's function named [ or test decides neither whether
-# this file is the script being run nor what the CLI exits with.
+# this file is the script being run nor what the CLI exits with. \builtin: the line above put
+# the invoking environment's aliases back, and this is parsed after it.
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   shmutant_main "$@"
-  builtin exit $?
+  \builtin exit $?
 fi
