@@ -160,8 +160,8 @@ shmutant_mut 'baseline runs once per row instead of once per selector' \
   '[ "$k" = "$sel" ] && continue; done' \
   't_pool_runs_baseline_once_per_selector'
 shmutant_mut 'SHMUTANT_KEEP=1 removes the clone' \
-  '  if [ "${SHMUTANT_KEEP:-0}" != 1 ]; then' \
-  '  if true; then' \
+  '  elif [ "${SHMUTANT_KEEP:-0}" != 1 ] && [ -e "$1/tree" ]; then' \
+  '  elif [ -e "$1/tree" ]; then' \
   't_pool_keep_retains_clones'
 shmutant_mut 'a nested root is not carried into the clone' \
   'root="$dir/tree$suffix"' \
@@ -324,8 +324,8 @@ shmutant_mut 'the descendant list is split by the caller IFS again' \
   '        _shmutant_held_group "$pid"; _shmutant_kill_tree_twice "${SHMUTANT_HELD[@]}" "$pid:$rootid" $(printf "%s\n" "${victims[@]}")' \
   't_verdict_timeout_kills_a_descendant_seen_then_reparented'
 shmutant_mut 'prepare runs in a subshell' \
-  '"$prep" "$wd/pristine" >&"$pout_w"; _shmutant_pool_prc=$?' \
-  '( "$prep" "$wd/pristine" >&"$pout_w" ); _shmutant_pool_prc=$?' \
+  '"$prep" "$wd/pristine" >&"$pout_w"; _shmutant_pool_stash "$?"' \
+  '( "$prep" "$wd/pristine" >&"$pout_w" ); _shmutant_pool_stash "$?"' \
   't_pool_runs_prepare_in_its_own_shell'
 shmutant_mut 'surplus mutation arguments are accepted' \
   'if [ "$#" -lt 4 ] || [ "$#" -gt 5 ]; then' \
@@ -346,8 +346,8 @@ shmutant_mut 'the prepare capture is a predictable name again' \
   'pout="$wd/prepare.out" ||' \
   't_pool_prepare_capture_never_follows_a_link'
 shmutant_mut 'prepare runs as a condition, muting its errexit' \
-  '"$prep" "$wd/pristine" >&"$pout_w"; _shmutant_pool_prc=$?' \
-  'if "$prep" "$wd/pristine" >&"$pout_w"; then _shmutant_pool_prc=0; else _shmutant_pool_prc=$?; fi' \
+  '"$prep" "$wd/pristine" >&"$pout_w"; _shmutant_pool_stash "$?"' \
+  'if "$prep" "$wd/pristine" >&"$pout_w"; then _shmutant_pool_stash 0; else _shmutant_pool_stash "$?"; fi' \
   't_pool_prepare_keeps_its_own_errexit'
 shmutant_mut 'the errexit prepare turned on is left on' \
   'if [ "$errexit_before" = 1 ]; then set -e; else set +e; fi' \
@@ -1066,8 +1066,8 @@ shmutant_mut 'a pristine tree modified after prepare is cloned anyway' \
   '  if false; then' \
   't_pool_refuses_a_modified_pristine_tree'
 shmutant_mut 'a readonly setting is assigned to' \
-  '  case "$1" in *r*) \builtin return 0 ;; esac' \
-  '  :' \
+  '_shmutant_attr_field_has_r() { case "${1%% *}" in *r*) [[ 1 -eq 1 ]] ;; *) [[ 1 -eq 0 ]] ;; esac; }' \
+  '_shmutant_attr_field_has_r() { case "${1%% *}" in *r*) [[ 1 -eq 0 ]] ;; *) [[ 1 -eq 0 ]] ;; esac; }' \
   't_readonly_settings_do_not_kill_the_caller'
 shmutant_mut 'an alias passes as a callback' \
   '  case "$(builtin type -t -- "$1" 2>/dev/null)" in function|file) return 0 ;; esac' \
@@ -1288,8 +1288,8 @@ shmutant_mut 'the completion path is unlinked whatever now sits at the workdir' 
   '  command -p rm -f -- "$done_file"' \
   't_cli_removes_only_the_workdir_it_created_by_identity'
 shmutant_mut 'a clone swapped by its run is removed by path' \
-  '    elif [ -L "$1/tree" ] || [ "$(_shmutant_dir_id "$1/tree")" != "${SHMUTANT_CLONE_ID:-}" ]; then _shmutant_err "refusing to remove $1/tree: it is no longer the clone this run made"' \
-  '    elif false; then :' \
+  '  if [ -L "$1/tree" ] || { [ -e "$1/tree" ] && [ "$(_shmutant_dir_id "$1/tree")" != "${SHMUTANT_CLONE_ID:-}" ]; }; then' \
+  '  if [ -L "$1/tree" ]; then' \
   't_a_clone_swapped_by_its_run_is_not_removed'
 shmutant_mut 'an unverified CLI child is escalated on by bare number' \
   '    _shmutant_kill_tree_twice "$SHMUTANT_CLI_CHILD:${SHMUTANT_CLI_CHILD_ID:-}"' \
@@ -1334,12 +1334,12 @@ shmutant_mut 'a function named return swallows the shadow check refusal' \
 
 # --- guards added for the fortieth review round ---
 shmutant_mut 'the prepare status is captured into a name prepare can make readonly' \
-  '  "$prep" "$wd/pristine" >&"$pout_w"; _shmutant_pool_prc=$?' \
-  '  "$prep" "$wd/pristine" >&"$pout_w"; prc=$?; _shmutant_pool_prc=$prc' \
+  '  "$prep" "$wd/pristine" >&"$pout_w"; _shmutant_pool_stash "$?"' \
+  '  "$prep" "$wd/pristine" >&"$pout_w"; prc=$?; _shmutant_pool_stash "$prc"' \
   't_readonly_settings_do_not_kill_the_caller'
 shmutant_mut 'an unbounded run has no descendant watchdog' \
-  '        while [ "$timeout" -eq 0 ] || [ "$n" -lt "$polls" ]; do' \
-  '        while [ "$timeout" -ne 0 ] && [ "$n" -lt "$polls" ]; do' \
+  '        while [ "$timeout" -eq 0 ] || [ "$elapsed" -lt "$budget" ]; do' \
+  '        while [ "$timeout" -ne 0 ] && [ "$elapsed" -lt "$budget" ]; do' \
   't_unbounded_run_still_tracks_descendants'
 shmutant_mut 'POSIX mode prepare turned on is not rechecked' \
   '  if [[ -o posix ]]; then' \
@@ -1360,8 +1360,8 @@ shmutant_mut 'mutate declares its locals before the readonly check' \
   '  :' \
   't_readonly_settings_do_not_kill_the_caller'
 shmutant_mut 'the readonly check skips the last name' \
-  '  while [[ $# -gt 2 ]]; do' \
-  '  while [[ $# -gt 3 ]]; do' \
+  '  if [[ $# -le 2 ]]; then :' \
+  '  if [[ $# -le 3 ]]; then :' \
   't_readonly_settings_do_not_kill_the_caller'
 shmutant_mut 'a missing completion report ignores the keep channel' \
   '    if [ -z "$keep_last" ] || [ "$keep_last" = 1 ]; then keep=1; fi' \
@@ -1372,6 +1372,40 @@ shmutant_mut 'the prepared tree is removed by path at cleanup' \
   '    elif false; then :' \
   't_a_clone_swapped_by_its_run_is_not_removed'
 shmutant_mut 'the watchdog deadline is a wall-clock instant' \
-  '        while [ "$timeout" -eq 0 ] || [ "$n" -lt "$polls" ]; do' \
-  '        while [ "$timeout" -eq 0 ] || [ "$(_shmutant_now)" -lt "$(( t0 + 10#$timeout * 1000000 ))" ]; do' \
-  't_watchdog_deadline_is_a_count_of_polls'
+  '        while [ "$timeout" -eq 0 ] || [ "$elapsed" -lt "$budget" ]; do' \
+  '        while [ "$timeout" -eq 0 ] || [ "$(_shmutant_now)" -lt "$(( last + budget - elapsed ))" ]; do' \
+  't_watchdog_deadline_survives_clock_steps'
+shmutant_mut 'a poll that read no time counts nothing' \
+  '          [ "$d" -lt 500000 ] && d=500000' \
+  '          :' \
+  't_watchdog_deadline_survives_clock_steps'
+shmutant_mut 'a poll counts a whole clock step' \
+  '          [ "$d" -gt 5000000 ] && d=5000000' \
+  '          :' \
+  't_watchdog_deadline_survives_clock_steps'
+
+# --- guards added for the forty-second review round ---
+shmutant_mut 'the readonly probe reads its answer through a shadowable set' \
+  '_shmutant_readonly() { _shmutant_attrs_readonly "$(declare -p -- "$1" 2>/dev/null)"; }' \
+  '_shmutant_readonly() { set -- "$(declare -p -- "$1" 2>/dev/null)"; _shmutant_attrs_readonly "$1"; }' \
+  't_readonly_settings_do_not_kill_the_caller'
+shmutant_mut 'the readonly probe keeps its answer in a name of its own' \
+  '_shmutant_readonly() { _shmutant_attrs_readonly "$(declare -p -- "$1" 2>/dev/null)"; }' \
+  '_shmutant_readonly() { local d; d="$(declare -p -- "$1" 2>/dev/null)"; _shmutant_attrs_readonly "$d"; }' \
+  't_readonly_settings_do_not_kill_the_caller'
+shmutant_mut 'the prepare status stash skips its readonly check' \
+  '  if _shmutant_readonly _shmutant_pool_prc; then' \
+  '  if false; then' \
+  't_readonly_settings_do_not_kill_the_caller'
+shmutant_mut 'a kept clone is not identity-checked before its verdict' \
+  '  if [ -L "$1/tree" ] || { [ -e "$1/tree" ] && [ "$(_shmutant_dir_id "$1/tree")" != "${SHMUTANT_CLONE_ID:-}" ]; }; then' \
+  '  if [ "${SHMUTANT_KEEP:-0}" != 1 ] && { [ -L "$1/tree" ] || { [ -e "$1/tree" ] && [ "$(_shmutant_dir_id "$1/tree")" != "${SHMUTANT_CLONE_ID:-}" ]; }; }; then' \
+  't_a_clone_swapped_by_its_run_is_not_removed'
+shmutant_mut 'a swapped clone still publishes the run verdict' \
+  '    set -- "$1" unprepared "$3" swapped' \
+  '    :' \
+  't_a_clone_swapped_by_its_run_is_not_removed'
+shmutant_mut 'a swapped kept clone is not a harness error' \
+  '        swapped)     swapped=1 ;;' \
+  '        swapped)     : ;;' \
+  't_a_clone_swapped_by_its_run_is_not_removed'

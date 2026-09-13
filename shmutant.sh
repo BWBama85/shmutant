@@ -962,14 +962,20 @@ _shmutant_run_bounded() {
         # to clean up whatever the callback left behind.
         trap 'kill "$s" 2>/dev/null; for p in "${!seen[@]}"; do printf "%s:%s\n" "$p" "${seen[$p]}"; done >&"$seen_w"; exit 0' TERM
         declare -A seen=(); tampered=0
-        # 10#: a validated value like 08 is still octal to bash arithmetic. The deadline is a
-        # count of half-second polls, not a wall-clock instant: a clock set back while the run
-        # is alive would otherwise extend it, one set forward end it early.
-        polls=$(( 10#$timeout * 2 )); n=0
-        while [ "$timeout" -eq 0 ] || [ "$n" -lt "$polls" ]; do
-          n=$(( n + 1 ))
+        # The deadline is elapsed time as this loop sees it, one poll at a time, each poll's
+        # share clamped to [its own sleep, 5 s]: a clock set back cannot extend the run (a poll
+        # counts at least the half second it slept) and one set forward cannot cut it by more
+        # than one poll's cap. Not a poll count: under load a poll takes longer than its sleep,
+        # and a count would stretch the bound with the host. 10#: a validated value like 08 is
+        # still octal to bash arithmetic.
+        budget=$(( 10#$timeout * 1000000 )); elapsed=0; last=$(_shmutant_now)
+        while [ "$timeout" -eq 0 ] || [ "$elapsed" -lt "$budget" ]; do
           command -p sleep 0.5 & s=$!
           wait "$s"
+          tnow=$(_shmutant_now); d=$(( tnow - last )); last=$tnow
+          [ "$d" -lt 500000 ] && d=500000
+          [ "$d" -gt 5000000 ] && d=5000000
+          elapsed=$(( elapsed + d ))
           # Each descendant is remembered with the identity it had when first seen, so a pid
           # reused by a newer process can be told apart at the kill.
           while IFS= read -r p; do
@@ -1103,13 +1109,15 @@ _shmutant_worker_finish() {
   # The worker directory is this run's; a callback that made it unwritable does not get to
   # suppress the verdict.
   [ -w "$1" ] || command -p chmod -- u+rwx "$1" 2>/dev/null
-  if [ "${SHMUTANT_KEEP:-0}" != 1 ]; then
-    # Only the clone this run made, by identity: what a callback put at its path stays, and the
-    # pool then finds a tree left behind — a harness error, not a removal.
-    if [ ! -e "$1/tree" ] && [ ! -L "$1/tree" ]; then :
-    elif [ -L "$1/tree" ] || [ "$(_shmutant_dir_id "$1/tree")" != "${SHMUTANT_CLONE_ID:-}" ]; then _shmutant_err "refusing to remove $1/tree: it is no longer the clone this run made"
-    else _shmutant_remove "$1/tree" || _shmutant_err "could not remove $1/tree"
-    fi
+  # The clone's identity, kept or not: what a callback put at the path stays, and the verdict
+  # of a run that renamed its clone away and put another directory there is not accepted —
+  # nothing says which tree it ran against. Only the removal waits on SHMUTANT_KEEP.
+  if [ -L "$1/tree" ] || { [ -e "$1/tree" ] && [ "$(_shmutant_dir_id "$1/tree")" != "${SHMUTANT_CLONE_ID:-}" ]; }; then
+    _shmutant_err "$1/tree is no longer the clone this run made; the verdict of a run that swapped its tree is not accepted"
+    { printf 'swapped\n' >&"$SHMUTANT_VERDICT_FD"; } 2>/dev/null
+    set -- "$1" unprepared "$3" swapped
+  elif [ "${SHMUTANT_KEEP:-0}" != 1 ] && [ -e "$1/tree" ]; then
+    _shmutant_remove "$1/tree" || _shmutant_err "could not remove $1/tree"
   fi
   # The verdict goes down the channel the pool opened for this worker before it forked, on a
   # file that no longer has a name: nothing planted in the directory can stand in for it.
@@ -1250,7 +1258,7 @@ _shmutant_dir_id() {
 # SHMUTANT_RES_*[key] (and SHMUTANT_V_*): the last `verdict <v> <us> <status>` line, or `lost`
 # when there is none, the line is damaged, or the worker did not exit 0. Closes the channel.
 _shmutant_collect() {
-  local dir="$1" key="$2" wstatus="$3" line fd unpublished=0 setup_failed=0 clone_id=""
+  local dir="$1" key="$2" wstatus="$3" line fd unpublished=0 setup_failed=0 swapped=0 clone_id=""
   SHMUTANT_V_VERDICT=lost; SHMUTANT_V_US=0; SHMUTANT_V_STATUS=""
   fd="${SHMUTANT_VERDICT_R[$key]:-}"
   if [ -n "$fd" ]; then
@@ -1264,6 +1272,7 @@ _shmutant_collect() {
         "clone "*)   clone_id="${line#clone }" ;;
         unpublished) unpublished=1 ;;
         setup-failed) setup_failed=1 ;;
+        swapped)     swapped=1 ;;
       esac
     done
     exec {fd}<&-
@@ -1293,6 +1302,11 @@ _shmutant_collect() {
   fi
   if [ "$unpublished" = 1 ]; then
     _shmutant_err "$dir/output could not be published — the documented artifact of this run is missing"; SHMUTANT_CLEANUP_FAILED=1
+  fi
+  # A run that swapped its clone is a harness error whether or not the tree was kept: with
+  # SHMUTANT_KEEP=1 nothing is left behind to find, so the worker's own report decides.
+  if [ "$swapped" = 1 ]; then
+    _shmutant_err "$dir/tree is not the clone its worker made — the run's verdict is not accepted"; SHMUTANT_CLEANUP_FAILED=1
   fi
   # A clone the worker did not remove is a harness error, whatever it reported: the next run
   # in this workdir would find it. Only the directory the pool created is looked at, by inode.
@@ -1362,6 +1376,7 @@ _shmutant_detail() {
                   raced)   printf 'the clone does not match the prepared tree — a concurrent callback wrote into pristine during the copy' ;;
                   missing) printf 'the target is not a regular file inside the tree' ;;
                   moved)   printf 'the target'"'"'s directory left the tree before the rewrite — a concurrent callback moved or replaced it' ;;
+                  swapped) printf 'the tree at the clone path is no longer the clone this run made — the run renamed it away and put something else there' ;;
                   *)       printf 'the rewrite failed' ;;
                 esac ;;
     baseline)   printf 'the tests selected by [%s] did not come back green BEFORE any defect was injected — a red result here would prove nothing (see the baseline record)' "$4" ;;
@@ -1675,24 +1690,38 @@ _shmutant_stream_intact() {
 }
 
 # _shmutant_readonly <name> — true when <name> is readonly in this shell; an assignment to it
-# would end a non-interactive shell. Positional parameters only: a local of its own could be
-# the readonly name. \builtin: this runs before the alias state is saved.
-_shmutant_readonly() {
-  set -- "$(\builtin declare -p -- "$1" 2>/dev/null)"
-  set -- "${1#declare -}"; set -- "${1%% *}"
-  case "$1" in *r*) \builtin return 0 ;; esac
-  \builtin return 1
-}
+# would end a non-interactive shell. This runs before the shadow check, so it keeps no local
+# (the readonly name could be its own), uses no `set` (a caller's function of that name would
+# leave the parameters untouched) and no `return` (one of those would fall through): the
+# `declare -p` line travels as a positional parameter, and each helper's status is its last
+# command's. The attribute field is the word after `declare -`.
+_shmutant_readonly() { _shmutant_attrs_readonly "$(declare -p -- "$1" 2>/dev/null)"; }
+_shmutant_attrs_readonly() { _shmutant_attr_field_has_r "${1#declare -}"; }
+_shmutant_attr_field_has_r() { case "${1%% *}" in *r*) [[ 1 -eq 1 ]] ;; *) [[ 1 -eq 0 ]] ;; esac; }
 
 # _shmutant_locals_writable <label> <who> <name…> — refuse (status 1, with a message) when a
 # <name> is readonly: bash refuses a local over a readonly global, and the assignment that
-# follows would end a non-interactive caller's shell. Positional parameters only, as above.
+# follows would end a non-interactive caller's shell. Positional parameters only, as above;
+# one name per call, by recursion, so nothing here can loop.
 _shmutant_locals_writable() {
-  while [[ $# -gt 2 ]]; do
-    if _shmutant_readonly "$3"; then _shmutant_err "$1: $2 '$3' readonly — a name shmutant keeps its own state in; declare yours with another name or a local of your own"; \builtin return 1; fi
-    set -- "$1" "$2" "${@:4}"
-  done
-  \builtin return 0
+  if [[ $# -le 2 ]]; then :
+  elif _shmutant_readonly "$3"; then _shmutant_err "$1: $2 '$3' readonly — a name shmutant keeps its own state in; declare yours with another name or a local of your own"; [[ 1 -eq 0 ]]
+  else _shmutant_locals_writable "$1" "$2" "${@:4}"
+  fi
+}
+
+# _shmutant_pool_stash <status> — prepare's status into _shmutant_pool_prc, after the traps are
+# held and only when prepare did not make that name readonly (dynamic scope reaches it, and the
+# assignment would end a non-interactive caller). The status arrives as a positional parameter,
+# which no callback can mark readonly. Refuses with status 1.
+_shmutant_pool_stash() {
+  _shmutant_hold_traps
+  # if/else, not a return: a `return` function prepare defined would fall through to the
+  # assignment; the shadow check that refuses it comes after this.
+  if _shmutant_readonly _shmutant_pool_prc; then
+    _shmutant_err "$_shmutant_pool_label: prepare made '_shmutant_pool_prc' readonly — the name the pool keeps prepare's status in; declare yours with another name or a local of your own"; [[ 1 -eq 0 ]]
+  else _shmutant_pool_prc=$1
+  fi
 }
 
 # _shmutant_pool_locals_writable <label> <who> — the pool's own names, checked at entry (the
@@ -1993,11 +2022,11 @@ _shmutant_pool_body() {
   local _shmutant_pool_label="$label" _shmutant_pool_wd="$wd" _shmutant_pool_run="$run" _shmutant_pool_cap="$cap"
   local _shmutant_pool_n="$n" _shmutant_pool_t0="$t0" _shmutant_pool_pout_r="$pout_r" _shmutant_pool_pout_w="$pout_w" _shmutant_pool_errexit="$errexit_before" _shmutant_pool_prc=0
   _shmutant_report_keep before-prepare
-  # The status lands in a name prepare cannot reach: `prc` itself is checked for readonly below.
-  "$prep" "$wd/pristine" >&"$pout_w"; _shmutant_pool_prc=$?
-  # First: from here to the pool's return a trap prepare installed (or the caller's) sees no
-  # child of this shell but the ones that save it, and DEBUG no command past the saves.
-  _shmutant_hold_traps
+  # The status goes to the stash as a positional parameter, never through an assignment prepare
+  # could have made fatal; the stash holds the traps first: from there to the pool's return a
+  # trap prepare installed (or the caller's) sees no child of this shell but the ones that save
+  # it, and DEBUG no command past the saves.
+  "$prep" "$wd/pristine" >&"$pout_w"; _shmutant_pool_stash "$?" || { exec {_shmutant_pool_pout_w}>&- {_shmutant_pool_pout_r}<&-; _shmutant_pool_fail "$_shmutant_pool_label" "$_shmutant_pool_wd"; return 2; }
   label="$_shmutant_pool_label"; wd="$_shmutant_pool_wd"; run="$_shmutant_pool_run"; cap="$_shmutant_pool_cap"
   # A name of this function's that prepare made readonly (dynamic scope reaches these locals)
   # cannot be restored, and any later assignment to it would end a non-interactive caller's

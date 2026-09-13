@@ -710,6 +710,31 @@ t_readonly_settings_do_not_kill_the_caller() {
     SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd-ro3" toy_prepare toy_run > /dev/null 2>"$T/ro-e3"; echo "pool=$?" > "$T/ro3" )
   eq "$(cat "$T/ro3" 2>/dev/null)" 'pool=2' 'the last name of the list is checked too, and the shell survives'
   has "$(cat "$T/ro-e3")" "the calling shell made 'st' readonly" 'says why'
+  # the prefixed name prepare's status is stashed in, made readonly by prepare: dynamic scope
+  # reaches it too, so the status arrives as a positional parameter and the name is checked first
+  ro_stash_prepare() { readonly _shmutant_pool_prc=7; toy_prepare "$@"; }
+  ( SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd-stash" ro_stash_prepare toy_run > "$T/o-stash" 2>"$T/e-stash"; echo "rc=$?" >> "$T/o-stash" )
+  has "$(cat "$T/o-stash")" 'rc=2' "a prepare that made '_shmutant_pool_prc' readonly is a harness error, and the caller survives"
+  has "$(cat "$T/e-stash")" "made '_shmutant_pool_prc' readonly" 'says why'
+  [ -d "$T/wd-stash/pristine" ] && fail_ 'the pristine tree was left behind after that refusal'
+  # a caller's function named set, or the builtin disabled, before the preflight: the check
+  # reaches past the function (and refuses the disabled builtin) instead of looping; a readonly
+  # name is still seen, and a helper under a set function is refused as a shadow, not as a
+  # false readonly collision
+  set -m
+  ( set() { :; }; readonly rc=7; SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd-set" toy_prepare toy_run > /dev/null 2>"$T/e-set"; echo "pool=$?" > "$T/o-set" ) > /dev/null 2>&1 & local bg=$! i=0
+  ( enable -n set; SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd-set2" toy_prepare toy_run > /dev/null 2>"$T/e-set3"; echo "pool2=$?" > "$T/o-set3" ) > /dev/null 2>&1 & local bg3=$!
+  ( set() { :; }; shmutant_copy_tree "$T/ro-src" "$T/ro-dst3" 2>"$T/e-set2"; echo "copy=$?" > "$T/o-set2" ) > /dev/null 2>&1 & local bg2=$!
+  set +m
+  until { [ -s "$T/o-set" ] && [ -s "$T/o-set2" ] && [ -s "$T/o-set3" ]; } || [ "$i" -ge 300 ]; do i=$((i + 1)); sleep 0.1; done
+  kill -KILL -- -"$bg" -"$bg2" -"$bg3" 2>/dev/null; wait "$bg" "$bg2" "$bg3" 2>/dev/null
+  eq "$(cat "$T/o-set" 2>/dev/null)" 'pool=2' 'a set function never loops the preflight: the pool refuses and the shell survives'
+  has "$(cat "$T/e-set")" "the calling shell made 'rc' readonly" 'the readonly name is still seen past a set function'
+  eq "$(cat "$T/o-set3" 2>/dev/null)" 'pool2=2' 'a disabled set never loops the preflight either: the pool refuses and the shell survives'
+  has "$(cat "$T/e-set3")" 'set is not the builtin' 'a disabled set is refused as a shadow'
+  eq "$(cat "$T/o-set2" 2>/dev/null)" 'copy=1' 'copy_tree under a set function is refused'
+  has "$(cat "$T/e-set2")" 'set is not the builtin' 'as a shadow'
+  [ -z "$(grep -c readonly "$T/e-set2" | grep -v '^0$')" ] || fail_ 'copy_tree under a set function reported a false readonly collision'
   # and a refused pool leaves no descriptor behind in the caller shell
   ( before="$(ls /dev/fd | wc -l | tr -d ' ')"; SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd-fd" readonly_prepare toy_run > /dev/null 2>&1; after="$(ls /dev/fd | wc -l | tr -d ' ')"; echo "$before $after" > "$T/fds" )
   eq "$(cut -d' ' -f1 "$T/fds")" "$(cut -d' ' -f2 "$T/fds")" "a refused pool closed its prepare capture descriptors: [$(cat "$T/fds")]"
@@ -1133,6 +1158,13 @@ t_a_clone_swapped_by_its_run_is_not_removed() {
   SHMUTANT_BASELINE=1 pool lbl "$T/wd2" toy_prepare swapping_tree_run
   rc_is "$RC" 2 'a baseline clone swapped by its run is a harness error'
   [ -f "$T/wd2/base-0/tree/keep" ] || fail_ 'the directory the baseline run put at the clone path was removed'
+  # kept trees too: the identity is checked before the verdict is published, and only the
+  # removal waits on SHMUTANT_KEEP — a baseline that swapped its clone and returned 0 is not green
+  ( SHMUTANT_KEEP=1 SHMUTANT_BASELINE=1 shmutant_pool lbl "$T/wd2k" toy_prepare swapping_tree_run > "$T/o2k" 2>"$T/e2k"; echo "rc=$?" > "$T/r2k" )
+  eq "$(cat "$T/r2k" 2>/dev/null)" 'rc=2' 'a kept baseline clone swapped by its run is a harness error, not a green baseline'
+  has "$(cat "$T/o2k")" 'unprepared' 'the verdict is unprepared'
+  has "$(cat "$T/e2k")" 'no longer the clone this run made' 'says why'
+  [ -f "$T/wd2k/base-0/tree/keep" ] || fail_ 'the directory the kept baseline run put at the clone path was removed'
   # a worker that dies (ended by the pool on a sibling's startup failure) after its run swapped
   # the clone: the collector removes only the clone the worker published, never the replacement
   shmutant_reset; shmutant_target lib.sh
@@ -1204,9 +1236,10 @@ t_unbounded_run_still_tracks_descendants() {
   pkill -f "touch '$T/escaped'" 2>/dev/null; true
 }
 
-t_watchdog_deadline_is_a_count_of_polls() {
-  # the deadline counts half-second polls, never compares wall-clock instants: with the clock
-  # frozen (a stubbed _shmutant_now), a one-second timeout still fires
+t_watchdog_deadline_survives_clock_steps() {
+  # the deadline is elapsed time as the watchdog sees it, each poll clamped: with the clock
+  # frozen (a stubbed _shmutant_now, so every poll reads as zero and counts as its sleep), a
+  # one-second timeout still fires
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
   shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
@@ -1216,10 +1249,24 @@ t_watchdog_deadline_is_a_count_of_polls() {
     SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=1 shmutant_pool lbl "$T/wd" toy_prepare hanging_run > "$T/out" 2>"$T/err"; echo "rc=$?" > "$T/rc" ) > /dev/null 2>&1 & local bg=$! i=0
   set +m
   until [ -e "$T/rc" ] || [ "$i" -ge 300 ]; do i=$((i + 1)); sleep 0.1; done
-  [ -e "$T/rc" ] || { kill -KILL -- -"$bg" 2>/dev/null; wait "$bg" 2>/dev/null; fail_ 'with the clock frozen the watchdog never fired: the deadline is a wall-clock instant'; return; }
+  [ -e "$T/rc" ] || { kill -KILL -- -"$bg" 2>/dev/null; wait "$bg" 2>/dev/null; fail_ 'with the clock frozen the watchdog never fired: a clock set back extends the run'; return; }
   wait "$bg" 2>/dev/null
-  has "$(cat "$T/out")" $'\trow\ttimeout\ta\t' 'the run timed out on the poll count, with the clock frozen'
-  pkill -f "sleep 30" 2>/dev/null; true
+  has "$(cat "$T/out")" $'\trow\ttimeout\ta\t' 'the run timed out with the clock frozen'
+  pkill -f "sleep 30" 2>/dev/null
+  # a clock that jumps an hour forward at every read: each poll counts at most its cap, so a
+  # thirty-second timeout is not reached before a one-second run returns
+  rm -f "$T/out" "$T/err" "$T/rc"; : > "$T/calls"
+  short_run() { sleep 1; : > "$T/short-done"; bash "$1/test.sh"; }
+  set -m
+  ( _shmutant_now() { local c; c="$(cat "$T/calls")"; c="${c:-0}"; echo "$((c + 1))" > "$T/calls"; printf '%s' "$(( 1000000000000000 + c * 3600000000 ))"; }
+    SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=30 shmutant_pool lbl "$T/wd2" toy_prepare short_run > "$T/out" 2>"$T/err"; echo "rc=$?" > "$T/rc" ) > /dev/null 2>&1 & bg=$!; i=0
+  set +m
+  until [ -e "$T/rc" ] || [ "$i" -ge 600 ]; do i=$((i + 1)); sleep 0.1; done
+  [ -e "$T/rc" ] || { kill -KILL -- -"$bg" 2>/dev/null; wait "$bg" 2>/dev/null; fail_ 'with the clock jumping forward the pool never returned'; return; }
+  wait "$bg" 2>/dev/null
+  [ -e "$T/short-done" ] || fail_ 'a clock jumping forward cut a one-second run short of a thirty-second timeout'
+  has "$(cat "$T/out")" $'\trow\tkilled\ta\t' 'the run completed and its verdict stands, with the clock jumping forward'
+  true
 }
 
 t_verdict_scans_a_large_output() {
