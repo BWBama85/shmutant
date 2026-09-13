@@ -420,4 +420,8 @@ One line per resolved review thread, newest last.
 - `clock-dependent-deadline` `shmutant.sh` `c55ebc7` `PRRT_kwDOUT7q9s6h4wRF` PR #1 2026-09-13
 - `host-shell-option-leak` `shmutant.sh` `c55ebc7` `PRRT_kwDOUT7q9s6h4wRH` PR #1 2026-09-13
 - `host-shell-option-leak` `shmutant.sh` `c55ebc7` `PRRT_kwDOUT7q9s6h4wRJ` PR #1 2026-09-13
+- `early-return-skips-cleanup` `shmutant.sh` `1aa1b43` `PRRT_kwDOUT7q9s6h5ojN` PR #1 2026-09-13
+- `stale-artifact-reuse` `shmutant.sh` `1aa1b43` `PRRT_kwDOUT7q9s6h5ojR` PR #1 2026-09-13
+- `timeout-escalation-cancelled` `shmutant.sh` `1aa1b43` `PRRT_kwDOUT7q9s6h5ojU` PR #1 2026-09-13
+- `rewrite-loses-file-shape` `shmutant.sh` `1aa1b43` `PRRT_kwDOUT7q9s6h5ojY` PR #1 2026-09-13
 <!-- adb:hits:end -->
