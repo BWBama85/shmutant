@@ -412,4 +412,8 @@ One line per resolved review thread, newest last.
 - `early-return-skips-cleanup` `shmutant.sh` `e364ba9` `PRRT_kwDOUT7q9s6h34Us` PR #1 2026-09-13
 - `rewrite-loses-file-shape` `shmutant.sh` `e364ba9` `PRRT_kwDOUT7q9s6h34U3` PR #1 2026-09-13
 - `contract-not-honoured` `shmutant.sh` `e364ba9` `PRRT_kwDOUT7q9s6h34U_` PR #1 2026-09-13
+- `host-shell-option-leak` `shmutant.sh` `3a1b526` `PRRT_kwDOUT7q9s6h4JCH` PR #1 2026-09-13
+- `early-return-skips-cleanup` `shmutant.sh` `3a1b526` `PRRT_kwDOUT7q9s6h4JCI` PR #1 2026-09-13
+- `path-lookup-ambiguity` `shmutant.sh` `3a1b526` `PRRT_kwDOUT7q9s6h4JCJ` PR #1 2026-09-13
+- `timeout-escalation-cancelled` `shmutant.sh` `3a1b526` `PRRT_kwDOUT7q9s6h4JCK` PR #1 2026-09-13
 <!-- adb:hits:end -->
