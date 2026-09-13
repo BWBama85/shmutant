@@ -1381,6 +1381,36 @@ t_library_refuses_a_readonly_name_it_assigns_when_sourced() {
   eq "$out" 'rc=0 n=0' 'a writable table array of the caller is simply reset, as before'
 }
 
+t_cli_end_group_checks_the_holder_identity() {
+  # the holder published by the plan subshell carries its identity: a stranger at a reused
+  # number is not killed on the holder's behalf, and the group is not signalled for it
+  set -m
+  sleep 30 & local hp=$!
+  set +m
+  local hid; hid="$(_shmutant_identity "$hp")" || { kill -KILL "$hp" 2>/dev/null; wait "$hp" 2>/dev/null; echo "note: $_unit: no identity readable here; skipped"; return; }
+  _shmutant_cli_end_group "$hp" "$hp $(( hid + 5 ))"
+  sleep 0.2; kill -0 "$hp" 2>/dev/null || fail_ 'a holder whose identity does not match was killed anyway'
+  _shmutant_cli_end_group "$hp" "$hp $hid"
+  local i=0; while kill -0 "$hp" 2>/dev/null && [ "$i" -lt 30 ]; do i=$((i + 1)); sleep 0.1; done
+  kill -0 "$hp" 2>/dev/null && { kill -KILL "$hp" 2>/dev/null; fail_ 'the holder with its own identity was not ended'; }
+  wait "$hp" 2>/dev/null; true
+}
+
+t_stream_prefix_overwritten_in_place_is_noticed() {
+  # a stream that already held records: a run that overwrites a byte within them in place
+  # (same length) is noticed at the end, like a truncation or an appended record
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  printf 'shmutant\t1\trow\tkilled\told\tlib.sh\tsel\t0.1\tearlier\n' > "$T/stream"
+  overwriting_run() { printf 'X' | dd of="$T/stream" bs=1 seek=0 conv=notrunc 2>/dev/null; bash "$1/test.sh"; }
+  ( SHMUTANT_STREAM="$T/stream" SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd" toy_prepare overwriting_run > /dev/null 2>"$T/err"; echo "rc=$?" > "$T/rc" )
+  eq "$(cat "$T/rc")" 'rc=2' 'an in-place overwrite within the records that were already there is a harness error'
+  has "$(cat "$T/err")" 'no longer names the file the records were written to, as they were written' 'says why'
+  ( SHMUTANT_STREAM="$T/stream" SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd2" toy_prepare toy_run > /dev/null 2>"$T/err2"; echo "rc=$?" > "$T/rc2" )
+  eq "$(cat "$T/rc2")" 'rc=0' 'and an untouched prefix passes'
+}
+
 t_helpers_restore_posixly_correct() {
   # the shadow check toggles POSIX mode to drop a builtin function; the caller'"'"'s POSIXLY_CORRECT
   # comes back exactly (its value, or its absence), not as the y that set -o posix writes
@@ -2643,6 +2673,13 @@ t_pool_reads_the_table_prepare_declared() {
   SHMUTANT_BASELINE=0 pool lbl "$T/wdnl" newline_root_prepare toy_run
   rc_is "$RC" 2 'a prepare root whose name ends in a newline is refused, not trimmed to the sibling'
   has "$ERR" 'contains a newline' 'says why'
+  # the ordinary line terminator, as echo prints it, is not part of the name
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  echo_root_prepare() { mkdir -p "$1/sub" && cp -R "$TOY/." "$1/sub" && echo "$1/sub"; }
+  SHMUTANT_BASELINE=0 pool lbl "$T/wdecho" echo_root_prepare toy_run
+  rc_is "$RC" 0 'a root printed with echo (a trailing newline) is accepted'
+  eq "$(verdict_of a)" killed 'and the rows run under it'
   refusing_prepare() { toy_prepare "$1"; shmutant_mut 'c' '' 'x' 'add-works' 2>/dev/null; true; }
   SHMUTANT_BASELINE=0 pool lbl "$T/wd" refusing_prepare toy_run
   rc_is "$RC" 2 'a declaration refused inside prepare is the same harness error as one refused before it'

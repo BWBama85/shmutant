@@ -1483,3 +1483,17 @@ shmutant_mut 'the source-time readonly probe fails a caller under errexit' \
   '  _shmutant_d="$(\builtin declare -p "$_shmutant_v" 2>/dev/null; :)"; _shmutant_d="${_shmutant_d#declare -}"' \
   '  _shmutant_d="$(\builtin declare -p "$_shmutant_v" 2>/dev/null)"; _shmutant_d="${_shmutant_d#declare -}"' \
   't_library_sources_under_errexit'
+
+# --- guards added for the forty-sixth review round ---
+shmutant_mut 'the CLI holder is killed by number alone' \
+  '  if [ -n "$hid" ] && _shmutant_identity "$hp" > /dev/null; then _shmutant_alive_since "$hp" "$hid" || return 0; fi' \
+  '  :' \
+  't_cli_end_group_checks_the_holder_identity'
+shmutant_mut 'the line terminator prepare printed is part of the root' \
+  '  root="${root%$'"'"'\n'"'"'}"' \
+  '  :' \
+  't_pool_reads_the_table_prepare_declared'
+shmutant_mut 'the bytes the stream already held are not checked' \
+  '    [ "$(command -p dd if="$SHMUTANT_STREAM" bs="$SHMUTANT_STREAM_BASE" count=1 2>/dev/null | command -p cksum)" = "${SHMUTANT_STREAM_PREFIX_CK:-}" ] || return 1' \
+  '    :' \
+  't_stream_prefix_overwritten_in_place_is_noticed'

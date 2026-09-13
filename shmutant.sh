@@ -1702,6 +1702,10 @@ _shmutant_open_stream() {
   # stream in place is seen.
   SHMUTANT_STREAM_INO="$(_shmutant_dir_id "$SHMUTANT_STREAM")"
   SHMUTANT_STREAM_BASE="$(command -p wc -c < "$SHMUTANT_STREAM" 2>/dev/null | command -p tr -d ' ')" || SHMUTANT_STREAM_BASE=0
+  # The bytes already there, by checksum: an overwrite in place within them keeps the length.
+  if [ "${SHMUTANT_STREAM_BASE:-0}" -gt 0 ]; then
+    SHMUTANT_STREAM_PREFIX_CK="$(command -p dd if="$SHMUTANT_STREAM" bs="$SHMUTANT_STREAM_BASE" count=1 2>/dev/null | command -p cksum)"
+  else SHMUTANT_STREAM_PREFIX_CK=""; fi
   _shmutant_close_stream_copy
   local copy
   # A failure here rolls the open back: left open and cached, the next pool for the same stream
@@ -1731,6 +1735,10 @@ _shmutant_stream_intact() {
   # Contents, past what was there when opened: a truncation, an overwrite or an appended record
   # from a callback changes them; the pool's own records, through the descriptor, do not.
   [ -n "${SHMUTANT_STREAM_COPY_R:-}" ] || return 1
+  # And what was there when opened, unchanged: an overwrite in place within it keeps the length.
+  if [ "${SHMUTANT_STREAM_BASE:-0}" -gt 0 ]; then
+    [ "$(command -p dd if="$SHMUTANT_STREAM" bs="$SHMUTANT_STREAM_BASE" count=1 2>/dev/null | command -p cksum)" = "${SHMUTANT_STREAM_PREFIX_CK:-}" ] || return 1
+  fi
   [ "$(command -p tail -c "+$(( ${SHMUTANT_STREAM_BASE:-0} + 1 ))" -- "$SHMUTANT_STREAM" 2>/dev/null | command -p cksum)" = "$(command -p cksum <&"$SHMUTANT_STREAM_COPY_R")" ]
 }
 
@@ -1799,7 +1807,7 @@ _shmutant_pool_locals_writable() {
     SHMUTANT_RES_VERDICT SHMUTANT_RUN_FIRED SHMUTANT_RUN_PUBLISHED SHMUTANT_RUN_RED SHMUTANT_RUN_SCAN_FAILED \
     SHMUTANT_RUN_SETUP_FAILED SHMUTANT_RUN_STATUS SHMUTANT_RUN_TAMPERED SHMUTANT_RUN_TARGET_REWRITTEN \
     SHMUTANT_RUN_UNSETTLED SHMUTANT_RUN_WITNESSED SHMUTANT_SCAN_P SHMUTANT_SCAN_W SHMUTANT_SKIP \
-    SHMUTANT_SPAWNING SHMUTANT_STAT_STYLE SHMUTANT_STREAM_BASE SHMUTANT_STREAM_INO SHMUTANT_STREAM_OPENED \
+    SHMUTANT_SPAWNING SHMUTANT_STAT_STYLE SHMUTANT_STREAM_BASE SHMUTANT_STREAM_INO SHMUTANT_STREAM_OPENED SHMUTANT_STREAM_PREFIX_CK \
     SHMUTANT_TARGET_CK SHMUTANT_TARGET_KEY SHMUTANT_TARGET_REL SHMUTANT_TRAPS_HELD SHMUTANT_TRAPS_PENDING \
     SHMUTANT_TRAP_CHLD SHMUTANT_TRAP_DEBUG SHMUTANT_TRAP_DEBUG_PENDING SHMUTANT_TRAP_ERR SHMUTANT_TRAP_INT \
     SHMUTANT_TRAP_RETURN SHMUTANT_TRAP_RETURN_PENDING SHMUTANT_TRAP_TERM SHMUTANT_VERDICT_FD SHMUTANT_VERDICT_R \
@@ -2171,9 +2179,11 @@ _shmutant_pool_body() {
     exec {pout_w}>&- {pout_r}<&-
     _shmutant_err "$label: prepare failed (status $prc) — no tree to mutate"; _shmutant_pool_fail "$label" "$wd"; return 2
   fi
-  # printf x then strip it: command substitution trims trailing newlines, which would turn a
-  # root whose name ends in one into its sibling.
+  # printf x then strip it: command substitution trims every trailing newline. Exactly one is
+  # then taken as the line terminator `echo` or `printf '%s\n'` writes; a root whose name still
+  # holds one is refused below, never trimmed to a sibling.
   root="$(command -p cat <&"$pout_r"; builtin printf x)"; root="${root%x}"; exec {pout_w}>&- {pout_r}<&-
+  root="${root%$'\n'}"
   case "$root" in *$'\n'*) _shmutant_err "$label: prepare printed a root whose name contains a newline"; _shmutant_pool_fail "$label" "$wd"; return 2 ;; esac
   # prepare may have defined a function under a builtin's name, or taken the run callback away:
   # checked again before any worker relies on either.
@@ -2388,10 +2398,16 @@ _shmutant_cli_wd_is_ours() {
 # group (a helper backgrounded from the plan, a service prepare started), the holder with it.
 # The holder keeps the group in being, so its number cannot have been reused; with no live
 # holder (the plan never reported one) nothing is signalled by number.
+# <holder> is `pid identity` as the plan subshell published it: a holder that went (a plan
+# killed it) and a stranger now at its number are told apart, as for a run's holder; with no
+# identity readable now the holder is taken as it was, as with no ps at all.
 _shmutant_cli_end_group() {
-  [ -n "$2" ] && kill -0 "$2" 2>/dev/null || return 0
+  local hp="${2%% *}" hid=""
+  case "$2" in *" "*) hid="${2#* }" ;; esac
+  [ -n "$hp" ] && kill -0 "$hp" 2>/dev/null || return 0
+  if [ -n "$hid" ] && _shmutant_identity "$hp" > /dev/null; then _shmutant_alive_since "$hp" "$hid" || return 0; fi
   kill -KILL -- -"$1" 2>/dev/null
-  kill -KILL "$2" 2>/dev/null
+  kill -KILL "$hp" 2>/dev/null
   return 0
 }
 
@@ -2536,7 +2552,7 @@ _shmutant_cli_run() {
     # `trap -p` in a subshell reports the parent's traps although none is active: the pool
     # would save this shell's abort handler as the plan subshell's own and re-raise into it.
     trap - INT TERM
-    ( read -r _ <&"$hold_r" ) < /dev/null > /dev/null 2>&1 {keep_w}>&- {keep_r}<&- {hold}>&- & printf 'holder %s\n' "$!" >&"$keep_w"
+    ( read -r _ <&"$hold_r" ) < /dev/null > /dev/null 2>&1 {keep_w}>&- {keep_r}<&- {hold}>&- & printf 'holder %s %s\n' "$!" "$(_shmutant_identity "$!" 2>/dev/null)" >&"$keep_w"
     readonly SHMUTANT_CLI_WD="$wd" SHMUTANT_CLI_KEEP_FD="$keep_w"
     export SHMUTANT_CLI_KEEP_FD
     SHMUTANT_CLI_DONE_PATH="$done_file"

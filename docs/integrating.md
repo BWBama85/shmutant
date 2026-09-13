@@ -25,6 +25,7 @@ Upgrading is copying a newer file and re-checking the digest.
 
 ```
 prepare <dir>          populate <dir> with the tree under test; optionally print the tree root
+                       (one line; the newline echo writes is not part of the name)
                        (default <dir>, must lie inside <dir>). Called ONCE per pool.
 run <root> <select>    run the tests covering <select> inside <root>. SHMUTANT_SELECT carries
                        the same value. Exit 0 = green; exit 1 = red; anything else = aborted.
@@ -148,7 +149,8 @@ is made, so a callback that does the swap between rows stops the pool too. (On a
 with no `stat` form, a timestamp change within the minute `ls` shows is the one metadata change
 the fingerprint does not see.) A `SHMUTANT_STREAM` file is checked at the end not only to be the
 file the records went to but to hold, past what was there when it was opened, exactly the
-records the pool wrote: a callback that truncates, overwrites or appends to it in place is a
+records the pool wrote, and the bytes that were there when the pool opened it are unchanged: a
+callback that truncates, overwrites (in place, within old or new records) or appends to it is a
 harness error (status 2). The rewrite of a row's target is
 pinned to the target's directory and re-checked to be inside the tree from there, so a
 concurrent callback that swaps a directory component of a sibling's clone for a link cannot
