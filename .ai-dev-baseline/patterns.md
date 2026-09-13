@@ -400,4 +400,7 @@ One line per resolved review thread, newest last.
 - `host-shell-option-leak` `shmutant.sh` `9122095` `PRRT_kwDOUT7q9s6h2utc` PR #1 2026-09-13
 - `stale-artifact-reuse` `shmutant.sh` `9122095` `PRRT_kwDOUT7q9s6h2utf` PR #1 2026-09-13
 - `timeout-escalation-cancelled` `shmutant.sh` `9122095` `PRRT_kwDOUT7q9s6h2uth` PR #1 2026-09-13
+- `stale-artifact-reuse` `shmutant.sh` `86a7ec4` `PRRT_kwDOUT7q9s6h3cce` PR #1 2026-09-13
+- `contract-not-honoured` `shmutant.sh` `86a7ec4` `PRRT_kwDOUT7q9s6h3ccg` PR #1 2026-09-13
+- `stale-artifact-reuse` `shmutant.sh` `86a7ec4` `PRRT_kwDOUT7q9s6h3cch` PR #1 2026-09-13
 <!-- adb:hits:end -->
