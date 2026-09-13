@@ -196,7 +196,8 @@ anywhere the entry point runs, the pool's workers included (a readonly global re
 subshell too), and every `SHMUTANT_*` global it keeps its bookkeeping in; the settings you own
 are canonicalised instead, as above. `shmutant_reset`, `shmutant_target` and `shmutant_mut`
 make the same check on the table's own arrays (status 2), and sourcing the file refuses (status
-2) a shell that made one of the names it assigns when sourced readonly. The suite checks the lists against
+2) a shell that made one of the names it assigns when sourced, or keeps its bootstrap state in,
+readonly. The suite checks the lists against
 the source. That check uses no `set`, no
 `return` and no local of its own, so a caller's function of those names cannot make it loop or
 answer wrong before the shadow check refuses it; and the status `prepare` returns arrives as a positional parameter, so a `prepare` that made the pool's status name
@@ -286,7 +287,8 @@ first use (a `.shmutant` file holding the line `shmutant workdir`): a directory 
 holds entries by those names and no marker, or a `.shmutant` of the caller's own with anything
 else in it, is refused, not emptied. Each worker reports its verdict on a descriptor the pool opened
 before the worker forked, on a file with no name; nothing planted in a worker directory, by that
-worker or by a sibling, can stand in for it, and a worker that did not exit normally is `lost`. A workdir the CLI created for itself is removed unless `--keep`, read-only trees
+worker or by a sibling, can stand in for it, and a worker that did not exit normally is `lost`. A relative `TMPDIR` is resolved where the CLI was invoked, before the plan runs (a plan or
+`prepare` may change directory). A workdir the CLI created for itself is removed unless `--keep`, read-only trees
 included; one that cannot be removed is reported and the run exits 2. What the plan file or a callback
 left running (a helper backgrounded from the plan, a service `prepare` started) is ended with
 KILL when the run ends, whether the pool completed or the plan left early: the plan runs in a

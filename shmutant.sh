@@ -57,6 +57,20 @@
 # stand in for the dispatcher until the line below turns them off.
 \unset -f builtin 2>/dev/null
 
+# _shmutant_boot_readonly <name> — true when <name> is readonly in the sourcing shell. Defined
+# first, in bash-3.2 syntax, with no variable of its own: the file's bootstrap state must not
+# land in a name the caller made readonly (the assignment would fail, sourcing would go on, and
+# the caller's stale value would be evaluated at the end). The attribute field of a `declare -p`
+# line is the word after `declare -`.
+_shmutant_boot_readonly() { _shmutant_boot_attrs "$(\builtin declare -p -- "$1" 2>/dev/null)"; }
+_shmutant_boot_attrs() { _shmutant_boot_field "${1#declare -}"; }
+_shmutant_boot_field() { case "${1%% *}" in *r*) \builtin return 0 ;; esac; \builtin return 1; }
+if _shmutant_boot_readonly _shmutant_alias_state || _shmutant_boot_readonly _shmutant_candidate || _shmutant_boot_readonly _shmutant_v; then
+  \builtin printf 'shmutant: a name this file keeps its bootstrap state in (_shmutant_alias_state, _shmutant_candidate, _shmutant_v) is readonly in this shell — declare yours with another name\n' >&2
+  if [[ "${BASH_SOURCE[0]}" = "$0" ]]; then \builtin exit 2; fi
+  \builtin return 2
+fi
+
 # Aliases expand while a file is PARSED: a sourcing shell whose dotfiles alias `cp` or `mkdir`
 # would otherwise bake those flags into every function below. Off for the rest of this file,
 # and the caller's setting put back at its end.
@@ -105,23 +119,21 @@ fi
 # assignment would end a non-interactive shell, so the file refuses first. One name at a time:
 # the attribute field of its `declare -p` line is the word after `declare -`.
 for _shmutant_v in SHMUTANT_VERSION SHMUTANT_PROC SHMUTANT_SELECTED_N SHMUTANT_DECL_ERRORS SHMUTANT_TARGET SHMUTANT_ROWS_NAME SHMUTANT_ROWS_FILE SHMUTANT_ROWS_OLD SHMUTANT_ROWS_NEW SHMUTANT_ROWS_WIT SHMUTANT_ROWS_SEL; do
-  # `; :` — declare -p exits 1 for a name not yet set, which a caller's errexit would act on.
-  _shmutant_d="$(\builtin declare -p "$_shmutant_v" 2>/dev/null; :)"; _shmutant_d="${_shmutant_d#declare -}"
-  case "${_shmutant_d%% *}" in
-    *r*)
-      \builtin printf 'shmutant: %s is readonly in this shell, and this file assigns it when sourced — declare yours with another name\n' "$_shmutant_v" >&2
-      if [[ "${BASH_SOURCE[0]}" = "$0" ]]; then \builtin exit 2; fi
-      \builtin unset -v _shmutant_v _shmutant_d
-      \builtin eval "$_shmutant_alias_state"; \builtin unset _shmutant_alias_state
-      \builtin return 2 ;;
-  esac
+  if _shmutant_boot_readonly "$_shmutant_v"; then
+    \builtin printf 'shmutant: %s is readonly in this shell, and this file assigns it when sourced — declare yours with another name\n' "$_shmutant_v" >&2
+    if [[ "${BASH_SOURCE[0]}" = "$0" ]]; then \builtin exit 2; fi
+    \builtin unset -v _shmutant_v
+    \builtin eval "$_shmutant_alias_state"; \builtin unset _shmutant_alias_state
+    \builtin return 2
+  fi
 done
-\builtin unset -v _shmutant_v _shmutant_d
+\builtin unset -v _shmutant_v
 
 SHMUTANT_VERSION=0.1.0
 # Process identity comes from the kernel's start time in /proc where there is one (Linux):
-# tick resolution, so a reused pid cannot pass for the process it replaced. Elsewhere it is
-# `ps -o etime`, at second resolution, which is the best POSIX ps offers.
+# tick resolution, so a reused pid cannot pass for the process it replaced. Elsewhere it is the
+# start time ps recorded (`lstart`, fixed at the fork, which a clock step does not move), and
+# only where ps has no lstart the wall clock less `ps -o etime`, at second resolution.
 SHMUTANT_PROC=0; [[ -r /proc/self/stat ]] && SHMUTANT_PROC=1
 SHMUTANT_ROWS_NAME=(); SHMUTANT_ROWS_FILE=(); SHMUTANT_ROWS_OLD=(); SHMUTANT_ROWS_NEW=()
 SHMUTANT_ROWS_WIT=(); SHMUTANT_ROWS_SEL=()
@@ -643,6 +655,19 @@ _shmutant_descendants_started() {
       }'
     return 0
   fi
+  if [ "${SHMUTANT_PS_LSTART:-}" != 0 ] && _shmutant_identity "$$" > /dev/null && [ "${SHMUTANT_PS_LSTART:-}" = 1 ]; then
+    command -p ps -A -o pid= -o ppid= -o lstart= 2>/dev/null | command -p awk -v root="$1" '
+      NF > 2 && $1 ~ /^[0-9]+$/ { i++; child[i] = $1; parent[i] = $2; $1 = ""; $2 = ""; sub(/^ +/, ""); start[i] = $0 }
+      END {
+        want[root] = 1
+        do {
+          added = 0
+          for (j = 1; j <= i; j++) if ((parent[j] in want) && !(child[j] in want)) { want[child[j]] = 1; added = 1 }
+        } while (added)
+        for (j = 1; j <= i; j++) if ((child[j] in want) && child[j] != root) print child[j], start[j]
+      }'
+    return 0
+  fi
   table="$(command -p ps -A -o pid= -o ppid= -o etime= 2>/dev/null)" || return 0
   now="$(_shmutant_now)"; now=$(( now / 1000000 ))
   printf '%s\n' "$table" | command -p awk -v root="$1" -v now="$now" '
@@ -685,7 +710,7 @@ _shmutant_etime_secs() {
 # daemonising descendant does to itself (setsid changes its group, exec its command line) and
 # still tells a reused pid apart: the newer process started later.
 _shmutant_identity() {
-  local etime now
+  local etime now lstart
   if [ "${SHMUTANT_PROC:-}" = 1 ]; then
     # The kernel's own start time in clock ticks (field 22 of /proc/<pid>/stat, after the LAST
     # `)` of the parenthesised name, which may hold a newline or a `)` of its own; the file is
@@ -693,6 +718,17 @@ _shmutant_identity() {
     etime="$(command -p awk 'BEGIN { RS = "\001" } { s = $0; while ((k = index(s, ")")) > 0) s = substr(s, k + 1); n = split(s, a, " "); if (n >= 20) print a[20] }' "/proc/$1/stat" 2>/dev/null)" || return 1
     case "$etime" in ''|*[!0-9]*) return 1 ;; esac
     printf '%s' "$etime"; return 0
+  fi
+  # The start time the kernel recorded, as ps prints it (`lstart`): a wall-clock instant fixed
+  # at the fork, which a later clock step does not move — unlike `now - etime`, which shifts by
+  # the step and would make a live process look reused. Where ps has no lstart, told once by
+  # asking about this shell, the elapsed-time form remains.
+  if [ "${SHMUTANT_PS_LSTART:-}" != 0 ]; then
+    lstart="$(command -p ps -o lstart= -p "$1" 2>/dev/null | command -p awk 'NF { $1 = $1; print; exit }')"
+    if [ -n "$lstart" ]; then SHMUTANT_PS_LSTART=1; printf '%s' "$lstart"; return 0; fi
+    if [ "${SHMUTANT_PS_LSTART:-}" = 1 ]; then return 1; fi
+    if [ -n "$(command -p ps -o lstart= -p "$$" 2>/dev/null)" ]; then SHMUTANT_PS_LSTART=1; return 1; fi
+    SHMUTANT_PS_LSTART=0
   fi
   etime="$(command -p ps -o etime= -p "$1" 2>/dev/null | command -p tr -d ' ')" || return 1
   [ -n "$etime" ] || return 1
@@ -711,6 +747,13 @@ _shmutant_identity_table() {
       # shellcheck disable=SC2034
       [ -n "$line" ] && SHMUTANT_START["${line%% *}"]="${line#* }"
     done < <(_shmutant_proc_table | command -p awk '{ print $1, $3 }')
+    return 0
+  fi
+  if [ "${SHMUTANT_PS_LSTART:-}" != 0 ] && _shmutant_identity "$$" > /dev/null && [ "${SHMUTANT_PS_LSTART:-}" = 1 ]; then
+    while IFS= read -r line; do
+      # shellcheck disable=SC2034
+      [ -n "$line" ] && SHMUTANT_START["${line%% *}"]="${line#* }"
+    done < <(command -p ps -A -o pid= -o lstart= 2>/dev/null | command -p awk 'NF > 1 && $1 ~ /^[0-9]+$/ { pid = $1; $1 = ""; sub(/^ +/, ""); print pid, $0 }')
     return 0
   fi
   now="$(_shmutant_now)"; now=$(( now / 1000000 ))
@@ -734,11 +777,21 @@ _shmutant_identity_table() {
 # _shmutant_alive_since <pid> <start-seen> — true when <pid> still started when <start-seen>
 # says, within the one-second resolution of etime. A reused pid started later.
 _shmutant_alive_since() {
-  local now d
+  local now
   case "$1" in ''|*[!0-9]*) return 1 ;; esac
-  case "$2" in ''|*[!0-9]*) return 1 ;; esac
+  [ -n "$2" ] || return 1
   now="$(_shmutant_identity "$1")" || return 1
-  d=$(( now - $2 ))
+  _shmutant_same_start "$now" "$2"
+}
+
+# _shmutant_same_start <a> <b> — the two identities name the same start: a recorded start time
+# (lstart, a /proc tick) matches exactly; only the elapsed-time form carries the one-second
+# resolution of etime.
+_shmutant_same_start() {
+  local d
+  [ -n "$1" ] && [ -n "$2" ] || return 1
+  case "$1$2" in *[!0-9]*) [ "$1" = "$2" ]; return ;; esac
+  d=$(( $1 - $2 ))
   [ "$d" -ge -1 ] && [ "$d" -le 1 ]
 }
 
@@ -791,10 +844,9 @@ _shmutant_frozen_only() {
     case "${p%% *}" in ''|*[!0-9]*) continue ;; esac
     # An entry with no start time was stopped without anything to verify it by: let go, and the
     # freeze counts as unsettled rather than pretending the pid was recorded.
-    case "${p#* }" in ''|*[!0-9]*) kill -CONT "${p%% *}" 2>/dev/null; SHMUTANT_FREEZE_UNSETTLED=1; continue ;; esac
+    case "$p" in *' '?*) ;; *) kill -CONT "${p%% *}" 2>/dev/null; SHMUTANT_FREEZE_UNSETTLED=1; continue ;; esac
     if [ -n "${SHMUTANT_START[${p%% *}]:-}" ]; then
-      d=$(( SHMUTANT_START[${p%% *}] - ${p#* } ))
-      if [ "$d" -ge -1 ] && [ "$d" -le 1 ]; then
+      if _shmutant_same_start "${SHMUTANT_START[${p%% *}]}" "${p#* }"; then
         # Still the process found, and stopped: a stop that was refused (a set-uid descendant)
         # leaves a live process the record would otherwise claim as frozen.
         if kill -STOP "${p%% *}" 2>/dev/null; then SHMUTANT_FROZEN_NOW+=("${p%% *}"); else SHMUTANT_FREEZE_UNSETTLED=1; fi
@@ -855,10 +907,10 @@ _shmutant_kill_tree_twice() {
   for p in "$@"; do
     [ -n "$p" ] || continue
     [ -n "${have[${p%%:*}]:-}" ] && continue
-    case "${p%%:*}${p#*:}" in *[!0-9]*|'') continue ;; esac
+    case "${p%%:*}" in ''|*[!0-9]*) continue ;; esac
+    [ "${p#*:}" != "$p" ] && [ -n "${p#*:}" ] || continue
     [ -n "${SHMUTANT_START[${p%%:*}]:-}" ] || continue
-    d=$(( SHMUTANT_START[${p%%:*}] - ${p#*:} ))
-    [ "$d" -ge -1 ] && [ "$d" -le 1 ] || continue
+    _shmutant_same_start "${SHMUTANT_START[${p%%:*}]}" "${p#*:}" || continue
     have["${p%%:*}"]=1; stillours+=("${p%%:*} ${p#*:}")
   done
   if [ "${#stillours[@]}" -gt 0 ]; then
@@ -1047,6 +1099,11 @@ _shmutant_run_bounded() {
         # instant) must not stop the freeze halfway and leave stopped processes behind.
         trap '' TERM
         printf 'fired\n' >&"$fired"
+        # What was still there at the deadline, for the record: a run that hangs is diagnosed
+        # from this list, not from an output that stopped.
+        { printf 'shmutant: %s: still running at the deadline (pid ppid stat args):\n' "$dir"
+          command -p ps -o pid= -o ppid= -o stat= -o args= -p "$(IFS=,; printf '%s' "$pid,${!seen[*]}")" 2>/dev/null | command -p head -n 30 | command -p cut -c1-200
+        } 1>&"$err_fd" 2>/dev/null
         # An array of pid:identity pairs, never an unquoted expansion.
         victims=()
         for p in "${!seen[@]}"; do victims+=("$p:${seen[$p]}"); done
@@ -1720,7 +1777,9 @@ _shmutant_open_stream() {
   local copy
   # A failure here rolls the open back: left open and cached, the next pool for the same stream
   # would skip this function and run without a private copy.
-  copy="$(command -p mktemp "${TMPDIR:-/tmp}/shmutant-stream.XXXXXX" 2>/dev/null)" || { _shmutant_stream_rollback; _shmutant_err "$label: cannot create the private copy of the verdict stream (in ${TMPDIR:-/tmp})"; return 2; }
+  local tmpd
+  tmpd="$(_shmutant_abs "${TMPDIR:-/tmp}")" || { _shmutant_stream_rollback; _shmutant_err "$label: TMPDIR does not name a directory that resolves from here (${TMPDIR:-/tmp}) — the private copy of the verdict stream goes there"; return 2; }
+  copy="$(command -p mktemp "$tmpd/shmutant-stream.XXXXXX" 2>/dev/null)" || { _shmutant_stream_rollback; _shmutant_err "$label: cannot create the private copy of the verdict stream (in ${TMPDIR:-/tmp})"; return 2; }
   # shellcheck disable=SC2093
   if ! { exec {SHMUTANT_STREAM_COPY_W}>>"$copy" {SHMUTANT_STREAM_COPY_R}<"$copy"; } 2>/dev/null; then
     command -p rm -f -- "$copy"; _shmutant_stream_rollback; _shmutant_err "$label: cannot open the private copy of the verdict stream"; return 2
@@ -1825,7 +1884,8 @@ _shmutant_pool_locals_writable() {
     SHMUTANT_ROWS_NAME SHMUTANT_ROWS_FILE SHMUTANT_ROWS_OLD SHMUTANT_ROWS_NEW SHMUTANT_ROWS_WIT SHMUTANT_ROWS_SEL \
     SHMUTANT_TARGET SHMUTANT_DECL_ERRORS SHMUTANT_SELECTED_N \
     _shmutant_bo _shmutant_so _shmutant_o _shmutant_n _shmutant_pc _shmutant_wrap_left \
-    a budget dog e elapsed last leftovers linked old rrc s tampered tnow victims wroot
+    a budget dog e elapsed last leftovers linked lstart old rrc s tampered tmpd tnow victims wroot \
+    SHMUTANT_PS_LSTART
 }
 
 # _shmutant_decl_writable <label> — the table's own names, checked by each declaration entry
@@ -2550,6 +2610,9 @@ _shmutant_cli_run() {
   case "$plan$wd" in *$'\n'*) _shmutant_err "run: a path containing a newline is refused"; return 2 ;; esac
   [ -f "$plan" ] || { _shmutant_err "run: plan not found: $plan"; return 2; }
   SHMUTANT_PLAN_DIR="$(_shmutant_abs "$(command -p dirname -- "$plan")")" || { _shmutant_err "run: cannot resolve $plan"; return 2; }
+  # A relative TMPDIR is made absolute now, from where the CLI was invoked: the plan or prepare
+  # may change directory, and the stream's private copy is made after they ran.
+  case "${TMPDIR:-}" in ''|/*) ;; *) TMPDIR="$(_shmutant_abs "$TMPDIR")" || { _shmutant_err "run: TMPDIR does not name a directory ($TMPDIR)"; return 2; }; export TMPDIR ;; esac
   export SHMUTANT_PLAN_DIR
   # Every path is settled, absolute, BEFORE the plan runs: a plan may cd, and a relative
   # --workdir, TMPDIR or SHMUTANT_STREAM must mean what it meant where the operator typed it.
@@ -2704,7 +2767,9 @@ shmutant_main() {
   esac
 }
 
-eval "$_shmutant_alias_state"; unset -v _shmutant_alias_state
+# Through the builtins: a caller's function named eval or unset would otherwise stand in for
+# the restore (the shadow check refuses those at the entry points, not here).
+\builtin eval "$_shmutant_alias_state"; \builtin unset -v _shmutant_alias_state
 
 # The [[ keyword, like the bootstrap: a caller's function named [ or test decides neither whether
 # this file is the script being run nor what the CLI exits with. \builtin: the line above put

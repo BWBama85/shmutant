@@ -422,7 +422,7 @@ shmutant_mut 'a non-red baseline exit is scored red' \
   '    elif true; then verdict=red' \
   't_baseline_non_red_exit_is_aborted'
 shmutant_mut 'a reused pid is signalled anyway' \
-  '  [ "$d" -ge -1 ] && [ "$d" -le 1 ]' \
+  '  _shmutant_same_start "$now" "$2"' \
   '  true' \
   't_kill_tree_skips_a_reused_pid'
 
@@ -831,8 +831,8 @@ shmutant_mut 'aliases in the sourcing shell are baked into the library' \
   ':' \
   't_library_is_immune_to_aliases_at_parse_time'
 shmutant_mut 'the alias setting of the sourcing shell is not put back' \
-  'eval "$_shmutant_alias_state"; unset -v _shmutant_alias_state' \
-  'unset -v _shmutant_alias_state' \
+  '\builtin eval "$_shmutant_alias_state"; \builtin unset -v _shmutant_alias_state' \
+  '\builtin unset -v _shmutant_alias_state' \
   't_library_is_immune_to_aliases_at_parse_time'
 shmutant_mut 'the clone directory is made with -p and follows a planted link' \
   '    || ! command -p mkdir -- "$dir/tree" 2>/dev/null; then' \
@@ -1007,7 +1007,7 @@ shmutant_mut 'a mutate path with a newline is accepted' \
   '  :' \
   't_copy_tree_excludes_git'
 shmutant_mut 'a listing entry with no start time is left stopped and unreported' \
-  '    case "${p#* }" in '"'"''"'"'|*[!0-9]*) kill -CONT "${p%% *}" 2>/dev/null; SHMUTANT_FREEZE_UNSETTLED=1; continue ;; esac' \
+  '    case "$p" in *'"'"' '"'"'?*) ;; *) kill -CONT "${p%% *}" 2>/dev/null; SHMUTANT_FREEZE_UNSETTLED=1; continue ;; esac' \
   '    :' \
   't_freeze_records_only_what_it_stopped'
 
@@ -1207,8 +1207,12 @@ shmutant_mut 'a worker directory is made in whatever sits at the workdir path' \
   '    if ! _shmutant_fresh_dir "$wd/$kind-$i" "$wd" || ! SHMUTANT_DIR_IDS["$kind-$i"]="$(_shmutant_dir_id "$wd/$kind-$i")" \' \
   't_pool_refuses_a_workdir_swapped_between_rows'
 shmutant_mut 'a half-opened stream is left cached' \
-  '  copy="$(command -p mktemp "${TMPDIR:-/tmp}/shmutant-stream.XXXXXX" 2>/dev/null)" || { _shmutant_stream_rollback; _shmutant_err "$label: cannot create the private copy of the verdict stream (in ${TMPDIR:-/tmp})"; return 2; }' \
-  '  copy="$(command -p mktemp "${TMPDIR:-/tmp}/shmutant-stream.XXXXXX" 2>/dev/null)" || { _shmutant_err "$label: cannot create the private copy of the verdict stream (in ${TMPDIR:-/tmp})"; return 2; }' \
+  '  tmpd="$(_shmutant_abs "${TMPDIR:-/tmp}")" || { _shmutant_stream_rollback; _shmutant_err "$label: TMPDIR does not name a directory that resolves from here (${TMPDIR:-/tmp}) — the private copy of the verdict stream goes there"; return 2; }' \
+  '  tmpd="$(_shmutant_abs "${TMPDIR:-/tmp}")" || { _shmutant_err "$label: TMPDIR does not name a directory that resolves from here (${TMPDIR:-/tmp}) — the private copy of the verdict stream goes there"; return 2; }' \
+  't_stream_open_failure_is_rolled_back'
+shmutant_mut 'a stream whose private copy cannot be made is left cached' \
+  '  copy="$(command -p mktemp "$tmpd/shmutant-stream.XXXXXX" 2>/dev/null)" || { _shmutant_stream_rollback; _shmutant_err "$label: cannot create the private copy of the verdict stream (in ${TMPDIR:-/tmp})"; return 2; }' \
+  '  copy="$(command -p mktemp "$tmpd/shmutant-stream.XXXXXX" 2>/dev/null)" || { _shmutant_err "$label: cannot create the private copy of the verdict stream (in ${TMPDIR:-/tmp})"; return 2; }' \
   't_stream_open_failure_is_rolled_back'
 shmutant_mut 'a function named builtin survives the bootstrap' \
   'unset -f builtin 2>/dev/null' \
@@ -1473,13 +1477,10 @@ shmutant_mut 'a row is declared into a readonly table' \
 # (no rows on the /proc record reader: its witness runs on Linux only, and a row that survives
 # wherever /proc is absent would read as a defect endured)
 shmutant_mut 'a readonly name is assigned when the file is sourced' \
-  '  case "${_shmutant_d%% *}" in' \
-  '  case "" in' \
+  '  if _shmutant_boot_readonly "$_shmutant_v"; then' \
+  '  if false; then' \
   't_library_refuses_a_readonly_name_it_assigns_when_sourced'
-shmutant_mut 'the source-time readonly probe fails a caller under errexit' \
-  '  _shmutant_d="$(\builtin declare -p "$_shmutant_v" 2>/dev/null; :)"; _shmutant_d="${_shmutant_d#declare -}"' \
-  '  _shmutant_d="$(\builtin declare -p "$_shmutant_v" 2>/dev/null)"; _shmutant_d="${_shmutant_d#declare -}"' \
-  't_library_sources_under_errexit'
+# (row 'the source-time readonly probe fails a caller under errexit' dropped: the probe's substitution is now a function argument, which a caller's errexit does not act on; nothing is left to observe)
 
 # --- guards added for the forty-sixth review round ---
 shmutant_mut 'the CLI holder is killed by number alone' \
@@ -1542,10 +1543,30 @@ shmutant_mut 'a helper that left the plan group outlives the CLI' \
   '  :' \
   't_cli_ends_a_helper_that_left_the_plan_group'
 shmutant_mut 'the watchdog scratch names are not in the readonly preflight' \
-  '    a budget dog e elapsed last leftovers linked old rrc s tampered tnow victims wroot' \
-  '    a budget dog e elapsed leftovers linked old rrc s tampered tnow victims wroot' \
+  '    a budget dog e elapsed last leftovers linked lstart old rrc s tampered tmpd tnow victims wroot \' \
+  '    a budget dog e elapsed leftovers linked lstart old rrc s tampered tmpd tnow victims wroot \' \
   't_readonly_preflight_covers_every_name_the_pool_assigns'
 shmutant_mut 'a callback directory ending in a newline is pinned to its sibling' \
   '  d="$(_shmutant_abs "$(command -p dirname -- "$f")")" || return 1' \
   '  d="$(builtin cd -P -- "$(command -p dirname -- "$f")" 2>/dev/null && command -p pwd -P)" || return 1' \
   't_abs_refuses_a_physical_name_ending_in_a_newline'
+
+# --- guards added for the fiftieth review round ---
+shmutant_mut 'a relative TMPDIR is read after the plan changed directory' \
+  '  case "${TMPDIR:-}" in '"'"''"'"'|/*) ;; *) TMPDIR="$(_shmutant_abs "$TMPDIR")" || { _shmutant_err "run: TMPDIR does not name a directory ($TMPDIR)"; return 2; }; export TMPDIR ;; esac' \
+  '  :' \
+  't_cli_resolves_a_relative_tmpdir_before_the_plan_runs'
+shmutant_mut 'a readonly bootstrap name is assigned and its stale value evaluated' \
+  'if _shmutant_boot_readonly _shmutant_alias_state || _shmutant_boot_readonly _shmutant_candidate || _shmutant_boot_readonly _shmutant_v; then' \
+  'if false; then' \
+  't_library_refuses_a_readonly_bootstrap_name'
+shmutant_mut 'the alias state is put back through a shadowable eval' \
+  '\builtin eval "$_shmutant_alias_state"; \builtin unset -v _shmutant_alias_state' \
+  'eval "$_shmutant_alias_state"; unset -v _shmutant_alias_state' \
+  't_library_restores_alias_state_through_the_builtins'
+# (no row on the lstart identity: its witness runs only where /proc is absent, and a row that
+# survives on Linux would read as a defect endured)
+shmutant_mut 'a timed-out run leaves no record of what was still running' \
+  '        { printf '"'"'shmutant: %s: still running at the deadline (pid ppid stat args):\n'"'"' "$dir"' \
+  '        { :' \
+  't_verdict_timeout'

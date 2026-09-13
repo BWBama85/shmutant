@@ -1098,6 +1098,15 @@ t_stream_open_failure_is_rolled_back() {
   has "$(cat "$T/e1")" 'private copy' 'says why'
   has "$(cat "$T/rc2")" 'rc=0' 'the next pool for the same stream opens it afresh and passes its integrity check'
   has "$(cat "$T/s.tsv")" $'\trow\tkilled\ta\t' 'and its records went to the stream'
+  # a TMPDIR that resolves but cannot be written to (the copy itself fails): rolled back too
+  if [ "$(id -u)" != 0 ]; then
+    mkdir -p "$T/ro"; chmod 500 "$T/ro"
+    ( TMPDIR="$T/ro" SHMUTANT_STREAM="$T/s2.tsv" SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd-ro" toy_prepare toy_run > /dev/null 2>"$T/e-ro"; echo "rc=$?" > "$T/rc-ro"
+      SHMUTANT_STREAM="$T/s2.tsv" SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd-ro2" toy_prepare toy_run > /dev/null 2>"$T/e-ro2"; echo "rc=$?" >> "$T/rc-ro" )
+    chmod 700 "$T/ro"
+    eq "$(cat "$T/rc-ro")" $'rc=2\nrc=0' 'an unwritable TMPDIR fails the pool (2), and the next pool for the same stream, with TMPDIR back, opens it afresh'
+    has "$(cat "$T/e-ro")" 'cannot create the private copy' 'says why'
+  else echo "note: $_unit: running as root; an unwritable TMPDIR cannot be made"; fi
 }
 
 t_pool_status_survives_a_handler_that_shadows_return() {
@@ -1333,6 +1342,7 @@ t_readonly_preflight_names_every_local() {
   # values, then takes the words after `local` and its flags.
   local names listed n missing="" count
   names="$(awk '
+    /^[A-Za-z_][A-Za-z0-9_]*\(\) \{.*\}$/ { next }
     /^[A-Za-z_][A-Za-z0-9_]*\(\) \{/ { f = $1; sub(/\(\).*/, "", f) }
     /^\}/ { f = "" }
     f != "" && f !~ /^_shmutant_cli_/ && f != "shmutant_main" && f != "_shmutant_checksum" { if ($0 ~ /^[ \t]*#/) next; sub(/[ \t]#[^"'"'"']*$/, ""); print }
@@ -1348,6 +1358,7 @@ t_readonly_preflight_names_every_local() {
   # canonicalised instead, and SHMUTANT_SELECT has its own check)
   local globals gcount
   globals="$(awk '
+    /^[A-Za-z_][A-Za-z0-9_]*\(\) \{.*\}$/ { next }
     /^[A-Za-z_][A-Za-z0-9_]*\(\) \{/ { f = $1; sub(/\(\).*/, "", f) }
     /^\}/ { f = "" }
     f != "" && f !~ /^_shmutant_cli_/ && f != "shmutant_main" && f != "_shmutant_checksum" { if ($0 ~ /^[ \t]*#/) next; print }
@@ -1402,7 +1413,7 @@ t_cli_end_group_checks_the_holder_identity() {
   sleep 30 & local hp=$!
   set +m
   local hid; hid="$(_shmutant_identity "$hp")" || { kill -KILL "$hp" 2>/dev/null; wait "$hp" 2>/dev/null; echo "note: $_unit: no identity readable here; skipped"; return; }
-  _shmutant_cli_end_group "$hp" "$hp $(( hid + 5 ))"
+  _shmutant_cli_end_group "$hp" "$hp not-${hid}-really"
   sleep 0.2; kill -0 "$hp" 2>/dev/null || fail_ 'a holder whose identity does not match was killed anyway'
   _shmutant_cli_end_group "$hp" "$hp $hid"
   local i=0; while kill -0 "$hp" 2>/dev/null && [ "$i" -lt 30 ]; do i=$((i + 1)); sleep 0.1; done
@@ -1423,6 +1434,61 @@ t_stream_prefix_overwritten_in_place_is_noticed() {
   has "$(cat "$T/err")" 'no longer names the file the records were written to, as they were written' 'says why'
   ( SHMUTANT_STREAM="$T/stream" SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd2" toy_prepare toy_run > /dev/null 2>"$T/err2"; echo "rc=$?" > "$T/rc2" )
   eq "$(cat "$T/rc2")" 'rc=0' 'and an untouched prefix passes'
+}
+
+t_cli_resolves_a_relative_tmpdir_before_the_plan_runs() {
+  # a relative TMPDIR is made absolute where the CLI was invoked: a plan that changes directory
+  # must not move where the stream's private copy (made after the plan loaded) is created
+  mk_toy "$T/toy"; TOY="$T/toy"; mkdir -p "$T/tmpd"
+  cat > "$T/toy/plan-cd.sh" <<'EOF'
+cd "$SHMUTANT_PLAN_DIR" || exit 9
+prepare() { shmutant_copy_tree "$SHMUTANT_PLAN_DIR" "$1"; }
+run() { bash "$1/test.sh"; }
+shmutant_target lib.sh
+shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+EOF
+  ( cd "$T" && TMPDIR=tmpd SHMUTANT_STREAM="$T/out.tsv" bash "$SHMUTANT" run "$T/toy/plan-cd.sh" --no-baseline > /dev/null 2>"$T/e"; echo "rc=$?" > "$T/rc" )
+  eq "$(cat "$T/rc")" 'rc=0' "with a relative TMPDIR and a plan that changes directory, the run completes: [$(head -c 200 "$T/e")]"
+  has "$(cat "$T/out.tsv" 2>/dev/null)" $'\trow\tkilled\ta\t' 'and the stream carries the row'
+}
+
+t_identity_survives_a_clock_step_without_proc() {
+  # where /proc is absent the identity is the start time ps recorded (lstart), which a clock
+  # step does not move: the same live process keeps its identity under a stepped clock
+  if [ "${SHMUTANT_PROC:-0}" = 1 ]; then echo "note: $_unit: /proc here; the ps identity is not exercised on this platform"; return; fi
+  sleep 30 & local p=$!
+  local id1 id2 rc
+  id1="$(_shmutant_identity "$p")" || { kill -KILL "$p" 2>/dev/null; wait "$p" 2>/dev/null; fail_ 'fixture: no identity for a live process'; return; }
+  case "$id1" in *[!0-9]*) ;; *) echo "note: $_unit: ps has no lstart here; the elapsed-time identity is in use and this case is not exercised"; kill -KILL "$p" 2>/dev/null; wait "$p" 2>/dev/null; return ;; esac
+  id2="$( _shmutant_now() { printf '%s' 9999999999000000; }; _shmutant_identity "$p" )"
+  eq "$id2" "$id1" 'the identity does not move with a clock step of the harness clock'
+  ( _shmutant_now() { printf '%s' 9999999999000000; }; _shmutant_alive_since "$p" "$id1" ); rc=$?
+  rc_is "$rc" 0 'the process is still recognised as itself under the stepped clock'
+  ( _shmutant_alive_since "$p" "Mon Jan  1 00:00:00 1990" ); rc=$?
+  rc_is "$rc" 1 'and a different recorded start is not it'
+  local -A SHMUTANT_START=(); _shmutant_identity_table
+  eq "${SHMUTANT_START[$p]:-}" "$id1" 'the identity table agrees with the single-process identity'
+  kill -KILL "$p" 2>/dev/null; wait "$p" 2>/dev/null; true
+}
+
+t_library_refuses_a_readonly_bootstrap_name() {
+  # a caller that made one of the file'"'"'s bootstrap temporaries readonly: refused before the
+  # assignment, so the caller'"'"'s stale value is never evaluated at the end
+  local out
+  out="$(bash -c 'readonly _shmutant_alias_state="printf injected"; . "$1" 2>"$2"; echo "rc=$?"' _ "$SHMUTANT" "$T/e1")"
+  eq "$out" 'rc=2' 'sourcing under a readonly alias-state name is refused and the shell survives'
+  hasnt "$out" injected 'and the caller'"'"'s value was not evaluated'
+  has "$(cat "$T/e1")" 'bootstrap state' 'says why'
+  out="$(bash -c 'readonly _shmutant_candidate=x; . "$1" 2>"$2"; echo "rc=$?"' _ "$SHMUTANT" "$T/e2")"
+  eq "$out" 'rc=2' 'the floor loop'"'"'s own name is checked too'
+}
+
+t_library_restores_alias_state_through_the_builtins() {
+  # a caller with functions named eval or unset: the alias setting still comes back through the
+  # builtins at the end of the file, and the saved state is still removed
+  local out
+  out="$(bash -c 'shopt -s expand_aliases; eval() { :; }; unset() { :; }; . "$1" || exit 9; shopt -q expand_aliases && echo on; declare -p _shmutant_alias_state > /dev/null 2>&1 || echo gone' _ "$SHMUTANT" 2>&1)"
+  eq "$out" $'on\ngone' 'the alias setting is put back and the saved state removed, past eval and unset functions'
 }
 
 t_helpers_restore_posixly_correct() {
@@ -1664,14 +1730,15 @@ t_readonly_preflight_covers_every_name_the_pool_assigns() {
   local listed names unlisted="" n count=0
   listed="$(declare -f _shmutant_pool_locals_writable shmutant_copy_tree shmutant_mutate | tr -s ' \t\\' '\n\n\n')"
   names="$(awk '
+    /^[A-Za-z_][A-Za-z0-9_]*\(\) \{.*\}$/ { next }
     /^[A-Za-z_][A-Za-z0-9_]*\(\) \{/ { f = $1; sub(/\(\).*/, "", f) }
     /^\}/ { f = "" }
     f != "" && f !~ /^_shmutant_cli_/ && f != "shmutant_main" && f != "_shmutant_checksum" { if ($0 ~ /^[ \t]*#/) next; print }
   ' "$SHMUTANT" | grep -oE '(^|[^A-Za-z0-9_$])[A-Za-z_][A-Za-z0-9_]*\+?=' | grep -oE '[A-Za-z_][A-Za-z0-9_]*' | sort -u)"
   for n in $names; do
     # settings the caller owns, shell state, and what only looks like an assignment: dd and ps
-    # operands (if= bs= count= pid= ppid= etime=)
-    case "$n" in SHMUTANT_KEEP|SHMUTANT_TIMEOUT|SHMUTANT_JOBS|SHMUTANT_RED_STATUS|SHMUTANT_RED_PREFIX|SHMUTANT_STREAM|SHMUTANT_BASELINE|SHMUTANT_SELECT|LC_ALL|POSIXLY_CORRECT|GLOBIGNORE|IFS|PATH|PWD|OLDPWD|_|prepare|run|exit|if|bs|count|of|seek|conv|pid|ppid|etime) continue ;; esac
+    # operands (if= bs= count= pid= ppid= etime= stat= args=)
+    case "$n" in SHMUTANT_KEEP|SHMUTANT_TIMEOUT|SHMUTANT_JOBS|SHMUTANT_RED_STATUS|SHMUTANT_RED_PREFIX|SHMUTANT_STREAM|SHMUTANT_BASELINE|SHMUTANT_SELECT|LC_ALL|POSIXLY_CORRECT|GLOBIGNORE|IFS|PATH|PWD|OLDPWD|_|prepare|run|exit|if|bs|count|of|seek|conv|pid|ppid|etime|stat|args) continue ;; esac
     count=$((count + 1))
     printf '%s\n' "$listed" | grep -qx -- "$n" || unlisted="$unlisted $n"
   done
@@ -1805,6 +1872,9 @@ t_verdict_timeout() {
   has "$ERR" 'within 1s' 'reports the bound'
   sleep 3
   [ -e "$T/finished" ] && fail_ 'the run outlived its timeout — the process tree was not killed'
+  # what was still there at the deadline is listed on stderr, so a hang can be diagnosed
+  has "$ERR" 'still running at the deadline' 'the deadline listing is printed'
+  has "$ERR" 'sleep' 'and names what was running'
 }
 
 t_verdict_timeout_kills_a_term_ignoring_descendant() {
@@ -2031,13 +2101,17 @@ t_freeze_records_only_what_it_stopped() {
   sleep 5 & local bystander=$!
   ( sleep 5; : ) & local root=$!
   sleep 0.3
-  ( _shmutant_descendants_started() { printf '%s %s\n' "$bystander" "$(( $(_shmutant_identity "$bystander") - 100 ))"; printf '%s \n' "$root"; }
+  # the bystander carries a start that is not its own, in either identity form (a tick count,
+  # or the start time ps recorded)
+  ( _shmutant_descendants_started() { printf '%s %s\n' "$bystander" "not-$(_shmutant_identity "$bystander")"; printf '%s \n' "$root"; }
     local -a frozen=() roots=("$root"); local -A have=()
+    local f=0
     _shmutant_freeze_from
-    case " ${frozen[*]} " in *" $bystander:"*) echo "FAIL: $_unit: a pid whose process had changed since the listing was recorded as frozen" ;; esac
-    case " ${frozen[*]} " in *" $root:"*) echo "FAIL: $_unit: a pid listed with no start time was recorded as frozen" ;; esac
-    [ "${SHMUTANT_FREEZE_UNSETTLED:-0}" = 1 ] || echo "FAIL: $_unit: an entry with nothing to verify it by did not make the freeze unsettled"
-    exit 0 )
+    case " ${frozen[*]} " in *" $bystander:"*) echo "FAIL: $_unit: a pid whose process had changed since the listing was recorded as frozen"; f=1 ;; esac
+    case " ${frozen[*]} " in *" $root:"*) echo "FAIL: $_unit: a pid listed with no start time was recorded as frozen"; f=1 ;; esac
+    [ "${SHMUTANT_FREEZE_UNSETTLED:-0}" = 1 ] || { echo "FAIL: $_unit: an entry with nothing to verify it by did not make the freeze unsettled"; f=1; }
+    # the subshell's own findings count: they are this unit's assertions
+    exit "$f" ) || _failed=1
   sleep 0.2
   case "$(ps -o stat= -p "$root")" in T*) fail_ 'a pid listed with no start time was left stopped' ;; esac
   sleep 0.2
@@ -2092,7 +2166,7 @@ t_post_run_cleanup_never_signals_a_reaped_root_by_number() {
   _shmutant_kill_tree_twice "$dead"; rc_is $? 0 'kill_tree_twice on a reaped root is a quiet no-op'
   sleep 5 & local b2=$!
   local id2; id2="$(_shmutant_identity "$b2")"
-  _shmutant_kill_tree_twice "$b2:$(( id2 - 100 ))"; sleep 0.2
+  _shmutant_kill_tree_twice "$b2:not-$id2"; sleep 0.2
   kill -0 "$b2" 2>/dev/null; rc_is $? 0 'a root whose given identity does not match is neither stopped nor killed'
   case "$(ps -o stat= -p "$b2")" in T*) fail_ 'the mismatched root was left stopped' ;; esac
   kill "$b2" 2>/dev/null; wait "$b2" 2>/dev/null
@@ -2101,7 +2175,7 @@ t_post_run_cleanup_never_signals_a_reaped_root_by_number() {
   sleep 0.3
   local kid; kid="$(_shmutant_descendants "$b3" | head -n 1)"
   [ -n "$kid" ] || fail_ 'fixture: the root has no child to protect'
-  _shmutant_kill_tree_twice "$b3:$(( $(_shmutant_identity "$b3") - 100 ))"; sleep 0.2
+  _shmutant_kill_tree_twice "$b3:not-$(_shmutant_identity "$b3")"; sleep 0.2
   kill -0 "$kid" 2>/dev/null; rc_is $? 0 'the children of a root whose identity does not match are left alone'
   kill "$b3" "$kid" 2>/dev/null; wait "$b3" 2>/dev/null
   # a bare pid is stopped and killed even when ps cannot identify it
@@ -2658,14 +2732,23 @@ t_kill_tree_skips_a_reused_pid() {
   eq "$(_shmutant_etime_secs 'junk')" 0 'garbage reads as zero'
   sleep 5 & local p=$!
   sleep 1.2
-  local id; id="$(_shmutant_identity "$p")"
-  case "$id" in [0-9]*) ;; *) fail_ "identity is not a start time in epoch seconds: [$id]" ;; esac
-  [ "$id" -le "$(( $(_shmutant_now) / 1000000 ))" ] || fail_ 'a start time in the future'
+  # the identity is a /proc tick count, the start time ps recorded (lstart), or, where ps has
+  # no lstart, a start in epoch seconds; a wrong one differs in each form
+  local id wrong; id="$(_shmutant_identity "$p")"
+  case "$id" in
+    ''|*[!0-9]*)
+      [ -n "$id" ] || fail_ 'no identity for a live process'
+      eq "$id" "$(ps -o lstart= -p "$p" | awk 'NF { $1 = $1; print; exit }')" 'a non-numeric identity is the start time ps recorded, normalised'
+      wrong="not-$id" ;;
+    *)
+      [ "${SHMUTANT_PROC:-0}" = 1 ] || [ "$id" -le "$(( $(_shmutant_now) / 1000000 ))" ] || fail_ 'a start time in the future'
+      wrong="$(( id - 100 ))" ;;
+  esac
   _shmutant_alive_since "$p" "$id"; rc_is $? 0 'a process seen a moment ago with this identity is the same process'
   sleep 1.1
   _shmutant_alive_since "$p" "$id"; rc_is $? 0 'the identity is stable while the process lives'
-  _shmutant_alive_since "$p" "$(( id - 100 ))"; rc_is $? 1 'a pid recorded as having started earlier than this process is a reused pid'
-  _shmutant_kill_tree TERM 2147483000 "$p:$(( id - 100 ))"; sleep 0.2
+  _shmutant_alive_since "$p" "$wrong"; rc_is $? 1 'a pid recorded with another start is a reused pid'
+  _shmutant_kill_tree TERM 2147483000 "$p:$wrong"; sleep 0.2
   kill -0 "$p" 2>/dev/null; rc_is $? 0 'a retained pid that fails the identity check is not signalled'
   kill "$p" 2>/dev/null; wait "$p" 2>/dev/null
 }
