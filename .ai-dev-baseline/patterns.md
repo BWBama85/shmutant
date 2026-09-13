@@ -403,4 +403,8 @@ One line per resolved review thread, newest last.
 - `stale-artifact-reuse` `shmutant.sh` `86a7ec4` `PRRT_kwDOUT7q9s6h3cce` PR #1 2026-09-13
 - `contract-not-honoured` `shmutant.sh` `86a7ec4` `PRRT_kwDOUT7q9s6h3ccg` PR #1 2026-09-13
 - `stale-artifact-reuse` `shmutant.sh` `86a7ec4` `PRRT_kwDOUT7q9s6h3cch` PR #1 2026-09-13
+- `rewrite-loses-file-shape` `shmutant.sh` `5afd018` `PRRT_kwDOUT7q9s6h3xAb` PR #1 2026-09-13
+- `contract-not-honoured` `shmutant.sh` `5afd018` `PRRT_kwDOUT7q9s6h3xAi` PR #1 2026-09-13
+- `stale-artifact-reuse` `shmutant.sh` `5afd018` `PRRT_kwDOUT7q9s6h3xAo` PR #1 2026-09-13
+- `clock-dependent-deadline` `shmutant.sh` `5afd018` `PRRT_kwDOUT7q9s6h3xA1` PR #1 2026-09-13
 <!-- adb:hits:end -->
