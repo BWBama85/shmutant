@@ -394,4 +394,7 @@ One line per resolved review thread, newest last.
 - `host-shell-option-leak` `shmutant.sh` `2f0ae0e` `PRRT_kwDOUT7q9s6h1KDf` PR #1 2026-09-13
 - `host-shell-option-leak` `shmutant.sh` `2f0ae0e` `PRRT_kwDOUT7q9s6h1KDh` PR #1 2026-09-13
 - `locale-dependent-match` `shmutant.sh` `2f0ae0e` `PRRT_kwDOUT7q9s6h1KDi` PR #1 2026-09-13
+- `path-lookup-ambiguity` `shmutant.sh` `9d877a2` `PRRT_kwDOUT7q9s6h10xB` PR #1 2026-09-13
+- `caller-owned-path-deleted` `shmutant.sh` `9d877a2` `PRRT_kwDOUT7q9s6h10xE` PR #1 2026-09-13
+- `timeout-escalation-cancelled` `shmutant.sh` `9d877a2` `PRRT_kwDOUT7q9s6h10xH` PR #1 2026-09-13
 <!-- adb:hits:end -->
