@@ -866,7 +866,9 @@ t_cli_abort_waits_for_the_child_and_names_its_identity() {
   # an identity that could not be taken at the spawn is passed as pid: (unverified, and so left
   # alone by the helper), never as a bare pid the helper would treat as certainly the child's
   out="$(SHMUTANT="$SHMUTANT" bash -c '. "$SHMUTANT"; sleep 30 & SHMUTANT_CLI_CHILD=$!; SHMUTANT_CLI_CHILD_ID=""; _shmutant_kill_tree_twice() { printf "%s\n" "$1"; }; _shmutant_cli_abort TERM' 2>/dev/null)"
-  case "$out" in [0-9]*:) ;; *) fail_ "with no identity the CLI abort escalated with [$out], not pid: (unverified)" ;; esac
+  # the child is this shell's own unreaped child, which nobody else can have been given: by
+  # bare pid, as the pool ends a worker whose identity was never read
+  case "$out" in *:*) fail_ "with no identity the CLI abort escalated with [$out], not the bare pid of its own child" ;; [0-9]*) ;; *) fail_ "with no identity the CLI abort escalated with [$out]" ;; esac
 }
 
 t_mutate_takes_a_bare_relative_target_as_a_path() {
@@ -1491,6 +1493,31 @@ t_library_restores_alias_state_through_the_builtins() {
   eq "$out" $'on\ngone' 'the alias setting is put back and the saved state removed, past eval and unset functions'
 }
 
+t_same_start_compares_recorded_starts_exactly() {
+  # a recorded start (a /proc tick, an lstart) matches only itself: a pid reused in the next
+  # tick is another process; the elapsed-time form (marked e) matches within a second, and
+  # only its own form
+  _shmutant_same_start 100 100; rc_is $? 0 'a tick matches itself'
+  _shmutant_same_start 100 101; rc_is $? 1 'the next tick is another process'
+  _shmutant_same_start e100 e101; rc_is $? 0 'the elapsed-time form matches within a second'
+  _shmutant_same_start e100 e102; rc_is $? 1 'and not beyond'
+  _shmutant_same_start e100 100; rc_is $? 1 'the two forms never match each other'
+  _shmutant_same_start 'Sun Sep 13 07:36:34 2026' 'Sun Sep 13 07:36:34 2026'; rc_is $? 0 'a recorded start time matches itself'
+  _shmutant_same_start 'Sun Sep 13 07:36:34 2026' 'Sun Sep 13 07:36:35 2026'; rc_is $? 1 'and not the next second'
+  _shmutant_same_start '' 100; rc_is $? 1 'an empty identity matches nothing'
+}
+
+t_stat_less_fingerprint_keeps_names_byte_for_byte() {
+  # with no usable stat, the ls records carry the names: a run of spaces in a name is kept as
+  # it is, so two directories that differ only there do not share a fingerprint
+  mkdir -p "$T/t1/a  b" "$T/t2/a b"
+  local f1 f2
+  f1="$(SHMUTANT_STAT_STYLE=none _shmutant_pristine_state "$T/t1")" || fail_ 'fingerprint of the first tree failed'
+  f2="$(SHMUTANT_STAT_STYLE=none _shmutant_pristine_state "$T/t2")" || fail_ 'fingerprint of the second tree failed'
+  [ "$f1" != "$f2" ] || fail_ 'two trees whose only difference is a run of spaces in a name share a fingerprint'
+  has "$f1" 'a  b' 'the name is carried byte for byte'
+}
+
 t_helpers_restore_posixly_correct() {
   # the shadow check toggles POSIX mode to drop a builtin function; the caller'"'"'s POSIXLY_CORRECT
   # comes back exactly (its value, or its absence), not as the y that set -o posix writes
@@ -1522,8 +1549,10 @@ t_cli_ends_what_the_plan_left_running() {
   # completed or the plan left early: the plan subshell runs in a held process group of its own
   mk_toy "$T/toy"; TOY="$T/toy"; rm -rf "$T/tmpd"; mkdir -p "$T/tmpd"
   local i
+  # double-forked: the sleep's parent is gone at once, so no snapshot of the plan subshell's
+  # descendants can name it; it is still in the plan's process group, which is what ends it
   cat > "$T/toy/plan-leaves.sh" <<EOF
-command -p sleep 30 & echo \$! > "$T/left-plan"
+( command -p sleep 30 & echo \$! > "$T/left-plan" )
 exit 0
 EOF
   TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-leaves.sh" --no-baseline > /dev/null 2>"$T/e-left"; rc_is $? 2 'a plan that exits before the pool is a harness error'
@@ -1531,7 +1560,7 @@ EOF
   i=0; while kill -0 "$(cat "$T/left-plan")" 2>/dev/null && [ "$i" -lt 30 ]; do i=$((i + 1)); sleep 0.1; done
   kill -0 "$(cat "$T/left-plan")" 2>/dev/null && { kill -KILL "$(cat "$T/left-plan")" 2>/dev/null; fail_ 'a process the plan backgrounded outlived the CLI'; }
   cat > "$T/toy/plan-helper.sh" <<EOF
-prepare() { command -p sleep 30 & echo \$! > "$T/left-prep"; shmutant_copy_tree "\$SHMUTANT_PLAN_DIR" "\$1"; }
+prepare() { ( command -p sleep 30 & echo \$! > "$T/left-prep" ); shmutant_copy_tree "\$SHMUTANT_PLAN_DIR" "\$1"; }
 run() { bash "\$1/test.sh"; }
 shmutant_target lib.sh
 shmutant_mut 'a' '\$1 + \$2' '\$1 - \$2' 'add-works'
@@ -1657,6 +1686,27 @@ EOF
   rm -rf "$T/tmpd"; mkdir -p "$T/tmpd"
   TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-keep-untrap.sh" --no-baseline > /dev/null 2>"$T/e4"; rc_is $? 2 'a plan that removes the EXIT trap while loading is a harness error'
   has "$(cat "$T/e4")" 'workdir kept' 'and its keep is still honoured'
+  # a plan that execs another program while loading: no EXIT trap runs, so the keep in force
+  # is reported before the exec
+  cat > "$T/toy/plan-keep-exec.sh" <<'EOF'
+SHMUTANT_KEEP=1
+exec true
+EOF
+  rm -rf "$T/tmpd"; mkdir -p "$T/tmpd"
+  TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-keep-exec.sh" --no-baseline > /dev/null 2>"$T/e5"; rc_is $? 2 'a plan that execs while loading is a harness error'
+  has "$(cat "$T/e5")" 'workdir kept' 'and the keep it set is reported before the exec'
+  # an exec that only redirects replaces nothing: the plan goes on, and the keep it settles
+  # afterwards is what counts
+  cat > "$T/toy/plan-keep-redirect.sh" <<'EOF'
+SHMUTANT_KEEP=1
+exec 3> /dev/null
+SHMUTANT_KEEP=0
+exit 0
+EOF
+  rm -rf "$T/tmpd"; mkdir -p "$T/tmpd"
+  TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-keep-redirect.sh" --no-baseline > /dev/null 2>"$T/e6"; rc_is $? 2 'a plan that leaves after a redirecting exec is a harness error'
+  hasnt "$(cat "$T/e6")" 'workdir kept' 'the keep settled after the redirecting exec is the one honoured'
+  eq "$(find "$T/tmpd" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" 0 'and the workdir is removed'
 }
 
 t_cli_abort_keeps_the_workdir_the_environment_asked_to_keep() {
@@ -1910,16 +1960,23 @@ t_verdict_timeout_kills_a_reparented_term_ignoring_descendant() {
   shmutant_mut 'hangs' '$1 + $2' '$1 - $2' 'add-works'
   # own process group AND ignores TERM: the leader dies to TERM, this one is reparented, and only
   # the pid set captured before TERM can still name it for KILL.
-  # Two of them: with one, even an unsplit pid list is still one valid pid.
-  stubborn_escaping_run() { set -m; bash -c "trap '' TERM; sleep 4; touch '$T/finished'" & bash -c "trap '' TERM; sleep 4; touch '$T/finished2'" & wait; }
+  # Two of them: with one, even an unsplit pid list is still one valid pid. They sleep long and
+  # write their pids: the check waits on the pids rather than on a fixed window, since the
+  # freeze and kill take longer on a loaded host, and a survivor is one still there after that.
+  stubborn_escaping_run() { set -m; bash -c "trap '' TERM; sleep 20; touch '$T/finished'" & echo $! > "$T/p1"; bash -c "trap '' TERM; sleep 20; touch '$T/finished2'" & echo $! > "$T/p2"; wait; }
+  gone_or_fail() {
+    local i=0 p1 p2; p1="$(cat "$T/p1" 2>/dev/null)"; p2="$(cat "$T/p2" 2>/dev/null)"
+    [ -n "$p1" ] && [ -n "$p2" ] || { fail_ "fixture: the run did not record its descendants ($1)"; return; }
+    while { kill -0 "$p1" 2>/dev/null || kill -0 "$p2" 2>/dev/null; } && [ "$i" -lt 150 ]; do i=$((i + 1)); sleep 0.1; done
+    if kill -0 "$p1" 2>/dev/null || kill -0 "$p2" 2>/dev/null; then kill -KILL "$p1" "$p2" 2>/dev/null; fail_ "$1"; fi
+    [ -e "$T/finished" ] || [ -e "$T/finished2" ] && fail_ "$1 (a descendant ran to its end)"
+    rm -f "$T/finished" "$T/finished2" "$T/p1" "$T/p2"
+  }
   SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=1 pool lbl "$T/wd" toy_prepare stubborn_escaping_run
   eq "$(verdict_of 'hangs')" timeout 'verdict is timeout'
-  sleep 4
-  [ -e "$T/finished" ] || [ -e "$T/finished2" ] && fail_ 'a reparented TERM-ignoring descendant outlived the KILL escalation'
-  rm -f "$T/finished" "$T/finished2"
+  gone_or_fail 'a reparented TERM-ignoring descendant outlived the KILL escalation'
   ( IFS=''; SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=1 shmutant_pool lbl "$T/wd2" toy_prepare stubborn_escaping_run > /dev/null 2>&1 )
-  sleep 4
-  [ -e "$T/finished" ] || [ -e "$T/finished2" ] && fail_ 'with the caller IFS empty, the descendant pid list was not split and a descendant survived'
+  gone_or_fail 'with the caller IFS empty, the descendant pid list was not split and a descendant survived'
 }
 
 t_verdict_timeout_kills_a_descendant_seen_before_it_detached() {
@@ -2736,6 +2793,9 @@ t_kill_tree_skips_a_reused_pid() {
   # no lstart, a start in epoch seconds; a wrong one differs in each form
   local id wrong; id="$(_shmutant_identity "$p")"
   case "$id" in
+    e*)
+      [ "${id#e}" -le "$(( $(_shmutant_now) / 1000000 ))" ] || fail_ 'an elapsed-time identity in the future'
+      wrong="e$(( ${id#e} - 100 ))" ;;
     ''|*[!0-9]*)
       [ -n "$id" ] || fail_ 'no identity for a live process'
       eq "$id" "$(ps -o lstart= -p "$p" | awk 'NF { $1 = $1; print; exit }')" 'a non-numeric identity is the start time ps recorded, normalised'

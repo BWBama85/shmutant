@@ -679,7 +679,7 @@ _shmutant_descendants_started() {
       if (n == 3) s = t[1] * 3600 + t[2] * 60 + t[3]
       else if (n == 2) s = t[1] * 60 + t[2]
       else s = t[1]
-      start[NR] = now - (d * 86400 + s)
+      start[NR] = "e" (now - (d * 86400 + s))
     }
     END {
       want[root] = 1
@@ -733,7 +733,7 @@ _shmutant_identity() {
   etime="$(command -p ps -o etime= -p "$1" 2>/dev/null | command -p tr -d ' ')" || return 1
   [ -n "$etime" ] || return 1
   now="$(_shmutant_now)"
-  printf '%s' "$(( now / 1000000 - $(_shmutant_etime_secs "$etime") ))"
+  printf 'e%s' "$(( now / 1000000 - $(_shmutant_etime_secs "$etime") ))"
 }
 
 # _shmutant_identity_table — fill SHMUTANT_START[pid] with the start time of every live process
@@ -770,7 +770,7 @@ _shmutant_identity_table() {
       if (n == 3) s = t[1] * 3600 + t[2] * 60 + t[3]
       else if (n == 2) s = t[1] * 60 + t[2]
       else s = t[1]
-      print $1, now - (d * 86400 + s)
+      print $1, "e" (now - (d * 86400 + s))
     }')
 }
 
@@ -784,15 +784,19 @@ _shmutant_alive_since() {
   _shmutant_same_start "$now" "$2"
 }
 
-# _shmutant_same_start <a> <b> — the two identities name the same start: a recorded start time
-# (lstart, a /proc tick) matches exactly; only the elapsed-time form carries the one-second
-# resolution of etime.
+# _shmutant_same_start <a> <b> — the two identities name the same start. A recorded start (a
+# /proc tick, an lstart) matches exactly: a pid reused in the next tick is another process.
+# Only the elapsed-time form, marked with a leading e, carries the one-second resolution of
+# etime, and it matches only its own form.
 _shmutant_same_start() {
   local d
   [ -n "$1" ] && [ -n "$2" ] || return 1
-  case "$1$2" in *[!0-9]*) [ "$1" = "$2" ]; return ;; esac
-  d=$(( $1 - $2 ))
-  [ "$d" -ge -1 ] && [ "$d" -le 1 ]
+  case "$1" in
+    e*) case "$2" in e*) ;; *) return 1 ;; esac
+        case "${1#e}${2#e}" in ''|*[!0-9]*) return 1 ;; esac
+        d=$(( ${1#e} - ${2#e} )); [ "$d" -ge -1 ] && [ "$d" -le 1 ] ;;
+    *)  [ "$1" = "$2" ] ;;
+  esac
 }
 
 # _shmutant_freeze_from — stop every descendant of the pids in `roots`, repeatedly, until a pass
@@ -1988,7 +1992,7 @@ _shmutant_pristine_state() {
     { command -p find . -exec "$ls_bin" -ldn -- {} + \
         && { [ -z "$stat_bin" ] || command -p find . -exec "$stat_bin" "$fmt" {} + ; } \
         && command -p find . -type f -exec "$cksum_bin" {} + ; } 2>/dev/null \
-      | command -p awk '/^[0-9]/ || /^\.$/ || /^\.\// { print; next } { sub(/[@+.]$/, "", $1); $2 = "-"; if ($1 ~ /^d/) $5 = "-"; print }' \
+      | command -p awk '/^[0-9]/ || /^\.$/ || /^\.\// { print; next } { m = $1; sub(/[@+.]$/, "", m); o = $3; g = $4; sz = ($1 ~ /^d/) ? "-" : $5; sub(/^[^ ]+ +[^ ]+ +[^ ]+ +[^ ]+ +[^ ]+ +/, ""); print m, "-", o, g, sz, $0 }' \
       | LC_ALL=C command -p sort )
 }
 
@@ -2450,14 +2454,12 @@ _shmutant_cli_load() {
   # The SHMUTANT_KEEP in force when this subshell ends, whichever way: a plan that assigns it
   # and then leaves while loading (exit, a failure under its errexit) never reaches the pool's
   # own reports, and the parent would read only the seed.
-  trap '_shmutant_report_keep at-exit' EXIT
+  trap '_shmutant_cli_leave at-exit' EXIT
   # A plan that installs an EXIT trap of its own while loading replaces that one: before each
   # of the plan's commands the report is put back ahead of whatever the plan set, so both run.
   # Only while loading — the pool reports for itself afterwards. functrace: a DEBUG trap set
   # in this function reaches the sourced file's commands only with it.
   local functrace_before=0; [[ -o functrace ]] && functrace_before=1
-  set -o functrace
-  trap '_shmutant_cli_keep_exit_trap' DEBUG
   unset -f prepare run
   shmutant_reset
   # The completion channel is a descriptor on a file unlinked before
@@ -2468,7 +2470,10 @@ _shmutant_cli_load() {
   readonly SHMUTANT_CLI_DONE_FD="$done_w"
   # shellcheck disable=SC1090
   # Loaded with stdout on stderr: anything a plan prints while loading is prose, and the CLI's
-  # stdout carries verdict records only.
+  # stdout carries verdict records only. The DEBUG guard covers the plan's own commands only.
+  set -o functrace
+  trap '_shmutant_cli_keep_exit_trap' DEBUG
+  # shellcheck disable=SC1090
   . "$plan" >&2
   rc=$?
   trap - DEBUG
@@ -2484,18 +2489,32 @@ _shmutant_cli_load() {
   return "$rc"
 }
 
+# _shmutant_cli_leave <when> — what the plan subshell reports as it leaves, however it leaves:
+# the SHMUTANT_KEEP in force, and one last snapshot of its descendants for the parent's
+# sampler. The sampler polls twice a second, and a plan that ends inside one poll would
+# otherwise leave a helper prepare started unseen — once this shell is gone, that helper is
+# nobody's descendant.
+_shmutant_cli_leave() {
+  _shmutant_report_keep "$1"
+  [ -z "${SHMUTANT_CLI_SEEN_W:-}" ] || { _shmutant_snapshot "$BASHPID" >&"$SHMUTANT_CLI_SEEN_W"; } 2>/dev/null
+}
+
 # _shmutant_cli_keep_exit_trap — the plan subshell's DEBUG handler while the plan loads: keep
-# `_shmutant_report_keep` at the head of the EXIT trap, ahead of one the plan installed (or put
+# `_shmutant_cli_leave` at the head of the EXIT trap, ahead of one the plan installed (or put
 # it back after the plan removed it), so the keep in force is reported however the plan ends.
 _shmutant_cli_keep_exit_trap() {
   local t
+  # An exec with a program word replaces this shell without running its EXIT trap: the leave
+  # report is made before the command that is about to do that. An exec that only redirects
+  # (`exec 3>f`, `exec {fd}>f`, `exec >f`) replaces nothing and is not one.
+  case "$BASH_COMMAND" in exec|exec\ [!'{<>&'0-9]*) _shmutant_cli_leave before-exec ;; esac
   t="$(trap -p EXIT)"
-  case "$t" in *_shmutant_report_keep*) return 0 ;; esac
-  if [ -z "$t" ]; then trap '_shmutant_report_keep at-exit' EXIT; return 0; fi
+  case "$t" in *_shmutant_cli_leave*) return 0 ;; esac
+  if [ -z "$t" ]; then trap '_shmutant_cli_leave at-exit' EXIT; return 0; fi
   eval "set -- $t"
   # Expanded now on purpose: the plan's own command text becomes part of the trap.
   # shellcheck disable=SC2064
-  trap "_shmutant_report_keep at-exit; $3" EXIT
+  trap "_shmutant_cli_leave at-exit; $3" EXIT
 }
 
 # _shmutant_cli_wd_is_ours <path> — true while <path> is, by identity, the workdir this run made.
@@ -2560,7 +2579,9 @@ _shmutant_cli_abort() {
     for (( i = 0; i < 50; i++ )); do kill -0 "$SHMUTANT_CLI_CHILD" 2>/dev/null || break; command -p sleep 0.1; done
     # With the identity taken at the spawn: a child that went on TERM and was reaped inside bash
     # may have given its number to someone else by now, who is then neither stopped nor killed.
-    _shmutant_kill_tree_twice "$SHMUTANT_CLI_CHILD:${SHMUTANT_CLI_CHILD_ID:-}"
+    # A bare pid when no identity was captured (ps failed at the spawn): the number is still
+    # this shell's own unreaped child, which nobody else can have been given.
+    if [ -n "${SHMUTANT_CLI_CHILD_ID:-}" ]; then _shmutant_kill_tree_twice "$SHMUTANT_CLI_CHILD:$SHMUTANT_CLI_CHILD_ID"; else _shmutant_kill_tree_twice "$SHMUTANT_CLI_CHILD"; fi
     wait "$SHMUTANT_CLI_CHILD" 2>/dev/null
   fi
   # The last SHMUTANT_KEEP the plan subshell reported (after loading, and around prepare)

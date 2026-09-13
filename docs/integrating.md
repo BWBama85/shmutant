@@ -319,7 +319,8 @@ does the same around its plan subshell, and removes a workdir it created unless 
 A `SHMUTANT_KEEP=1` assigned inside the plan or `prepare` is honoured by the CLI's cleanup too,
 also when the plan leaves while loading (an `exit`, a failure under its own `set -e`): the plan
 subshell reports the value in force as it ends, ahead of any EXIT trap the plan installed or
-removed while loading (the pool reports for itself afterwards). A baseline run that exits with a
+removed while loading, and before an `exec` that would replace the subshell without one (the
+pool reports for itself afterwards). A baseline run that exits with a
 status that is neither green nor red is recorded as `aborted`, not `red`.
 
 ## 7. Migrating a `check-lib.sh`-style harness

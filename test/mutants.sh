@@ -1105,7 +1105,7 @@ shmutant_mut 'a signal during the CLI spawn window is acted on at once' \
   '  :' \
   't_cli_abort_waits_for_the_child_and_names_its_identity'
 shmutant_mut 'the CLI child is escalated on by number alone' \
-  '    _shmutant_kill_tree_twice "$SHMUTANT_CLI_CHILD:${SHMUTANT_CLI_CHILD_ID:-}"' \
+  '    if [ -n "${SHMUTANT_CLI_CHILD_ID:-}" ]; then _shmutant_kill_tree_twice "$SHMUTANT_CLI_CHILD:$SHMUTANT_CLI_CHILD_ID"; else _shmutant_kill_tree_twice "$SHMUTANT_CLI_CHILD"; fi' \
   '    _shmutant_kill_tree_twice "$SHMUTANT_CLI_CHILD"' \
   't_cli_abort_waits_for_the_child_and_names_its_identity'
 
@@ -1292,10 +1292,7 @@ shmutant_mut 'a clone swapped by its run is removed by path' \
   '  if [ -L "$1/tree" ] || { [ -e "$1/tree" ] && [ "$(_shmutant_dir_id "$1/tree")" != "${SHMUTANT_CLONE_ID:-}" ]; }; then' \
   '  if [ -L "$1/tree" ]; then' \
   't_a_clone_swapped_by_its_run_is_not_removed'
-shmutant_mut 'an unverified CLI child is escalated on by bare number' \
-  '    _shmutant_kill_tree_twice "$SHMUTANT_CLI_CHILD:${SHMUTANT_CLI_CHILD_ID:-}"' \
-  '    _shmutant_kill_tree_twice "$SHMUTANT_CLI_CHILD${SHMUTANT_CLI_CHILD_ID:+:$SHMUTANT_CLI_CHILD_ID}"' \
-  't_cli_abort_waits_for_the_child_and_names_its_identity'
+# (row 'an unverified CLI child is escalated on by bare number' dropped: a bare pid for the CLI's own unreaped child is now the intended behaviour, per the later review finding)
 
 # --- guards added for the thirty-eighth review round ---
 shmutant_mut 'a standalone mutate trusts the names the caller left' \
@@ -1570,3 +1567,24 @@ shmutant_mut 'a timed-out run leaves no record of what was still running' \
   '        { printf '"'"'shmutant: %s: still running at the deadline (pid ppid stat args):\n'"'"' "$dir"' \
   '        { :' \
   't_verdict_timeout'
+
+# --- guards added for the fifty-first review round ---
+shmutant_mut 'a plan that execs while loading reports no keep' \
+  '  case "$BASH_COMMAND" in exec|exec\ [!'"'"'{<>&'"'"'0-9]*) _shmutant_cli_leave before-exec ;; esac' \
+  '  :' \
+  't_cli_keeps_the_workdir_a_plan_asked_to_keep_before_leaving'
+shmutant_mut 'a recorded start matches the next tick too' \
+  '    *)  [ "$1" = "$2" ] ;;' \
+  '    *)  case "$1$2" in *[!0-9]*) [ "$1" = "$2" ] ;; *) d=$(( $1 - $2 )); [ "$d" -ge -1 ] && [ "$d" -le 1 ] ;; esac ;;' \
+  't_same_start_compares_recorded_starts_exactly'
+shmutant_mut 'the CLI child with no identity is passed as unverified' \
+  '    if [ -n "${SHMUTANT_CLI_CHILD_ID:-}" ]; then _shmutant_kill_tree_twice "$SHMUTANT_CLI_CHILD:$SHMUTANT_CLI_CHILD_ID"; else _shmutant_kill_tree_twice "$SHMUTANT_CLI_CHILD"; fi' \
+  '    _shmutant_kill_tree_twice "$SHMUTANT_CLI_CHILD:${SHMUTANT_CLI_CHILD_ID:-}"' \
+  't_cli_abort_waits_for_the_child_and_names_its_identity'
+shmutant_mut 'the stat-less fingerprint collapses spaces in names' \
+  '      | command -p awk '"'"'/^[0-9]/ || /^\.$/ || /^\.\// { print; next } { m = $1; sub(/[@+.]$/, "", m); o = $3; g = $4; sz = ($1 ~ /^d/) ? "-" : $5; sub(/^[^ ]+ +[^ ]+ +[^ ]+ +[^ ]+ +[^ ]+ +/, ""); print m, "-", o, g, sz, $0 }'"'"' \' \
+  '      | command -p awk '"'"'/^[0-9]/ || /^\.$/ || /^\.\// { print; next } { sub(/[@+.]$/, "", $1); $2 = "-"; if ($1 ~ /^d/) $5 = "-"; print }'"'"' \' \
+  't_stat_less_fingerprint_keeps_names_byte_for_byte'
+# (no row on the plan subshell's leave snapshot: whether its absence shows depends on whether the
+# half-second sampler happened to see the helper, so a row would be a coin flip; the unit
+# t_cli_ends_a_helper_that_left_the_plan_group went red without it, 2 runs of 3, on an idle host)
