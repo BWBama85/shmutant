@@ -390,4 +390,8 @@ One line per resolved review thread, newest last.
 - `host-shell-option-leak` `shmutant.sh` `d202848` `PRRT_kwDOUT7q9s6h0gQ1` PR #1 2026-09-13
 - `host-shell-option-leak` `shmutant.sh` `d202848` `PRRT_kwDOUT7q9s6h0gQ4` PR #1 2026-09-13
 - `stale-artifact-reuse` `shmutant.sh` `d202848` `PRRT_kwDOUT7q9s6h0gQ6` PR #1 2026-09-13
+- `host-shell-option-leak` `shmutant.sh` `2f0ae0e` `PRRT_kwDOUT7q9s6h1KDd` PR #1 2026-09-13
+- `host-shell-option-leak` `shmutant.sh` `2f0ae0e` `PRRT_kwDOUT7q9s6h1KDf` PR #1 2026-09-13
+- `host-shell-option-leak` `shmutant.sh` `2f0ae0e` `PRRT_kwDOUT7q9s6h1KDh` PR #1 2026-09-13
+- `locale-dependent-match` `shmutant.sh` `2f0ae0e` `PRRT_kwDOUT7q9s6h1KDi` PR #1 2026-09-13
 <!-- adb:hits:end -->
