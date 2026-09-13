@@ -1572,6 +1572,25 @@ EOF
   rm -rf "$T/tmpd"; mkdir -p "$T/tmpd"
   TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-keep-fail.sh" --no-baseline > /dev/null 2>"$T/e2"; rc_is $? 2 'a plan that fails under its own errexit is a harness error'
   has "$(cat "$T/e2")" 'workdir kept' 'and its keep is honoured too'
+  # a plan that installs an EXIT trap of its own, or removes the trap, while loading
+  cat > "$T/toy/plan-keep-trap.sh" <<'EOF'
+SHMUTANT_KEEP=1
+cleanup() { printf 'cleaned\n' > "$SHMUTANT_CLI_WD/cleaned"; }
+trap cleanup EXIT
+exit 0
+EOF
+  rm -rf "$T/tmpd"; mkdir -p "$T/tmpd"
+  TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-keep-trap.sh" --no-baseline > /dev/null 2>"$T/e3"; rc_is $? 2 'a plan with an EXIT trap of its own that leaves while loading is a harness error'
+  has "$(cat "$T/e3")" 'workdir kept' 'and its keep is honoured past its own trap'
+  [ "$(find "$T/tmpd" -mindepth 2 -maxdepth 2 -name cleaned | wc -l | tr -d ' ')" -eq 1 ] || fail_ 'the plan'"'"'s own EXIT trap did not run'
+  cat > "$T/toy/plan-keep-untrap.sh" <<'EOF'
+SHMUTANT_KEEP=1
+trap - EXIT
+exit 0
+EOF
+  rm -rf "$T/tmpd"; mkdir -p "$T/tmpd"
+  TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-keep-untrap.sh" --no-baseline > /dev/null 2>"$T/e4"; rc_is $? 2 'a plan that removes the EXIT trap while loading is a harness error'
+  has "$(cat "$T/e4")" 'workdir kept' 'and its keep is still honoured'
 }
 
 t_cli_abort_keeps_the_workdir_the_environment_asked_to_keep() {
@@ -1596,6 +1615,69 @@ EOF
   has "$(cat "$T/e")" 'workdir kept' 'with no report from the plan, the environment keep decides'
   [ "$(find "$T/tmpd" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" -ge 1 ] || fail_ 'the workdir was removed despite SHMUTANT_KEEP=1 in the environment'
   true
+}
+
+t_abs_refuses_a_physical_name_ending_in_a_newline() {
+  # a newline-free symlink to a directory whose physical name ends in a newline: the resolver
+  # refuses it, since the caller'"'"'s substitution would strip the newline and answer with the
+  # sibling
+  mkdir -p "$T/d"$'\n' "$T/d"; ln -s "$T/d"$'\n' "$T/link"
+  local out; out="$(_shmutant_abs "$T/link")"; local rc=$?
+  [ "$rc" -ne 0 ] || fail_ "the resolver answered [$out] for a link to a directory whose name ends in a newline"
+  printf 'x\n' > "$T/d"$'\n'"/f"
+  shmutant_copy_tree "$T/link" "$T/dst" 2>"$T/e"; rc_is $? 1 'copy_tree refuses such a source'
+  [ ! -e "$T/dst/f" ] || fail_ 'copy_tree copied through the link'
+  # an executable callback reached through such a link is refused too, never pinned to the
+  # sibling directory's program of the same name
+  printf '#!/bin/sh\nexit 0\n' > "$T/d"$'\n'"/runner"; chmod +x "$T/d"$'\n'"/runner"
+  printf '#!/bin/sh\nexit 1\n' > "$T/d/runner"; chmod +x "$T/d/runner"
+  out="$(_shmutant_pin_callback "$T/link/runner")"; rc=$?
+  [ "$rc" -ne 0 ] || fail_ "a callback through a link to a newline-ending directory was pinned to [$out]"
+}
+
+t_cli_ends_a_helper_that_left_the_plan_group() {
+  # a helper prepare started in a session of its own (setsid) is not in the plan'"'"'s process
+  # group: sampled while the plan subshell lived, it is ended by identity at the end
+  mk_toy "$T/toy"; TOY="$T/toy"; rm -rf "$T/tmpd"; mkdir -p "$T/tmpd"
+  local starter
+  if command -v setsid > /dev/null 2>&1; then starter="setsid sleep 30 & echo \$! > '$T/left-sid'"
+  elif command -v perl > /dev/null 2>&1; then starter="perl -e 'use POSIX; POSIX::setsid(); exec \"sleep\", \"30\"' & echo \$! > '$T/left-sid'"
+  else echo "note: $_unit: neither setsid nor perl here; a new session cannot be made"; return; fi
+  cat > "$T/toy/plan-sid.sh" <<EOF
+prepare() { $starter; shmutant_copy_tree "\$SHMUTANT_PLAN_DIR" "\$1"; }
+run() { bash "\$1/test.sh"; }
+shmutant_target lib.sh
+shmutant_mut 'a' '\$1 + \$2' '\$1 - \$2' 'add-works'
+EOF
+  TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-sid.sh" --no-baseline > /dev/null 2>"$T/e"; rc_is $? 0 'a completed pool whose prepare left a helper in its own session'
+  [ -s "$T/left-sid" ] || fail_ 'fixture: prepare did not start the helper'
+  local i=0; while kill -0 "$(cat "$T/left-sid")" 2>/dev/null && [ "$i" -lt 30 ]; do i=$((i + 1)); sleep 0.1; done
+  kill -0 "$(cat "$T/left-sid")" 2>/dev/null && { kill -KILL "$(cat "$T/left-sid")" 2>/dev/null; fail_ 'a helper that left the plan group outlived the CLI'; }
+  true
+}
+
+t_readonly_preflight_covers_every_name_the_pool_assigns() {
+  # every identifier the pool's code assigns — its subshells, wrappers and watchdogs included,
+  # not only what it declares local — is in a preflight list (the pool's, or a helper's that
+  # prepare may call). A scratch name missing from the lists would end a worker or a watchdog
+  # in a shell that made that name readonly, past the refusal at entry.
+  local listed names unlisted="" n count=0
+  listed="$(declare -f _shmutant_pool_locals_writable shmutant_copy_tree shmutant_mutate | tr -s ' \t\\' '\n\n\n')"
+  names="$(awk '
+    /^[A-Za-z_][A-Za-z0-9_]*\(\) \{/ { f = $1; sub(/\(\).*/, "", f) }
+    /^\}/ { f = "" }
+    f != "" && f !~ /^_shmutant_cli_/ && f != "shmutant_main" && f != "_shmutant_checksum" { if ($0 ~ /^[ \t]*#/) next; print }
+  ' "$SHMUTANT" | grep -oE '(^|[^A-Za-z0-9_$])[A-Za-z_][A-Za-z0-9_]*\+?=' | grep -oE '[A-Za-z_][A-Za-z0-9_]*' | sort -u)"
+  for n in $names; do
+    # settings the caller owns, shell state, and what only looks like an assignment: dd and ps
+    # operands (if= bs= count= pid= ppid= etime=)
+    case "$n" in SHMUTANT_KEEP|SHMUTANT_TIMEOUT|SHMUTANT_JOBS|SHMUTANT_RED_STATUS|SHMUTANT_RED_PREFIX|SHMUTANT_STREAM|SHMUTANT_BASELINE|SHMUTANT_SELECT|LC_ALL|POSIXLY_CORRECT|GLOBIGNORE|IFS|PATH|PWD|OLDPWD|_|prepare|run|exit|if|bs|count|of|seek|conv|pid|ppid|etime) continue ;; esac
+    count=$((count + 1))
+    printf '%s\n' "$listed" | grep -qx -- "$n" || unlisted="$unlisted $n"
+  done
+  [ "$count" -ge 150 ] || fail_ "fixture: the extraction found only $count assigned identifiers"
+  [ -z "$unlisted" ] || fail_ "identifiers the pool's code assigns but no preflight list carries:$unlisted"
+  echo "note: $_unit: $count assigned identifiers checked against the preflight lists"
 }
 
 t_pool_refuses_a_hard_link_under_git_in_the_prepared_tree() {
@@ -2527,10 +2609,12 @@ t_callback_bare_wait_does_not_block_on_the_holder() {
   shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
   # the job's own status, then a bare wait
   waiting_run() { bash "$1/test.sh" & local j=$! rc; wait "$j"; rc=$?; wait; return "$rc"; }
+  # a wait that blocked on the holder would run until the timeout and score `timeout`: the
+  # bound below is well under it and well above what the pool needs even on a loaded host
   local t0; t0="$(_shmutant_now)"
-  SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=6 pool lbl "$T/wd" toy_prepare waiting_run
+  SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=30 pool lbl "$T/wd" toy_prepare waiting_run
   eq "$(verdict_of a)" killed 'a callback that backgrounds its suite and waits gets its own verdict'
-  [ $(( ($(_shmutant_now) - t0) / 1000000 )) -lt 5 ] || fail_ 'a bare wait in the callback blocked on the holder until the timeout'
+  [ $(( ($(_shmutant_now) - t0) / 1000000 )) -lt 25 ] || fail_ 'a bare wait in the callback blocked on the holder until the timeout'
 }
 
 t_verdict_timeout_stops_a_run_that_keeps_forking() {

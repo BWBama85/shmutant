@@ -785,13 +785,10 @@ shmutant_mut 'a directory named - resolves as cd -' \
   '  case "$d" in /*) ;; *) d="./$d" ;; esac' \
   '  :' \
   't_abs_ignores_cdpath'
-shmutant_mut 'a name ending in a newline resolves to its sibling' \
-  '  case "$1" in *$'"'"'\n'"'"') return 1 ;; esac' \
-  '  :' \
-  't_abs_ignores_cdpath'
+# (row 'a name ending in a newline resolves to its sibling' dropped: subsumed by the physical-name check that follows the cd, which refuses the same input and has a row of its own)
 shmutant_mut 'a caller function named cd stands in for the builtin' \
-  '  ( builtin cd -P -- "$d" 2>/dev/null && builtin pwd -P )' \
-  '  ( cd -P -- "$d" 2>/dev/null && pwd -P )' \
+  '  ( builtin cd -P -- "$d" 2>/dev/null || exit 1' \
+  '  ( cd -P -- "$d" 2>/dev/null || exit 1' \
   't_abs_ignores_cdpath'
 shmutant_mut 'a caller workdir holding entries shmutant did not make is emptied' \
   '    for e in "$wd"/pristine "$wd"/base-* "$wd"/mut-*; do' \
@@ -1521,10 +1518,7 @@ shmutant_mut 'a baseline red status without a red line is scored red' \
   '    elif [ "$status" -eq "$red" ] && [ "$SHMUTANT_RUN_RED" = 1 ]; then verdict=red' \
   '    elif [ "$status" -eq "$red" ]; then verdict=red' \
   't_baseline_red_status_without_a_red_line_is_aborted'
-shmutant_mut 'a plan that leaves while loading reports no keep' \
-  '  trap '"'"'_shmutant_report_keep at-exit'"'"' EXIT' \
-  '  :' \
-  't_cli_keeps_the_workdir_a_plan_asked_to_keep_before_leaving'
+# (row 'a plan that leaves while loading reports no keep' dropped: subsumed by the DEBUG guard, which puts the report back before the plan's first command and has a row of its own)
 shmutant_mut 'hard links under .git in the prepared tree are exempt' \
   '  linked="$(builtin cd -- "$wd/pristine" 2>/dev/null && command -p find . -type f -links +1 -print 2>/dev/null)" || linked="?"' \
   '  linked="$(builtin cd -- "$wd/pristine" 2>/dev/null && command -p find . -path ./.git -prune -o -type f -links +1 -print 2>/dev/null)" || linked="?"' \
@@ -1533,3 +1527,25 @@ shmutant_mut 'a carriage return is a witness character' \
   '    BEGIN { SEP = " \t\r\f\v!\"#$%&" sprintf("%c", 39) "()*+,/:;<=>?@[\\]^`{|}~" }' \
   '    BEGIN { SEP = " \t!\"#$%&" sprintf("%c", 39) "()*+,/:;<=>?@[\\]^`{|}~" }' \
   't_witness_matches_a_whole_token'
+
+# --- guards added for the forty-ninth review round ---
+shmutant_mut 'a plan EXIT trap replaces the keep report' \
+  '  trap '"'"'_shmutant_cli_keep_exit_trap'"'"' DEBUG' \
+  '  :' \
+  't_cli_keeps_the_workdir_a_plan_asked_to_keep_before_leaving'
+shmutant_mut 'a physical name ending in a newline is answered as its sibling' \
+  '    case "$PWD" in *$'"'"'\n'"'"'*) exit 1 ;; esac' \
+  '    :' \
+  't_abs_refuses_a_physical_name_ending_in_a_newline'
+shmutant_mut 'a helper that left the plan group outlives the CLI' \
+  '  _shmutant_kill_tree_twice "$1" "${sampled[@]}"' \
+  '  :' \
+  't_cli_ends_a_helper_that_left_the_plan_group'
+shmutant_mut 'the watchdog scratch names are not in the readonly preflight' \
+  '    a budget dog e elapsed last leftovers linked old rrc s tampered tnow victims wroot' \
+  '    a budget dog e elapsed leftovers linked old rrc s tampered tnow victims wroot' \
+  't_readonly_preflight_covers_every_name_the_pool_assigns'
+shmutant_mut 'a callback directory ending in a newline is pinned to its sibling' \
+  '  d="$(_shmutant_abs "$(command -p dirname -- "$f")")" || return 1' \
+  '  d="$(builtin cd -P -- "$(command -p dirname -- "$f")" 2>/dev/null && command -p pwd -P)" || return 1' \
+  't_abs_refuses_a_physical_name_ending_in_a_newline'

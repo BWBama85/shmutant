@@ -290,9 +290,10 @@ worker or by a sibling, can stand in for it, and a worker that did not exit norm
 included; one that cannot be removed is reported and the run exits 2. What the plan file or a callback
 left running (a helper backgrounded from the plan, a service `prepare` started) is ended with
 KILL when the run ends, whether the pool completed or the plan left early: the plan runs in a
-process group of its own, held until then. The plan reads no terminal (its standard input is
-`/dev/null`). A process that put itself in another session is out of reach, as for a timed-out
-run.
+process group of its own, held until then, and its descendants are sampled twice a second while
+it lives, so one that left the group (a new session) before the subshell ended is still ended,
+by the identity it had when seen. The plan reads no terminal (its standard input is `/dev/null`).
+A process that detached within half a second of forking is out of reach, as for a timed-out run.
 
 ## 6. Tuning
 
@@ -315,7 +316,8 @@ process tree, then restores the caller's own traps verbatim and re-delivers the 
 does the same around its plan subshell, and removes a workdir it created unless `SHMUTANT_KEEP=1`.
 A `SHMUTANT_KEEP=1` assigned inside the plan or `prepare` is honoured by the CLI's cleanup too,
 also when the plan leaves while loading (an `exit`, a failure under its own `set -e`): the plan
-subshell reports the value in force as it ends. A baseline run that exits with a
+subshell reports the value in force as it ends, ahead of any EXIT trap the plan installed or
+removed while loading (the pool reports for itself afterwards). A baseline run that exits with a
 status that is neither green nor red is recorded as `aborted`, not `red`.
 
 ## 7. Migrating a `check-lib.sh`-style harness

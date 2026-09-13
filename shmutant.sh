@@ -210,7 +210,11 @@ _shmutant_abs() {
   case "$1" in *$'\n') return 1 ;; esac
   local d="$1"
   case "$d" in /*) ;; *) d="./$d" ;; esac
-  ( builtin cd -P -- "$d" 2>/dev/null && builtin pwd -P )
+  # The physical name too: a newline-free symlink can resolve to a directory whose name ends
+  # in one, and the caller's substitution would strip it and answer with the sibling.
+  ( builtin cd -P -- "$d" 2>/dev/null || exit 1
+    case "$PWD" in *$'\n'*) exit 1 ;; esac
+    builtin pwd -P )
 }
 
 # _shmutant_inside <root> <path> — true when <path> is <root> or below it, compared byte for
@@ -1819,7 +1823,9 @@ _shmutant_pool_locals_writable() {
     SHMUTANT_TRAP_RETURN SHMUTANT_TRAP_RETURN_PENDING SHMUTANT_TRAP_TERM SHMUTANT_VERDICT_FD SHMUTANT_VERDICT_R \
     SHMUTANT_VERDICT_W SHMUTANT_V_STATUS SHMUTANT_V_US SHMUTANT_V_VERDICT SHMUTANT_WD_ID \
     SHMUTANT_ROWS_NAME SHMUTANT_ROWS_FILE SHMUTANT_ROWS_OLD SHMUTANT_ROWS_NEW SHMUTANT_ROWS_WIT SHMUTANT_ROWS_SEL \
-    SHMUTANT_TARGET SHMUTANT_DECL_ERRORS SHMUTANT_SELECTED_N
+    SHMUTANT_TARGET SHMUTANT_DECL_ERRORS SHMUTANT_SELECTED_N \
+    _shmutant_bo _shmutant_so _shmutant_o _shmutant_n _shmutant_pc _shmutant_wrap_left \
+    a budget dog e elapsed last leftovers linked old rrc s tampered tnow victims wroot
 }
 
 # _shmutant_decl_writable <label> — the table's own names, checked by each declaration entry
@@ -1861,7 +1867,9 @@ _shmutant_pin_callback() {
   local f d
   case "$1" in */*) f="$1" ;; *) f="$(builtin type -P -- "$1" 2>/dev/null)" || return 1 ;; esac
   [ -n "$f" ] || return 1
-  d="$(builtin cd -P -- "$(command -p dirname -- "$f")" 2>/dev/null && command -p pwd -P)" || return 1
+  # Through the resolver: it refuses a physical directory name ending in a newline, which this
+  # substitution would otherwise strip, naming the sibling's program.
+  d="$(_shmutant_abs "$(command -p dirname -- "$f")")" || return 1
   printf '%s/%s' "$d" "$(command -p basename -- "$f")"
 }
 
@@ -2383,6 +2391,13 @@ _shmutant_cli_load() {
   # and then leaves while loading (exit, a failure under its errexit) never reaches the pool's
   # own reports, and the parent would read only the seed.
   trap '_shmutant_report_keep at-exit' EXIT
+  # A plan that installs an EXIT trap of its own while loading replaces that one: before each
+  # of the plan's commands the report is put back ahead of whatever the plan set, so both run.
+  # Only while loading — the pool reports for itself afterwards. functrace: a DEBUG trap set
+  # in this function reaches the sourced file's commands only with it.
+  local functrace_before=0; [[ -o functrace ]] && functrace_before=1
+  set -o functrace
+  trap '_shmutant_cli_keep_exit_trap' DEBUG
   unset -f prepare run
   shmutant_reset
   # The completion channel is a descriptor on a file unlinked before
@@ -2396,6 +2411,8 @@ _shmutant_cli_load() {
   # stdout carries verdict records only.
   . "$plan" >&2
   rc=$?
+  trap - DEBUG
+  [ "$functrace_before" = 1 ] || set +o functrace
   [ "$rc" -eq 0 ] || { _shmutant_err "run: the plan failed while loading (status $rc)"; return 2; }
   declare -F prepare > /dev/null || { _shmutant_err "run: the plan defines no prepare function"; return 2; }
   declare -F run > /dev/null || { _shmutant_err "run: the plan defines no run function"; return 2; }
@@ -2405,6 +2422,20 @@ _shmutant_cli_load() {
   shmutant_pool "$(command -p basename -- "$plan")" "$SHMUTANT_CLI_WD" prepare run; rc=$?
   printf '%s %s\n' "$rc" "${SHMUTANT_KEEP:-0}" >&"$SHMUTANT_CLI_DONE_FD"
   return "$rc"
+}
+
+# _shmutant_cli_keep_exit_trap — the plan subshell's DEBUG handler while the plan loads: keep
+# `_shmutant_report_keep` at the head of the EXIT trap, ahead of one the plan installed (or put
+# it back after the plan removed it), so the keep in force is reported however the plan ends.
+_shmutant_cli_keep_exit_trap() {
+  local t
+  t="$(trap -p EXIT)"
+  case "$t" in *_shmutant_report_keep*) return 0 ;; esac
+  if [ -z "$t" ]; then trap '_shmutant_report_keep at-exit' EXIT; return 0; fi
+  eval "set -- $t"
+  # Expanded now on purpose: the plan's own command text becomes part of the trap.
+  # shellcheck disable=SC2064
+  trap "_shmutant_report_keep at-exit; $3" EXIT
 }
 
 # _shmutant_cli_wd_is_ours <path> — true while <path> is, by identity, the workdir this run made.
@@ -2426,6 +2457,27 @@ _shmutant_cli_end_group() {
   if [ -n "$hid" ] && _shmutant_identity "$hp" > /dev/null; then _shmutant_alive_since "$hp" "$hid" || return 0; fi
   kill -KILL -- -"$1" 2>/dev/null
   kill -KILL "$hp" 2>/dev/null
+  return 0
+}
+
+# _shmutant_cli_end_sampled <child-spec> — stop the sampler, then freeze and KILL every
+# descendant it saw that is still the process it saw (pid:identity, as the runner's leftovers),
+# the plan subshell (dead or alive, by its spec) as the root. Nothing when no sample was taken.
+_shmutant_cli_end_sampled() {
+  local line
+  local -a sampled=()
+  local -A first=()
+  [ -n "${SHMUTANT_CLI_SAMPLER:-}" ] || return 0
+  kill -TERM "$SHMUTANT_CLI_SAMPLER" 2>/dev/null; wait "$SHMUTANT_CLI_SAMPLER" 2>/dev/null; SHMUTANT_CLI_SAMPLER=""
+  [ -n "${SHMUTANT_CLI_SEEN_R:-}" ] || return 0
+  exec {SHMUTANT_CLI_SEEN_W}>&-
+  # The identity a pid had when first seen: a later sample of a reused number is not it.
+  while IFS= read -r line <&"$SHMUTANT_CLI_SEEN_R"; do
+    case "$line" in *:*) [ -n "${first[${line%%:*}]:-}" ] || { first["${line%%:*}"]=1; sampled+=("$line"); } ;; esac
+  done
+  exec {SHMUTANT_CLI_SEEN_R}<&-; unset SHMUTANT_CLI_SEEN_R SHMUTANT_CLI_SEEN_W
+  [ "${#sampled[@]}" -gt 0 ] || return 0
+  _shmutant_kill_tree_twice "$1" "${sampled[@]}"
   return 0
 }
 
@@ -2459,6 +2511,7 @@ _shmutant_cli_abort() {
   fi
   [ -z "${SHMUTANT_CLI_CHILD:-}" ] || _shmutant_cli_end_group "$SHMUTANT_CLI_CHILD" "$holder"
   [ -z "${SHMUTANT_CLI_HOLD:-}" ] || { exec {SHMUTANT_CLI_HOLD}>&-; SHMUTANT_CLI_HOLD=""; }
+  [ -z "${SHMUTANT_CLI_CHILD:-}" ] || _shmutant_cli_end_sampled "$SHMUTANT_CLI_CHILD:${SHMUTANT_CLI_CHILD_ID:-}"
   [ -n "${SHMUTANT_CLI_DONE_FILE:-}" ] && _shmutant_cli_wd_is_ours "${SHMUTANT_CLI_WD_PATH:-}" && command -p rm -f -- "$SHMUTANT_CLI_DONE_FILE"
   if [ -n "${SHMUTANT_CLI_WD_TO_RM:-}" ]; then
     if [ "$keep_last" = 1 ]; then
@@ -2565,6 +2618,15 @@ _shmutant_cli_run() {
   # in being by the holder until the run is over: what the plan or prepare left running is
   # ended by group number when the run ends, and the holder makes that number unreusable
   # meanwhile. Stdin from /dev/null: a background group reading the terminal would be stopped.
+  # Descendants are sampled while the plan subshell lives, as the runner does for a run: one
+  # that left the group (a new session) before the subshell ended is still named, with the
+  # identity it had, and ended at the end. The samples go to an unlinked file of this shell's.
+  local seen_file
+  seen_file="$(command -p mktemp "$done_file.seen.XXXXXX")" || { _shmutant_err "run: cannot create the sample file in $wd"; exec {hold}>&- {hold_r}<&- {keep_w}>&- {keep_r}<&- {done_r}<&-; command -p rm -f -- "$done_file"; [ "$made" = 1 ] && command -p rm -rf -- "$wd"; return 2; }
+  if ! exec {SHMUTANT_CLI_SEEN_W}>|"$seen_file" {SHMUTANT_CLI_SEEN_R}<"$seen_file"; then
+    _shmutant_err "run: cannot open the sample file"; command -p rm -f -- "$seen_file"; exec {hold}>&- {hold_r}<&- {keep_w}>&- {keep_r}<&- {done_r}<&-; command -p rm -f -- "$done_file"; [ "$made" = 1 ] && command -p rm -rf -- "$wd"; return 2
+  fi
+  command -p rm -f -- "$seen_file"
   builtin set -m
   (
     # `trap -p` in a subshell reports the parent's traps although none is active: the pool
@@ -2577,6 +2639,7 @@ _shmutant_cli_run() {
     _shmutant_cli_load "$SHMUTANT_PLAN_DIR/$(command -p basename -- "$plan")"
   ) < /dev/null & SHMUTANT_CLI_CHILD=$!
   builtin set +m
+  ( while kill -0 "$SHMUTANT_CLI_CHILD" 2>/dev/null; do _shmutant_snapshot "$SHMUTANT_CLI_CHILD"; command -p sleep 0.5; done ) 1>&"$SHMUTANT_CLI_SEEN_W" 2>/dev/null < /dev/null & SHMUTANT_CLI_SAMPLER=$!
   SHMUTANT_CLI_CHILD_ID="$(_shmutant_identity "$SHMUTANT_CLI_CHILD" 2>/dev/null)" || SHMUTANT_CLI_CHILD_ID=""
   SHMUTANT_CLI_SPAWNING=0
   [ -z "${SHMUTANT_CLI_ABORT_PENDING:-}" ] || { local p="$SHMUTANT_CLI_ABORT_PENDING"; SHMUTANT_CLI_ABORT_PENDING=""; _shmutant_cli_abort "$p"; }
@@ -2589,6 +2652,7 @@ _shmutant_cli_run() {
   exec {keep_r}<&-; unset SHMUTANT_CLI_KEEP_R
   _shmutant_cli_end_group "$SHMUTANT_CLI_CHILD" "$plan_holder"
   exec {hold}>&- {hold_r}<&-; SHMUTANT_CLI_HOLD=""
+  _shmutant_cli_end_sampled "$SHMUTANT_CLI_CHILD:${SHMUTANT_CLI_CHILD_ID:-}"
   SHMUTANT_CLI_CHILD=""
   marker="$(command -p cat <&"$done_r")"; exec {done_r}<&-
   # The completion path is a name inside the workdir: a plan that moved the workdir away and
