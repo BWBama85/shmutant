@@ -424,4 +424,6 @@ One line per resolved review thread, newest last.
 - `stale-artifact-reuse` `shmutant.sh` `1aa1b43` `PRRT_kwDOUT7q9s6h5ojR` PR #1 2026-09-13
 - `timeout-escalation-cancelled` `shmutant.sh` `1aa1b43` `PRRT_kwDOUT7q9s6h5ojU` PR #1 2026-09-13
 - `rewrite-loses-file-shape` `shmutant.sh` `1aa1b43` `PRRT_kwDOUT7q9s6h5ojY` PR #1 2026-09-13
+- `path-lookup-ambiguity` `test/run.sh:3909` `ba400d0` `PRRT_kwDOUT7q9s6iRl3B` PR #4 2026-09-14 — the sweep path stayed relative under a relative TMPDIR, so the unit EXIT-trap snapshot was written beneath the unit directory
+- `contract-not-honoured` `test/run.sh:59` `ba400d0` `PRRT_kwDOUT7q9s6iRl2-` PR #4 2026-09-14 — wait_gone waited on kill -0, which a reparented zombie answers forever under a PID 1 that never reaps
 <!-- adb:hits:end -->
