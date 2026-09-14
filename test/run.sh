@@ -2539,21 +2539,23 @@ t_run_holder_ends_with_a_killed_runner() {
 
 # shellcheck disable=SC2034
 t_interrupted_freeze_does_not_leave_the_holder_stopped() {
-  mkdir -p "$T/d"
   # A freeze stops the run's whole group, holder included, and sends KILL only at the end. When the
   # process doing it is killed in between (an outer timeout reaching an inner run), the holder must
-  # not be left stopped: no tree walk reaches it, and a stopped process never sees end-of-file.
-  ( exec {vf}>|"$T/chan"; SHMUTANT_VERDICT_FD="$vf"
-    cb() { : > "$T/started"; sleep 30; }
-    SHMUTANT_TIMEOUT=0 _shmutant_run_bounded "$T/d" cb "$T/d" sel ) > /dev/null 2>&1 & local outer=$!
-  wait_for "$T/started" || { fail_ 'the callback never started'; _shmutant_kill_tree KILL "$outer" "$outer:"; wait "$outer" 2>/dev/null; return; }
-  local grp holder holderid
-  read -r _ grp holder holderid < <(awk '$1 == "group" { print; exit }' "$T/chan")
-  if [ -z "$holder" ] || ! kill -0 "$holder" 2>/dev/null; then fail_ 'no live holder was published'; _shmutant_kill_tree KILL "$outer" "$outer:"; wait "$outer" 2>/dev/null; return; fi
-  # the killer is killed straight after it stops the group, before any KILL is sent
-  { ( _shmutant_freeze_from() { kill -KILL "$BASHPID"; }; _shmutant_kill_tree_twice -g "$grp" "$grp:" ); } > /dev/null 2>&1
-  _shmutant_kill_tree KILL "$outer" "$outer:"; wait "$outer" 2>/dev/null
-  wait_gone "$holder" || { fail_ "the holder was left behind (state $(ps -o stat= -p "$holder" 2>/dev/null | tr -d ' '))"; kill -KILL "$holder" 2>/dev/null; }
+  # not be left stopped: no tree walk reaches it, and a stopped process never sees end-of-file. The
+  # killer is killed at the first identity query after the stop, and again at the freeze itself.
+  local point outer grp holder holderid
+  for point in _shmutant_identity _shmutant_freeze_from; do
+    mkdir -p "$T/$point"; rm -f "$T/started"
+    ( exec {vf}>|"$T/$point/chan"; SHMUTANT_VERDICT_FD="$vf"
+      cb() { : > "$T/started"; sleep 30; }
+      SHMUTANT_TIMEOUT=0 _shmutant_run_bounded "$T/$point" cb "$T/$point" sel ) > /dev/null 2>&1 & outer=$!
+    wait_for "$T/started" || { fail_ "$point: the callback never started"; _shmutant_kill_tree KILL "$outer" "$outer:"; wait "$outer" 2>/dev/null; continue; }
+    read -r _ grp holder holderid < <(awk '$1 == "group" { print; exit }' "$T/$point/chan")
+    if [ -z "$holder" ] || ! kill -0 "$holder" 2>/dev/null; then fail_ "$point: no live holder was published"; _shmutant_kill_tree KILL "$outer" "$outer:"; wait "$outer" 2>/dev/null; continue; fi
+    { ( eval "$point() { kill -KILL \"\$BASHPID\"; }"; _shmutant_kill_tree_twice -g "$grp" "$grp:" ); } > /dev/null 2>&1
+    _shmutant_kill_tree KILL "$outer" "$outer:"; wait "$outer" 2>/dev/null
+    wait_gone "$holder" || { fail_ "$point: the holder was left behind (state $(ps -o stat= -p "$holder" 2>/dev/null | tr -d ' '))"; kill -KILL "$holder" 2>/dev/null; }
+  done
 }
 
 t_run_output_is_published_over_a_planted_directory() {
@@ -3885,9 +3887,38 @@ EOF
   has "$out" 'FAIL: t_zz_leaks_then_exits: 1 process(es) outlived the unit' 'and it is counted'
   pid="$(cat "$T/leaks_then_exits.pid" 2>/dev/null)"
   [ -z "$pid" ] || wait_gone "$pid" || { fail_ 'with the process-state query failing, the leftover survived the sweep'; kill -KILL "$pid" 2>/dev/null; }
+  # A leftover the kill does not reach is not reported as swept: the sweep checks what died.
+  mkdir -p "$T/suite-nokill/test"
+  cp -- "$SHMUTANT" "$T/suite-nokill/shmutant.sh"
+  { sed '$d' "$T/suite/test/run.sh"
+    printf '%s\n' '_shmutant_kill_tree_twice() { return 0; }' 'main "$@"'
+  } > "$T/suite-nokill/test/run.sh"
+  rm -f "$T/leaks_then_exits.pid"
+  out="$(SHMUTANT_SELECT=t_zz_leaks_then_exits bash "$T/suite-nokill/test/run.sh" 2>&1)"; rc_is $? 1 'a leftover the kill did not reach still fails the unit'
+  has "$out" 'FAIL: t_zz_leaks_then_exits: 1 process(es) outlived the unit and could not be killed' 'and is reported as not killed'
+  has "$out" '0 leftover process(es) swept' 'and is not counted as swept'
+  pid="$(cat "$T/leaks_then_exits.pid" 2>/dev/null)"
+  [ -z "$pid" ] || { kill -KILL "$pid" 2>/dev/null; wait_gone "$pid"; }
   out="$(SHMUTANT_SELECT=t_zz_clean bash "$T/suite/test/run.sh" 2>&1)"; rc_is $? 0 'a unit that waits for its children passes'
   has "$out" '0 leftover process(es) swept' 'a clean unit reports zero'
   hasnt "$out" 'FAIL' 'and nothing is failed'
+}
+
+t_unit_leftovers_fails_closed() {
+  # Every identity recorded for a pid is checked: a stale one recorded first (a reused pid) must
+  # not hide the live process now at that number.
+  sleep 30 > /dev/null 2>&1 & local leak=$!
+  local real stale
+  real="$(_shmutant_identity "$leak")" || { fail_ 'fixture: no identity for the sleep'; kill -KILL "$leak"; wait "$leak" 2>/dev/null; return; }
+  case "$real" in e*) stale=e1 ;; *[!0-9]*) stale='Thu Jan  1 00:00:00 1970' ;; *) stale=1 ;; esac
+  printf '%s:%s\n%s:%s\n' "$leak" "$stale" "$leak" "$real" > "$T/seen"
+  left=(); unit_leftovers "$T/seen"
+  case " ${left[*]%%:*} " in *" $leak "*) ;; *) fail_ 'a live process recorded after a stale identity at its pid was not reported' ;; esac
+  # An identity table that cannot be read clears nothing: the leftovers are unverified, not absent.
+  ( _shmutant_identity_table() { SHMUTANT_START=(); }
+    left=(); unit_leftovers "$T/seen"
+    [ "$left_unverified" = 1 ] || { echo "FAIL: $_unit: an unreadable identity table passed the unit as clean"; exit 1; } ) || _failed=1
+  kill -KILL "$leak" 2>/dev/null; wait "$leak" 2>/dev/null
 }
 
 t_wait_gone_takes_a_zombie_as_gone() {
@@ -3930,19 +3961,24 @@ sample_unit() {
 }
 
 # unit_leftovers <seen-file> — set `left` to each `pid:identity` in <seen-file> whose pid is still
-# the process it was when first seen, judged against one process table. A zombie is not a
-# leftover: it has already exited and is only waiting to be reaped. Only a state read that worked
-# can clear one: the whole table, which lists at least this shell, so an empty or failed read is a
-# failure and every verified process is kept (the kill re-checks each identity).
+# the process it was when seen, judged against one process table; every identity recorded for a
+# pid is checked, since a reused pid carries a new one. A zombie is not a leftover: it has already
+# exited and is only waiting to be reaped. Only a read that worked can clear a process: both tables
+# list at least this shell, so an empty identity table sets `left_unverified` (nothing could be
+# matched), and an empty or failed state read keeps every verified process.
 unit_leftovers() {
   local p id st table
   local -a found=()
   local -A SHMUTANT_START=() state=()
-  left=()
+  left=(); left_unverified=0
   _shmutant_identity_table
+  if [ "${#SHMUTANT_START[@]}" -eq 0 ]; then
+    [ -s "$1" ] && left_unverified=1
+    return 0
+  fi
   while IFS=: read -r p id; do
     [ -n "${SHMUTANT_START[$p]:-}" ] && _shmutant_same_start "${SHMUTANT_START[$p]}" "$id" && found+=("$p:$id")
-  done < <(command -p awk -F: '!seen[$1]++' "$1")
+  done < <(command -p awk '!seen[$0]++' "$1")
   [ "${#found[@]}" -gt 0 ] || return 0
   if ! table="$(command -p ps -A -o pid= -o stat= 2>/dev/null)" || [ -z "$table" ]; then
     left=("${found[@]}"); return 0
@@ -3954,8 +3990,8 @@ unit_leftovers() {
 }
 
 main() {
-  local units u ran=0 failed=0 swept=0 urc pfd sampler sd
-  local -a left=()
+  local units u ran=0 failed=0 swept=0 urc pfd sampler sd i left_unverified=0
+  local -a left=() victims=()
   units="$(declare -F | awk '$3 ~ /^t_/ { print $3 }')"
   SWEEP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/shmutant-sweep.XXXXXX")" || { echo 'run.sh: cannot create the sweep directory' >&2; exit 2; }
   trap 'rm -rf -- "$SWEEP_DIR"' EXIT
@@ -3988,17 +4024,31 @@ main() {
     printf 'none\n' >&"$pfd"; exec {pfd}>&-
     wait "$sampler"
     unit_leftovers "$SWEEP_SEEN"
-    rm -f -- "$SWEEP_SEEN"
+    if [ "$left_unverified" = 1 ]; then
+      printf 'FAIL: %s: the process table could not be read, so what the unit left behind is unverified\n' "$u"
+      urc=1
+    fi
     if [ "${#left[@]}" -gt 0 ]; then
       # Named before the kill: a leftover is diagnosed from this list, not from a count.
       { printf 'run.sh: %s: left behind (pid ppid stat args):\n' "$u"
         command -p ps -o pid= -o ppid= -o stat= -o args= -p "$(IFS=,; printf '%s' "${left[*]%%:*}")" 2>/dev/null | command -p cut -c1-200
       } | command -p sed 's/^/  /'
+      victims=("${left[@]}")
       # `0:` names no root: only the victims, each still the process it was, are frozen and killed.
-      _shmutant_kill_tree_twice 0: "${left[@]}"
-      printf 'FAIL: %s: %d process(es) outlived the unit and were killed\n' "$u" "${#left[@]}"
-      swept=$((swept + ${#left[@]})); urc=1
+      _shmutant_kill_tree_twice 0: "${victims[@]}"
+      # Checked, not assumed: a process the suite cannot signal is still there after the kill.
+      for (( i = 0; i < 30; i++ )); do
+        printf '%s\n' "${victims[@]}" > "$SWEEP_SEEN"
+        unit_leftovers "$SWEEP_SEEN"
+        [ "${#left[@]}" -gt 0 ] || [ "$left_unverified" = 1 ] || break
+        command -p sleep 0.1
+      done
+      [ "$left_unverified" = 1 ] && left=("${victims[@]}")
+      [ "${#left[@]}" -eq "${#victims[@]}" ] || printf 'FAIL: %s: %d process(es) outlived the unit and were killed\n' "$u" "$(( ${#victims[@]} - ${#left[@]} ))"
+      [ "${#left[@]}" -eq 0 ] || printf 'FAIL: %s: %d process(es) outlived the unit and could not be killed\n' "$u" "${#left[@]}"
+      swept=$((swept + ${#victims[@]} - ${#left[@]})); urc=1
     fi
+    rm -f -- "$SWEEP_SEEN"
     [ "$urc" -eq 0 ] || failed=$((failed + 1))
   done
   if [ "$ran" -eq 0 ]; then
