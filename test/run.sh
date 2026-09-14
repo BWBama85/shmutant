@@ -52,6 +52,13 @@ wait_for() {
   until [ -e "$1" ]; do i=$((i + 1)); [ "$i" -lt 100 ] || return 1; sleep 0.1; done
 }
 
+# wait_gone <pid> — block until <pid> no longer exists, at most three seconds; false on expiry.
+# A process just sent KILL can still answer `kill -0` until it has been reaped.
+wait_gone() {
+  local i=0
+  while kill -0 "$1" 2>/dev/null; do i=$((i + 1)); [ "$i" -lt 30 ] || return 1; sleep 0.1; done
+}
+
 # make_unremovable <dir> — make <dir> (with a file inside) something this user cannot delete:
 # the immutable flag where the platform has one, else root ownership through a non-interactive
 # sudo (the CI runners allow it). False when neither is available; undo with unmake_unremovable.
@@ -2176,7 +2183,9 @@ t_freeze_records_only_what_it_stopped() {
   case "$(ps -o stat= -p "$bystander")" in T*) fail_ 'the bystander was left stopped' ;; esac
   kill -0 "$bystander" 2>/dev/null; rc_is $? 0 'the bystander is still there'
   # KILL: a bystander a defect left stopped would never see a TERM, and the wait would hang
-  kill -KILL "$bystander" "$root" "$(cat "$T/root-child.pid" 2>/dev/null)" 2>/dev/null; wait "$bystander" "$root" 2>/dev/null
+  local child; child="$(cat "$T/root-child.pid" 2>/dev/null)"
+  kill -KILL "$bystander" "$root" ${child:+"$child"} 2>/dev/null; wait "$bystander" "$root" 2>/dev/null
+  [ -z "$child" ] || wait_gone "$child"
 }
 
 # shellcheck disable=SC2034
@@ -2518,12 +2527,9 @@ t_run_holder_ends_with_a_killed_runner() {
   local holder
   holder="$(awk '$1 == "group" { print $3; exit }' "$T/chan")"
   if [ -z "$holder" ] || ! kill -0 "$holder" 2>/dev/null; then fail_ 'no live holder was published'; kill -KILL "$outer" 2>/dev/null; return; fi
-  local -a tree=()
-  mapfile -t tree < <(_shmutant_descendants "$outer")
-  kill -KILL "$outer" "${tree[@]}" 2>/dev/null; wait "$outer" 2>/dev/null
-  local i=0
-  while kill -0 "$holder" 2>/dev/null && [ "$i" -lt 30 ]; do sleep 0.1; i=$((i + 1)); done
-  if kill -0 "$holder" 2>/dev/null; then fail_ 'the holder outlived its killed run'; kill -KILL "$holder" 2>/dev/null; fi
+  # the outer subshell and every descendant, in one kill: the holder is not among them
+  _shmutant_kill_tree KILL "$outer" "$outer:"; wait "$outer" 2>/dev/null
+  wait_gone "$holder" || { fail_ 'the holder outlived its killed run'; kill -KILL "$holder" 2>/dev/null; }
 }
 
 t_run_output_is_published_over_a_planted_directory() {
@@ -2633,7 +2639,8 @@ t_pool_abort_waits_only_for_its_helpers() {
   sleep 4
   [ -e "$T/finished" ] && fail_ 'the worker survived the interrupt'
   # the caller's job is the caller's to end: the pool rightly left it running
-  [ -s "$T/own.pid" ] && kill -KILL "$(cat "$T/own.pid")" 2>/dev/null
+  local own; own="$(cat "$T/own.pid" 2>/dev/null)"
+  [ -z "$own" ] || { kill -KILL "$own" 2>/dev/null; wait_gone "$own"; }
 }
 
 t_pool_survives_failglob() {
@@ -3807,8 +3814,10 @@ EOF
 # --- the sweep ---------------------------------------------------------------------------------
 
 t_suite_sweeps_what_a_unit_leaves_behind() {
-  # A copy of this suite with three extra units, each run alone: a process a unit leaves behind
-  # (in a group of its own, or across an early exit) turns the unit red, is counted, and is gone.
+  # A copy of this suite with four extra units, each run alone. A process a unit leaves behind
+  # turns the unit red, is counted, and is gone, whichever way it was left: in a group of its own
+  # (the EXIT trap sees it), across an early exit (so does the trap), or reparented before the
+  # unit ended (only the sampler saw it).
   # The leftovers write nowhere: one holding the capture's pipe would make `$(…)` wait for it to
   # end by itself, and the check that it was killed could then never fail.
   [ "$(tail -n 1 "$here/run.sh")" = 'main "$@"' ] || { fail_ 'run.sh no longer ends with main "$@"'; return; }
@@ -3816,20 +3825,22 @@ t_suite_sweeps_what_a_unit_leaves_behind() {
   cp -- "$SHMUTANT" "$T/suite/shmutant.sh"
   { sed '$d' "$here/run.sh"
     cat <<EOF
-t_zz_leaks() { set -m; sleep 30 > /dev/null 2>&1 & echo \$! > '$T/leak.pid'; set +m; sleep 1; }
-t_zz_leaks_then_exits() { sleep 30 > /dev/null 2>&1 & echo \$! > '$T/exit.pid'; exit 0; }
-t_zz_clean() { sleep 0.2 & wait; }
+  t_zz_leaks() { set -m; sleep 30 > /dev/null 2>&1 & echo \$! > '$T/leaks.pid'; set +m; }
+  t_zz_leaks_then_exits() { sleep 30 > /dev/null 2>&1 & echo \$! > '$T/leaks_then_exits.pid'; exit 0; }
+  t_zz_reparents() { ( sleep 30 > /dev/null 2>&1 & echo \$! > '$T/reparents.pid'; sleep 2 ); sleep 0.3; }
+  t_zz_clean() { sleep 0.2 & wait; }
 main "\$@"
 EOF
   } > "$T/suite/test/run.sh"
-  local out
-  out="$(SHMUTANT_SELECT=t_zz_leaks bash "$T/suite/test/run.sh" 2>&1)"; rc_is $? 1 'a unit that leaves a process behind fails the suite'
-  has "$out" 'FAIL: t_zz_leaks: 1 process(es) outlived the unit' 'the leaking unit is named with the count'
-  has "$out" '1 leftover process(es) swept' 'the summary reports the count swept'
-  kill -0 "$(cat "$T/leak.pid")" 2>/dev/null && { fail_ 'the leftover in a group of its own survived the sweep'; kill -KILL "$(cat "$T/leak.pid")"; }
-  out="$(SHMUTANT_SELECT=t_zz_leaks_then_exits bash "$T/suite/test/run.sh" 2>&1)"; rc_is $? 1 'a unit that exits early past its leftover still fails'
-  has "$out" 'FAIL: t_zz_leaks_then_exits: 1 process(es) outlived the unit' 'the early exit is swept too'
-  kill -0 "$(cat "$T/exit.pid")" 2>/dev/null && { fail_ 'the leftover of an early exit survived the sweep'; kill -KILL "$(cat "$T/exit.pid")"; }
+  local out c pid
+  for c in leaks leaks_then_exits reparents; do
+    out="$(SHMUTANT_SELECT="t_zz_$c" bash "$T/suite/test/run.sh" 2>&1)"; rc_is $? 1 "t_zz_$c leaves a process behind and fails the suite"
+    has "$out" "FAIL: t_zz_$c: 1 process(es) outlived the unit" "t_zz_$c is named with the count"
+    has "$out" '1 leftover process(es) swept' "t_zz_$c: the summary reports the count swept"
+    pid="$(cat "$T/$c.pid" 2>/dev/null)"
+    [ -n "$pid" ] || { fail_ "t_zz_$c never started its leftover"; continue; }
+    wait_gone "$pid" || { fail_ "the leftover of t_zz_$c survived the sweep"; kill -KILL "$pid" 2>/dev/null; }
+  done
   out="$(SHMUTANT_SELECT=t_zz_clean bash "$T/suite/test/run.sh" 2>&1)"; rc_is $? 0 'a unit that waits for its children passes'
   has "$out" '0 leftover process(es) swept' 'a clean unit reports zero'
   hasnt "$out" 'FAIL' 'and nothing is failed'
@@ -3838,30 +3849,47 @@ EOF
 # --- runner -----------------------------------------------------------------------------------------------
 
 # sample_unit <fd> — read the unit's pid from <fd>, then print `pid:identity` for its descendants
-# every half second while it is still the process it was. It runs beside the unit, never inside
-# it: a unit's bare `wait` would block on it. A double fork that detaches within one poll is not
-# seen here; the unit's EXIT trap snapshots what is still attached when it ends.
+# every half second while it is still the process it was, until a second line arrives on <fd>.
+# It runs beside the unit, never inside it: a unit's bare `wait` would block on it. A double fork
+# that detaches within one poll is not seen here; the unit's EXIT trap snapshots what is still
+# attached when it ends. Both run the shmutant.sh the suite sourced, so in a mutation row they use
+# the mutated primitives; the outer pool's own cleanup still ends that row's leftovers.
 sample_unit() {
   local up id
   IFS= read -r up <&"$1" || return 0
   case "$up" in ''|*[!0-9]*) return 0 ;; esac
   id="$(_shmutant_identity "$up")" || return 0
-  printf 'unit %s\n' "$up"
-  while _shmutant_alive_since "$up" "$id"; do _shmutant_snapshot "$up"; command -p sleep 0.5; done
+  while _shmutant_alive_since "$up" "$id"; do
+    _shmutant_snapshot "$up"
+    IFS= read -t 0.5 -r _ <&"$1" && break
+  done
+}
+
+# unit_leftovers <seen-file> — set `left` to each `pid:identity` in <seen-file> whose pid is still
+# the process it was when first seen, judged against one process table.
+unit_leftovers() {
+  local p id
+  local -A SHMUTANT_START=()
+  left=()
+  _shmutant_identity_table
+  while IFS=: read -r p id; do
+    [ -n "${SHMUTANT_START[$p]:-}" ] && _shmutant_same_start "${SHMUTANT_START[$p]}" "$id" && left+=("$p:$id")
+  done < <(command -p awk -F: '!seen[$1]++' "$1")
 }
 
 main() {
-  local units u ran=0 failed=0 swept=0 urc fifo pfd sampler line up
+  local units u ran=0 failed=0 swept=0 urc pfd sampler
   local -a left=()
-  local -A first=()
   units="$(declare -F | awk '$3 ~ /^t_/ { print $3 }')"
   SWEEP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/shmutant-sweep.XXXXXX")" || { echo 'run.sh: cannot create the sweep directory' >&2; exit 2; }
   trap 'rm -rf -- "$SWEEP_DIR"' EXIT
+  # Reopened per unit: a line left unread in it is gone once every descriptor has closed.
+  command -p mkfifo -- "$SWEEP_DIR/up" || { echo 'run.sh: cannot create the sweep channel' >&2; exit 2; }
   for u in $units; do
     shmutant_selected "$u" || continue
     ran=$((ran + 1))
-    fifo="$SWEEP_DIR/up.$ran"; SWEEP_SEEN="$SWEEP_DIR/seen.$ran"
-    { command -p mkfifo -- "$fifo" && : > "$SWEEP_SEEN" && exec {pfd}<>"$fifo"; } \
+    SWEEP_SEEN="$SWEEP_DIR/seen.$ran"
+    { : > "$SWEEP_SEEN" && exec {pfd}<>"$SWEEP_DIR/up"; } \
       || { echo "run.sh: cannot set up the sweep for $u" >&2; exit 2; }
     sample_unit "$pfd" >> "$SWEEP_SEEN" 2>/dev/null & sampler=$!
     (
@@ -3873,27 +3901,18 @@ main() {
       "$u"
       exit "$_failed"
     ); urc=$?
-    # Unblocks a sampler still waiting for a pid; per-unit FIFO, so the line never reaches another.
+    # Stops the sampler at once, or unblocks one still waiting for a pid.
     printf 'none\n' >&"$pfd"; exec {pfd}>&-
     wait "$sampler"
-    # Every pid the unit ever had below it that is still the process it was when first seen.
-    left=(); first=(); up=""
-    while IFS= read -r line; do
-      case "$line" in
-        "unit "*) up="${line#unit }" ;;
-        *:*) [ -n "${first[${line%%:*}]:-}" ] && continue
-             first["${line%%:*}"]=1
-             _shmutant_alive_since "${line%%:*}" "${line#*:}" && left+=("$line") ;;
-      esac
-    done < "$SWEEP_SEEN"
-    rm -f -- "$fifo" "$SWEEP_SEEN"
+    unit_leftovers "$SWEEP_SEEN"
+    rm -f -- "$SWEEP_SEEN"
     if [ "${#left[@]}" -gt 0 ]; then
       # Named before the kill: a leftover is diagnosed from this list, not from a count.
       { printf 'run.sh: %s: left behind (pid ppid stat args):\n' "$u"
         command -p ps -o pid= -o ppid= -o stat= -o args= -p "$(IFS=,; printf '%s' "${left[*]%%:*}")" 2>/dev/null | command -p cut -c1-200
       } | command -p sed 's/^/  /'
-      # `<pid>:` with no identity: the reaped unit's number is never signalled, only the victims.
-      _shmutant_kill_tree_twice "${up:-0}:" "${left[@]}"
+      # `0:` names no root: only the victims, each still the process it was, are frozen and killed.
+      _shmutant_kill_tree_twice 0: "${left[@]}"
       printf 'FAIL: %s: %d process(es) outlived the unit and were killed\n' "$u" "${#left[@]}"
       swept=$((swept + ${#left[@]})); urc=1
     fi
