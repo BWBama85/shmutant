@@ -991,7 +991,7 @@ _shmutant_snapshot() {
 # control on, bash reports the reaped job there when the pool itself runs under `$(...)`.
 _shmutant_run_bounded() {
   local dir="$1" run="$2" root="$3" sel="$4" wit="${5:-}" timeout mark fifo fd left seen outf line
-  local left_w left_r seen_w seen_r fired out_w out_r out_r2 hold hp go holder holderid err_fd l kept
+  local left_w left_r seen_w seen_r fired out_w out_r out_r2 hold hold_r hp go holder holderid err_fd l kept
   timeout="$(_shmutant_pos_int "${SHMUTANT_TIMEOUT:-300}")" || timeout=0
   SHMUTANT_RUN_FIRED=0; SHMUTANT_RUN_RED=0; SHMUTANT_RUN_WITNESSED=0; SHMUTANT_RUN_UNSETTLED=0; SHMUTANT_RUN_PUBLISHED=1
   # Until the runner reports its own status the run has not started: a setup failure (a channel
@@ -1011,9 +1011,9 @@ _shmutant_run_bounded() {
   fifo="$mark.fired"
   { command -p mkfifo -- "$fifo" "$mark.hold" "$mark.hp" "$mark.go"; } 2>/dev/null \
     || { command -p rm -f -- "$mark" "$left" "$seen" "$outf" "$fifo" "$mark.hold" "$mark.hp" "$mark.go"; return 0; }
-  if ! exec {left_w}>|"$left" {left_r}<"$left" {seen_w}>|"$seen" {seen_r}<"$seen" {fired}<>"$fifo" {out_w}>|"$outf" {out_r}<"$outf" {out_r2}<"$outf" {hold}<>"$mark.hold" {hp}<>"$mark.hp" {go}<>"$mark.go" {err_fd}>&2; then
+  if ! exec {left_w}>|"$left" {left_r}<"$left" {seen_w}>|"$seen" {seen_r}<"$seen" {fired}<>"$fifo" {out_w}>|"$outf" {out_r}<"$outf" {out_r2}<"$outf" {hold}<>"$mark.hold" {hold_r}<"$mark.hold" {hp}<>"$mark.hp" {go}<>"$mark.go" {err_fd}>&2; then
     # A partial open (a descriptor limit) is a setup failure, not a run: close what did open.
-    for fd in "${left_w:-}" "${left_r:-}" "${seen_w:-}" "${seen_r:-}" "${fired:-}" "${out_w:-}" "${out_r:-}" "${out_r2:-}" "${hold:-}" "${hp:-}" "${go:-}" "${err_fd:-}"; do [ -n "$fd" ] && exec {fd}>&-; done
+    for fd in "${left_w:-}" "${left_r:-}" "${seen_w:-}" "${seen_r:-}" "${fired:-}" "${out_w:-}" "${out_r:-}" "${out_r2:-}" "${hold:-}" "${hold_r:-}" "${hp:-}" "${go:-}" "${err_fd:-}"; do [ -n "$fd" ] && exec {fd}>&-; done
     command -p rm -f -- "$mark" "$left" "$seen" "$outf" "$fifo" "$mark.hold" "$mark.hp" "$mark.go"; return 0
   fi
   # The capture too has no name while the run executes: it is read back through one descriptor
@@ -1034,10 +1034,13 @@ _shmutant_run_bounded() {
     # be stopped and killed by number after the wrapper has been reaped, with or without ps;
     # every such kill first checks the holder is still there. (Not a pipeline led by the holder:
     # `wait` on one member of a job waits for the whole job.)
+    # The holder reads a read-only descriptor and closes the writing end it inherits: it is
+    # reparented at birth, so no tree walk reaches it, and a run killed before the release below
+    # would otherwise leave it blocked for good. It ends once nothing of the run holds a writer.
     # A bare `exit` keeps the status it would have had: the snapshot runs first and must not
     # replace it.
     ( _shmutant_wrap_left="$left_w"
-      ( ( read -r _ <&"$hold" ) < /dev/null > /dev/null 2>&1 & printf '%s\n' "$!" >&"$hp" )
+      ( ( read -r _ <&"$hold_r" ) < /dev/null > /dev/null 2>&1 {hold}>&- & printf '%s\n' "$!" >&"$hp" )
       # No plan code until the runner has published this run's group and holder for the abort
       # path: an interrupt before that would find a run it could not name.
       read -t 30 -r _ <&"$go" || builtin exit 127
@@ -1191,7 +1194,7 @@ _shmutant_run_bounded() {
       SHMUTANT_RUN_PUBLISHED=0
     fi
   fi
-  exec {left_w}>&- {left_r}<&- {seen_w}>&- {seen_r}<&- {fired}<&- {out_w}>&- {out_r}<&- {out_r2}<&- {hold}<&- {hp}<&- {go}<&- {err_fd}>&-
+  exec {left_w}>&- {left_r}<&- {seen_w}>&- {seen_r}<&- {fired}<&- {out_w}>&- {out_r}<&- {out_r2}<&- {hold}<&- {hold_r}<&- {hp}<&- {go}<&- {err_fd}>&-
 }
 
 # _shmutant_held_group <pgid> — set SHMUTANT_HELD to `-g <pgid>` when the run's holder is still
@@ -1864,7 +1867,7 @@ _shmutant_pool_locals_writable() {
     _shmutant_pool_t0 _shmutant_pool_wd after_ck base base_sel base_verdict cap cksum_bin clone_id comp copy d \
     dbg depth detail dir dirmode done_pid err_fd errexit_before etime f fd fifo \
     fired fmt found frozen go got grp h have held helpers here \
-    hms hold holder holderid hp i id intact jobs k kept key \
+    hms hold hold_r holder holderid hp i id intact jobs k kept key \
     killed kind kinds l label left left_r left_w line ls_bin m mark \
     mode ms mutate_aliases n new nl now out out_r out_r2 out_w outf \
     p parent path pending phys pid pids pool_aliases pout pout_r pout_w prc \

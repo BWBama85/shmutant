@@ -1588,3 +1588,13 @@ shmutant_mut 'the stat-less fingerprint collapses spaces in names' \
 # (no row on the plan subshell's leave snapshot: whether its absence shows depends on whether the
 # half-second sampler happened to see the helper, so a row would be a coin flip; the unit
 # t_cli_ends_a_helper_that_left_the_plan_group went red without it, 2 runs of 3, on an idle host)
+
+# --- the run holder ends with its run (#2) ---
+shmutant_mut 'the run holder reads its own read-write descriptor' \
+  '( read -r _ <&"$hold_r" ) < /dev/null > /dev/null 2>&1 {hold}>&- &' \
+  '( read -r _ <&"$hold" ) < /dev/null > /dev/null 2>&1 &' \
+  't_run_holder_ends_with_a_killed_runner'
+shmutant_mut 'the run holder keeps the writing end it inherits' \
+  '( read -r _ <&"$hold_r" ) < /dev/null > /dev/null 2>&1 {hold}>&- &' \
+  '( read -r _ <&"$hold_r" ) < /dev/null > /dev/null 2>&1 &' \
+  't_run_holder_ends_with_a_killed_runner'
