@@ -427,4 +427,8 @@ One line per resolved review thread, newest last.
 - `path-lookup-ambiguity` `test/run.sh:3909` `ba400d0` `PRRT_kwDOUT7q9s6iRl3B` PR #4 2026-09-14 — the sweep path stayed relative under a relative TMPDIR, so the unit EXIT-trap snapshot was written beneath the unit directory
 - `contract-not-honoured` `test/run.sh:59` `ba400d0` `PRRT_kwDOUT7q9s6iRl2-` PR #4 2026-09-14 — wait_gone waited on kill -0, which a reparented zombie answers forever under a PID 1 that never reaps
 - `write-failure-swallowed` `test/run.sh:3934` `73decc9` `PRRT_kwDOUT7q9s6iTP5k` PR #4 2026-09-14 — unit_leftovers dropped every verified leftover when its ps state read failed, so a failed read reported the unit clean
+- `write-failure-swallowed` `test/run.sh:3942` `1e25b67` `PRRT_kwDOUT7q9s6iTo9M` PR #4 2026-09-14 — an empty identity table dropped every recorded pid before the fail-closed state read, so the unit passed with live leftovers
+- `timeout-escalation-cancelled` `shmutant.sh:906` `1e25b67` `PRRT_kwDOUT7q9s6iTo9R` PR #4 2026-09-14 — an identity re-check between the group stop and the holder continue widened the window a killer could die in, leaving the holder stopped
+- `write-failure-swallowed` `test/run.sh:3998` `1e25b67` `PRRT_kwDOUT7q9s6iTo9U` PR #4 2026-09-14 — the sweep reported leftovers killed and swept without checking the kill reached them
+- `contract-not-honoured` `test/run.sh:3945` `1e25b67` `PRRT_kwDOUT7q9s6iTo9W` PR #4 2026-09-14 — leftovers were deduplicated by pid alone, so a reused pid kept the stale identity and the live process went unchecked
 <!-- adb:hits:end -->
