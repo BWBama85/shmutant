@@ -152,7 +152,7 @@ could not run.
 ## Testing shmutant
 
 ```sh
-bash test/run.sh                     # the suite, 175 units
+bash test/run.sh                     # the suite, 176 units
 bash shmutant.sh run test/mutants.sh # the suite, mutation-tested by shmutant itself
 ```
 

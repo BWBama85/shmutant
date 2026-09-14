@@ -52,11 +52,15 @@ wait_for() {
   until [ -e "$1" ]; do i=$((i + 1)); [ "$i" -lt 100 ] || return 1; sleep 0.1; done
 }
 
-# wait_gone <pid> — block until <pid> no longer exists, at most three seconds; false on expiry.
-# A process just sent KILL can still answer `kill -0` until it has been reaped.
+# wait_gone <pid> — block until <pid> no longer runs, at most three seconds; false on expiry.
+# A process just sent KILL answers `kill -0` until it is reaped, and one whose parent never reaps
+# it answers forever: a zombie has already exited, and counts as gone.
 wait_gone() {
   local i=0
-  while kill -0 "$1" 2>/dev/null; do i=$((i + 1)); [ "$i" -lt 30 ] || return 1; sleep 0.1; done
+  while kill -0 "$1" 2>/dev/null; do
+    case "$(command -p ps -o stat= -p "$1" 2>/dev/null)" in *Z*) return 0 ;; esac
+    i=$((i + 1)); [ "$i" -lt 30 ] || return 1; sleep 0.1
+  done
 }
 
 # make_unremovable <dir> — make <dir> (with a file inside) something this user cannot delete:
@@ -3843,9 +3847,36 @@ EOF
     [ -n "$pid" ] || { fail_ "t_zz_$c never started its leftover"; continue; }
     wait_gone "$pid" || { fail_ "the leftover of t_zz_$c survived the sweep"; kill -KILL "$pid" 2>/dev/null; }
   done
+  # A relative TMPDIR: the unit changes into its own directory before its EXIT trap snapshots, so
+  # the sweep's paths must already be absolute or that snapshot is written somewhere else.
+  mkdir -p "$T/reltmp"; rm -f "$T/leaks_then_exits.pid"
+  out="$( cd "$T" && TMPDIR=reltmp SHMUTANT_SELECT=t_zz_leaks_then_exits bash "$T/suite/test/run.sh" 2>&1 )"; rc_is $? 1 'with a relative TMPDIR, a unit that leaves a process and exits still fails'
+  has "$out" 'FAIL: t_zz_leaks_then_exits: 1 process(es) outlived the unit' 'and its leftover is counted'
+  pid="$(cat "$T/leaks_then_exits.pid" 2>/dev/null)"
+  [ -z "$pid" ] || wait_gone "$pid" || { fail_ 'with a relative TMPDIR the leftover survived the sweep'; kill -KILL "$pid" 2>/dev/null; }
   out="$(SHMUTANT_SELECT=t_zz_clean bash "$T/suite/test/run.sh" 2>&1)"; rc_is $? 0 'a unit that waits for its children passes'
   has "$out" '0 leftover process(es) swept' 'a clean unit reports zero'
   hasnt "$out" 'FAIL' 'and nothing is failed'
+}
+
+t_wait_gone_takes_a_zombie_as_gone() {
+  # A child that has exited but was never reaped still answers `kill -0`, as a reparented one does
+  # forever under a PID 1 that does not reap. Its parent here execs into a sleep, which never waits.
+  bash -c 'sleep 0.2 & echo "$!" > child.pid; exec sleep 30' & local parent=$!
+  wait_for "$T/child.pid" || { fail_ 'the child never started'; kill -KILL "$parent" 2>/dev/null; wait "$parent" 2>/dev/null; return; }
+  local child i=0 t0
+  child="$(cat "$T/child.pid")"
+  until case "$(ps -o stat= -p "$child" 2>/dev/null)" in *Z*) true ;; *) false ;; esac; do
+    i=$((i + 1)); [ "$i" -lt 50 ] || break; sleep 0.1
+  done
+  case "$(ps -o stat= -p "$child" 2>/dev/null)" in
+    *Z*) ;;
+    *) fail_ 'fixture: the child never became a zombie'; kill -KILL "$parent" 2>/dev/null; wait "$parent" 2>/dev/null; return ;;
+  esac
+  t0="$(_shmutant_now)"
+  wait_gone "$child" || fail_ 'a zombie was waited on as if it were still running'
+  [ $(( ($(_shmutant_now) - t0) / 1000000 )) -lt 2 ] || fail_ 'waiting on a zombie ran until the bound'
+  kill -KILL "$parent" 2>/dev/null; wait "$parent" 2>/dev/null
 }
 
 # --- runner -----------------------------------------------------------------------------------------------
@@ -3885,11 +3916,15 @@ unit_leftovers() {
 }
 
 main() {
-  local units u ran=0 failed=0 swept=0 urc pfd sampler
+  local units u ran=0 failed=0 swept=0 urc pfd sampler sd
   local -a left=()
   units="$(declare -F | awk '$3 ~ /^t_/ { print $3 }')"
   SWEEP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/shmutant-sweep.XXXXXX")" || { echo 'run.sh: cannot create the sweep directory' >&2; exit 2; }
   trap 'rm -rf -- "$SWEEP_DIR"' EXIT
+  # Absolute before any unit runs: a unit changes directory before its EXIT trap writes through
+  # this path, so a relative TMPDIR would send that final snapshot somewhere else.
+  sd="$(_shmutant_abs "$SWEEP_DIR")" || { echo 'run.sh: cannot resolve the sweep directory' >&2; exit 2; }
+  SWEEP_DIR="$sd"
   # Reopened per unit: a line left unread in it is gone once every descriptor has closed.
   command -p mkfifo -- "$SWEEP_DIR/up" || { echo 'run.sh: cannot create the sweep channel' >&2; exit 2; }
   for u in $units; do
