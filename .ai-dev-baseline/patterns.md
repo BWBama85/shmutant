@@ -426,4 +426,5 @@ One line per resolved review thread, newest last.
 - `rewrite-loses-file-shape` `shmutant.sh` `1aa1b43` `PRRT_kwDOUT7q9s6h5ojY` PR #1 2026-09-13
 - `path-lookup-ambiguity` `test/run.sh:3909` `ba400d0` `PRRT_kwDOUT7q9s6iRl3B` PR #4 2026-09-14 — the sweep path stayed relative under a relative TMPDIR, so the unit EXIT-trap snapshot was written beneath the unit directory
 - `contract-not-honoured` `test/run.sh:59` `ba400d0` `PRRT_kwDOUT7q9s6iRl2-` PR #4 2026-09-14 — wait_gone waited on kill -0, which a reparented zombie answers forever under a PID 1 that never reaps
+- `write-failure-swallowed` `test/run.sh:3934` `73decc9` `PRRT_kwDOUT7q9s6iTP5k` PR #4 2026-09-14 — unit_leftovers dropped every verified leftover when its ps state read failed, so a failed read reported the unit clean
 <!-- adb:hits:end -->
