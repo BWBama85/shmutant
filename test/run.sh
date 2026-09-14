@@ -3922,6 +3922,18 @@ EOF
   has "$out" 'FAIL: t_zz_leaks_then_exits: its leftovers kept forking through every freeze pass' 'and says so'
   pid="$(cat "$T/leaks_then_exits.pid" 2>/dev/null)"
   [ -z "$pid" ] || { kill -KILL "$pid" 2>/dev/null; wait_gone "$pid"; }
+  # An identity table that cannot be read while the unit runs records nothing: that is unverified.
+  mkdir -p "$T/suite-nosnapshot/test"
+  cp -- "$SHMUTANT" "$T/suite-nosnapshot/shmutant.sh"
+  { sed '$d' "$T/suite/test/run.sh"
+    printf '%s\n' 'eval "_real_table() $(declare -f _shmutant_identity_table | sed 1d)"' \
+      '_shmutant_identity_table() { if [ "${FUNCNAME[1]}" != unit_leftovers ]; then SHMUTANT_START=(); return 0; fi; _real_table; }' 'main "$@"'
+  } > "$T/suite-nosnapshot/test/run.sh"
+  rm -f "$T/leaks_then_exits.pid"
+  out="$(SHMUTANT_SELECT=t_zz_leaks_then_exits bash "$T/suite-nosnapshot/test/run.sh" 2>&1)"; rc_is $? 1 'a unit sampled only while the identity table could not be read fails'
+  has "$out" 'FAIL: t_zz_leaks_then_exits: the process table could not be read' 'and its leftovers are reported unverified'
+  pid="$(cat "$T/leaks_then_exits.pid" 2>/dev/null)"
+  [ -z "$pid" ] || { kill -KILL "$pid" 2>/dev/null; wait_gone "$pid"; }
   out="$(SHMUTANT_SELECT=t_zz_clean bash "$T/suite/test/run.sh" 2>&1)"; rc_is $? 0 'a unit that waits for its children passes'
   has "$out" '0 leftover process(es) swept' 'a clean unit reports zero'
   hasnt "$out" 'FAIL' 'and nothing is failed'
@@ -3941,7 +3953,39 @@ t_unit_leftovers_fails_closed() {
   ( _shmutant_identity_table() { SHMUTANT_START=(); }
     left=(); unit_leftovers "$T/seen"
     [ "$left_unverified" = 1 ] || { echo "FAIL: $_unit: an unreadable identity table passed the unit as clean"; exit 1; } ) || _failed=1
+  : > "$T/empty-seen"
+  ( _shmutant_identity_table() { SHMUTANT_START=(); }
+    left=(); unit_leftovers "$T/empty-seen"
+    [ "$left_unverified" = 1 ] || { echo "FAIL: $_unit: an unreadable identity table passed a unit with no samples as clean"; exit 1; } ) || _failed=1
+  # A sample taken while its table could not be read says so, and that too is unverified.
+  printf 'unverified\n' > "$T/marked-seen"
+  left=(); unit_leftovers "$T/marked-seen"
+  [ "$left_unverified" = 1 ] || fail_ 'a sample recorded while its table could not be read passed as clean'
   kill -KILL "$leak" 2>/dev/null; wait "$leak" 2>/dev/null
+}
+
+# shellcheck disable=SC2034
+t_cli_sampler_never_signals_a_reaped_sleep() {
+  # The CLI sampler ends the sleep in flight when it is stopped. A sleep it already reaped may have
+  # given its number to an unrelated process, so the trap must not signal it. The sampler's subshell
+  # is taken from the source and run with a slow snapshot and a kill that records a dead target.
+  local sub sp="" i=0
+  sub="$(sed -n 's/^  \(( trap .*kill -0 "\$SHMUTANT_CLI_CHILD".* done )\) 1>&"\$SHMUTANT_CLI_SEEN_W".*/\1/p' "$SHMUTANT")"
+  [ -n "$sub" ] || { fail_ 'could not find the CLI sampler in the source'; return; }
+  : > "$T/snaps"
+  ( SHMUTANT_CLI_CHILD=$BASHPID
+    _shmutant_snapshot() { printf 'x\n' >> "$T/snaps"; command -p sleep 1; }
+    kill() {
+      if [ "$1" = -0 ] || [ -z "${1:-}" ]; then builtin kill "$@"; return; fi
+      builtin kill -0 "$1" 2>/dev/null || printf '%s\n' "$1" >> "$T/stale"
+      builtin kill "$@"
+    }
+    eval "$sub > /dev/null 2>&1 & sp=\$!"
+    # stopped once the second snapshot has begun, so the first sleep has already been reaped
+    until [ "$(grep -c x "$T/snaps")" -ge 2 ]; do i=$((i + 1)); [ "$i" -lt 200 ] || break; command -p sleep 0.05; done
+    builtin kill -TERM "$sp"; wait "$sp" 2>/dev/null )
+  [ "$(grep -c x "$T/snaps")" -ge 2 ] || { fail_ 'fixture: the sampler never reached its second snapshot'; return; }
+  if [ -s "$T/stale" ]; then fail_ "the sampler's trap signalled a sleep it had already reaped (pid $(head -n 1 "$T/stale"))"; fi
 }
 
 t_wait_gone_takes_a_zombie_as_gone() {
@@ -3966,6 +4010,20 @@ t_wait_gone_takes_a_zombie_as_gone() {
 
 # --- runner -----------------------------------------------------------------------------------------------
 
+# unit_snapshot <pid> — print `pid:identity` for each live descendant of <pid>, read against one
+# identity table, or the line `unverified` when that table cannot be read: a sample that recorded
+# nothing because the read failed must not look like a unit that left nothing.
+unit_snapshot() {
+  local p
+  local -A SHMUTANT_START=()
+  _shmutant_identity_table
+  if [ "${#SHMUTANT_START[@]}" -eq 0 ]; then printf 'unverified\n'; return 0; fi
+  while IFS= read -r p; do
+    [ -n "$p" ] && [ -n "${SHMUTANT_START[$p]:-}" ] && printf '%s:%s\n' "$p" "${SHMUTANT_START[$p]}"
+  done < <(_shmutant_descendants "$1")
+  return 0
+}
+
 # sample_unit <fd> — read the unit's pid from <fd>, then print `pid:identity` for its descendants
 # every half second while it is still the process it was, until a second line arrives on <fd>.
 # It runs beside the unit, never inside it: a unit's bare `wait` would block on it. A double fork
@@ -3985,7 +4043,7 @@ sample_unit() {
   done
   if [ -z "$id" ]; then kill -0 "$up" 2>/dev/null && return 3; return 0; fi
   while _shmutant_alive_since "$up" "$id"; do
-    _shmutant_snapshot "$up"
+    unit_snapshot "$up"
     IFS= read -t 0.5 -r _ <&"$1" && break
   done
   return 0
@@ -3995,8 +4053,9 @@ sample_unit() {
 # the process it was when seen, judged against one process table; every identity recorded for a
 # pid is checked, since a reused pid carries a new one. A zombie is not a leftover: it has already
 # exited and is only waiting to be reaped. Only a read that worked can clear a process: both tables
-# list at least this shell, so an empty identity table sets `left_unverified` (nothing could be
-# matched), and an empty or failed state read keeps every verified process.
+# list at least this shell, so an empty identity table sets `left_unverified` whatever <seen-file>
+# holds, as does a sample recorded while its table could not be read (`unverified`); an empty or
+# failed state read keeps every verified process.
 unit_leftovers() {
   local p id st table
   local -a found=()
@@ -4004,9 +4063,10 @@ unit_leftovers() {
   left=(); left_unverified=0
   _shmutant_identity_table
   if [ "${#SHMUTANT_START[@]}" -eq 0 ]; then
-    [ -s "$1" ] && left_unverified=1
+    left_unverified=1
     return 0
   fi
+  command -p grep -qx unverified "$1" && left_unverified=1
   while IFS=: read -r p id; do
     [ -n "${SHMUTANT_START[$p]:-}" ] && _shmutant_same_start "${SHMUTANT_START[$p]}" "$id" && found+=("$p:$id")
   done < <(command -p awk '!seen[$0]++' "$1")
@@ -4046,7 +4106,7 @@ main() {
       printf '%s\n' "$BASHPID" >&"$pfd"; exec {pfd}>&-
       _unit="$u"; _failed=0
       T="$(mktemp -d "${TMPDIR:-/tmp}/shmutant-test.XXXXXX")" || exit 1
-      trap '_shmutant_snapshot "$BASHPID" >> "$SWEEP_SEEN" 2>/dev/null; rm -rf -- "$T"' EXIT
+      trap 'unit_snapshot "$BASHPID" >> "$SWEEP_SEEN" 2>/dev/null; rm -rf -- "$T"' EXIT
       cd "$T" || exit 1
       "$u"
       exit "$_failed"

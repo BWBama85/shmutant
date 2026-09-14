@@ -1606,3 +1606,9 @@ shmutant_mut 'an interrupted freeze leaves the run holder stopped' \
   '    [ -z "${holder:-}" ] || kill -CONT "$holder" 2>/dev/null' \
   '      :' \
   't_interrupted_freeze_does_not_leave_the_holder_stopped'
+shmutant_mut 'the CLI sampler keeps the pid of a sleep it already reaped' \
+  'wait "$s"; s=""; done )' \
+  'wait "$s"; done )' \
+  't_cli_sampler_never_signals_a_reaped_sleep'
+# (no row on the run watchdog clearing its sleep pid after the wait: that loop lives inside
+# _shmutant_run_bounded, and no unit can land a TERM between two of its polls deterministically)

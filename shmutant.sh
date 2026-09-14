@@ -1091,6 +1091,8 @@ _shmutant_run_bounded() {
         while [ "$timeout" -eq 0 ] || [ "$elapsed" -lt "$budget" ]; do
           command -p sleep 0.5 & s=$!
           wait "$s"
+          # cleared once reaped: a TERM later in this poll must not signal a number reused since
+          s=""
           tnow=$(_shmutant_now); d=$(( tnow - last )); last=$tnow
           [ "$d" -lt 500000 ] && d=500000
           [ "$d" -gt 5000000 ] && d=5000000
@@ -2732,8 +2734,9 @@ _shmutant_cli_run() {
     _shmutant_cli_load "$SHMUTANT_PLAN_DIR/$(command -p basename -- "$plan")"
   ) < /dev/null & SHMUTANT_CLI_CHILD=$!
   builtin set +m
-  # Stopped with TERM: the trap ends the sleep in flight, which would otherwise outlive the run.
-  ( trap 'kill "$s" 2>/dev/null; exit 0' TERM; s=""; while kill -0 "$SHMUTANT_CLI_CHILD" 2>/dev/null; do _shmutant_snapshot "$SHMUTANT_CLI_CHILD"; command -p sleep 0.5 & s=$!; wait "$s"; done ) 1>&"$SHMUTANT_CLI_SEEN_W" 2>/dev/null < /dev/null & SHMUTANT_CLI_SAMPLER=$!
+  # Stopped with TERM: the trap ends the sleep in flight, which would otherwise outlive the run. Its
+  # pid is cleared once reaped, so the trap never signals a number that may have been reused since.
+  ( trap 'kill "$s" 2>/dev/null; exit 0' TERM; s=""; while kill -0 "$SHMUTANT_CLI_CHILD" 2>/dev/null; do _shmutant_snapshot "$SHMUTANT_CLI_CHILD"; command -p sleep 0.5 & s=$!; wait "$s"; s=""; done ) 1>&"$SHMUTANT_CLI_SEEN_W" 2>/dev/null < /dev/null & SHMUTANT_CLI_SAMPLER=$!
   SHMUTANT_CLI_CHILD_ID="$(_shmutant_identity "$SHMUTANT_CLI_CHILD" 2>/dev/null)" || SHMUTANT_CLI_CHILD_ID=""
   SHMUTANT_CLI_SPAWNING=0
   [ -z "${SHMUTANT_CLI_ABORT_PENDING:-}" ] || { local p="$SHMUTANT_CLI_ABORT_PENDING"; SHMUTANT_CLI_ABORT_PENDING=""; _shmutant_cli_abort "$p"; }
