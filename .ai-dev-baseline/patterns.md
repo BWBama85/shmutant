@@ -433,4 +433,6 @@ One line per resolved review thread, newest last.
 - `contract-not-honoured` `test/run.sh:3945` `1e25b67` `PRRT_kwDOUT7q9s6iTo9W` PR #4 2026-09-14 — leftovers were deduplicated by pid alone, so a reused pid kept the stale identity and the live process went unchecked
 - `write-failure-swallowed` `test/run.sh:3956` `18c9b95` `PRRT_kwDOUT7q9s6iUAqX` PR #4 2026-09-14 — a sampler whose identity lookup failed returned success, so a unit it never sampled was reported clean
 - `write-failure-swallowed` `test/run.sh:4038` `18c9b95` `PRRT_kwDOUT7q9s6iUAqa` PR #4 2026-09-14 — the sweep gave the kill no report channel, so a freeze that never settled was accepted as a clean kill
+- `write-failure-swallowed` `test/run.sh:4007` `e1c76ef` `PRRT_kwDOUT7q9s6iUYzA` PR #4 2026-09-14 — samples taken while the identity table could not be read recorded nothing, so an empty record passed a unit that leaked
+- `contract-not-honoured` `shmutant.sh:2736` `e1c76ef` `PRRT_kwDOUT7q9s6iUYzH` PR #4 2026-09-14 — the CLI sampler trap signalled the pid of a sleep it had already reaped, which may belong to another process by then
 <!-- adb:hits:end -->
