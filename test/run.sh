@@ -3873,6 +3873,18 @@ EOF
   has "$out" 'FAIL: t_zz_leaks_then_exits: 1 process(es) outlived the unit' 'and its leftover is counted'
   pid="$(cat "$T/leaks_then_exits.pid" 2>/dev/null)"
   [ -z "$pid" ] || wait_gone "$pid" || { fail_ 'with a relative TMPDIR the leftover survived the sweep'; kill -KILL "$pid" 2>/dev/null; }
+  # The process-state query failing must not clear a leftover: nothing then proves it gone. A copy
+  # whose only failing command is that query still sweeps the leak.
+  mkdir -p "$T/suite-nostat/test"
+  cp -- "$SHMUTANT" "$T/suite-nostat/shmutant.sh"
+  { sed '$d' "$T/suite/test/run.sh"
+    printf '%s\n' 'command() { case "$*" in *stat=*) return 1 ;; esac; builtin command "$@"; }' 'main "$@"'
+  } > "$T/suite-nostat/test/run.sh"
+  rm -f "$T/leaks_then_exits.pid"
+  out="$(SHMUTANT_SELECT=t_zz_leaks_then_exits bash "$T/suite-nostat/test/run.sh" 2>&1)"; rc_is $? 1 'with the process-state query failing, a leftover is still swept'
+  has "$out" 'FAIL: t_zz_leaks_then_exits: 1 process(es) outlived the unit' 'and it is counted'
+  pid="$(cat "$T/leaks_then_exits.pid" 2>/dev/null)"
+  [ -z "$pid" ] || wait_gone "$pid" || { fail_ 'with the process-state query failing, the leftover survived the sweep'; kill -KILL "$pid" 2>/dev/null; }
   out="$(SHMUTANT_SELECT=t_zz_clean bash "$T/suite/test/run.sh" 2>&1)"; rc_is $? 0 'a unit that waits for its children passes'
   has "$out" '0 leftover process(es) swept' 'a clean unit reports zero'
   hasnt "$out" 'FAIL' 'and nothing is failed'
@@ -3919,19 +3931,26 @@ sample_unit() {
 
 # unit_leftovers <seen-file> — set `left` to each `pid:identity` in <seen-file> whose pid is still
 # the process it was when first seen, judged against one process table. A zombie is not a
-# leftover: it has already exited and is only waiting to be reaped.
+# leftover: it has already exited and is only waiting to be reaped. Only a state read that worked
+# can clear one: the whole table, which lists at least this shell, so an empty or failed read is a
+# failure and every verified process is kept (the kill re-checks each identity).
 unit_leftovers() {
-  local p id
+  local p id st table
   local -a found=()
-  local -A SHMUTANT_START=() running=()
+  local -A SHMUTANT_START=() state=()
   left=()
   _shmutant_identity_table
   while IFS=: read -r p id; do
     [ -n "${SHMUTANT_START[$p]:-}" ] && _shmutant_same_start "${SHMUTANT_START[$p]}" "$id" && found+=("$p:$id")
   done < <(command -p awk -F: '!seen[$1]++' "$1")
   [ "${#found[@]}" -gt 0 ] || return 0
-  while read -r p; do running["$p"]=1; done < <(command -p ps -o pid= -o stat= -p "$(IFS=,; printf '%s' "${found[*]%%:*}")" 2>/dev/null | command -p awk '$2 !~ /^Z/ { print $1 }')
-  for p in "${found[@]}"; do [ -n "${running[${p%%:*}]:-}" ] && left+=("$p"); done
+  if ! table="$(command -p ps -A -o pid= -o stat= 2>/dev/null)" || [ -z "$table" ]; then
+    left=("${found[@]}"); return 0
+  fi
+  while read -r p st; do [ -n "$p" ] && state["$p"]="$st"; done <<< "$table"
+  for p in "${found[@]}"; do
+    case "${state[${p%%:*}]:-}" in ''|Z*) ;; *) left+=("$p") ;; esac
+  done
 }
 
 main() {
