@@ -431,4 +431,6 @@ One line per resolved review thread, newest last.
 - `timeout-escalation-cancelled` `shmutant.sh:906` `1e25b67` `PRRT_kwDOUT7q9s6iTo9R` PR #4 2026-09-14 — an identity re-check between the group stop and the holder continue widened the window a killer could die in, leaving the holder stopped
 - `write-failure-swallowed` `test/run.sh:3998` `1e25b67` `PRRT_kwDOUT7q9s6iTo9U` PR #4 2026-09-14 — the sweep reported leftovers killed and swept without checking the kill reached them
 - `contract-not-honoured` `test/run.sh:3945` `1e25b67` `PRRT_kwDOUT7q9s6iTo9W` PR #4 2026-09-14 — leftovers were deduplicated by pid alone, so a reused pid kept the stale identity and the live process went unchecked
+- `write-failure-swallowed` `test/run.sh:3956` `18c9b95` `PRRT_kwDOUT7q9s6iUAqX` PR #4 2026-09-14 — a sampler whose identity lookup failed returned success, so a unit it never sampled was reported clean
+- `write-failure-swallowed` `test/run.sh:4038` `18c9b95` `PRRT_kwDOUT7q9s6iUAqa` PR #4 2026-09-14 — the sweep gave the kill no report channel, so a freeze that never settled was accepted as a clean kill
 <!-- adb:hits:end -->
