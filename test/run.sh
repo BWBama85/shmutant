@@ -1958,7 +1958,8 @@ t_verdict_timeout_kills_an_escaped_process_group() {
   ( sleep 3 & sleep 3 & wait ) & local p=$!
   sleep 0.3
   eq "$(_shmutant_descendants "$p" | wc -l | tr -d ' ')" 2 'the descendant walk finds both children'
-  kill "$p" 2>/dev/null; wait "$p" 2>/dev/null
+  # the children with it: a signal to the subshell alone would leave both sleeps running
+  _shmutant_kill_tree KILL "$p" "$p:"; wait "$p" 2>/dev/null
 }
 
 t_verdict_timeout_kills_a_reparented_term_ignoring_descendant() {
@@ -3867,15 +3868,20 @@ sample_unit() {
 }
 
 # unit_leftovers <seen-file> — set `left` to each `pid:identity` in <seen-file> whose pid is still
-# the process it was when first seen, judged against one process table.
+# the process it was when first seen, judged against one process table. A zombie is not a
+# leftover: it has already exited and is only waiting to be reaped.
 unit_leftovers() {
   local p id
-  local -A SHMUTANT_START=()
+  local -a found=()
+  local -A SHMUTANT_START=() running=()
   left=()
   _shmutant_identity_table
   while IFS=: read -r p id; do
-    [ -n "${SHMUTANT_START[$p]:-}" ] && _shmutant_same_start "${SHMUTANT_START[$p]}" "$id" && left+=("$p:$id")
+    [ -n "${SHMUTANT_START[$p]:-}" ] && _shmutant_same_start "${SHMUTANT_START[$p]}" "$id" && found+=("$p:$id")
   done < <(command -p awk -F: '!seen[$1]++' "$1")
+  [ "${#found[@]}" -gt 0 ] || return 0
+  while read -r p; do running["$p"]=1; done < <(command -p ps -o pid= -o stat= -p "$(IFS=,; printf '%s' "${found[*]%%:*}")" 2>/dev/null | command -p awk '$2 !~ /^Z/ { print $1 }')
+  for p in "${found[@]}"; do [ -n "${running[${p%%:*}]:-}" ] && left+=("$p"); done
 }
 
 main() {

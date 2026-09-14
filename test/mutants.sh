@@ -1598,3 +1598,7 @@ shmutant_mut 'the run holder keeps the writing end it inherits' \
   '( read -r _ <&"$hold_r" ) < /dev/null > /dev/null 2>&1 {hold}>&- &' \
   '( read -r _ <&"$hold_r" ) < /dev/null > /dev/null 2>&1 &' \
   't_run_holder_ends_with_a_killed_runner'
+# (no row on the CLI sampler ending its sleep when stopped: without the trap the sleep outlives the
+# run by at most half a second, and the per-unit sweep sees it only when the unit ends first, so a
+# row would be a coin flip; t_cli_keeps_the_workdir_a_plan_asked_to_keep_before_leaving went red
+# without it 2 runs of 5)
