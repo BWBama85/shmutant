@@ -698,7 +698,7 @@ shmutant_mut 'copy_tree reads its positionals before checking their count' \
   '  if [ -z "$1" ] || [ -z "$2" ]; then _shmutant_err "copy_tree: usage' \
   't_copy_tree_excludes_git'
 shmutant_mut 'no holder keeps the group in being after the wrapper' \
-  '      ( ( read -r _ <&"$hold" ) < /dev/null > /dev/null 2>&1 & printf '"'"'%s\n'"'"' "$!" >&"$hp" )' \
+  '      ( ( read -r _ <&"$hold_r" ) < /dev/null > /dev/null 2>&1 {hold}>&- & printf '"'"'%s\n'"'"' "$!" >&"$hp" )' \
   '      printf '"'"'\n'"'"' >&"$hp"' \
   't_returned_run_without_an_identity_is_still_cleaned_up'
 shmutant_mut 'the post-return cleanup does not use the held group' \
@@ -722,8 +722,8 @@ shmutant_mut 'dot components in the destination are created as typed' \
   '  :' \
   't_copy_tree_excludes_git'
 shmutant_mut 'the holder is a job of the wrapper' \
-  '      ( ( read -r _ <&"$hold" ) < /dev/null > /dev/null 2>&1 & printf '"'"'%s\n'"'"' "$!" >&"$hp" )' \
-  '      ( read -r _ <&"$hold" ) < /dev/null > /dev/null 2>&1 & printf '"'"'%s\n'"'"' "$!" >&"$hp"' \
+  '      ( ( read -r _ <&"$hold_r" ) < /dev/null > /dev/null 2>&1 {hold}>&- & printf '"'"'%s\n'"'"' "$!" >&"$hp" )' \
+  '      ( read -r _ <&"$hold_r" ) < /dev/null > /dev/null 2>&1 {hold}>&- & printf '"'"'%s\n'"'"' "$!" >&"$hp"' \
   't_callback_bare_wait_does_not_block_on_the_holder'
 
 # --- guards added for the twenty-second review round ---

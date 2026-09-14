@@ -3350,7 +3350,8 @@ t_stream_write_failure_is_a_harness_error() {
   # a failed assertion. The watchdog is the unit's own, not the pool's.
   ( SHMUTANT_STREAM="$T/fifo" shmutant_pool lbl "$T/wd" toy_prepare toy_run > /dev/null 2> "$T/fifo-err" ) &
   local pp=$!
-  ( sleep 5; kill "$pp" 2>/dev/null ) & local dog=$!
+  # its own sleep is ended with it: a TERM to the subshell alone would leave the sleep running
+  ( trap 'kill "$s" 2>/dev/null; exit 0' TERM; sleep 5 & s=$!; wait "$s"; kill "$pp" 2>/dev/null ) & local dog=$!
   wait "$pp"; rc_is $? 2 'a FIFO stream is refused: with no reader the first record would block forever'
   kill "$dog" 2>/dev/null; wait "$dog" 2>/dev/null
   has "$(cat "$T/fifo-err")" 'not a regular file' 'says why'
@@ -3892,6 +3893,9 @@ main() {
     { : > "$SWEEP_SEEN" && exec {pfd}<>"$SWEEP_DIR/up"; } \
       || { echo "run.sh: cannot set up the sweep for $u" >&2; exit 2; }
     sample_unit "$pfd" >> "$SWEEP_SEEN" 2>/dev/null & sampler=$!
+    # Tested by `||`, never `; urc=$?`: errexit a unit turns on stays ignored inside it, so its
+    # assertions still print instead of the unit dying at the first failing command.
+    urc=0
     (
       printf '%s\n' "$BASHPID" >&"$pfd"; exec {pfd}>&-
       _unit="$u"; _failed=0
@@ -3900,7 +3904,7 @@ main() {
       cd "$T" || exit 1
       "$u"
       exit "$_failed"
-    ); urc=$?
+    ) || urc=$?
     # Stops the sampler at once, or unblocks one still waiting for a pid.
     printf 'none\n' >&"$pfd"; exec {pfd}>&-
     wait "$sampler"
