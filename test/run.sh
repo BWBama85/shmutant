@@ -2537,6 +2537,25 @@ t_run_holder_ends_with_a_killed_runner() {
   wait_gone "$holder" || { fail_ 'the holder outlived its killed run'; kill -KILL "$holder" 2>/dev/null; }
 }
 
+# shellcheck disable=SC2034
+t_interrupted_freeze_does_not_leave_the_holder_stopped() {
+  mkdir -p "$T/d"
+  # A freeze stops the run's whole group, holder included, and sends KILL only at the end. When the
+  # process doing it is killed in between (an outer timeout reaching an inner run), the holder must
+  # not be left stopped: no tree walk reaches it, and a stopped process never sees end-of-file.
+  ( exec {vf}>|"$T/chan"; SHMUTANT_VERDICT_FD="$vf"
+    cb() { : > "$T/started"; sleep 30; }
+    SHMUTANT_TIMEOUT=0 _shmutant_run_bounded "$T/d" cb "$T/d" sel ) > /dev/null 2>&1 & local outer=$!
+  wait_for "$T/started" || { fail_ 'the callback never started'; _shmutant_kill_tree KILL "$outer" "$outer:"; wait "$outer" 2>/dev/null; return; }
+  local grp holder holderid
+  read -r _ grp holder holderid < <(awk '$1 == "group" { print; exit }' "$T/chan")
+  if [ -z "$holder" ] || ! kill -0 "$holder" 2>/dev/null; then fail_ 'no live holder was published'; _shmutant_kill_tree KILL "$outer" "$outer:"; wait "$outer" 2>/dev/null; return; fi
+  # the killer is killed straight after it stops the group, before any KILL is sent
+  { ( _shmutant_freeze_from() { kill -KILL "$BASHPID"; }; _shmutant_kill_tree_twice -g "$grp" "$grp:" ); } > /dev/null 2>&1
+  _shmutant_kill_tree KILL "$outer" "$outer:"; wait "$outer" 2>/dev/null
+  wait_gone "$holder" || { fail_ "the holder was left behind (state $(ps -o stat= -p "$holder" 2>/dev/null | tr -d ' '))"; kill -KILL "$holder" 2>/dev/null; }
+}
+
 t_run_output_is_published_over_a_planted_directory() {
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh

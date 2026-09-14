@@ -899,6 +899,12 @@ _shmutant_kill_tree_twice() {
   # or not the root has been reaped, ps or no ps.
   if [ -n "$held" ]; then
     kill -STOP -- -"$held" 2>/dev/null
+    # The caller's holder (holder, holderid) is in that group and only blocks on a read: continued
+    # at once, so a freeze cut short before its KILL leaves it running to its end-of-file rather
+    # than stopped where none can reach it. Checked as _shmutant_held_group checks it.
+    if [ -n "${holder:-}" ]; then
+      if [ -z "${holderid:-}" ] || ! _shmutant_identity "$holder" > /dev/null || _shmutant_alive_since "$holder" "$holderid"; then kill -CONT "$holder" 2>/dev/null; fi
+    fi
     SHMUTANT_KILL_GROUP="$held"
   fi
   # The root's tree first, before any identity work: every pass is one ps and one bulk stop.

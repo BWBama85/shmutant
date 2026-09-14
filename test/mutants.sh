@@ -1602,3 +1602,7 @@ shmutant_mut 'the run holder keeps the writing end it inherits' \
 # run by at most half a second, and the per-unit sweep sees it only when the unit ends first, so a
 # row would be a coin flip; t_cli_keeps_the_workdir_a_plan_asked_to_keep_before_leaving went red
 # without it 2 runs of 5)
+shmutant_mut 'an interrupted freeze leaves the run holder stopped' \
+  '      if [ -z "${holderid:-}" ] || ! _shmutant_identity "$holder" > /dev/null || _shmutant_alive_since "$holder" "$holderid"; then kill -CONT "$holder" 2>/dev/null; fi' \
+  '      :' \
+  't_interrupted_freeze_does_not_leave_the_holder_stopped'
