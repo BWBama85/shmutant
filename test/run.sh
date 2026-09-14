@@ -3899,6 +3899,29 @@ EOF
   has "$out" '0 leftover process(es) swept' 'and is not counted as swept'
   pid="$(cat "$T/leaks_then_exits.pid" 2>/dev/null)"
   [ -z "$pid" ] || { kill -KILL "$pid" 2>/dev/null; wait_gone "$pid"; }
+  # A sampler that cannot read the unit's identity samples nothing: that is reported, not passed.
+  mkdir -p "$T/suite-nosampler/test"
+  cp -- "$SHMUTANT" "$T/suite-nosampler/shmutant.sh"
+  { sed '$d' "$T/suite/test/run.sh"
+    printf '%s\n' 'eval "_real_identity() $(declare -f _shmutant_identity | sed 1d)"' \
+      '_shmutant_identity() { if [ "${FUNCNAME[1]}" = sample_unit ]; then return 1; fi; _real_identity "$@"; }' 'main "$@"'
+  } > "$T/suite-nosampler/test/run.sh"
+  rm -f "$T/reparents.pid"
+  out="$(SHMUTANT_SELECT=t_zz_reparents bash "$T/suite-nosampler/test/run.sh" 2>&1)"; rc_is $? 1 'a unit whose sampler could not start fails'
+  has "$out" 'FAIL: t_zz_reparents: the descendant sampler could not start' 'and says why'
+  pid="$(cat "$T/reparents.pid" 2>/dev/null)"
+  [ -z "$pid" ] || { kill -KILL "$pid" 2>/dev/null; wait_gone "$pid"; }
+  # A freeze that never settles leaves what escaped it unverified: that is reported, not accepted.
+  mkdir -p "$T/suite-unsettled/test"
+  cp -- "$SHMUTANT" "$T/suite-unsettled/shmutant.sh"
+  { sed '$d' "$T/suite/test/run.sh"
+    printf '%s\n' '_shmutant_freeze_from() { SHMUTANT_FREEZE_UNSETTLED=1; }' 'main "$@"'
+  } > "$T/suite-unsettled/test/run.sh"
+  rm -f "$T/leaks_then_exits.pid"
+  out="$(SHMUTANT_SELECT=t_zz_leaks_then_exits bash "$T/suite-unsettled/test/run.sh" 2>&1)"; rc_is $? 1 'a sweep whose freeze never settled fails the unit'
+  has "$out" 'FAIL: t_zz_leaks_then_exits: its leftovers kept forking through every freeze pass' 'and says so'
+  pid="$(cat "$T/leaks_then_exits.pid" 2>/dev/null)"
+  [ -z "$pid" ] || { kill -KILL "$pid" 2>/dev/null; wait_gone "$pid"; }
   out="$(SHMUTANT_SELECT=t_zz_clean bash "$T/suite/test/run.sh" 2>&1)"; rc_is $? 0 'a unit that waits for its children passes'
   has "$out" '0 leftover process(es) swept' 'a clean unit reports zero'
   hasnt "$out" 'FAIL' 'and nothing is failed'
@@ -3949,15 +3972,23 @@ t_wait_gone_takes_a_zombie_as_gone() {
 # that detaches within one poll is not seen here; the unit's EXIT trap snapshots what is still
 # attached when it ends. Both run the shmutant.sh the suite sourced, so in a mutation row they use
 # the mutated primitives; the outer pool's own cleanup still ends that row's leftovers.
+# Returns 3 when the unit is still running but its identity cannot be read, so nothing could be
+# sampled; a unit already gone by then has nothing to sample, and that is not a failure.
 sample_unit() {
-  local up id
+  local up id="" i
   IFS= read -r up <&"$1" || return 0
   case "$up" in ''|*[!0-9]*) return 0 ;; esac
-  id="$(_shmutant_identity "$up")" || return 0
+  for (( i = 0; i < 10; i++ )); do
+    id="$(_shmutant_identity "$up")" && break
+    kill -0 "$up" 2>/dev/null || return 0
+    command -p sleep 0.05
+  done
+  if [ -z "$id" ]; then kill -0 "$up" 2>/dev/null && return 3; return 0; fi
   while _shmutant_alive_since "$up" "$id"; do
     _shmutant_snapshot "$up"
     IFS= read -t 0.5 -r _ <&"$1" && break
   done
+  return 0
 }
 
 # unit_leftovers <seen-file> — set `left` to each `pid:identity` in <seen-file> whose pid is still
@@ -3990,7 +4021,7 @@ unit_leftovers() {
 }
 
 main() {
-  local units u ran=0 failed=0 swept=0 urc pfd sampler sd i left_unverified=0
+  local units u ran=0 failed=0 swept=0 urc pfd sampler src ufd sd i left_unverified=0
   local -a left=() victims=()
   units="$(declare -F | awk '$3 ~ /^t_/ { print $3 }')"
   SWEEP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/shmutant-sweep.XXXXXX")" || { echo 'run.sh: cannot create the sweep directory' >&2; exit 2; }
@@ -4022,7 +4053,11 @@ main() {
     ) || urc=$?
     # Stops the sampler at once, or unblocks one still waiting for a pid.
     printf 'none\n' >&"$pfd"; exec {pfd}>&-
-    wait "$sampler"
+    src=0; wait "$sampler" || src=$?
+    if [ "$src" = 3 ]; then
+      printf 'FAIL: %s: the descendant sampler could not start, so what the unit left behind is unverified\n' "$u"
+      urc=1
+    fi
     unit_leftovers "$SWEEP_SEEN"
     if [ "$left_unverified" = 1 ]; then
       printf 'FAIL: %s: the process table could not be read, so what the unit left behind is unverified\n' "$u"
@@ -4035,7 +4070,15 @@ main() {
       } | command -p sed 's/^/  /'
       victims=("${left[@]}")
       # `0:` names no root: only the victims, each still the process it was, are frozen and killed.
-      _shmutant_kill_tree_twice 0: "${victims[@]}"
+      # A freeze that never settled is reported on this channel; what escaped it is unverified.
+      { : > "$SWEEP_DIR/unsettled" && exec {ufd}>>"$SWEEP_DIR/unsettled"; } \
+        || { echo "run.sh: cannot set up the sweep for $u" >&2; exit 2; }
+      SHMUTANT_UNSETTLED_FD="$ufd" _shmutant_kill_tree_twice 0: "${victims[@]}"
+      exec {ufd}>&-
+      if command -p grep -qx unsettled "$SWEEP_DIR/unsettled"; then
+        printf 'FAIL: %s: its leftovers kept forking through every freeze pass, so what escaped them is unverified\n' "$u"
+        urc=1
+      fi
       # Checked, not assumed: a process the suite cannot signal is still there after the kill.
       for (( i = 0; i < 30; i++ )); do
         printf '%s\n' "${victims[@]}" > "$SWEEP_SEEN"
