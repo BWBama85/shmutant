@@ -443,4 +443,7 @@ One line per resolved review thread, newest last.
 - `write-failure-swallowed` `test/run.sh:4190` `1ff2c7e` `PRRT_kwDOUT7q9s6iVP5b` PR #4 2026-09-15 — only sampler status 3 failed the unit, so a sampler killed from outside stopped recording and the unit passed
 - `contract-not-honoured` `shmutant.sh:982` `1ff2c7e` `PRRT_kwDOUT7q9s6iVP5e` PR #4 2026-09-15 — the final group check accepted any live pid at the holder number without checking the holder identity
 - `write-failure-swallowed` `shmutant.sh:814` `1ff2c7e` `PRRT_kwDOUT7q9s6iVP5h` PR #4 2026-09-15 — the freeze read the descendant listing through a process substitution, so a failed listing looked like no children
+- `write-failure-swallowed` `test/run.sh:4261` `0d77c9e` `PRRT_kwDOUT7q9s6iVkNI` PR #4 2026-09-15 — a unit whose identity reads all failed sent an empty identity, and a late sampler then recorded nothing
+- `contract-not-honoured` `test/run.sh:4222` `0d77c9e` `PRRT_kwDOUT7q9s6iVkNK` PR #4 2026-09-15 — leftovers were deduplicated by whole line, so one pid sampled under two etime identities was counted twice
+- `contract-not-honoured` `test/run.sh:64` `0d77c9e` `PRRT_kwDOUT7q9s6iVkNN` PR #4 2026-09-15 — wait_gone followed a pid by number only, so a reused number was waited on and then killed
 <!-- adb:hits:end -->
