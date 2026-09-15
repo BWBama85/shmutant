@@ -435,4 +435,8 @@ One line per resolved review thread, newest last.
 - `write-failure-swallowed` `test/run.sh:4038` `18c9b95` `PRRT_kwDOUT7q9s6iUAqa` PR #4 2026-09-14 — the sweep gave the kill no report channel, so a freeze that never settled was accepted as a clean kill
 - `write-failure-swallowed` `test/run.sh:4007` `e1c76ef` `PRRT_kwDOUT7q9s6iUYzA` PR #4 2026-09-14 — samples taken while the identity table could not be read recorded nothing, so an empty record passed a unit that leaked
 - `contract-not-honoured` `shmutant.sh:2736` `e1c76ef` `PRRT_kwDOUT7q9s6iUYzH` PR #4 2026-09-14 — the CLI sampler trap signalled the pid of a sleep it had already reaped, which may belong to another process by then
+- `write-failure-swallowed` `test/run.sh:4045` `3a9d1b8` `PRRT_kwDOUT7q9s6iUwF-` PR #4 2026-09-15 — a later identity read that failed while the unit still ran ended the sampling silently, so what the unit left afterwards was never recorded
+- `write-failure-swallowed` `test/run.sh:4023` `3a9d1b8` `PRRT_kwDOUT7q9s6iUwGB` PR #4 2026-09-15 — a descendant listing whose ps read failed looked like an empty tree, so the snapshot recorded nothing and no marker
+- `contract-not-honoured` `test/run.sh:4019` `3a9d1b8` `PRRT_kwDOUT7q9s6iUwGD` PR #4 2026-09-15 — the snapshot took identities and ancestry from two reads, so a child forked between them was listed without an identity and skipped
+- `contract-not-honoured` `shmutant.sh:907` `3a9d1b8` `PRRT_kwDOUT7q9s6iUwGG` PR #4 2026-09-15 — the final group KILL was sent by number after the continued holder could have exited, when the group number was no longer reserved
 <!-- adb:hits:end -->
