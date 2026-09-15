@@ -2557,6 +2557,11 @@ t_interrupted_freeze_does_not_leave_the_holder_stopped() {
     read -r _ grp holder holderid < <(awk '$1 == "group" { print; exit }' "$T/$point/chan")
     if [ -z "$holder" ] || ! kill -0 "$holder" 2>/dev/null; then fail_ "$point: no live holder was published"; _shmutant_kill_tree KILL "$outer" "$outer:"; wait "$outer" 2>/dev/null; continue; fi
     { ( eval "$point() { kill -KILL \"\$BASHPID\"; }"; _shmutant_kill_tree_twice -g "$grp" "$grp:" ); } > /dev/null 2>&1
+    # Read now, before the run is ended: once its group is orphaned the kernel may continue or hang up a
+    # stopped holder by itself, which would hide one this freeze left stopped.
+    case "$(command -p ps -o stat= -p "$holder" 2>/dev/null)" in
+      *T*) fail_ "$point: the interrupted freeze left the holder stopped" ;;
+    esac
     _shmutant_kill_tree KILL "$outer" "$outer:"; wait "$outer" 2>/dev/null
     wait_gone "$holder" || { fail_ "$point: the holder was left behind (state $(ps -o stat= -p "$holder" 2>/dev/null | tr -d ' '))"; kill -KILL "$holder" 2>/dev/null; }
   done
