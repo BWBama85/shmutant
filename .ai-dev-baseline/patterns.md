@@ -439,4 +439,8 @@ One line per resolved review thread, newest last.
 - `write-failure-swallowed` `test/run.sh:4023` `3a9d1b8` `PRRT_kwDOUT7q9s6iUwGB` PR #4 2026-09-15 — a descendant listing whose ps read failed looked like an empty tree, so the snapshot recorded nothing and no marker
 - `contract-not-honoured` `test/run.sh:4019` `3a9d1b8` `PRRT_kwDOUT7q9s6iUwGD` PR #4 2026-09-15 — the snapshot took identities and ancestry from two reads, so a child forked between them was listed without an identity and skipped
 - `contract-not-honoured` `shmutant.sh:907` `3a9d1b8` `PRRT_kwDOUT7q9s6iUwGG` PR #4 2026-09-15 — the final group KILL was sent by number after the continued holder could have exited, when the group number was no longer reserved
+- `contract-not-honoured` `test/run.sh:4179` `1ff2c7e` `PRRT_kwDOUT7q9s6iVP5X` PR #4 2026-09-15 — the sampler was handed only the unit pid, so a reused number let it sample a stranger descendants
+- `write-failure-swallowed` `test/run.sh:4190` `1ff2c7e` `PRRT_kwDOUT7q9s6iVP5b` PR #4 2026-09-15 — only sampler status 3 failed the unit, so a sampler killed from outside stopped recording and the unit passed
+- `contract-not-honoured` `shmutant.sh:982` `1ff2c7e` `PRRT_kwDOUT7q9s6iVP5e` PR #4 2026-09-15 — the final group check accepted any live pid at the holder number without checking the holder identity
+- `write-failure-swallowed` `shmutant.sh:814` `1ff2c7e` `PRRT_kwDOUT7q9s6iVP5h` PR #4 2026-09-15 — the freeze read the descendant listing through a process substitution, so a failed listing looked like no children
 <!-- adb:hits:end -->
