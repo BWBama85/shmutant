@@ -1616,6 +1616,18 @@ shmutant_mut 'the group is signalled after its holder has gone' \
   '  if [ -n "${SHMUTANT_KILL_GROUP:-}" ] && { [ -z "${holder:-}" ] || kill -0 "$holder" 2>/dev/null; }; then' \
   '  if [ -n "${SHMUTANT_KILL_GROUP:-}" ]; then' \
   't_group_kill_skips_a_group_its_holder_no_longer_holds'
+shmutant_mut 'an unreadable listing in a freeze passes for a settled one' \
+  '        _shmutant_can_list && SHMUTANT_FREEZE_UNSETTLED=1' \
+  '        :' \
+  't_freeze_treats_an_unreadable_table_as_unsettled'
+shmutant_mut 'a host with no process listing counts every freeze as unsettled' \
+  '        _shmutant_can_list && SHMUTANT_FREEZE_UNSETTLED=1' \
+  '        SHMUTANT_FREEZE_UNSETTLED=1' \
+  't_freeze_without_any_listing_is_not_unsettled'
+shmutant_mut 'the group kill takes any live pid at the holder number for the holder' \
+  '! _shmutant_identity "$holder" > /dev/null || _shmutant_alive_since "$holder" "$holderid"; then' \
+  '! _shmutant_identity "$holder" > /dev/null || :; then' \
+  't_group_kill_checks_the_holder_identity'
 shmutant_mut 'an unreadable /proc table lists no descendants and succeeds' \
   '    table="$(_shmutant_proc_table)"; [ -n "$table" ] || return 1' \
   '    table="$(_shmutant_proc_table)"' \

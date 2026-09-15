@@ -806,13 +806,19 @@ _shmutant_same_start() {
 # _shmutant_freeze_from — stop every descendant of the pids in `roots`, repeatedly, until a pass
 # finds nothing new; appends what it stopped to `frozen`/`have`. Shares its caller's arrays.
 _shmutant_freeze_from() {
-  local r p new rounds=0
+  local r p new rounds=0 out
   local -a found=() pids=()
   while :; do
     new=0
     for r in "${roots[@]}"; do
-      mapfile -t found < <(_shmutant_descendants_started "$r")
-      [ "${#found[@]}" -gt 0 ] || continue
+      # A listing that could not be read has not reached this root's children, so the freeze is not
+      # settled; on a host with no listing at all, the group is all a kill can reach.
+      if ! out="$(_shmutant_descendants_started "$r")"; then
+        _shmutant_can_list && SHMUTANT_FREEZE_UNSETTLED=1
+        continue
+      fi
+      [ -n "$out" ] || continue
+      mapfile -t found <<< "$out"
       pids=()
       for p in "${found[@]}"; do [ -n "$p" ] && pids+=("${p%% *}"); done
       kill -STOP "${pids[@]}" 2>/dev/null
@@ -830,6 +836,11 @@ _shmutant_freeze_from() {
     # reach; the bound is recorded, not endured in silence.
     if [ "$rounds" -ge 32 ]; then SHMUTANT_FREEZE_UNSETTLED=1; break; fi
   done
+}
+
+# _shmutant_can_list — succeeds where a process listing can be read at all: /proc, or a ps.
+_shmutant_can_list() {
+  [ "${SHMUTANT_PROC:-}" = 1 ] || command -p -v ps > /dev/null 2>&1
 }
 
 # _shmutant_frozen_only <pid start>… — after a bulk stop, SHMUTANT_FROZEN_NOW holds the pids
@@ -979,7 +990,11 @@ _shmutant_kill_tree() {
   # the group stop may have read its end-of-file and gone, and a group number nothing reserves may
   # belong to someone else by now. A zombie holder still reserves it.
   if [ -n "${SHMUTANT_KILL_GROUP:-}" ] && { [ -z "${holder:-}" ] || kill -0 "$holder" 2>/dev/null; }; then
-    targets=(-"$SHMUTANT_KILL_GROUP" "${targets[@]}")
+    # A live pid at that number is the holder only while it carries the holder's identity, where one
+    # can be read now: the same test _shmutant_held_group applied before the stop.
+    if [ -z "${holder:-}" ] || [ -z "${holderid:-}" ] || ! _shmutant_identity "$holder" > /dev/null || _shmutant_alive_since "$holder" "$holderid"; then
+      targets=(-"$SHMUTANT_KILL_GROUP" "${targets[@]}")
+    fi
   fi
   [ "${#targets[@]}" -gt 0 ] || return 0
   kill "-$sig" -- "${targets[@]}" 2>/dev/null
