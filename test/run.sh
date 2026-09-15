@@ -52,13 +52,16 @@ wait_for() {
   until [ -e "$1" ]; do i=$((i + 1)); [ "$i" -lt 100 ] || return 1; sleep 0.1; done
 }
 
-# wait_gone <pid> — block until <pid> no longer runs, at most three seconds; false on expiry.
+# wait_gone <pid> [identity] — block until <pid> no longer runs, at most three seconds; false on expiry.
 # A process just sent KILL answers `kill -0` until it is reaped, and one whose parent never reaps
-# it answers forever: a zombie has already exited, and counts as gone.
+# it answers forever: a zombie has already exited, and counts as gone. The process waited on is the
+# one carrying <identity> (read on entry when none is given): a pid carrying another was reused.
 wait_gone() {
-  local i=0
+  local i=0 id="${2:-}" now
+  [ -n "$id" ] || id="$(_shmutant_identity "$1" 2>/dev/null)"
   while kill -0 "$1" 2>/dev/null; do
     case "$(command -p ps -o stat= -p "$1" 2>/dev/null)" in *Z*) return 0 ;; esac
+    if [ -n "$id" ] && now="$(_shmutant_identity "$1" 2>/dev/null)"; then _shmutant_same_start "$now" "$id" || return 0; fi
     i=$((i + 1)); [ "$i" -lt 30 ] || return 1; sleep 0.1
   done
 }
@@ -3947,6 +3950,20 @@ EOF
   has "$out" 'FAIL: t_zz_late_reparents: the process table could not be read' 'and its leftovers are reported unverified'
   pid="$(cat "$T/late_reparents.pid" 2>/dev/null)"
   [ -z "$pid" ] || { kill -KILL "$pid" 2>/dev/null; wait_gone "$pid"; }
+  # A unit that cannot read its own identity hands the sampler nothing to check; a sampler that
+  # then starts only after the unit has ended records nothing either. The unit itself says so.
+  mkdir -p "$T/suite-noid/test"
+  cp -- "$SHMUTANT" "$T/suite-noid/shmutant.sh"
+  { sed '$d' "$T/suite/test/run.sh"
+    printf '%s\n' 'eval "_real_identity() $(declare -f _shmutant_identity | sed 1d)"' \
+      '_shmutant_identity() { [ "$1" = "$$" ] || return 1; _real_identity "$@"; }' \
+      'sample_unit() { return 0; }' 'main "$@"'
+  } > "$T/suite-noid/test/run.sh"
+  rm -f "$T/reparents.pid"
+  out="$(SHMUTANT_SELECT=t_zz_reparents bash "$T/suite-noid/test/run.sh" 2>&1)"; rc_is $? 1 'a unit that could not read its own identity fails'
+  has "$out" 'FAIL: t_zz_reparents: the process table could not be read' 'and its leftovers are reported unverified'
+  pid="$(cat "$T/reparents.pid" 2>/dev/null)"
+  [ -z "$pid" ] || { kill -KILL "$pid" 2>/dev/null; wait_gone "$pid"; }
   # A sampler that ends abnormally (killed from outside) stopped recording: that is unverified too.
   mkdir -p "$T/suite-killedsampler/test"
   cp -- "$SHMUTANT" "$T/suite-killedsampler/shmutant.sh"
@@ -3973,6 +3990,11 @@ t_unit_leftovers_fails_closed() {
   printf '%s:%s\n%s:%s\n' "$leak" "$stale" "$leak" "$real" > "$T/seen"
   left=(); unit_leftovers "$T/seen"
   case " ${left[*]%%:*} " in *" $leak "*) ;; *) fail_ 'a live process recorded after a stale identity at its pid was not reported' ;; esac
+  # Elapsed-time identities a second apart both match one live process: it is still one leftover.
+  printf '%s:e100\n%s:e101\n' "$leak" "$leak" > "$T/etime-seen"
+  ( _shmutant_identity_table() { SHMUTANT_START=(["$leak"]=e100); }
+    left=(); unit_leftovers "$T/etime-seen"
+    [ "${#left[@]}" = 1 ] || { echo "FAIL: $_unit: one live process sampled under two elapsed-time identities was counted ${#left[@]} times"; exit 1; } ) || _failed=1
   # An identity table that cannot be read clears nothing: the leftovers are unverified, not absent.
   ( _shmutant_identity_table() { SHMUTANT_START=(); }
     left=(); unit_leftovers "$T/seen"
@@ -4127,6 +4149,19 @@ t_freeze_without_any_listing_is_not_unsettled() {
   kill -KILL "$child" "$parent" 2>/dev/null; wait "$parent" 2>/dev/null; wait_gone "$child"
 }
 
+t_wait_gone_takes_a_reused_pid_as_gone() {
+  # A pid that now carries another identity is not the process waited on: that one is gone, and a
+  # caller that kills on a timeout must not be handed a stranger's number.
+  sleep 30 > /dev/null 2>&1 & local p=$!
+  local real stale rc=0 t0=$SECONDS
+  real="$(_shmutant_identity "$p")" || { fail_ 'fixture: no identity for the sleep'; kill -KILL "$p"; wait "$p" 2>/dev/null; return; }
+  case "$real" in e*) stale=e1 ;; *[!0-9]*) stale='Thu Jan  1 00:00:00 1970' ;; *) stale=1 ;; esac
+  wait_gone "$p" "$stale" || rc=$?
+  [ "$rc" = 0 ] || fail_ 'a pid carrying another identity was waited on until the timeout'
+  [ $(( SECONDS - t0 )) -lt 2 ] || fail_ 'a pid carrying another identity was waited on as if it were the process'
+  kill -KILL "$p" 2>/dev/null; wait "$p" 2>/dev/null
+}
+
 t_wait_gone_takes_a_zombie_as_gone() {
   # A child that has exited but was never reaped still answers `kill -0`, as a reparented one does
   # forever under a PID 1 that does not reap. Its parent here execs into a sleep, which never waits.
@@ -4209,7 +4244,7 @@ sample_unit() {
 unit_leftovers() {
   local p id st table
   local -a found=()
-  local -A SHMUTANT_START=() state=()
+  local -A SHMUTANT_START=() state=() got=()
   left=(); left_unverified=0
   _shmutant_identity_table
   if [ "${#SHMUTANT_START[@]}" -eq 0 ]; then
@@ -4217,8 +4252,10 @@ unit_leftovers() {
     return 0
   fi
   command -p grep -qx unverified "$1" && left_unverified=1
+  # One entry per live pid: elapsed-time identities a second apart both match the same process.
   while IFS=: read -r p id; do
-    [ -n "${SHMUTANT_START[$p]:-}" ] && _shmutant_same_start "${SHMUTANT_START[$p]}" "$id" && found+=("$p:$id")
+    [ -n "$p" ] && [ -z "${got[$p]:-}" ] || continue
+    [ -n "${SHMUTANT_START[$p]:-}" ] && _shmutant_same_start "${SHMUTANT_START[$p]}" "$id" && { found+=("$p:$id"); got["$p"]=1; }
   done < <(command -p awk '!seen[$0]++' "$1")
   [ "${#found[@]}" -gt 0 ] || return 0
   if ! table="$(command -p ps -A -o pid= -o stat= 2>/dev/null)" || [ -z "$table" ]; then
@@ -4258,6 +4295,8 @@ main() {
         _sweep_id="$(_shmutant_identity "$_sweep_up" 2>/dev/null)" && break
         command -p sleep 0.05
       done
+      # Recorded here, not left to the sampler: one that starts after the unit ended finds no pid to check.
+      [ -n "$_sweep_id" ] || printf 'unverified\n' >> "$SWEEP_SEEN"
       printf '%s %s\n' "$_sweep_up" "$_sweep_id" >&"$pfd"; exec {pfd}>&-
       _unit="$u"; _failed=0
       T="$(mktemp -d "${TMPDIR:-/tmp}/shmutant-test.XXXXXX")" || exit 1
