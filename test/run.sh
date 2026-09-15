@@ -1298,7 +1298,8 @@ t_proc_scan_ignores_globignore() {
   [ "$n" -ge 1 ] || fail_ "with GLOBIGNORE='*' the /proc scan found $n descendants of a process that has one"
   local id; id="$( GLOBIGNORE='*'; _shmutant_identity "$root" )"
   [ -n "$id" ] || fail_ "with GLOBIGNORE='*' the /proc identity table gave no identity for a live process"
-  kill "$root" 2>/dev/null; wait "$root" 2>/dev/null
+  # The whole tree: a signal to the subshell alone leaves its sleep running.
+  _shmutant_kill_tree KILL "$root" "$root:"; wait "$root" 2>/dev/null
 }
 
 t_unbounded_run_still_tracks_descendants() {
@@ -3950,6 +3951,19 @@ EOF
   has "$out" 'FAIL: t_zz_late_reparents: the process table could not be read' 'and its leftovers are reported unverified'
   pid="$(cat "$T/late_reparents.pid" 2>/dev/null)"
   [ -z "$pid" ] || { kill -KILL "$pid" 2>/dev/null; wait_gone "$pid"; }
+  # The same, with each failing read slow (a loaded host): the unit ends while the sampler is still
+  # retrying, and a read that already failed while it ran leaves the rest of it unverified.
+  mkdir -p "$T/suite-slowsampler/test"
+  cp -- "$SHMUTANT" "$T/suite-slowsampler/shmutant.sh"
+  { sed '$d' "$T/suite/test/run.sh"
+    printf '%s\n' 'eval "_real_identity() $(declare -f _shmutant_identity | sed 1d)"' \
+      "_shmutant_identity() { if [ -s '$T/late_reparents.flag' ] && [ \"\$1\" = \"\$(cat '$T/late_reparents.flag')\" ]; then sleep 0.2; return 1; fi; _real_identity \"\$@\"; }" 'main "$@"'
+  } > "$T/suite-slowsampler/test/run.sh"
+  rm -f "$T/late_reparents.pid" "$T/late_reparents.flag"
+  out="$(SHMUTANT_SELECT=t_zz_late_reparents bash "$T/suite-slowsampler/test/run.sh" 2>&1)"; rc_is $? 1 'a unit that ends while its failing identity reads are retried fails'
+  has "$out" 'FAIL: t_zz_late_reparents: the process table could not be read' 'and its leftovers are reported unverified'
+  pid="$(cat "$T/late_reparents.pid" 2>/dev/null)"
+  [ -z "$pid" ] || { kill -KILL "$pid" 2>/dev/null; wait_gone "$pid"; }
   # A unit that cannot read its own identity hands the sampler nothing to check; a sampler that
   # then starts only after the unit has ended records nothing either. The unit itself says so.
   mkdir -p "$T/suite-noid/test"
@@ -4222,7 +4236,8 @@ sample_unit() {
     # unverified: a sampler that stopped silently would leave the rest of the unit unsampled.
     now="$(_shmutant_identity "$up")" || now=""
     for (( i = 0; i < 10 && ${#now} == 0; i++ )); do
-      kill -0 "$up" 2>/dev/null || return 0
+      # Past the first pass, a read already failed while the unit ran: what it did since is unverified.
+      kill -0 "$up" 2>/dev/null || { [ "$i" -eq 0 ] || printf 'unverified\n'; return 0; }
       command -p sleep 0.05
       now="$(_shmutant_identity "$up")" || now=""
     done
