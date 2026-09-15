@@ -1616,3 +1616,15 @@ shmutant_mut 'the group is signalled after its holder has gone' \
   '  if [ -n "${SHMUTANT_KILL_GROUP:-}" ] && { [ -z "${holder:-}" ] || kill -0 "$holder" 2>/dev/null; }; then' \
   '  if [ -n "${SHMUTANT_KILL_GROUP:-}" ]; then' \
   't_group_kill_skips_a_group_its_holder_no_longer_holds'
+shmutant_mut 'an unreadable /proc table lists no descendants and succeeds' \
+  '    table="$(_shmutant_proc_table)"; [ -n "$table" ] || return 1' \
+  '    table="$(_shmutant_proc_table)"' \
+  't_descendants_started_reports_an_unreadable_table'
+shmutant_mut 'a failed lstart table read lists no descendants and succeeds' \
+  '    table="$(command -p ps -A -o pid= -o ppid= -o lstart= 2>/dev/null)" && [ -n "$table" ] || return 1' \
+  '    table="$(command -p ps -A -o pid= -o ppid= -o lstart= 2>/dev/null)" || return 0' \
+  't_descendants_started_reports_an_unreadable_table'
+shmutant_mut 'a failed etime table read lists no descendants and succeeds' \
+  '  table="$(command -p ps -A -o pid= -o ppid= -o etime= 2>/dev/null)" && [ -n "$table" ] || return 1' \
+  '  table="$(command -p ps -A -o pid= -o ppid= -o etime= 2>/dev/null)" || return 0' \
+  't_descendants_started_reports_an_unreadable_table'

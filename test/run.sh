@@ -3927,7 +3927,7 @@ EOF
   mkdir -p "$T/suite-nosnapshot/test"
   cp -- "$SHMUTANT" "$T/suite-nosnapshot/shmutant.sh"
   { sed '$d' "$T/suite/test/run.sh"
-    printf '%s\n' '_shmutant_descendants_started() { :; }' 'main "$@"'
+    printf '%s\n' '_shmutant_descendants_started() { return 1; }' 'main "$@"'
   } > "$T/suite-nosnapshot/test/run.sh"
   rm -f "$T/leaks.pid"
   out="$(SHMUTANT_SELECT=t_zz_leaks bash "$T/suite-nosnapshot/test/run.sh" 2>&1)"; rc_is $? 1 'a unit whose descendants could not be listed fails'
@@ -4034,6 +4034,26 @@ t_group_kill_skips_a_group_its_holder_no_longer_holds() {
   kill -KILL "$holder" 2>/dev/null; wait_gone "$holder"
 }
 
+# shellcheck disable=SC2034
+t_descendants_started_reports_an_unreadable_table() {
+  # A failed process-table read must be told apart from a pid with no descendants. The table always
+  # lists the caller, so an empty or failed read returns 1, in each of the three reading modes.
+  sleep 30 > /dev/null 2>&1 & local lone=$!
+  local out rc
+  out="$(_shmutant_descendants_started "$lone")"; rc=$?
+  rc_is "$rc" 0 'a pid with no descendants is a working read'
+  eq "$out" '' 'and lists nothing'
+  ( SHMUTANT_PROC=1; _shmutant_proc_table() { :; }
+    _shmutant_descendants_started "$lone" > /dev/null ) && fail_ 'an unreadable /proc table was reported as a pid with no descendants'
+  ( SHMUTANT_PROC=0; SHMUTANT_PS_LSTART=1
+    command() { case "$*" in *'-A -o pid= -o ppid= -o lstart='*) return 1 ;; esac; builtin command "$@"; }
+    _shmutant_descendants_started "$lone" > /dev/null ) && fail_ 'a failed lstart table read was reported as a pid with no descendants'
+  ( SHMUTANT_PROC=0; SHMUTANT_PS_LSTART=0
+    command() { case "$*" in *'-A -o pid= -o ppid= -o etime='*) return 1 ;; esac; builtin command "$@"; }
+    _shmutant_descendants_started "$lone" > /dev/null ) && fail_ 'a failed etime table read was reported as a pid with no descendants'
+  kill -KILL "$lone" 2>/dev/null; wait "$lone" 2>/dev/null
+}
+
 t_wait_gone_takes_a_zombie_as_gone() {
   # A child that has exited but was never reaped still answers `kill -0`, as a reparented one does
   # forever under a PID 1 that does not reap. Its parent here execs into a sleep, which never waits.
@@ -4058,22 +4078,12 @@ t_wait_gone_takes_a_zombie_as_gone() {
 
 # unit_snapshot <pid> — print `pid:identity` for each live descendant of <pid>, taking ancestry and
 # start identity from the same process-table read, so a child forked between two reads is never
-# listed without its identity. When that read lists nothing, a second read of the whole table must
-# show <pid> childless as well, or the line `unverified` is printed: a failed read must not look like
-# a unit that left nothing. That second read leaves out its own subshell, a child of <pid> when this
-# runs in the unit's own EXIT trap.
+# listed without its identity; or the line `unverified` when that read failed. Only the read's own
+# status says so: a second read would race whatever the unit forks in between.
 unit_snapshot() {
-  local out table
-  out="$(_shmutant_descendants_started "$1")"
-  if [ -n "$out" ]; then
-    printf '%s\n' "$out" | command -p sed 's/ /:/'
-    return 0
-  fi
-  if ! table="$(printf 'self %s\n' "$BASHPID"; command -p ps -A -o pid= -o ppid= 2>/dev/null)" \
-     || ! printf '%s\n' "$table" | command -p awk 'NR > 1 { n++ } END { exit !n }' \
-     || printf '%s\n' "$table" | command -p awk -v r="$1" 'NR == 1 { self = $2; next } $2 == r && $1 != self { f = 1 } END { exit !f }'; then
-    printf 'unverified\n'
-  fi
+  local out
+  out="$(_shmutant_descendants_started "$1")" || { printf 'unverified\n'; return 0; }
+  [ -z "$out" ] || printf '%s\n' "$out" | command -p sed 's/ /:/'
   return 0
 }
 

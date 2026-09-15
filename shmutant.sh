@@ -640,10 +640,13 @@ _shmutant_proc_table() {
 
 # _shmutant_descendants_started <pid> — print `pid start` for every descendant of <pid>, from one
 # `ps -A -o pid= -o ppid= -o etime=` pass, so each is carried with the identity it had when found.
+# Returns 1 when that process table cannot be read: it always lists the caller, so an empty read is
+# a failed one, which a caller can then tell from a pid with no descendants (0, nothing printed).
 _shmutant_descendants_started() {
   local table now
   if [ "${SHMUTANT_PROC:-}" = 1 ]; then
-    _shmutant_proc_table | command -p awk -v root="$1" '
+    table="$(_shmutant_proc_table)"; [ -n "$table" ] || return 1
+    printf '%s\n' "$table" | command -p awk -v root="$1" '
       { i++; child[i] = $1; parent[i] = $2; start[i] = $3 }
       END {
         want[root] = 1
@@ -656,7 +659,8 @@ _shmutant_descendants_started() {
     return 0
   fi
   if [ "${SHMUTANT_PS_LSTART:-}" != 0 ] && _shmutant_identity "$$" > /dev/null && [ "${SHMUTANT_PS_LSTART:-}" = 1 ]; then
-    command -p ps -A -o pid= -o ppid= -o lstart= 2>/dev/null | command -p awk -v root="$1" '
+    table="$(command -p ps -A -o pid= -o ppid= -o lstart= 2>/dev/null)" && [ -n "$table" ] || return 1
+    printf '%s\n' "$table" | command -p awk -v root="$1" '
       NF > 2 && $1 ~ /^[0-9]+$/ { i++; child[i] = $1; parent[i] = $2; $1 = ""; $2 = ""; sub(/^ +/, ""); start[i] = $0 }
       END {
         want[root] = 1
@@ -668,7 +672,7 @@ _shmutant_descendants_started() {
       }'
     return 0
   fi
-  table="$(command -p ps -A -o pid= -o ppid= -o etime= 2>/dev/null)" || return 0
+  table="$(command -p ps -A -o pid= -o ppid= -o etime= 2>/dev/null)" && [ -n "$table" ] || return 1
   now="$(_shmutant_now)"; now=$(( now / 1000000 ))
   printf '%s\n' "$table" | command -p awk -v root="$1" -v now="$now" '
     NF == 3 && $1 ~ /^[0-9]+$/ {
