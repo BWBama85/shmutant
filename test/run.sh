@@ -3855,6 +3855,7 @@ t_suite_sweeps_what_a_unit_leaves_behind() {
   t_zz_leaks() { set -m; sleep 30 > /dev/null 2>&1 & echo \$! > '$T/leaks.pid'; set +m; }
   t_zz_leaks_then_exits() { sleep 30 > /dev/null 2>&1 & echo \$! > '$T/leaks_then_exits.pid'; exit 0; }
   t_zz_reparents() { ( sleep 30 > /dev/null 2>&1 & echo \$! > '$T/reparents.pid'; sleep 2 ); sleep 0.3; }
+  t_zz_late_reparents() { sleep 1.2; printf '%s\n' "\$BASHPID" > '$T/late_reparents.flag'; ( sleep 30 > /dev/null 2>&1 & echo \$! > '$T/late_reparents.pid'; sleep 1 ); sleep 0.3; }
   t_zz_clean() { sleep 0.2 & wait; }
 main "\$@"
 EOF
@@ -3922,17 +3923,29 @@ EOF
   has "$out" 'FAIL: t_zz_leaks_then_exits: its leftovers kept forking through every freeze pass' 'and says so'
   pid="$(cat "$T/leaks_then_exits.pid" 2>/dev/null)"
   [ -z "$pid" ] || { kill -KILL "$pid" 2>/dev/null; wait_gone "$pid"; }
-  # An identity table that cannot be read while the unit runs records nothing: that is unverified.
+  # A process table the sampling cannot read records nothing: that is unverified, never clean.
   mkdir -p "$T/suite-nosnapshot/test"
   cp -- "$SHMUTANT" "$T/suite-nosnapshot/shmutant.sh"
   { sed '$d' "$T/suite/test/run.sh"
-    printf '%s\n' 'eval "_real_table() $(declare -f _shmutant_identity_table | sed 1d)"' \
-      '_shmutant_identity_table() { if [ "${FUNCNAME[1]}" != unit_leftovers ]; then SHMUTANT_START=(); return 0; fi; _real_table; }' 'main "$@"'
+    printf '%s\n' '_shmutant_descendants_started() { :; }' 'main "$@"'
   } > "$T/suite-nosnapshot/test/run.sh"
-  rm -f "$T/leaks_then_exits.pid"
-  out="$(SHMUTANT_SELECT=t_zz_leaks_then_exits bash "$T/suite-nosnapshot/test/run.sh" 2>&1)"; rc_is $? 1 'a unit sampled only while the identity table could not be read fails'
-  has "$out" 'FAIL: t_zz_leaks_then_exits: the process table could not be read' 'and its leftovers are reported unverified'
-  pid="$(cat "$T/leaks_then_exits.pid" 2>/dev/null)"
+  rm -f "$T/leaks.pid"
+  out="$(SHMUTANT_SELECT=t_zz_leaks bash "$T/suite-nosnapshot/test/run.sh" 2>&1)"; rc_is $? 1 'a unit whose descendants could not be listed fails'
+  has "$out" 'FAIL: t_zz_leaks: the process table could not be read' 'and its leftovers are reported unverified'
+  pid="$(cat "$T/leaks.pid" 2>/dev/null)"
+  [ -z "$pid" ] || { kill -KILL "$pid" 2>/dev/null; wait_gone "$pid"; }
+  # An identity the sampler can no longer read later in the unit is retried, then recorded as
+  # unverified: a sampler that stopped silently would miss what the rest of the unit leaves behind.
+  mkdir -p "$T/suite-latesampler/test"
+  cp -- "$SHMUTANT" "$T/suite-latesampler/shmutant.sh"
+  { sed '$d' "$T/suite/test/run.sh"
+    printf '%s\n' 'eval "_real_identity() $(declare -f _shmutant_identity | sed 1d)"' \
+      "_shmutant_identity() { if [ -s '$T/late_reparents.flag' ] && [ \"\$1\" = \"\$(cat '$T/late_reparents.flag')\" ]; then return 1; fi; _real_identity \"\$@\"; }" 'main "$@"'
+  } > "$T/suite-latesampler/test/run.sh"
+  rm -f "$T/late_reparents.pid" "$T/late_reparents.flag"
+  out="$(SHMUTANT_SELECT=t_zz_late_reparents bash "$T/suite-latesampler/test/run.sh" 2>&1)"; rc_is $? 1 'a unit whose identity the sampler can no longer read fails'
+  has "$out" 'FAIL: t_zz_late_reparents: the process table could not be read' 'and its leftovers are reported unverified'
+  pid="$(cat "$T/late_reparents.pid" 2>/dev/null)"
   [ -z "$pid" ] || { kill -KILL "$pid" 2>/dev/null; wait_gone "$pid"; }
   out="$(SHMUTANT_SELECT=t_zz_clean bash "$T/suite/test/run.sh" 2>&1)"; rc_is $? 0 'a unit that waits for its children passes'
   has "$out" '0 leftover process(es) swept' 'a clean unit reports zero'
@@ -3988,6 +4001,39 @@ t_cli_sampler_never_signals_a_reaped_sleep() {
   if [ -s "$T/stale" ]; then fail_ "the sampler's trap signalled a sleep it had already reaped (pid $(head -n 1 "$T/stale"))"; fi
 }
 
+t_unit_snapshot_reads_ancestry_and_identity_together() {
+  # A child forked between an identity read and a separate walk would be listed without an identity
+  # and skipped. The snapshot takes both from one read, so an identity table lacking the child
+  # changes nothing.
+  sleep 30 > /dev/null 2>&1 & local child=$!
+  local me=$BASHPID out
+  out="$( _shmutant_identity_table() { SHMUTANT_START=([1]=not-the-child); }; unit_snapshot "$me" )"
+  printf '%s\n' "$out" | grep -q "^$child:" || fail_ "a child the identity table lacks was not recorded by the snapshot: [$out]"
+  kill -KILL "$child" 2>/dev/null; wait "$child" 2>/dev/null
+}
+
+# shellcheck disable=SC2034
+t_group_kill_skips_a_group_its_holder_no_longer_holds() {
+  # A holder continued after the group stop reads its end-of-file and goes when no writer is left,
+  # and the group number it reserved is then free to be reused: the final KILL must not be sent to it.
+  mkdir -p "$T/d"
+  ( exec {vf}>|"$T/chan"; SHMUTANT_VERDICT_FD="$vf"
+    cb() { : > "$T/started"; sleep 30; }
+    SHMUTANT_TIMEOUT=0 _shmutant_run_bounded "$T/d" cb "$T/d" sel ) > /dev/null 2>&1 & local outer=$!
+  wait_for "$T/started" || { fail_ 'the callback never started'; _shmutant_kill_tree KILL "$outer" "$outer:"; wait "$outer" 2>/dev/null; return; }
+  local grp holder holderid
+  read -r _ grp holder holderid < <(awk '$1 == "group" { print; exit }' "$T/chan")
+  if [ -z "$holder" ] || ! kill -0 "$holder" 2>/dev/null; then fail_ 'no live holder was published'; _shmutant_kill_tree KILL "$outer" "$outer:"; wait "$outer" 2>/dev/null; return; fi
+  # stranded: stopped by an earlier freeze that was cut short, and then every writer ended
+  kill -STOP "$holder"
+  _shmutant_kill_tree KILL "$outer" "$outer:"; wait "$outer" 2>/dev/null
+  ( _shmutant_freeze_from() { wait_gone "$holder"; }
+    kill() { case " $* " in *" -KILL "*" -$grp "*) printf 'x\n' >> "$T/group-killed" ;; esac; builtin kill "$@"; }
+    _shmutant_kill_tree_twice -g "$grp" "$grp:" ) 2>/dev/null
+  if [ -e "$T/group-killed" ]; then fail_ 'the group was signalled by number after its holder had gone'; fi
+  kill -KILL "$holder" 2>/dev/null; wait_gone "$holder"
+}
+
 t_wait_gone_takes_a_zombie_as_gone() {
   # A child that has exited but was never reaped still answers `kill -0`, as a reparented one does
   # forever under a PID 1 that does not reap. Its parent here execs into a sleep, which never waits.
@@ -4010,17 +4056,24 @@ t_wait_gone_takes_a_zombie_as_gone() {
 
 # --- runner -----------------------------------------------------------------------------------------------
 
-# unit_snapshot <pid> — print `pid:identity` for each live descendant of <pid>, read against one
-# identity table, or the line `unverified` when that table cannot be read: a sample that recorded
-# nothing because the read failed must not look like a unit that left nothing.
+# unit_snapshot <pid> — print `pid:identity` for each live descendant of <pid>, taking ancestry and
+# start identity from the same process-table read, so a child forked between two reads is never
+# listed without its identity. When that read lists nothing, a second read of the whole table must
+# show <pid> childless as well, or the line `unverified` is printed: a failed read must not look like
+# a unit that left nothing. That second read leaves out its own subshell, a child of <pid> when this
+# runs in the unit's own EXIT trap.
 unit_snapshot() {
-  local p
-  local -A SHMUTANT_START=()
-  _shmutant_identity_table
-  if [ "${#SHMUTANT_START[@]}" -eq 0 ]; then printf 'unverified\n'; return 0; fi
-  while IFS= read -r p; do
-    [ -n "$p" ] && [ -n "${SHMUTANT_START[$p]:-}" ] && printf '%s:%s\n' "$p" "${SHMUTANT_START[$p]}"
-  done < <(_shmutant_descendants "$1")
+  local out table
+  out="$(_shmutant_descendants_started "$1")"
+  if [ -n "$out" ]; then
+    printf '%s\n' "$out" | command -p sed 's/ /:/'
+    return 0
+  fi
+  if ! table="$(printf 'self %s\n' "$BASHPID"; command -p ps -A -o pid= -o ppid= 2>/dev/null)" \
+     || ! printf '%s\n' "$table" | command -p awk 'NR > 1 { n++ } END { exit !n }' \
+     || printf '%s\n' "$table" | command -p awk -v r="$1" 'NR == 1 { self = $2; next } $2 == r && $1 != self { f = 1 } END { exit !f }'; then
+    printf 'unverified\n'
+  fi
   return 0
 }
 
@@ -4033,7 +4086,7 @@ unit_snapshot() {
 # Returns 3 when the unit is still running but its identity cannot be read, so nothing could be
 # sampled; a unit already gone by then has nothing to sample, and that is not a failure.
 sample_unit() {
-  local up id="" i
+  local up id="" now="" i
   IFS= read -r up <&"$1" || return 0
   case "$up" in ''|*[!0-9]*) return 0 ;; esac
   for (( i = 0; i < 10; i++ )); do
@@ -4042,7 +4095,17 @@ sample_unit() {
     command -p sleep 0.05
   done
   if [ -z "$id" ]; then kill -0 "$up" 2>/dev/null && return 3; return 0; fi
-  while _shmutant_alive_since "$up" "$id"; do
+  while :; do
+    # An identity that cannot be read while the unit still runs is retried, then recorded as
+    # unverified: a sampler that stopped silently would leave the rest of the unit unsampled.
+    now="$(_shmutant_identity "$up")" || now=""
+    for (( i = 0; i < 10 && ${#now} == 0; i++ )); do
+      kill -0 "$up" 2>/dev/null || return 0
+      command -p sleep 0.05
+      now="$(_shmutant_identity "$up")" || now=""
+    done
+    if [ -z "$now" ]; then kill -0 "$up" 2>/dev/null && printf 'unverified\n'; return 0; fi
+    _shmutant_same_start "$now" "$id" || return 0
     unit_snapshot "$up"
     IFS= read -t 0.5 -r _ <&"$1" && break
   done

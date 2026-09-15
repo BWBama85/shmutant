@@ -1612,3 +1612,7 @@ shmutant_mut 'the CLI sampler keeps the pid of a sleep it already reaped' \
   't_cli_sampler_never_signals_a_reaped_sleep'
 # (no row on the run watchdog clearing its sleep pid after the wait: that loop lives inside
 # _shmutant_run_bounded, and no unit can land a TERM between two of its polls deterministically)
+shmutant_mut 'the group is signalled after its holder has gone' \
+  '  if [ -n "${SHMUTANT_KILL_GROUP:-}" ] && { [ -z "${holder:-}" ] || kill -0 "$holder" 2>/dev/null; }; then' \
+  '  if [ -n "${SHMUTANT_KILL_GROUP:-}" ]; then' \
+  't_group_kill_skips_a_group_its_holder_no_longer_holds'

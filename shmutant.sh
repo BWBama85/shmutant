@@ -971,8 +971,12 @@ _shmutant_kill_tree() {
     mapfile -t now < <(_shmutant_descendants "$pid")
     for p in "${now[@]}"; do [ -n "$p" ] && targets+=("$p"); done
   fi
-  # The group is the run's only while its holder lives, which the caller has checked.
-  [ -n "${SHMUTANT_KILL_GROUP:-}" ] && targets=(-"$SHMUTANT_KILL_GROUP" "${targets[@]}")
+  # The group is the run's only while its holder lives. Checked again here: a holder continued after
+  # the group stop may have read its end-of-file and gone, and a group number nothing reserves may
+  # belong to someone else by now. A zombie holder still reserves it.
+  if [ -n "${SHMUTANT_KILL_GROUP:-}" ] && { [ -z "${holder:-}" ] || kill -0 "$holder" 2>/dev/null; }; then
+    targets=(-"$SHMUTANT_KILL_GROUP" "${targets[@]}")
+  fi
   [ "${#targets[@]}" -gt 0 ] || return 0
   kill "-$sig" -- "${targets[@]}" 2>/dev/null
 }
