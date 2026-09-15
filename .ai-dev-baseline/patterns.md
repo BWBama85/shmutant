@@ -424,4 +424,26 @@ One line per resolved review thread, newest last.
 - `stale-artifact-reuse` `shmutant.sh` `1aa1b43` `PRRT_kwDOUT7q9s6h5ojR` PR #1 2026-09-13
 - `timeout-escalation-cancelled` `shmutant.sh` `1aa1b43` `PRRT_kwDOUT7q9s6h5ojU` PR #1 2026-09-13
 - `rewrite-loses-file-shape` `shmutant.sh` `1aa1b43` `PRRT_kwDOUT7q9s6h5ojY` PR #1 2026-09-13
+- `path-lookup-ambiguity` `test/run.sh:3909` `ba400d0` `PRRT_kwDOUT7q9s6iRl3B` PR #4 2026-09-14 — the sweep path stayed relative under a relative TMPDIR, so the unit EXIT-trap snapshot was written beneath the unit directory
+- `contract-not-honoured` `test/run.sh:59` `ba400d0` `PRRT_kwDOUT7q9s6iRl2-` PR #4 2026-09-14 — wait_gone waited on kill -0, which a reparented zombie answers forever under a PID 1 that never reaps
+- `write-failure-swallowed` `test/run.sh:3934` `73decc9` `PRRT_kwDOUT7q9s6iTP5k` PR #4 2026-09-14 — unit_leftovers dropped every verified leftover when its ps state read failed, so a failed read reported the unit clean
+- `write-failure-swallowed` `test/run.sh:3942` `1e25b67` `PRRT_kwDOUT7q9s6iTo9M` PR #4 2026-09-14 — an empty identity table dropped every recorded pid before the fail-closed state read, so the unit passed with live leftovers
+- `timeout-escalation-cancelled` `shmutant.sh:906` `1e25b67` `PRRT_kwDOUT7q9s6iTo9R` PR #4 2026-09-14 — an identity re-check between the group stop and the holder continue widened the window a killer could die in, leaving the holder stopped
+- `write-failure-swallowed` `test/run.sh:3998` `1e25b67` `PRRT_kwDOUT7q9s6iTo9U` PR #4 2026-09-14 — the sweep reported leftovers killed and swept without checking the kill reached them
+- `contract-not-honoured` `test/run.sh:3945` `1e25b67` `PRRT_kwDOUT7q9s6iTo9W` PR #4 2026-09-14 — leftovers were deduplicated by pid alone, so a reused pid kept the stale identity and the live process went unchecked
+- `write-failure-swallowed` `test/run.sh:3956` `18c9b95` `PRRT_kwDOUT7q9s6iUAqX` PR #4 2026-09-14 — a sampler whose identity lookup failed returned success, so a unit it never sampled was reported clean
+- `write-failure-swallowed` `test/run.sh:4038` `18c9b95` `PRRT_kwDOUT7q9s6iUAqa` PR #4 2026-09-14 — the sweep gave the kill no report channel, so a freeze that never settled was accepted as a clean kill
+- `write-failure-swallowed` `test/run.sh:4007` `e1c76ef` `PRRT_kwDOUT7q9s6iUYzA` PR #4 2026-09-14 — samples taken while the identity table could not be read recorded nothing, so an empty record passed a unit that leaked
+- `contract-not-honoured` `shmutant.sh:2736` `e1c76ef` `PRRT_kwDOUT7q9s6iUYzH` PR #4 2026-09-14 — the CLI sampler trap signalled the pid of a sleep it had already reaped, which may belong to another process by then
+- `write-failure-swallowed` `test/run.sh:4045` `3a9d1b8` `PRRT_kwDOUT7q9s6iUwF-` PR #4 2026-09-15 — a later identity read that failed while the unit still ran ended the sampling silently, so what the unit left afterwards was never recorded
+- `write-failure-swallowed` `test/run.sh:4023` `3a9d1b8` `PRRT_kwDOUT7q9s6iUwGB` PR #4 2026-09-15 — a descendant listing whose ps read failed looked like an empty tree, so the snapshot recorded nothing and no marker
+- `contract-not-honoured` `test/run.sh:4019` `3a9d1b8` `PRRT_kwDOUT7q9s6iUwGD` PR #4 2026-09-15 — the snapshot took identities and ancestry from two reads, so a child forked between them was listed without an identity and skipped
+- `contract-not-honoured` `shmutant.sh:907` `3a9d1b8` `PRRT_kwDOUT7q9s6iUwGG` PR #4 2026-09-15 — the final group KILL was sent by number after the continued holder could have exited, when the group number was no longer reserved
+- `contract-not-honoured` `test/run.sh:4179` `1ff2c7e` `PRRT_kwDOUT7q9s6iVP5X` PR #4 2026-09-15 — the sampler was handed only the unit pid, so a reused number let it sample a stranger descendants
+- `write-failure-swallowed` `test/run.sh:4190` `1ff2c7e` `PRRT_kwDOUT7q9s6iVP5b` PR #4 2026-09-15 — only sampler status 3 failed the unit, so a sampler killed from outside stopped recording and the unit passed
+- `contract-not-honoured` `shmutant.sh:982` `1ff2c7e` `PRRT_kwDOUT7q9s6iVP5e` PR #4 2026-09-15 — the final group check accepted any live pid at the holder number without checking the holder identity
+- `write-failure-swallowed` `shmutant.sh:814` `1ff2c7e` `PRRT_kwDOUT7q9s6iVP5h` PR #4 2026-09-15 — the freeze read the descendant listing through a process substitution, so a failed listing looked like no children
+- `write-failure-swallowed` `test/run.sh:4261` `0d77c9e` `PRRT_kwDOUT7q9s6iVkNI` PR #4 2026-09-15 — a unit whose identity reads all failed sent an empty identity, and a late sampler then recorded nothing
+- `contract-not-honoured` `test/run.sh:4222` `0d77c9e` `PRRT_kwDOUT7q9s6iVkNK` PR #4 2026-09-15 — leftovers were deduplicated by whole line, so one pid sampled under two etime identities was counted twice
+- `contract-not-honoured` `test/run.sh:64` `0d77c9e` `PRRT_kwDOUT7q9s6iVkNN` PR #4 2026-09-15 — wait_gone followed a pid by number only, so a reused number was waited on and then killed
 <!-- adb:hits:end -->

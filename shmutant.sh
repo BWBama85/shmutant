@@ -640,10 +640,13 @@ _shmutant_proc_table() {
 
 # _shmutant_descendants_started <pid> — print `pid start` for every descendant of <pid>, from one
 # `ps -A -o pid= -o ppid= -o etime=` pass, so each is carried with the identity it had when found.
+# Returns 1 when that process table cannot be read: it always lists the caller, so an empty read is
+# a failed one, which a caller can then tell from a pid with no descendants (0, nothing printed).
 _shmutant_descendants_started() {
   local table now
   if [ "${SHMUTANT_PROC:-}" = 1 ]; then
-    _shmutant_proc_table | command -p awk -v root="$1" '
+    table="$(_shmutant_proc_table)"; [ -n "$table" ] || return 1
+    printf '%s\n' "$table" | command -p awk -v root="$1" '
       { i++; child[i] = $1; parent[i] = $2; start[i] = $3 }
       END {
         want[root] = 1
@@ -656,7 +659,8 @@ _shmutant_descendants_started() {
     return 0
   fi
   if [ "${SHMUTANT_PS_LSTART:-}" != 0 ] && _shmutant_identity "$$" > /dev/null && [ "${SHMUTANT_PS_LSTART:-}" = 1 ]; then
-    command -p ps -A -o pid= -o ppid= -o lstart= 2>/dev/null | command -p awk -v root="$1" '
+    table="$(command -p ps -A -o pid= -o ppid= -o lstart= 2>/dev/null)" && [ -n "$table" ] || return 1
+    printf '%s\n' "$table" | command -p awk -v root="$1" '
       NF > 2 && $1 ~ /^[0-9]+$/ { i++; child[i] = $1; parent[i] = $2; $1 = ""; $2 = ""; sub(/^ +/, ""); start[i] = $0 }
       END {
         want[root] = 1
@@ -668,7 +672,7 @@ _shmutant_descendants_started() {
       }'
     return 0
   fi
-  table="$(command -p ps -A -o pid= -o ppid= -o etime= 2>/dev/null)" || return 0
+  table="$(command -p ps -A -o pid= -o ppid= -o etime= 2>/dev/null)" && [ -n "$table" ] || return 1
   now="$(_shmutant_now)"; now=$(( now / 1000000 ))
   printf '%s\n' "$table" | command -p awk -v root="$1" -v now="$now" '
     NF == 3 && $1 ~ /^[0-9]+$/ {
@@ -802,13 +806,19 @@ _shmutant_same_start() {
 # _shmutant_freeze_from — stop every descendant of the pids in `roots`, repeatedly, until a pass
 # finds nothing new; appends what it stopped to `frozen`/`have`. Shares its caller's arrays.
 _shmutant_freeze_from() {
-  local r p new rounds=0
+  local r p new rounds=0 out
   local -a found=() pids=()
   while :; do
     new=0
     for r in "${roots[@]}"; do
-      mapfile -t found < <(_shmutant_descendants_started "$r")
-      [ "${#found[@]}" -gt 0 ] || continue
+      # A listing that could not be read has not reached this root's children, so the freeze is not
+      # settled; on a host with no listing at all, the group is all a kill can reach.
+      if ! out="$(_shmutant_descendants_started "$r")"; then
+        _shmutant_can_list && SHMUTANT_FREEZE_UNSETTLED=1
+        continue
+      fi
+      [ -n "$out" ] || continue
+      mapfile -t found <<< "$out"
       pids=()
       for p in "${found[@]}"; do [ -n "$p" ] && pids+=("${p%% *}"); done
       kill -STOP "${pids[@]}" 2>/dev/null
@@ -826,6 +836,11 @@ _shmutant_freeze_from() {
     # reach; the bound is recorded, not endured in silence.
     if [ "$rounds" -ge 32 ]; then SHMUTANT_FREEZE_UNSETTLED=1; break; fi
   done
+}
+
+# _shmutant_can_list — succeeds where a process listing can be read at all: /proc, or a ps.
+_shmutant_can_list() {
+  [ "${SHMUTANT_PROC:-}" = 1 ] || command -p -v ps > /dev/null 2>&1
 }
 
 # _shmutant_frozen_only <pid start>… — after a bulk stop, SHMUTANT_FROZEN_NOW holds the pids
@@ -899,6 +914,12 @@ _shmutant_kill_tree_twice() {
   # or not the root has been reaped, ps or no ps.
   if [ -n "$held" ]; then
     kill -STOP -- -"$held" 2>/dev/null
+    # The caller's holder is in that group and only blocks on a read: continued in the very next
+    # command, so a freeze cut short before its KILL leaves it running to its end-of-file rather
+    # than stopped where none can reach it. The caller verified it just before (_shmutant_held_group),
+    # the check the group stop itself relies on; a KILL landing between these two commands still
+    # leaves it stopped.
+    [ -z "${holder:-}" ] || kill -CONT "$holder" 2>/dev/null
     SHMUTANT_KILL_GROUP="$held"
   fi
   # The root's tree first, before any identity work: every pass is one ps and one bulk stop.
@@ -965,8 +986,16 @@ _shmutant_kill_tree() {
     mapfile -t now < <(_shmutant_descendants "$pid")
     for p in "${now[@]}"; do [ -n "$p" ] && targets+=("$p"); done
   fi
-  # The group is the run's only while its holder lives, which the caller has checked.
-  [ -n "${SHMUTANT_KILL_GROUP:-}" ] && targets=(-"$SHMUTANT_KILL_GROUP" "${targets[@]}")
+  # The group is the run's only while its holder lives. Checked again here: a holder continued after
+  # the group stop may have read its end-of-file and gone, and a group number nothing reserves may
+  # belong to someone else by now. A zombie holder still reserves it.
+  if [ -n "${SHMUTANT_KILL_GROUP:-}" ] && { [ -z "${holder:-}" ] || kill -0 "$holder" 2>/dev/null; }; then
+    # A live pid at that number is the holder only while it carries the holder's identity, where one
+    # can be read now: the same test _shmutant_held_group applied before the stop.
+    if [ -z "${holder:-}" ] || [ -z "${holderid:-}" ] || ! _shmutant_identity "$holder" > /dev/null || _shmutant_alive_since "$holder" "$holderid"; then
+      targets=(-"$SHMUTANT_KILL_GROUP" "${targets[@]}")
+    fi
+  fi
   [ "${#targets[@]}" -gt 0 ] || return 0
   kill "-$sig" -- "${targets[@]}" 2>/dev/null
 }
@@ -991,7 +1020,7 @@ _shmutant_snapshot() {
 # control on, bash reports the reaped job there when the pool itself runs under `$(...)`.
 _shmutant_run_bounded() {
   local dir="$1" run="$2" root="$3" sel="$4" wit="${5:-}" timeout mark fifo fd left seen outf line
-  local left_w left_r seen_w seen_r fired out_w out_r out_r2 hold hp go holder holderid err_fd l kept
+  local left_w left_r seen_w seen_r fired out_w out_r out_r2 hold hold_r hp go holder holderid err_fd l kept
   timeout="$(_shmutant_pos_int "${SHMUTANT_TIMEOUT:-300}")" || timeout=0
   SHMUTANT_RUN_FIRED=0; SHMUTANT_RUN_RED=0; SHMUTANT_RUN_WITNESSED=0; SHMUTANT_RUN_UNSETTLED=0; SHMUTANT_RUN_PUBLISHED=1
   # Until the runner reports its own status the run has not started: a setup failure (a channel
@@ -1011,9 +1040,9 @@ _shmutant_run_bounded() {
   fifo="$mark.fired"
   { command -p mkfifo -- "$fifo" "$mark.hold" "$mark.hp" "$mark.go"; } 2>/dev/null \
     || { command -p rm -f -- "$mark" "$left" "$seen" "$outf" "$fifo" "$mark.hold" "$mark.hp" "$mark.go"; return 0; }
-  if ! exec {left_w}>|"$left" {left_r}<"$left" {seen_w}>|"$seen" {seen_r}<"$seen" {fired}<>"$fifo" {out_w}>|"$outf" {out_r}<"$outf" {out_r2}<"$outf" {hold}<>"$mark.hold" {hp}<>"$mark.hp" {go}<>"$mark.go" {err_fd}>&2; then
+  if ! exec {left_w}>|"$left" {left_r}<"$left" {seen_w}>|"$seen" {seen_r}<"$seen" {fired}<>"$fifo" {out_w}>|"$outf" {out_r}<"$outf" {out_r2}<"$outf" {hold}<>"$mark.hold" {hold_r}<"$mark.hold" {hp}<>"$mark.hp" {go}<>"$mark.go" {err_fd}>&2; then
     # A partial open (a descriptor limit) is a setup failure, not a run: close what did open.
-    for fd in "${left_w:-}" "${left_r:-}" "${seen_w:-}" "${seen_r:-}" "${fired:-}" "${out_w:-}" "${out_r:-}" "${out_r2:-}" "${hold:-}" "${hp:-}" "${go:-}" "${err_fd:-}"; do [ -n "$fd" ] && exec {fd}>&-; done
+    for fd in "${left_w:-}" "${left_r:-}" "${seen_w:-}" "${seen_r:-}" "${fired:-}" "${out_w:-}" "${out_r:-}" "${out_r2:-}" "${hold:-}" "${hold_r:-}" "${hp:-}" "${go:-}" "${err_fd:-}"; do [ -n "$fd" ] && exec {fd}>&-; done
     command -p rm -f -- "$mark" "$left" "$seen" "$outf" "$fifo" "$mark.hold" "$mark.hp" "$mark.go"; return 0
   fi
   # The capture too has no name while the run executes: it is read back through one descriptor
@@ -1034,10 +1063,13 @@ _shmutant_run_bounded() {
     # be stopped and killed by number after the wrapper has been reaped, with or without ps;
     # every such kill first checks the holder is still there. (Not a pipeline led by the holder:
     # `wait` on one member of a job waits for the whole job.)
+    # The holder reads a read-only descriptor and closes the writing end it inherits: it is
+    # reparented at birth, so no tree walk reaches it, and a run killed before the release below
+    # would otherwise leave it blocked for good. It ends once nothing of the run holds a writer.
     # A bare `exit` keeps the status it would have had: the snapshot runs first and must not
     # replace it.
     ( _shmutant_wrap_left="$left_w"
-      ( ( read -r _ <&"$hold" ) < /dev/null > /dev/null 2>&1 & printf '%s\n' "$!" >&"$hp" )
+      ( ( read -r _ <&"$hold_r" ) < /dev/null > /dev/null 2>&1 {hold}>&- & printf '%s\n' "$!" >&"$hp" )
       # No plan code until the runner has published this run's group and holder for the abort
       # path: an interrupt before that would find a run it could not name.
       read -t 30 -r _ <&"$go" || builtin exit 127
@@ -1082,6 +1114,8 @@ _shmutant_run_bounded() {
         while [ "$timeout" -eq 0 ] || [ "$elapsed" -lt "$budget" ]; do
           command -p sleep 0.5 & s=$!
           wait "$s"
+          # cleared once reaped: a TERM later in this poll must not signal a number reused since
+          s=""
           tnow=$(_shmutant_now); d=$(( tnow - last )); last=$tnow
           [ "$d" -lt 500000 ] && d=500000
           [ "$d" -gt 5000000 ] && d=5000000
@@ -1191,7 +1225,7 @@ _shmutant_run_bounded() {
       SHMUTANT_RUN_PUBLISHED=0
     fi
   fi
-  exec {left_w}>&- {left_r}<&- {seen_w}>&- {seen_r}<&- {fired}<&- {out_w}>&- {out_r}<&- {out_r2}<&- {hold}<&- {hp}<&- {go}<&- {err_fd}>&-
+  exec {left_w}>&- {left_r}<&- {seen_w}>&- {seen_r}<&- {fired}<&- {out_w}>&- {out_r}<&- {out_r2}<&- {hold}<&- {hold_r}<&- {hp}<&- {go}<&- {err_fd}>&-
 }
 
 # _shmutant_held_group <pgid> — set SHMUTANT_HELD to `-g <pgid>` when the run's holder is still
@@ -1864,7 +1898,7 @@ _shmutant_pool_locals_writable() {
     _shmutant_pool_t0 _shmutant_pool_wd after_ck base base_sel base_verdict cap cksum_bin clone_id comp copy d \
     dbg depth detail dir dirmode done_pid err_fd errexit_before etime f fd fifo \
     fired fmt found frozen go got grp h have held helpers here \
-    hms hold holder holderid hp i id intact jobs k kept key \
+    hms hold hold_r holder holderid hp i id intact jobs k kept key \
     killed kind kinds l label left left_r left_w line ls_bin m mark \
     mode ms mutate_aliases n new nl now out out_r out_r2 out_w outf \
     p parent path pending phys pid pids pool_aliases pout pout_r pout_w prc \
@@ -2723,7 +2757,9 @@ _shmutant_cli_run() {
     _shmutant_cli_load "$SHMUTANT_PLAN_DIR/$(command -p basename -- "$plan")"
   ) < /dev/null & SHMUTANT_CLI_CHILD=$!
   builtin set +m
-  ( while kill -0 "$SHMUTANT_CLI_CHILD" 2>/dev/null; do _shmutant_snapshot "$SHMUTANT_CLI_CHILD"; command -p sleep 0.5; done ) 1>&"$SHMUTANT_CLI_SEEN_W" 2>/dev/null < /dev/null & SHMUTANT_CLI_SAMPLER=$!
+  # Stopped with TERM: the trap ends the sleep in flight, which would otherwise outlive the run. Its
+  # pid is cleared once reaped, so the trap never signals a number that may have been reused since.
+  ( trap 'kill "$s" 2>/dev/null; exit 0' TERM; s=""; while kill -0 "$SHMUTANT_CLI_CHILD" 2>/dev/null; do _shmutant_snapshot "$SHMUTANT_CLI_CHILD"; command -p sleep 0.5 & s=$!; wait "$s"; s=""; done ) 1>&"$SHMUTANT_CLI_SEEN_W" 2>/dev/null < /dev/null & SHMUTANT_CLI_SAMPLER=$!
   SHMUTANT_CLI_CHILD_ID="$(_shmutant_identity "$SHMUTANT_CLI_CHILD" 2>/dev/null)" || SHMUTANT_CLI_CHILD_ID=""
   SHMUTANT_CLI_SPAWNING=0
   [ -z "${SHMUTANT_CLI_ABORT_PENDING:-}" ] || { local p="$SHMUTANT_CLI_ABORT_PENDING"; SHMUTANT_CLI_ABORT_PENDING=""; _shmutant_cli_abort "$p"; }
