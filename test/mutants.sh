@@ -698,7 +698,7 @@ shmutant_mut 'copy_tree reads its positionals before checking their count' \
   '  if [ -z "$1" ] || [ -z "$2" ]; then _shmutant_err "copy_tree: usage' \
   't_copy_tree_excludes_git'
 shmutant_mut 'no holder keeps the group in being after the wrapper' \
-  '      ( ( read -r _ <&"$hold" ) < /dev/null > /dev/null 2>&1 & printf '"'"'%s\n'"'"' "$!" >&"$hp" )' \
+  '      ( ( read -r _ <&"$hold_r" ) < /dev/null > /dev/null 2>&1 {hold}>&- & printf '"'"'%s\n'"'"' "$!" >&"$hp" )' \
   '      printf '"'"'\n'"'"' >&"$hp"' \
   't_returned_run_without_an_identity_is_still_cleaned_up'
 shmutant_mut 'the post-return cleanup does not use the held group' \
@@ -722,8 +722,8 @@ shmutant_mut 'dot components in the destination are created as typed' \
   '  :' \
   't_copy_tree_excludes_git'
 shmutant_mut 'the holder is a job of the wrapper' \
-  '      ( ( read -r _ <&"$hold" ) < /dev/null > /dev/null 2>&1 & printf '"'"'%s\n'"'"' "$!" >&"$hp" )' \
-  '      ( read -r _ <&"$hold" ) < /dev/null > /dev/null 2>&1 & printf '"'"'%s\n'"'"' "$!" >&"$hp"' \
+  '      ( ( read -r _ <&"$hold_r" ) < /dev/null > /dev/null 2>&1 {hold}>&- & printf '"'"'%s\n'"'"' "$!" >&"$hp" )' \
+  '      ( read -r _ <&"$hold_r" ) < /dev/null > /dev/null 2>&1 {hold}>&- & printf '"'"'%s\n'"'"' "$!" >&"$hp"' \
   't_callback_bare_wait_does_not_block_on_the_holder'
 
 # --- guards added for the twenty-second review round ---
@@ -1588,3 +1588,55 @@ shmutant_mut 'the stat-less fingerprint collapses spaces in names' \
 # (no row on the plan subshell's leave snapshot: whether its absence shows depends on whether the
 # half-second sampler happened to see the helper, so a row would be a coin flip; the unit
 # t_cli_ends_a_helper_that_left_the_plan_group went red without it, 2 runs of 3, on an idle host)
+
+# --- the run holder ends with its run (#2) ---
+shmutant_mut 'the run holder reads its own read-write descriptor' \
+  '( read -r _ <&"$hold_r" ) < /dev/null > /dev/null 2>&1 {hold}>&- &' \
+  '( read -r _ <&"$hold" ) < /dev/null > /dev/null 2>&1 &' \
+  't_run_holder_ends_with_a_killed_runner'
+shmutant_mut 'the run holder keeps the writing end it inherits' \
+  '( read -r _ <&"$hold_r" ) < /dev/null > /dev/null 2>&1 {hold}>&- &' \
+  '( read -r _ <&"$hold_r" ) < /dev/null > /dev/null 2>&1 &' \
+  't_run_holder_ends_with_a_killed_runner'
+# (no row on the CLI sampler ending its sleep when stopped: without the trap the sleep outlives the
+# run by at most half a second, and the per-unit sweep sees it only when the unit ends first, so a
+# row would be a coin flip; t_cli_keeps_the_workdir_a_plan_asked_to_keep_before_leaving went red
+# without it 2 runs of 5)
+shmutant_mut 'an interrupted freeze leaves the run holder stopped' \
+  '    [ -z "${holder:-}" ] || kill -CONT "$holder" 2>/dev/null' \
+  '      :' \
+  't_interrupted_freeze_does_not_leave_the_holder_stopped'
+shmutant_mut 'the CLI sampler keeps the pid of a sleep it already reaped' \
+  'wait "$s"; s=""; done )' \
+  'wait "$s"; done )' \
+  't_cli_sampler_never_signals_a_reaped_sleep'
+# (no row on the run watchdog clearing its sleep pid after the wait: that loop lives inside
+# _shmutant_run_bounded, and no unit can land a TERM between two of its polls deterministically)
+shmutant_mut 'the group is signalled after its holder has gone' \
+  '  if [ -n "${SHMUTANT_KILL_GROUP:-}" ] && { [ -z "${holder:-}" ] || kill -0 "$holder" 2>/dev/null; }; then' \
+  '  if [ -n "${SHMUTANT_KILL_GROUP:-}" ]; then' \
+  't_group_kill_skips_a_group_its_holder_no_longer_holds'
+shmutant_mut 'an unreadable listing in a freeze passes for a settled one' \
+  '        _shmutant_can_list && SHMUTANT_FREEZE_UNSETTLED=1' \
+  '        :' \
+  't_freeze_treats_an_unreadable_table_as_unsettled'
+shmutant_mut 'a host with no process listing counts every freeze as unsettled' \
+  '        _shmutant_can_list && SHMUTANT_FREEZE_UNSETTLED=1' \
+  '        SHMUTANT_FREEZE_UNSETTLED=1' \
+  't_freeze_without_any_listing_is_not_unsettled'
+shmutant_mut 'the group kill takes any live pid at the holder number for the holder' \
+  '! _shmutant_identity "$holder" > /dev/null || _shmutant_alive_since "$holder" "$holderid"; then' \
+  '! _shmutant_identity "$holder" > /dev/null || :; then' \
+  't_group_kill_checks_the_holder_identity'
+shmutant_mut 'an unreadable /proc table lists no descendants and succeeds' \
+  '    table="$(_shmutant_proc_table)"; [ -n "$table" ] || return 1' \
+  '    table="$(_shmutant_proc_table)"' \
+  't_descendants_started_reports_an_unreadable_table'
+shmutant_mut 'a failed lstart table read lists no descendants and succeeds' \
+  '    table="$(command -p ps -A -o pid= -o ppid= -o lstart= 2>/dev/null)" && [ -n "$table" ] || return 1' \
+  '    table="$(command -p ps -A -o pid= -o ppid= -o lstart= 2>/dev/null)" || return 0' \
+  't_descendants_started_reports_an_unreadable_table'
+shmutant_mut 'a failed etime table read lists no descendants and succeeds' \
+  '  table="$(command -p ps -A -o pid= -o ppid= -o etime= 2>/dev/null)" && [ -n "$table" ] || return 1' \
+  '  table="$(command -p ps -A -o pid= -o ppid= -o etime= 2>/dev/null)" || return 0' \
+  't_descendants_started_reports_an_unreadable_table'

@@ -6,3 +6,18 @@ bots = ["chatgpt-codex-connector"]
 # Uncapped re-review rounds: the resolve loop runs until the reviewer passes or another terminal
 # guard fires. Recorded as D1 in .ai-dev-baseline/decisions.md.
 max_rounds = 0
+
+# Gate detection finds no ecosystem in a bash-only repository, so the CI checks are declared here
+# (D2). Each command runs under `sh -c` from the repository root.
+[gates]
+lint = "shellcheck --severity=warning -e SC1091 shmutant.sh test/run.sh test/mutants.sh"
+checksum = "bash shmutant.sh checksum | sed 's/$/  shmutant.sh/' | diff - CHECKSUMS"
+test = "bash test/run.sh"
+
+# The suite takes about ten minutes: it runs in a full gate run, not at the end of every turn.
+[gates.cadence]
+test = "full"
+
+[gates.state]
+typecheck = "na"
+format = "na"
