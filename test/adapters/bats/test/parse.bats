@@ -30,6 +30,12 @@ setup() {
   [ "$status" -eq 0 ]
 }
 
+# Filtered on as written, printed as `parse refuses nothing`.
+@test 'parse refuses "nothing"' {
+  run parse ''
+  [ "$status" -eq 1 ]
+}
+
 @test 'parse keeps \ ^ $ | * + ? { }' {
   run parse '\ ^ $ | * + ? { }'
   [ "$output" = '\ ^ $ | * + ? { }' ]

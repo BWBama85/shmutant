@@ -97,17 +97,21 @@ The plan sits in `test/` beside the `.bats` files, one level below the tree it c
 loads only the `.bats` files there. CI runs this block as written against Bats 1.14.0 on
 Linux (`test/adapters/check.sh`). A failing test exits 1, the default `SHMUTANT_RED_STATUS`.
 The escaped, anchored filter selects exactly the named test, a name holding `.`, `(`, `[` or
-any other regex character included, and never a test whose name merely starts with it. A
-filter that selects nothing makes Bats exit 1 with no `not ok` line, so a mistyped witness
-scores its row `baseline`, not `survived`.
+another regex character included, and never a test whose name merely starts with it. Bats
+filters on a name as written but prints it expanded as a double-quoted string, so a name
+holding `"`, `$`, a backtick or a backslash can print differently: give that test's row the
+printed name as its witness and the written name as its selector, the fifth argument. A
+filter that selects nothing makes Bats exit 1 with no `not ok` line, so with the baseline on
+(the default) a mistyped witness scores its row `baseline`, not `survived`.
 
 ### ShellSpec
 
 ShellSpec selects with `--example <pattern>`: a shell pattern, in which `*`, `?` and `[` are
 pattern characters, matched against the whole description of each example and of each group,
-never against part of one. A group that matches selects every example in it. Its `tap`
-formatter prints an example's full name, its groups' descriptions and its own joined by
-spaces: `not ok <n> - <full name>`. So a row names both, the full name as its witness and the
+never against part of one (as 0.28.1 behaves; its `--help` says names that include the
+pattern). A group that matches selects every example in it. Its `tap` formatter prints an
+example's full name, its groups' descriptions and its own joined by spaces:
+`not ok <n> - <full name>`. So a row names both, the full name as its witness and the
 example's own description as its selector, the fifth argument:
 
 ```sh
@@ -117,7 +121,7 @@ prepare() { shmutant_copy_tree "$SHMUTANT_PLAN_DIR/.." "$1"; }
 run() {
   local pat
   pat="$(printf '%s' "$2" | sed 's/[][*?]/[&]/g')"
-  (cd "$1" && shellspec --format tap --fail-no-examples --example "$pat")
+  (cd "$1" && shellspec --format tap --no-color --fail-no-examples --example "$pat")
 }
 shmutant_target lib/parse.sh
 shmutant_mut 'empty input is accepted' 'return 1' 'return 0' 'parse rejects empty input' 'rejects empty input'
@@ -129,11 +133,13 @@ clone because ShellSpec finds its project root, which `Include` paths are resolv
 looking for `.shellspec` from the directory it starts in: started from your checkout, it tests
 the original library rather than the mutant. CI runs this block as written against
 ShellSpec 0.28.1 on Linux (`test/adapters/check.sh`). A failing example exits 101, hence the
-`SHMUTANT_RED_STATUS` above; a fatal error exits 102 and is scored `aborted`. The bracketed
-pattern selects exactly the named example, a description holding `[`, `*` or `?` included,
-and never one whose description merely starts with it. `--fail-no-examples` makes a selector
-that matches nothing exit 101 with no `not ok` line, so its row is scored `baseline`, not
-`survived`. A description holding `|` cannot be selected at all: ShellSpec reads it as the
+`SHMUTANT_RED_STATUS` above; a fatal error exits 102 and is scored `aborted`. `--no-color`
+keeps the TAP lines plain where the environment sets `FORCE_COLOR`, which would otherwise put
+a color code before every `not ok`. The bracketed pattern selects exactly the named example,
+a description holding `[`, `*` or `?` included, and never one whose description merely starts
+with it. `--fail-no-examples` makes a selector that matches nothing exit 101 with no `not ok`
+line, so with the baseline on (the default) its row is scored `baseline`, not `survived`. A
+description holding `|` cannot be selected by itself: ShellSpec reads the `|` as the
 pattern's alternation.
 
 ## 4. Write the plan

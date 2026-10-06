@@ -12,8 +12,10 @@ set -u
 unset CDPATH
 
 # An inherited SHMUTANT_SELECT, SHMUTANT_STREAM, SHMUTANT_BASELINE=0 or red setting would change
-# what the run proves.
+# what the run proves. FORCE_COLOR is set because CI environments often set it, and the blocks
+# must keep their red lines plain there.
 unset -v "${!SHMUTANT_@}"
+export FORCE_COLOR=1
 
 fw="${1:-}"
 case "$fw" in
@@ -46,7 +48,7 @@ awk 'on && $0 == "```" { done = 1; exit }
   || { echo "check: no \`\`\`sh block under '$heading' in docs/integrating.md" >&2; exit 2; }
 
 version="$vprefix$("$fw" --version)"
-tr '\n' ' ' < "$tmp/section" | grep -qF -- "$version" \
+tr '\n' ' ' < "$tmp/section" | grep -qwF -- "$version" \
   || bad "the doc's $heading section does not name the version run here: $version"
 
 cp -R -- "$root/test/adapters/$fw" "$tmp/fixture" || exit 2
@@ -72,9 +74,11 @@ LC_ALL=C sort -- "$tmp/fixture/expected.tsv" > "$tmp/want"
 diff -- "$tmp/want" "$tmp/got" >&2 || bad "the verdict stream is not test/adapters/$fw/expected.tsv (above: < expected, > got)"
 
 # --- selection, by the block's own run called directly: the TAP plan and result lines it prints.
-# call_run <root> <select> — the block sourced alone, its table calls stubbed, then `run`.
+# call_run <root> <select> — the block sourced alone, its table calls stubbed, then `run`,
+# without this script's nounset, which the pool does not impose either.
 call_run() {
   (
+    set +u
     shmutant_copy_tree() { :; }; shmutant_target() { :; }; shmutant_mut() { :; }
     # shellcheck disable=SC1091
     . "$tmp/adapter.sh"

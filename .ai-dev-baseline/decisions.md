@@ -30,8 +30,8 @@
 ## D4 — Bats and ShellSpec are CI-only, pinned, and Bats is pinned by commit
 - date:      2026-10-06
 - category:  project-delta
-- unknown:   #7 runs the documented Bats and ShellSpec adapters in CI with each framework pinned by checksum, as bash 5.3 is. bats-core v1.14.0 has no release asset (only the archives GitHub generates for a tag) and is not on npm, and GitHub's archive documentation promises identical contents only for an archive of a commit ID, not identical bytes for a tag's.
+- unknown:   #7 runs the documented Bats and ShellSpec adapters in CI with each framework pinned by checksum, as bash 5.3 is. bats-core v1.14.0 has no release asset (only the archives GitHub generates for a tag) and is not on npm, and GitHub's archive documentation promises an archive's contents (a tag's only while the tag does not move), never its bytes.
 - decision:  ShellSpec 0.28.1 is pinned by the SHA-256 of its release asset. Bats 1.14.0 is pinned by the commit its tag names: a shallow clone of the tag whose HEAD must equal `BATS_COMMIT`. Both run in one `adapters` job on ubuntu-latest. Neither is a `[gates]` entry, since neither is installed where the gates run.
 - placement: .github/workflows/ci.yml (env, `adapters` job); test/adapters/check.sh; README "Testing shmutant"
-- reason:    a SHA-256 of a generated tag archive can change with GitHub's archiver while the contents do not, failing CI for no reason; a commit pins the contents. The macOS job's bash comes from Homebrew unpinned, so the adapter verdicts are claimed for the pinned Linux setup only.
+- reason:    a SHA-256 of a generated tag archive can change with GitHub's archiver while the contents do not, failing CI for no reason; a commit pins the contents, by git's SHA-1 object id, which is weaker than the SHA-256 pins beside it. The macOS job's bash comes from Homebrew unpinned, so the adapter verdicts are claimed for the pinned Linux setup only.
 - baseline-issue: n/a (CI dependencies are per project)

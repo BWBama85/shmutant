@@ -29,7 +29,7 @@ Describe 'parse'
     The output should equal 'x'
   End
 
-  # No --example selects this one: ShellSpec reads the | as alternation.
+  # Its own description does not select it: ShellSpec reads the | as alternation.
   It 'keeps a|b'
     When call parse 'a|b'
     The output should equal 'a|b'
