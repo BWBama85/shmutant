@@ -167,14 +167,16 @@ and the unit that claims to cover it must go red. If `shmutant` could not mutati
 assertions, it would not work.
 
 Both commands need to execute `ps`, the second because it runs `test/run.sh` for its baseline and
-every row. The suite's units read process state through it, and on macOS so does the leak check
-after every unit, which fails a unit whose process table it cannot read instead of passing it. So
+every row. The suite's units read process state through it, and so does the leak check after every
+unit, which fails a unit whose process table it cannot read instead of passing it. So
 `test/run.sh` first checks that `ps` runs; where it cannot, it runs no unit, prints one
 `run.sh: ps cannot run here …` line and exits 2.
 
 An agent sandbox is the usual cause: on macOS `/bin/ps` is setuid root, and Claude Code's sandbox
 refuses to execute it. This repository's `.claude/settings.json` lists `bash test/run.sh` in
-`sandbox.excludedCommands`, which runs that exact command line outside the sandbox. Only that exact
-line matches: the suite run with a variable prefix or a `cd` in front, the second command, and a
-gate script that runs the suite all stay sandboxed, and have to be run outside it another way, such as approving an
-unsandboxed retry. The exclusion runs whatever `test/run.sh` holds at the time with your full access.
+`sandbox.excludedCommands`, which runs that command outside the sandbox, matched the way a
+`Bash(bash test/run.sh)` permission rule is: with no wildcard, so an extra argument, a
+`SHMUTANT_SELECT=…` prefix or a `cd` before it keeps the suite sandboxed. So do the second command
+and a gate script that runs the suite; run those outside the sandbox another way, such as approving
+an unsandboxed retry. The exclusion runs whatever `test/run.sh` and the `shmutant.sh` it sources
+hold at the time with your full access.

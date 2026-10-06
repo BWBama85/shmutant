@@ -3,8 +3,8 @@
 # of them, which is how test/mutants.sh targets each row at the unit that claims to cover it.
 #
 # Exit: 0 every selected unit passed; 1 a unit failed (each failure prints `FAIL: <unit>: …`);
-# 2 the harness failed, saying why in one `run.sh: …` line on stderr; among the causes, ps cannot
-# run here (checked before any unit runs), or no unit matched the selection.
+# 2 the harness failed, saying why on stderr; among the causes, ps cannot run here (checked before
+# any unit runs) or no unit matched the selection, each reported in one `run.sh: …` line.
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 # shellcheck source=../shmutant.sh
@@ -4039,6 +4039,7 @@ t_ps_runs_needs_ps_to_report_this_shell() {
   }
   ps_runs || fail_ 'ps runs here, yet the probe said it does not'
   fake_ps '' 126 && fail_ 'a ps that could not be executed passed the probe'
+  fake_ps "$$" 1 && fail_ 'a ps that reported this pid but failed passed the probe'
   fake_ps '' 0 && fail_ 'a ps that printed nothing passed the probe'
   fake_ps "$(( $$ + 1 ))" 0 && fail_ 'a ps that reported another pid passed the probe'
   fake_ps "$$"$'\n'"$$" 0 && fail_ 'a ps that reported this pid twice passed the probe'
@@ -4334,9 +4335,9 @@ unit_leftovers() {
 }
 
 # ps_runs — true when ps runs here and reports this shell's own pid; a zero status alone is not
-# proof. The suite reads process state through ps: its units do, and on macOS so does the leak
-# check after every unit, which fails a unit whose read fails. So where ps cannot run (an agent
-# sandbox refusing the setuid /bin/ps), main stops before any unit; the per-unit checks still fail closed.
+# proof. The suite reads process state through ps, in its units and in the leak check after every
+# unit, so where ps cannot run (an agent sandbox refusing the setuid /bin/ps) every unit could fail
+# on that one cause; main stops before any unit instead. The per-unit checks still fail closed.
 ps_runs() {
   local out
   out="$(command -p ps -o pid= -p "$$" 2>/dev/null)" || return 1

@@ -16,3 +16,13 @@
 - placement: agents.toml [gates], [gates.cadence], [gates.state]
 - reason:    the owner chose it during the run for #2; the suite takes about ten minutes, so it runs in a full gate run rather than at the end of every turn
 - baseline-issue: n/a (the [gates] override covers the case)
+
+## D3 — the bare suite run is excluded from Claude Code's sandbox, without an ask rule
+- date:      2026-10-06
+- category:  project-delta
+- unknown:   inside Claude Code's macOS sandbox the setuid /bin/ps cannot be executed, so test/run.sh cannot check what a unit leaves behind and stops before any unit (#6)
+- decision:  `.claude/settings.json` lists `bash test/run.sh` in `sandbox.excludedCommands`, with no `permissions.ask` rule for it
+- placement: .claude/settings.json; README "Testing shmutant"
+- reason:    the owner specified the entry in #6. An excluded command still goes through the permission flow, so beyond the unsandboxed-retry path it only widens access where a user has turned that retry off in their own settings; the ask rule the vendor docs pair with an excluded script would prompt on every suite run, in bypassPermissions mode too. The exclusion runs whatever test/run.sh and shmutant.sh hold. The self-mutation command and the [gates] test command (run under `sh -c` by the gate runner) do not match it, stay sandboxed, and there stop at once with exit 2.
+- alternative: `"permissions": {"ask": ["Bash(bash test/run.sh)"]}` beside the exclusion: each run approved by hand; not taken for the prompt it adds to every run
+- baseline-issue: n/a (agent sandbox settings are per project)
