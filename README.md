@@ -167,18 +167,21 @@ and the unit that claims to cover it must go red. If `shmutant` could not mutati
 assertions, it would not work.
 
 Both commands need to execute `ps`, the second because it runs `test/run.sh` for its baseline and
-every row. The suite's units read process state through it, and so does the leak check after every
-unit, which fails a unit whose process table it cannot read instead of passing it. So
+every row. The suite's units read process state through it, and some of their checks that a process
+is gone would pass vacuously without it. Where there is no `/proc`, as on macOS, the leak check
+after every unit reads the process table through it too, and fails a unit whose table it cannot
+read instead of passing it. So
 `test/run.sh` first checks that `ps` runs; where it cannot, it runs no unit, prints one
 `run.sh: ps cannot run here …` line and exits 2.
 
 An agent sandbox is the usual cause: on macOS `/bin/ps` is setuid root, and Claude Code's sandbox
 refuses to execute it. This repository's `.claude/settings.json` lists `bash test/run.sh` in
-`sandbox.excludedCommands`, which runs that command outside the sandbox, matched the way a
-`Bash(bash test/run.sh)` permission rule is: with no wildcard, so an extra argument, a
-`SHMUTANT_SELECT=…` prefix or a `cd` before it keeps the suite sandboxed. So do the second command
-and a gate script that runs the suite; run those outside the sandbox another way, such as approving
-an unsandboxed retry. Sandboxed, the second command does not name `ps`: its baseline aborts, every
-row is scored `baseline`, and it exits 1. A sandbox your administrator requires ignores this
-repository's exclusion. The exclusion runs whatever `test/run.sh` and the `shmutant.sh` it sources
-hold at the time with your full access.
+`sandbox.excludedCommands`, which runs that command outside the sandbox. The entry has no wildcard,
+and some call shapes stay sandboxed whatever the entry says: the suite stays sandboxed with an extra
+argument, a `SHMUTANT_SELECT=…` prefix, a `cd` before it, a pipe after it or its output redirected
+to a file. So do the second command and a gate script that runs the suite; run those outside the
+sandbox another way, such as approving an unsandboxed retry. Sandboxed, the second command does not
+name `ps`: its baseline aborts, every row is scored `baseline`, and it exits 1. A sandbox made
+admin-required, by turning unsandboxed retries off in managed settings or with `--settings`,
+ignores this repository's exclusion. The exclusion runs whatever `test/run.sh` and the
+`shmutant.sh` it sources hold at the time with your full access.

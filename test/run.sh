@@ -4335,9 +4335,10 @@ unit_leftovers() {
 }
 
 # ps_runs — true when ps runs here and reports this shell's own pid; a zero status alone is not
-# proof. The suite reads process state through ps, in its units and in the leak check after every
-# unit, so where ps cannot run (an agent sandbox refusing the setuid /bin/ps) every unit could fail
-# on that one cause; main stops before any unit instead. The per-unit checks still fail closed.
+# proof. Units read process state through ps, and some of their absence checks would pass vacuously
+# without it; where there is no /proc (macOS) the leak check after every unit reads through ps too,
+# and every unit would fail on that one cause. So where ps cannot run (an agent sandbox refusing the
+# setuid /bin/ps), main stops before any unit. The per-unit checks still fail closed.
 ps_runs() {
   local out
   out="$(command -p ps -o pid= -p "$$" 2>/dev/null)" || return 1
