@@ -161,9 +161,12 @@ could not run.
 ```sh
 bash test/run.sh                      # the suite: every `t_*` unit, one at a time
 bash shmutant.sh run test/mutants.sh  # the suite, mutation-tested by shmutant itself
-bash test/adapters/check.sh bats      # the doc's Bats adapter, on its fixture (needs bats)
-bash test/adapters/check.sh shellspec # the same for ShellSpec (needs shellspec)
+bash test/adapters/check.sh bats      # the doc's Bats adapter, on its fixture
+bash test/adapters/check.sh shellspec # the same for ShellSpec
 ```
+
+The last two need the framework on `PATH` at the version CI pins (`BATS_VERSION`,
+`SHELLSPEC_VERSION` in `.github/workflows/ci.yml`), which is the version the doc names.
 
 The second command is the tool's own proof: every guard in `shmutant.sh` is broken in a clone
 and the unit that claims to cover it must go red. If `shmutant` could not mutation-test its own

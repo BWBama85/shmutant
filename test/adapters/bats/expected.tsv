@@ -1,0 +1,10 @@
+baseline	parse rejects empty input	green
+baseline	parse prints its input	green
+baseline	parse.empty (status) [1]	green
+baseline	parse has no such test	aborted
+row	empty input is accepted	killed
+row	the trailing newline is dropped	survived
+row	empty input exits 2	survived
+row	empty input is accepted, bracketed witness	killed
+row	a witness no test carries	baseline
+summary	5	2

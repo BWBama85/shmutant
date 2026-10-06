@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # test/adapters/check.sh <bats|shellspec> — run the adapter block docs/integrating.md gives for
 # <framework>, byte for byte, on its fixture under test/adapters/<framework>, through
-# `shmutant.sh run`, and require what the doc says of it: every row's verdict, exact selection
-# by the block's own `run`, and the framework version the doc names.
+# `shmutant.sh run`, and require what the doc says of it: the verdict stream the fixture's
+# expected.tsv lists, exact selection by the block's own `run`, and the framework version the
+# doc names.
 #
-# Needs the framework on PATH; CI installs pinned releases. Prints the verdict stream on stdout.
+# Needs the framework on PATH, at the version CI pins. Prints the verdict stream on stdout.
 # Exit 0 = every check held; 1 = a check failed, after printing the stream, the CLI's stderr and
 # every run's output to stderr; 2 = the check could not run (usage, no framework, no block).
 set -u
@@ -12,12 +13,12 @@ unset CDPATH
 
 # An inherited SHMUTANT_SELECT, SHMUTANT_STREAM, SHMUTANT_BASELINE=0 or red setting would change
 # what the run proves.
-while IFS= read -r v; do unset "$v"; done < <(compgen -v SHMUTANT_)
+unset -v "${!SHMUTANT_@}"
 
 fw="${1:-}"
 case "$fw" in
-  bats)      heading='### Bats';      plan=test/mutants.sh ;;
-  shellspec) heading='### ShellSpec'; plan=spec/mutants.sh ;;
+  bats)      heading='### Bats';      plan=test/mutants.sh; vprefix='' ;;
+  shellspec) heading='### ShellSpec'; plan=spec/mutants.sh; vprefix='ShellSpec ' ;;
   *)         echo "usage: test/adapters/check.sh bats|shellspec" >&2; exit 2 ;;
 esac
 command -v "$fw" > /dev/null || { echo "check: $fw is not on PATH" >&2; exit 2; }
@@ -39,18 +40,12 @@ awk -v h="$heading" '
   !fence && /^#/ { exit }
   { print }' "$doc" > "$tmp/section" || exit 2
 awk 'on && $0 == "```" { done = 1; exit }
-     on { print }
+     on { print; n++ }
      $0 == "```sh" { on = 1 }
-     END { exit !done }' "$tmp/section" > "$tmp/adapter.sh"
-found=$?
-if [ "$found" -ne 0 ] || [ ! -s "$tmp/adapter.sh" ]; then
-  echo "check: no \`\`\`sh block under '$heading' in docs/integrating.md" >&2; exit 2
-fi
+     END { exit !(done && n) }' "$tmp/section" > "$tmp/adapter.sh" \
+  || { echo "check: no \`\`\`sh block under '$heading' in docs/integrating.md" >&2; exit 2; }
 
-case "$fw" in
-  bats)      version="$(bats --version)" ;;
-  shellspec) version="ShellSpec $(shellspec --version)" ;;
-esac
+version="$vprefix$("$fw" --version)"
 tr '\n' ' ' < "$tmp/section" | grep -qF -- "$version" \
   || bad "the doc's $heading section does not name the version run here: $version"
 
@@ -65,51 +60,16 @@ rc=$?
 cat -- "$tmp/stream"
 [ "$rc" -eq 1 ] || bad "shmutant exited $rc; expected 1 (rows not killed, no harness error)"
 
-nrows=0; nkilled=0; nbase=0
-# row <name> <verdict> — the stream holds exactly one record for row <name>, and it is <verdict>.
-row() {
-  local got
-  got="$(n="$1" awk -F'\t' '$1 == "shmutant" && $3 == "row" && $5 == ENVIRON["n"] { print $4 }' "$tmp/stream")"
-  [ "$got" = "$2" ] || bad "row '$1': expected $2, got '${got//$'\n'/ + }'"
-  nrows=$((nrows + 1)); [ "$2" = killed ] && nkilled=$((nkilled + 1))
-  return 0
-}
-# base <select> <verdict> — likewise for the baseline run of <select>.
-base() {
-  local got
-  got="$(s="$1" awk -F'\t' '$1 == "shmutant" && $3 == "baseline" && $4 == ENVIRON["s"] { print $5 }' "$tmp/stream")"
-  [ "$got" = "$2" ] || bad "baseline '$1': expected $2, got '${got//$'\n'/ + }'"
-  nbase=$((nbase + 1))
-}
-
-case "$fw" in
-  bats)
-    row 'empty input is accepted' killed
-    row 'the trailing newline is dropped' survived
-    row 'empty input exits 2' survived
-    row 'empty input is accepted, bracketed witness' killed
-    row 'a witness no test carries' baseline
-    base 'parse rejects empty input' green
-    base 'parse prints its input' green
-    base 'parse.empty (status) [1]' green
-    base 'parse has no such test' aborted ;;
-  shellspec)
-    row 'empty input is accepted' killed
-    row 'the trailing newline is dropped' survived
-    row 'empty input exits 2' survived
-    row 'empty input is accepted, pattern-character selector' killed
-    row 'a selector no example carries' baseline
-    base 'rejects empty input' green
-    base 'prints its input' green
-    base 'refuses [empty] input *?' green
-    base 'has no such example' aborted ;;
-esac
-
-counts="$(awk -F'\t' '$1 != "shmutant" || $2 != 1 { odd++ } $3 == "row" { r++ } $3 == "baseline" { b++ }
-  $3 == "summary" { s++; sr = $5; sk = $6 }
-  END { printf "%d %d %d %d %s %s", odd, r, b, s, sr, sk }' "$tmp/stream")"
-[ "$counts" = "0 $nrows $nbase 1 $nrows $nkilled" ] \
-  || bad "stream shape (foreign lines, rows, baselines, summaries, summary rows, summary killed): got '$counts', expected '0 $nrows $nbase 1 $nrows $nkilled'"
+# Every record, reduced to what expected.tsv states of it; anything else is a line of its own.
+awk -F'\t' -v OFS='\t' '
+  $1 != "shmutant" || $2 != 1 { print "foreign", $0; next }
+  $3 == "baseline"            { print "baseline", $4, $5; next }
+  $3 == "row"                 { print "row", $5, $4; next }
+  $3 == "summary"             { print "summary", $5, $6; next }
+                              { print "foreign", $0 }' "$tmp/stream" > "$tmp/got.unsorted"
+LC_ALL=C sort -- "$tmp/got.unsorted" > "$tmp/got"
+LC_ALL=C sort -- "$tmp/fixture/expected.tsv" > "$tmp/want"
+diff -- "$tmp/want" "$tmp/got" >&2 || bad "the verdict stream is not test/adapters/$fw/expected.tsv (above: < expected, > got)"
 
 # --- selection, by the block's own run called directly: the TAP plan and result lines it prints.
 # call_run <root> <select> — the block sourced alone, its table calls stubbed, then `run`.
@@ -124,7 +84,7 @@ call_run() {
 }
 # selects <select> <status> <tap-line>… — run exits <status> and prints exactly these TAP lines.
 selects() {
-  local sel="$1" want_rc="$2" out got want n=0
+  local sel="$1" want_rc="$2" out got want n
   shift 2
   out="$(cd -- "$tmp" && call_run "$tmp/fixture" "$sel" 2>> "$tmp/selects.err")"; n=$?
   got="$(printf '%s\n' "$out" | grep -E '^(1\.\.[0-9]+|ok |not ok )')"

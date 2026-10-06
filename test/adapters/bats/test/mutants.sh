@@ -1,7 +1,8 @@
 # shellcheck shell=bash
 # The Bats fixture's plan: test/adapters/check.sh writes the Bats block of docs/integrating.md
-# beside this file as adapter.sh, then runs this plan. The rows after it are the ones the check
-# expects not to be killed, or to be killed through a witness the regex escaping must survive.
+# beside this file as adapter.sh, runs this plan, and requires the verdicts ../expected.tsv
+# lists. The rows after the block are the ones not killed, or killed only through a witness the
+# regex escaping must carry.
 . "$SHMUTANT_PLAN_DIR/adapter.sh"
 
 shmutant_mut 'the trailing newline is dropped' "printf '%s\n'" "printf '%s'" 'parse prints its input'
