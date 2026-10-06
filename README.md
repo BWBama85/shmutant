@@ -178,5 +178,7 @@ refuses to execute it. This repository's `.claude/settings.json` lists `bash tes
 `Bash(bash test/run.sh)` permission rule is: with no wildcard, so an extra argument, a
 `SHMUTANT_SELECT=…` prefix or a `cd` before it keeps the suite sandboxed. So do the second command
 and a gate script that runs the suite; run those outside the sandbox another way, such as approving
-an unsandboxed retry. The exclusion runs whatever `test/run.sh` and the `shmutant.sh` it sources
+an unsandboxed retry. Sandboxed, the second command does not name `ps`: its baseline aborts, every
+row is scored `baseline`, and it exits 1. A sandbox your administrator requires ignores this
+repository's exclusion. The exclusion runs whatever `test/run.sh` and the `shmutant.sh` it sources
 hold at the time with your full access.
