@@ -166,16 +166,15 @@ The second command is the tool's own proof: every guard in `shmutant.sh` is brok
 and the unit that claims to cover it must go red. If `shmutant` could not mutation-test its own
 assertions, it would not work.
 
-Both commands need to execute `ps`. After every unit the suite reads the process table for
-anything the unit left running, and a table it cannot read fails the unit instead of passing it.
-So `test/run.sh` first checks that `ps` runs; where it cannot, it runs no unit, prints one
-`run.sh: ps cannot run here …` line and exits 2. The second command runs `test/run.sh` for its
-baseline and for every row, so it needs `ps` too.
+Both commands need to execute `ps`, the second because it runs `test/run.sh` for its baseline and
+every row. The suite's units read process state through it, and on macOS so does the leak check
+after every unit, which fails a unit whose process table it cannot read instead of passing it. So
+`test/run.sh` first checks that `ps` runs; where it cannot, it runs no unit, prints one
+`run.sh: ps cannot run here …` line and exits 2.
 
 An agent sandbox is the usual cause: on macOS `/bin/ps` is setuid root, and Claude Code's sandbox
 refuses to execute it. This repository's `.claude/settings.json` lists `bash test/run.sh` in
-`sandbox.excludedCommands`, which runs that exact command line outside the sandbox. Nothing else
-matches it: `SHMUTANT_SELECT=… bash test/run.sh`, `cd … && bash test/run.sh`, the second command
-and a gate script that runs the suite all stay sandboxed, and have to be run outside it some other
-way, such as approving an unsandboxed retry. The exclusion runs whatever `test/run.sh` holds at
-the time with your full access.
+`sandbox.excludedCommands`, which runs that exact command line outside the sandbox. Only that exact
+line matches: the suite run with a variable prefix or a `cd` in front, the second command, and a
+gate script that runs the suite all stay sandboxed, and have to be run outside it another way, such as approving an
+unsandboxed retry. The exclusion runs whatever `test/run.sh` holds at the time with your full access.
