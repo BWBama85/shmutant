@@ -110,11 +110,12 @@ case "$fw" in
   shellspec)
     selects 'rejects empty input' 0 '1..1' 'ok 1 - parse rejects empty input'
     selects 'refuses [empty] input *?' 0 '1..1' 'ok 1 - parse refuses [empty] input *?'
-    selects 'prints its input' 0 '1..2' 'ok 1 - parse prints its input' 'ok 2 - twin prints its input'
+    selects 'prints its input' 0 '1..2' 'ok 1 - parse prints its input' 'ok 2 - twin parse prints its input'
     selects 'keeps a|b' 101 '1..0'
-    selects 'parse' 0 '1..8' 'ok 1 - parse rejects empty input' 'ok 2 - parse rejects empty input with status 1' \
+    selects 'parse' 0 '1..9' 'ok 1 - parse rejects empty input' 'ok 2 - parse rejects empty input with status 1' \
       'ok 3 - parse prints its input' 'ok 4 - parse refuses [empty] input *?' 'ok 5 - parse refuses e input XY' \
-      'ok 6 - parse refuses [empty] input X?' 'ok 7 - parse refuses [empty] input *X' 'ok 8 - parse keeps a|b'
+      'ok 6 - parse refuses [empty] input X?' 'ok 7 - parse refuses [empty] input *X' 'ok 8 - parse keeps a|b' \
+      'ok 9 - twin parse prints its input'
     # A fatal error (the library Include names is missing) exits 102 with no failing example.
     cp -R -- "$tmp/fixture" "$tmp/broken" || exit 2
     rm -f -- "$tmp/broken/lib/parse.sh"

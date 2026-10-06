@@ -7,4 +7,5 @@ row	the trailing newline is dropped	survived
 row	empty input exits 2	survived
 row	empty input is accepted, pattern-character selector	killed
 row	a selector no example carries	baseline
-summary	5	2
+summary	6	3
+row	twin input is refused, killed through the twin	killed

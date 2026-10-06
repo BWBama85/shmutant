@@ -10,4 +10,5 @@ row	empty input is accepted, bracketed witness	killed
 row	a witness no test carries	baseline
 row	empty input is accepted, printed name as witness	killed
 row	empty input is accepted, written name as witness	accidental
-summary	7	3
+summary	8	4
+row	twin input is refused, killed through the twin	killed

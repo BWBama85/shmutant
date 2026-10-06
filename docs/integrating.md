@@ -117,7 +117,8 @@ never against part of one (as 0.28.1 behaves; its `--help` says names that inclu
 pattern). A group that matches selects every example in it. Its `tap` formatter prints an
 example's full name, its groups' descriptions and its own joined by spaces:
 `not ok <n> - <full name>`. So a row names both, the full name as its witness and the
-example's own description as its selector, the fifth argument:
+example's own description as its selector, the fifth argument. The witness is matched as a
+whole token, so a longer full name that contains it carries it too (below):
 
 ```sh
 SHMUTANT_RED_PREFIX='not ok '
@@ -140,14 +141,17 @@ the original library rather than the mutant. CI runs this block as written again
 ShellSpec 0.28.1 on Linux (`test/adapters/check.sh`). A failing example exits 101, hence the
 `SHMUTANT_RED_STATUS` above; a fatal error exits 102 and is scored `aborted`. `--no-color`
 keeps the TAP lines plain where the environment sets `FORCE_COLOR`, which would otherwise put
-a color code before every `not ok`. The bracketed pattern selects exactly the examples whose
-own description it names, a description holding `[`, `*` or `?` included, and never one whose
-description merely starts with it. Examples in other groups or files that share the
-description run too; the witness, the full name, is what ties the row's verdict to the one it
-means. `--fail-no-examples` makes a selector
-that matches nothing exit 101 with no `not ok` line, so its row is scored `baseline` (`aborted`
-with `SHMUTANT_BASELINE=0`), never `survived`. A description holding `|` cannot be selected by
-itself: ShellSpec reads the `|` as the pattern's alternation.
+a color code before every `not ok`. The bracketed pattern selects the examples whose own
+description it names and every example in a group whose description it names, a description
+holding `[`, `*` or `?` included, and never one whose description merely starts with it. All
+of them run, and a failure in any whose full name holds the witness as a whole token scores
+the row `killed`: `twin parse prints its input`, an example of the same description under
+another group, carries the witness `parse prints its input`. Keep the descriptions a selector
+reaches distinct enough that only the intended example's full name holds its witness.
+`--fail-no-examples` makes a selector that matches nothing exit 101 with no `not ok` line, so
+its row is scored `baseline` (`aborted` with `SHMUTANT_BASELINE=0`), never `survived`. A
+description holding `|` cannot be selected by itself: ShellSpec reads the `|` as the
+pattern's alternation.
 
 ## 4. Write the plan
 

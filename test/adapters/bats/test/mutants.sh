@@ -13,3 +13,5 @@ shmutant_mut 'empty input is accepted, printed name as witness' 'return 1' 'retu
   'parse refuses nothing' 'parse refuses "nothing"'
 shmutant_mut 'empty input is accepted, written name as witness' 'return 1' 'return 0' \
   'parse refuses "nothing"'
+shmutant_mut 'twin input is refused, killed through the twin' '[ -z "$1" ]' '[ "$1" = twin ] || [ -z "$1" ]' \
+  'parse prints its input'
