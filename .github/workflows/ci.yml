@@ -8,6 +8,10 @@ on:
 env:
   CI_BASH: "5.3"
   BASH_SHA256: 0d5cd86965f869a26cf64f4b71be7b96f90a3ba8b3d74e27e8e9d9d5550f31ba
+  BATS_VERSION: "1.14.0"
+  BATS_COMMIT: eb7f42f8d608ac693d7a4b67474f6714ea68cfc5
+  SHELLSPEC_VERSION: "0.28.1"
+  SHELLSPEC_SHA256: 350d3de04ba61505c54eda31a3c2ee912700f1758b1a80a284bc08fd8b6c5992
 
 jobs:
   shellcheck:
@@ -19,7 +23,7 @@ jobs:
           curl -fsSL https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz | tar -xJ
           echo "$PWD/shellcheck-v0.11.0" >> "$GITHUB_PATH"
       - run: shellcheck --version
-      - run: shellcheck --severity=warning -e SC1091 shmutant.sh test/run.sh test/mutants.sh
+      - run: shellcheck --severity=warning -e SC1091 shmutant.sh test/run.sh test/mutants.sh test/adapters/check.sh test/adapters/bats/test/mutants.sh test/adapters/bats/lib/parse.sh test/adapters/shellspec/spec/mutants.sh test/adapters/shellspec/lib/parse.sh
 
   checksum:
     runs-on: ubuntu-latest
@@ -68,6 +72,48 @@ jobs:
             mutants.tsv
             ${{ runner.temp }}/mutants/*/output
             ${{ runner.temp }}/mutants/*/verdict
+
+  adapters:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: cache bash ${{ env.CI_BASH }}
+        id: cache-bash
+        uses: actions/cache@v6.1.0
+        with:
+          path: ~/bash-${{ env.CI_BASH }}
+          key: bash-${{ env.CI_BASH }}-${{ env.BASH_SHA256 }}-${{ runner.os }}-${{ runner.arch }}
+      - name: build bash ${{ env.CI_BASH }}
+        if: steps.cache-bash.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSL -o bash.tar.gz "https://ftp.gnu.org/gnu/bash/bash-${CI_BASH}.tar.gz"
+          echo "${BASH_SHA256}  bash.tar.gz" | sha256sum -c -
+          tar -xzf bash.tar.gz
+          cd "bash-${CI_BASH}"
+          ./configure --prefix="$HOME/bash-${CI_BASH}" > /dev/null
+          make -j"$(nproc)" > /dev/null
+          make install > /dev/null
+      - name: put bash ${{ env.CI_BASH }} first on PATH
+        run: echo "$HOME/bash-${CI_BASH}/bin" >> "$GITHUB_PATH"
+      - name: install Bats ${{ env.BATS_VERSION }}
+        run: |
+          git -c advice.detachedHead=false clone -q --depth 1 --branch "v${BATS_VERSION}" https://github.com/bats-core/bats-core.git "$RUNNER_TEMP/bats"
+          got="$(git -C "$RUNNER_TEMP/bats" rev-parse HEAD)"
+          [ "$got" = "$BATS_COMMIT" ] || { echo "v${BATS_VERSION} is ${got}, not ${BATS_COMMIT}"; exit 1; }
+          echo "$RUNNER_TEMP/bats/bin" >> "$GITHUB_PATH"
+      - name: install ShellSpec ${{ env.SHELLSPEC_VERSION }}
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/shellspec.tar.gz" "https://github.com/shellspec/shellspec/releases/download/${SHELLSPEC_VERSION}/shellspec-dist.tar.gz"
+          echo "${SHELLSPEC_SHA256}  $RUNNER_TEMP/shellspec.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/shellspec.tar.gz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/shellspec" >> "$GITHUB_PATH"
+      - run: bash --version
+      - run: bats --version
+      - run: shellspec --version
+      - name: the Bats adapter in docs/integrating.md
+        run: bash test/adapters/check.sh bats
+      - name: the ShellSpec adapter in docs/integrating.md
+        run: bash test/adapters/check.sh shellspec
 
   macos:
     runs-on: macos-latest

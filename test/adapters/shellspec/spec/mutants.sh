@@ -1,0 +1,15 @@
+# shellcheck shell=bash
+# The ShellSpec fixture's plan: test/adapters/check.sh writes the ShellSpec block of
+# docs/integrating.md beside this file as adapter.sh, then runs this plan. The rows after it are
+# the ones the check expects not to be killed, or to be killed through a selector the pattern
+# escaping must survive.
+. "$SHMUTANT_PLAN_DIR/adapter.sh"
+
+shmutant_mut 'the trailing newline is dropped' "printf '%s\n'" "printf '%s'" \
+  'parse prints its input' 'prints its input'
+shmutant_mut 'empty input exits 2' 'return 1' 'return 2' \
+  'parse rejects empty input' 'rejects empty input'
+shmutant_mut 'empty input is accepted, pattern-character selector' 'return 1' 'return 0' \
+  'parse refuses [empty] input *?' 'refuses [empty] input *?'
+shmutant_mut 'a selector no example carries' 'return 1' 'return 0' \
+  'parse has no such example' 'has no such example'
