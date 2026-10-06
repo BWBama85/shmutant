@@ -172,8 +172,8 @@ The second command is the tool's own proof: every guard in `shmutant.sh` is brok
 and the unit that claims to cover it must go red. If `shmutant` could not mutation-test its own
 assertions, it would not work.
 
-Both commands need to execute `ps`, the second because it runs `test/run.sh` for its baseline and
-every row. The suite's units read process state through it, and some of their checks that a process
+The first two commands need to execute `ps`, the second because it runs `test/run.sh` for its
+baseline and every row. The suite's units read process state through it, and some of their checks that a process
 is gone would pass vacuously without it. Where there is no `/proc`, as on macOS, the leak check
 after every unit reads the process table through it too, and fails a unit whose table it cannot
 read instead of passing it. So

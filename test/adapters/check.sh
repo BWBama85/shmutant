@@ -13,8 +13,8 @@ unset CDPATH
 
 # An inherited SHMUTANT_SELECT, SHMUTANT_STREAM, SHMUTANT_BASELINE=0 or red setting would change
 # what the run proves. FORCE_COLOR is set because CI environments often set it, and the blocks
-# must keep their red lines plain there.
-unset -v "${!SHMUTANT_@}"
+# must keep their red lines plain there; NO_COLOR would mask it.
+unset -v "${!SHMUTANT_@}" NO_COLOR
 export FORCE_COLOR=1
 
 fw="${1:-}"
@@ -47,7 +47,9 @@ awk 'on && $0 == "```" { done = 1; exit }
      END { exit !(done && n) }' "$tmp/section" > "$tmp/adapter.sh" \
   || { echo "check: no \`\`\`sh block under '$heading' in docs/integrating.md" >&2; exit 2; }
 
-version="$vprefix$("$fw" --version)"
+version="$("$fw" --version | head -n 1)"
+[ -n "$version" ] || { echo "check: $fw --version printed nothing" >&2; exit 2; }
+version="$vprefix$version"
 tr '\n' ' ' < "$tmp/section" | grep -qwF -- "$version" \
   || bad "the doc's $heading section does not name the version run here: $version"
 
@@ -102,14 +104,16 @@ case "$fw" in
     selects 'parse rejects empty input' 0 '1..1' 'ok 1 parse rejects empty input'
     selects 'parse.empty (status) [1]' 0 '1..1' 'ok 1 parse.empty (status) [1]'
     selects 'parse keeps \ ^ $ | * + ? { }' 0 '1..1' 'ok 1 parse keeps \ ^ $ | * + ? { }'
+    selects 'parse prints its input' 0 '1..2' 'ok 1 parse prints its input' 'ok 2 parse prints its input'
     selects 'parse has no such test' 1 '1..0' ;;
   shellspec)
     selects 'rejects empty input' 0 '1..1' 'ok 1 - parse rejects empty input'
     selects 'refuses [empty] input *?' 0 '1..1' 'ok 1 - parse refuses [empty] input *?'
+    selects 'prints its input' 0 '1..2' 'ok 1 - parse prints its input' 'ok 2 - twin prints its input'
     selects 'keeps a|b' 101 '1..0'
-    selects 'parse' 0 '1..6' 'ok 1 - parse rejects empty input' 'ok 2 - parse rejects empty input with status 1' \
+    selects 'parse' 0 '1..7' 'ok 1 - parse rejects empty input' 'ok 2 - parse rejects empty input with status 1' \
       'ok 3 - parse prints its input' 'ok 4 - parse refuses [empty] input *?' 'ok 5 - parse refuses e input XY' \
-      'ok 6 - parse keeps a|b'
+      'ok 6 - parse refuses [empty] input XY' 'ok 7 - parse keeps a|b'
     # A fatal error (the library Include names is missing) exits 102 with no failing example.
     cp -R -- "$tmp/fixture" "$tmp/broken" || exit 2
     rm -f -- "$tmp/broken/lib/parse.sh"

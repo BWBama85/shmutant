@@ -96,13 +96,16 @@ shmutant_mut 'empty input is accepted' 'return 1' 'return 0' 'parse rejects empt
 The plan sits in `test/` beside the `.bats` files, one level below the tree it copies; Bats
 loads only the `.bats` files there. CI runs this block as written against Bats 1.14.0 on
 Linux (`test/adapters/check.sh`). A failing test exits 1, the default `SHMUTANT_RED_STATUS`.
-The escaped, anchored filter selects exactly the named test, a name holding `.`, `(`, `[` or
-another regex character included, and never a test whose name merely starts with it. Bats
-filters on a name as written but prints it expanded as a double-quoted string, so a name
-holding `"`, `$`, a backtick or a backslash can print differently: give that test's row the
-printed name as its witness and the written name as its selector, the fifth argument. A
-filter that selects nothing makes Bats exit 1 with no `not ok` line, so with the baseline on
-(the default) a mistyped witness scores its row `baseline`, not `survived`.
+The escaped, anchored filter selects exactly the tests of that name, a name holding `.`, `(`,
+`[` or another regex character included, and never one whose name merely starts or ends with
+it. Bats refuses a duplicate name only within one file: a test of the same name in another
+file runs too, and its failure carries the same witness. Bats filters on a name as written but
+prints it expanded as a double-quoted
+string, so a name holding `"`, `$`, a backtick or a backslash can print differently: give that
+test's row the printed name as its witness and the written name as its selector, the fifth
+argument. A filter that selects nothing makes Bats exit 1 with no `not ok` line, so a row
+whose selector matches no test is scored `baseline` (`aborted` with `SHMUTANT_BASELINE=0`),
+never `survived`.
 
 ### ShellSpec
 
@@ -135,12 +138,14 @@ the original library rather than the mutant. CI runs this block as written again
 ShellSpec 0.28.1 on Linux (`test/adapters/check.sh`). A failing example exits 101, hence the
 `SHMUTANT_RED_STATUS` above; a fatal error exits 102 and is scored `aborted`. `--no-color`
 keeps the TAP lines plain where the environment sets `FORCE_COLOR`, which would otherwise put
-a color code before every `not ok`. The bracketed pattern selects exactly the named example,
-a description holding `[`, `*` or `?` included, and never one whose description merely starts
-with it. `--fail-no-examples` makes a selector that matches nothing exit 101 with no `not ok`
-line, so with the baseline on (the default) its row is scored `baseline`, not `survived`. A
-description holding `|` cannot be selected by itself: ShellSpec reads the `|` as the
-pattern's alternation.
+a color code before every `not ok`. The bracketed pattern selects exactly the examples whose
+own description it names, a description holding `[`, `*` or `?` included, and never one whose
+description merely starts with it. Examples in other groups or files that share the
+description run too; the witness, the full name, is what ties the row's verdict to the one it
+means. `--fail-no-examples` makes a selector
+that matches nothing exit 101 with no `not ok` line, so its row is scored `baseline` (`aborted`
+with `SHMUTANT_BASELINE=0`), never `survived`. A description holding `|` cannot be selected by
+itself: ShellSpec reads the `|` as the pattern's alternation.
 
 ## 4. Write the plan
 

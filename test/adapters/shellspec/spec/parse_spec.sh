@@ -23,8 +23,14 @@ Describe 'parse'
     The status should equal 1
   End
 
-  # Matched by the description above as an unescaped pattern, and not by the escaped one.
+  # Matched by the description above with its [ left unbracketed.
   It 'refuses e input XY'
+    When call parse 'x'
+    The output should equal 'x'
+  End
+
+  # Matched by the description above with its * and ? left unbracketed.
+  It 'refuses [empty] input XY'
     When call parse 'x'
     The output should equal 'x'
   End
