@@ -1,5 +1,7 @@
+# Loaded relative to where Bats starts, as a suite run from its root does: an adapter that did
+# not start Bats in the clone would test the original library.
 setup() {
-  . "$BATS_TEST_DIRNAME/../lib/parse.sh"
+  . lib/parse.sh
 }
 
 @test "parse rejects empty input" {
@@ -42,6 +44,17 @@ setup() {
 }
 
 @test "parse.empty (status) 1" {
+  run parse 'x'
+  [ "$status" -eq 0 ]
+}
+
+@test "parse a{2}" {
+  run parse 'a{2}'
+  [ "$output" = 'a{2}' ]
+}
+
+# Matched by the name above with its { } left unescaped, as a repeat count.
+@test "parse aa" {
   run parse 'x'
   [ "$status" -eq 0 ]
 }

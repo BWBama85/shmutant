@@ -87,25 +87,27 @@ prepare() { shmutant_copy_tree "$SHMUTANT_PLAN_DIR/.." "$1"; }
 run() {
   local re
   re="$(printf '%s' "$2" | sed 's/[][\\.^$*+?(){}|]/\\&/g')"
-  bats --formatter tap --filter "^${re}\$" "$1/test"
+  (cd "$1" && bats --formatter tap --filter "^${re}\$" test)
 }
 shmutant_target lib/parse.sh
 shmutant_mut 'empty input is accepted' 'return 1' 'return 0' 'parse rejects empty input'
 ```
 
 The plan sits in `test/` beside the `.bats` files, one level below the tree it copies; Bats
-loads only the `.bats` files there. CI runs this block as written against Bats 1.14.0 on
-Linux (`test/adapters/check.sh`). A failing test exits 1, the default `SHMUTANT_RED_STATUS`.
-The escaped, anchored filter selects exactly the tests of that name, a name holding `.`, `(`,
-`[` or another regex character included, and never one whose name merely starts or ends with
-it. Bats refuses a duplicate name only within one file: a test of the same name in another
-file runs too, and its failure carries the same witness. Bats filters on a name as written but
-prints it expanded as a double-quoted
-string, so a name holding `"`, `$`, a backtick or a backslash can print differently: give that
-test's row the printed name as its witness and the written name as its selector, the fifth
-argument. A filter that selects nothing makes Bats exit 1 with no `not ok` line, so a row
-whose selector matches no test is scored `baseline` (`aborted` with `SHMUTANT_BASELINE=0`),
-never `survived`.
+loads only the `.bats` files there. `run` changes into the clone because Bats runs the tests
+in the directory it starts in: started from your checkout, a test that loads code by a path
+relative to it tests the original rather than the mutant. CI runs this block as written
+against Bats 1.14.0 on Linux (`test/adapters/check.sh`). A failing test exits 1, the default
+`SHMUTANT_RED_STATUS`. The escaped, anchored filter selects exactly the tests of that name, a
+name holding `.`, `(`, `[`, `{` or another regex character included, and never one whose name
+merely starts or ends with it. Bats refuses a duplicate name only within one file: a test of
+the same name in another file runs too, and its failure carries the same witness. Bats
+filters on a name as written but prints it expanded as a double-quoted string, so a name
+holding `"`, `$`, a backtick or a backslash can print differently: give that test's row the
+printed name as its witness and the written name as its selector, the fifth argument. A
+filter that selects nothing makes Bats exit 1 with no `not ok` line, so a row whose selector
+matches no test is scored `baseline` (`aborted` with `SHMUTANT_BASELINE=0`), never
+`survived`.
 
 ### ShellSpec
 
