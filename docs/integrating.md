@@ -117,8 +117,8 @@ never against part of one (as 0.28.1 behaves; its `--help` says names that inclu
 pattern). A group that matches selects every example in it. Its `tap` formatter prints an
 example's full name, its groups' descriptions and its own joined by spaces:
 `not ok <n> - <full name>`. So a row names both, the full name as its witness and the
-example's own description as its selector, the fifth argument. The witness is matched as a
-whole token, so a longer full name that contains it carries it too (below):
+example's own description as its selector, the fifth argument (a longer full name that holds
+the witness as a whole token carries it too, as the paragraph after the block says):
 
 ```sh
 SHMUTANT_RED_PREFIX='not ok '
@@ -143,8 +143,8 @@ ShellSpec 0.28.1 on Linux (`test/adapters/check.sh`). A failing example exits 10
 keeps the TAP lines plain where the environment sets `FORCE_COLOR`, which would otherwise put
 a color code before every `not ok`. The bracketed pattern selects the examples whose own
 description it names and every example in a group whose description it names, a description
-holding `[`, `*` or `?` included, and never one whose description merely starts with it. All
-of them run, and a failure in any whose full name holds the witness as a whole token scores
+holding `[`, `*` or `?` included, and never one only because its description starts with it.
+All of them run, and a failure in any whose full name holds the witness as a whole token scores
 the row `killed`: `twin parse prints its input`, an example of the same description under
 another group, carries the witness `parse prints its input`. Keep the descriptions a selector
 reaches distinct enough that only the intended example's full name holds its witness.

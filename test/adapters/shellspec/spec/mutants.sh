@@ -1,8 +1,9 @@
 # shellcheck shell=bash
 # The ShellSpec fixture's plan: test/adapters/check.sh writes the ShellSpec block of
 # docs/integrating.md beside this file as adapter.sh, runs this plan, and requires the verdicts
-# ../expected.tsv lists. The rows after the block are the ones not killed, or killed only
-# through a selector the pattern escaping must carry.
+# ../expected.tsv lists. The rows after the block are the ones not killed, the ones killed only
+# through a selector the pattern escaping must carry, and one killed through an example of the
+# same description in another group.
 . "$SHMUTANT_PLAN_DIR/adapter.sh"
 
 shmutant_mut 'the trailing newline is dropped' "printf '%s\n'" "printf '%s'" \
