@@ -104,7 +104,13 @@ The predecessor of this tool ran the **entire suite for every mutant**. On one p
 118-row table took 4,600 to 5,200 seconds per pass. The coverage map was already there, every
 row declared its witness, but nothing used it to select work. `shmutant` passes the row's
 selector to `run` and ships `shmutant_selected` so a hand-rolled suite can honour it in one line.
-Its own 357-row self-mutation pass finishes in three to seven minutes against a suite that takes 15 seconds to run once.
+
+Its own self-mutation pass shows what selection buys. At commit `e139aca`, as timed by the steps
+of [CI run 37385016734](https://github.com/BWBama85/shmutant/actions/runs/37385016734), the pass
+over more than 350 rows took 940 seconds on `ubuntu-latest`, four rows at a time, where one run of
+the whole suite took 412 seconds: running the whole suite for every row at that concurrency would
+have taken over ten hours. On `macos-latest`, three rows at a time, the pass took 2,037 seconds
+against a 451-second suite, where whole-suite runs would have taken over fourteen hours.
 
 ## Installation
 
@@ -152,10 +158,30 @@ could not run.
 ## Testing shmutant
 
 ```sh
-bash test/run.sh                     # the suite, 187 units
+bash test/run.sh                     # the suite: every `t_*` unit, one at a time
 bash shmutant.sh run test/mutants.sh # the suite, mutation-tested by shmutant itself
 ```
 
 The second command is the tool's own proof: every guard in `shmutant.sh` is broken in a clone
 and the unit that claims to cover it must go red. If `shmutant` could not mutation-test its own
 assertions, it would not work.
+
+Both commands need to execute `ps`, the second because it runs `test/run.sh` for its baseline and
+every row. The suite's units read process state through it, and some of their checks that a process
+is gone would pass vacuously without it. Where there is no `/proc`, as on macOS, the leak check
+after every unit reads the process table through it too, and fails a unit whose table it cannot
+read instead of passing it. So
+`test/run.sh` first checks that `ps` runs; where it cannot, it runs no unit, prints one
+`run.sh: ps cannot run here …` line and exits 2.
+
+An agent sandbox is the usual cause: on macOS `/bin/ps` is setuid root, and Claude Code's sandbox
+refuses to execute it. This repository's `.claude/settings.json` lists `bash test/run.sh` in
+`sandbox.excludedCommands`, which runs that command outside the sandbox. The entry has no wildcard,
+and some call shapes stay sandboxed whatever the entry says: the suite stays sandboxed with an extra
+argument, a `SHMUTANT_SELECT=…` prefix, a `cd` before it, a pipe after it or its output redirected
+to a file. So do the second command and a gate script that runs the suite; run those outside the
+sandbox another way, such as approving an unsandboxed retry. Sandboxed, the second command does not
+name `ps`: its baseline aborts, every row is scored `baseline`, and it exits 1. A sandbox made
+admin-required, by turning unsandboxed retries off in managed settings or with `--settings`,
+ignores this repository's exclusion. The exclusion runs whatever `test/run.sh` and the
+`shmutant.sh` it sources hold at the time with your full access.

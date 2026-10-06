@@ -3,7 +3,8 @@
 # of them, which is how test/mutants.sh targets each row at the unit that claims to cover it.
 #
 # Exit: 0 every selected unit passed; 1 a unit failed (each failure prints `FAIL: <unit>: …`);
-# 2 no unit matched the selection.
+# 2 the harness failed, saying why on stderr; among the causes, ps cannot run here (checked before
+# any unit runs) or no unit matched the selection, each reported in one `run.sh: …` line.
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 # shellcheck source=../shmutant.sh
@@ -3999,6 +4000,52 @@ EOF
   hasnt "$out" 'FAIL' 'and nothing is failed'
 }
 
+t_suite_runs_no_unit_where_ps_cannot_run() {
+  # A copy of this suite with one unit that leaves a marker, and a copy of that in which ps cannot
+  # be executed: that one exits 2 with one line on stderr before it runs any unit, or sets up the
+  # sweep — given a TMPDIR that does not exist, setting it up first would fail with another line.
+  # The first copy runs the unit, and exits 2 only for a selection that matches nothing.
+  [ "$(tail -n 1 "$here/run.sh")" = 'main "$@"' ] || { fail_ 'run.sh no longer ends with main "$@"'; return; }
+  local out cause='run.sh: ps cannot run here (sandboxed?); the suite needs it, so no unit was run. Run the suite outside the sandbox.'
+  mkdir -p "$T/suite/test" "$T/suite-nops/test"
+  cp -- "$SHMUTANT" "$T/suite/shmutant.sh"
+  cp -- "$SHMUTANT" "$T/suite-nops/shmutant.sh"
+  { sed '$d' "$here/run.sh"
+    printf '%s\n' "t_zz_ran() { : > '$T/ran'; }" 'main "$@"'
+  } > "$T/suite/test/run.sh"
+  { sed '$d' "$T/suite/test/run.sh"
+    printf '%s\n' 'command() { [ "$1 $2" = "-p ps" ] && return 126; builtin command "$@"; }' 'main "$@"'
+  } > "$T/suite-nops/test/run.sh"
+  out="$(SHMUTANT_SELECT=t_zz_ran bash "$T/suite-nops/test/run.sh" 2> "$T/err")"; rc_is $? 2 'where ps cannot run, the suite exits 2'
+  eq "$(cat "$T/err")" "$cause" 'one line on stderr names the cause and the remedy'
+  eq "$out" '' 'nothing on stdout, so no FAIL line and no summary'
+  [ ! -e "$T/ran" ] || fail_ 'a unit ran although ps cannot run'
+  out="$(TMPDIR="$T/missing" SHMUTANT_SELECT=t_zz_ran bash "$T/suite-nops/test/run.sh" 2> "$T/err")"; rc_is $? 2 'where ps cannot run and TMPDIR does not exist, the suite exits 2'
+  eq "$(cat "$T/err")" "$cause" 'naming ps, which it checks before it sets up the sweep'
+  out="$(SHMUTANT_SELECT=t_zz_ran bash "$T/suite/test/run.sh" 2>&1)"; rc_is $? 0 'where ps runs, the unit runs'
+  [ -e "$T/ran" ] || fail_ 'fixture: where ps runs, the marker unit left no marker'
+  has "$out" 'run.sh: 1 unit(s) ran, 0 failed' 'and the summary counts it'
+  out="$(SHMUTANT_SELECT=t_zz_none bash "$T/suite/test/run.sh" 2> "$T/err")"; rc_is $? 2 'a selection that matches no unit exits 2'
+  eq "$(cat "$T/err")" 'run.sh: no unit matched the selection [t_zz_none]' 'with one line on stderr naming the selection'
+  eq "$out" '' 'and nothing on stdout'
+}
+
+t_ps_runs_needs_ps_to_report_this_shell() {
+  # fake_ps <output> <status> — the probe's verdict when ps prints <output> and returns <status>.
+  fake_ps() {
+    local ps_out="$1" ps_rc="$2"
+    ( command() { [ "$1 $2" = '-p ps' ] && { printf '%s' "$ps_out"; return "$ps_rc"; }; builtin command "$@"; }
+      ps_runs )
+  }
+  ps_runs || fail_ 'ps runs here, yet the probe said it does not'
+  fake_ps '' 126 && fail_ 'a ps that could not be executed passed the probe'
+  fake_ps "$$" 1 && fail_ 'a ps that reported this pid but failed passed the probe'
+  fake_ps '' 0 && fail_ 'a ps that printed nothing passed the probe'
+  fake_ps "$(( $$ + 1 ))" 0 && fail_ 'a ps that reported another pid passed the probe'
+  fake_ps "$$"$'\n'"$$" 0 && fail_ 'a ps that reported this pid twice passed the probe'
+  fake_ps "  $$ "$'\n' 0 || fail_ 'a ps that reported this pid padded with blanks failed the probe'
+}
+
 t_unit_leftovers_fails_closed() {
   # Every identity recorded for a pid is checked: a stale one recorded first (a reused pid) must
   # not hide the live process now at that number.
@@ -4287,9 +4334,21 @@ unit_leftovers() {
   done
 }
 
+# ps_runs — true when ps runs here and reports this shell's own pid; a zero status alone is not
+# proof. Units read process state through ps, and some of their absence checks would pass vacuously
+# without it; where there is no /proc (macOS) the leak check after every unit reads through ps too,
+# and every unit would fail on that one cause. So where ps cannot run (an agent sandbox refusing the
+# setuid /bin/ps), main stops before any unit. The per-unit checks still fail closed.
+ps_runs() {
+  local out
+  out="$(command -p ps -o pid= -p "$$" 2>/dev/null)" || return 1
+  [ "${out//[[:space:]]/}" = "$$" ]
+}
+
 main() {
   local units u ran=0 failed=0 swept=0 urc pfd sampler src ufd sd i left_unverified=0
   local -a left=() victims=()
+  ps_runs || { echo 'run.sh: ps cannot run here (sandboxed?); the suite needs it, so no unit was run. Run the suite outside the sandbox.' >&2; exit 2; }
   units="$(declare -F | awk '$3 ~ /^t_/ { print $3 }')"
   SWEEP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/shmutant-sweep.XXXXXX")" || { echo 'run.sh: cannot create the sweep directory' >&2; exit 2; }
   trap 'rm -rf -- "$SWEEP_DIR"' EXIT
