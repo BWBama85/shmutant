@@ -137,13 +137,14 @@ EOF
 
 hexre='^[0-9a-f]{40}([0-9a-f]{24})?$'
 
-# Any promisor remote, not only origin, can be fetched from lazily. A config read that fails, rather
-# than finding nothing (1), is exit 2.
-g config --get-regexp '^remote\..*\.promisor$' > /dev/null; prc=$?
+# Any remote whose promisor setting is true, not only origin, can be fetched from lazily. A config
+# read that fails, rather than finding nothing (1), is exit 2.
+promisors="$(g config --bool --get-regexp '^remote\..*\.promisor$')"; prc=$?
 [ "$prc" -le 1 ] || die "cannot read git's config (exit $prc)"
 pclone="$(g config --get extensions.partialclone)"; rc=$?
 [ "$rc" -le 1 ] || die "cannot read git's config (exit $rc)"
-if [ "$prc" -eq 0 ] || [ -n "$pclone" ]; then
+case " $promisors" in *" true"*) promisor=1 ;; *) promisor=0 ;; esac
+if [ "$promisor" -eq 1 ] || [ -n "$pclone" ]; then
   gv="$(git version)" || die "cannot read git's version"
   re='^git version ([0-9]+)\.([0-9]+)'
   [[ "$gv" =~ $re ]] || die "cannot read git's version: $gv"
@@ -191,11 +192,14 @@ blob_why() { if [ "$1" -eq 1 ]; then why="$2 has no $3"; else why="cannot read $
 # why set, unless CHECKSUMS is exactly the one line `<sha256>  shmutant.sh`, newline-terminated;
 # 2 when it cannot be read.
 checksums_digest() {
-  local ck rc re=$'^([0-9a-f]{64})  shmutant\\.sh\n$'
+  local ck rc size re=$'^([0-9a-f]{64})  shmutant\\.sh\n$'
   digest=""
   ck="$(blob "$1" CHECKSUMS && printf x)"; rc=$?
   [ "$rc" -eq 0 ] || { blob_why "$rc" "$1" CHECKSUMS; return "$rc"; }
   ck="${ck%x}"
+  # Its size too, from git: command substitution drops NUL bytes, so the text alone cannot show them.
+  size="$(g cat-file -s "$1:CHECKSUMS")" || { why="cannot read CHECKSUMS at $1"; return 2; }
+  [ "$size" = 78 ] || { why="CHECKSUMS is not the one line '<sha256>  shmutant.sh' (it is $size bytes, not 78)"; return 1; }
   [[ "$ck" =~ $re ]] || { why="CHECKSUMS is not the one line '<sha256>  shmutant.sh'"; return 1; }
   digest="${BASH_REMATCH[1]}"
 }
@@ -500,7 +504,8 @@ interrupted() {
 # The run's temporary directory holds only the two release assets, written from the checked commit.
 # Each directory and file's inode is recorded as it is made. Cleanup removes an asset only while it
 # is still that inode and still holds exactly that commit's blob (its git object id), never through a
-# symbolic link, and then rmdirs the directories: it cannot remove what the run did not write. What it leaves, it reports. A cleanup failure does not change the status of a run
+# symbolic link, and then rmdirs the directories. What it removes is what it checked an instant
+# before; nothing closes that instant, as nothing in a shell can remove by inode. What it leaves, it reports. A cleanup failure does not change the status of a run
 # whose outcome is already decided; it is reported beside it.
 made=""; made_id=""; assets_id=""; sh_id=""; ck_id=""
 # inode_of <path> — the inode of <path> itself (not of a link's target), or nothing.
@@ -521,7 +526,7 @@ cleanup() {
     done
     rmdir -- "$made/assets" 2> /dev/null
   fi
-  rmdir -- "$made" 2> /dev/null || err "left $made in place: it holds something this run did not write"
+  rmdir -- "$made" 2> /dev/null || err "left $made in place: it is not empty, and cleanup removes only the assets it can prove it wrote"
 }
 # newtmp — makes the run's temporary directory: a random name, then an atomic mkdir that fails on
 # anything already there. Signals are held until the directory is the run's own and its name set,
@@ -632,9 +637,17 @@ say "pushed $tag, naming $remote, on origin and on GitHub"
 mkdir -- "$made/assets" && assets_id="$(inode_of "$made/assets")" \
   && : > "$made/assets/shmutant.sh" && sh_id="$(inode_of "$made/assets/shmutant.sh")" \
   && : > "$made/assets/CHECKSUMS" && ck_id="$(inode_of "$made/assets/CHECKSUMS")" \
-  && g cat-file blob "$remote:shmutant.sh" > "$made/assets/shmutant.sh" \
-  && g cat-file blob "$remote:CHECKSUMS" > "$made/assets/CHECKSUMS" \
   || { err "could not write the release assets from $tag"; finish_by_hand; exit 1; }
+for a in shmutant.sh CHECKSUMS; do
+  want="$(g rev-parse --verify --quiet "$remote:$a")" \
+    || { err "cannot read $a at $remote"; finish_by_hand; exit 2; }
+  g cat-file blob "$want" > "$made/assets/$a"; rc=$?
+  # git reports a read it could not make with 128; anything else is the write.
+  [ "$rc" -ne 128 ] || { err "cannot read $a at $remote"; finish_by_hand; exit 2; }
+  [ "$rc" -eq 0 ] || { err "could not write the release asset $a"; finish_by_hand; exit 1; }
+  [ "$(g hash-object --no-filters -- "$made/assets/$a")" = "$want" ] \
+    || { err "the release asset $a does not hold $a at $remote"; finish_by_hand; exit 2; }
+done
 (cd -- "$made/assets" && "${create[@]}") \
   || { err "gh release create failed"; finish_by_hand; exit 1; }
 say "published the release $tag"

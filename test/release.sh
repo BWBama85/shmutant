@@ -906,6 +906,31 @@ c_hashes_with_whichever_digest_tool_there_is() {
   has "$err" "the digest tool printed no SHA-256" "says so"
 }
 
+c_refuses_a_checksums_line_hiding_a_nul() {
+  local d
+  d="$(sha256 < "$c/shmutant.sh")" || exit 2
+  printf '%s  shmutant.sh\n\0' "$d" > "$c/CHECKSUMS"; land "$c" nul
+  rel --dry-run "$VER"
+  refused_once "CHECKSUMS is not the one line '<sha256>  shmutant.sh' (it is 79 bytes, not 78)" "a NUL after the line"
+}
+
+c_a_failed_asset_read_after_the_tag_exits_2() {
+  failbox "$S/fr" git 128 "*cat-file blob $(git -C "$c" rev-parse HEAD:shmutant.sh)"
+  relf "$S/fr" "$VER"
+  rc_is "$rc" 2 "shmutant.sh unreadable when the assets are written"
+  has "$err" "cannot read shmutant.sh at" "says so"
+  has "$err" "to finish the release of $TAG by hand" "and how to finish"
+  hasnt "$(events)" "gh release create" "nothing published"
+}
+
+c_takes_a_promisor_setting_by_its_value() {
+  git -C "$c" config remote.origin.promisor false || exit 2
+  git_box "$S/oldgit" 2.39.5
+  (cd -- "$c" && PATH="$S/oldgit:$tmp/bin:$PATH" STUB="$S" SLUG="$SLUG" bash scripts/release.sh --dry-run "$VER") > "$S/out" 2> "$S/err"
+  rc=$?; err="$(cat "$S/err")"
+  rc_is "$rc" 0 "remote.origin.promisor=false is no partial clone, even under git 2.39"
+}
+
 c_refuses_a_checksums_line_that_is_not_exactly_one() {
   local d
   d="$(sha256 < "$c/shmutant.sh")" || exit 2
@@ -1004,12 +1029,12 @@ c_sets_aside_the_callers_tracing_and_aliases() {
 # sha_box <dir> — <dir> holding a sha256sum that fails on the call $STUB/sha.failat names and is a
 # real digest tool otherwise; calls are counted in $STUB/sha.count.
 sha_box() {
-  local real
+  local real args=""
   real="$(command -v sha256sum || command -v shasum)" || exit 2
-  case "$real" in *shasum) real="$real -a 256" ;; esac
+  case "$real" in *shasum) args="-a 256" ;; esac
   toolbox "$1" gh curl sleep
-  printf '#!/usr/bin/env bash\nn=$(( $(cat "$STUB/sha.count" 2> /dev/null || echo 0) + 1 )); echo "$n" > "$STUB/sha.count"\n[ "$n" != "$(cat "$STUB/sha.failat" 2> /dev/null)" ] || { echo "sha256sum: read error" >&2; exit 1; }\nexec %s\n' \
-    "$real" > "$1/sha256sum" && chmod +x "$1/sha256sum" || exit 2
+  printf '#!/usr/bin/env bash\nn=$(( $(cat "$STUB/sha.count" 2> /dev/null || echo 0) + 1 )); echo "$n" > "$STUB/sha.count"\n[ "$n" != "$(cat "$STUB/sha.failat" 2> /dev/null)" ] || { echo "sha256sum: read error" >&2; exit 1; }\nexec %q %s\n' \
+    "$real" "$args" > "$1/sha256sum" && chmod +x "$1/sha256sum" || exit 2
 }
 
 c_verify_exits_2_when_it_cannot_hash_what_it_read() {
@@ -1328,7 +1353,7 @@ c_cleanup_removes_only_the_files_it_wrote() {
   mkdir -p "$S/tmp"; : > "$S/replace-asset"
   TMPDIR="$S/tmp" rel "$VER"
   rc_is "$rc" 0 "the cut, one asset swapped for an identical new file"
-  has "$err" "it holds something this run did not write" "cleanup says why it left the directory"
+  has "$err" "it is not empty" "cleanup says why it left the directory"
   local f found=0
   for f in "$S"/tmp/release.*/assets/shmutant.sh; do [ ! -f "$f" ] || found=1; done
   [ "$found" -eq 1 ] || fail_ "the swapped-in file was removed"
@@ -1411,7 +1436,7 @@ c_exits_2_when_a_read_fails_rather_than_finds_nothing() {
   relf "$S/f1" --dry-run "$VER"; rc_is "$rc" 2 "HEAD unreadable"; has "$err" "cannot read HEAD" "says so"
   failbox "$S/f2" git 128 '*config --get-all remote.origin.pushurl*'
   relf "$S/f2" --dry-run "$VER"; rc_is "$rc" 2 "push URLs unreadable"; has "$err" "cannot read origin's push URLs" "says so"
-  failbox "$S/f3" git 128 '*config --get-regexp*'
+  failbox "$S/f3" git 128 '*--get-regexp*'
   relf "$S/f3" --dry-run "$VER"; rc_is "$rc" 2 "config unreadable"; has "$err" "cannot read git's config" "says so"
   failbox "$S/f4" git 128 '*rev-parse --quiet --verify refs/tags/*'
   relf "$S/f4" --dry-run "$VER"; rc_is "$rc" 2 "local tags unreadable"; has "$err" "cannot read this checkout's tags" "says so"
