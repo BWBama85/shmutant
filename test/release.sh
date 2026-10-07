@@ -20,8 +20,11 @@ for t in git jq; do
 done
 root="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)" || exit 2
 made="$(mktemp -d "${TMPDIR:-/tmp}/release-test.XXXXXX")" || exit 2
-trap 'rm -rf -- "$made" || echo "test/release.sh: could not remove $made" >&2' EXIT
 tmp="$(cd -P -- "$made" && pwd -P)" || exit 2
+tmp_id="$(ls -di -- "$tmp" | awk '{ print $1 }')" || exit 2
+# The physical directory, and only while it keeps the inode it was made with.
+trap '[ "$(ls -di -- "$tmp" 2> /dev/null | awk "{ print \$1 }")" = "$tmp_id" ] && rm -rf -- "$tmp" \
+  || echo "test/release.sh: left $tmp in place" >&2' EXIT
 
 SLUG=shmutant-test/fixture
 # uid 0 reads through mode bits, so a file made unreadable with chmod stays readable to it.
@@ -49,8 +52,8 @@ cat > "$tmp/bin/gh" <<'EOF'
 # driver should not make, or one it made with prompts left on.
 unset -f git
 { printf 'gh'; printf ' %q' "$@"; printf '\n'; } >> "$STUB/events"
-[ "${GH_PROMPT_DISABLED:-}" = 1 ] && [ "${GIT_TERMINAL_PROMPT:-}" = 0 ] \
-  || { echo "gh stub: called with prompts enabled" >&2; exit 3; }
+[ "${GH_PROMPT_DISABLED:-}" = 1 ] && [ "${GIT_TERMINAL_PROMPT:-}" = 0 ] && [ "${GIT_ASKPASS:-}" = false ] \
+  || { echo "gh stub: called with prompts or askpass enabled" >&2; exit 3; }
 jqx=""; paginate=0; a=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -63,13 +66,14 @@ reply() { if [ -n "$jqx" ]; then jq -r "$jqx"; else cat; fi; }
 # pages — a list read must ask for every page.
 pages() { [ "$paginate" -eq 1 ] || { echo "gh stub: a list read without --paginate" >&2; exit 3; }; }
 fail() { echo "gh: $1" >&2; exit 1; }
-# opts <args>… — sets repo, dir, verify and files from a release subcommand's arguments.
+# opts <args>… — sets repo, dir, verify, patterns and files from a release subcommand's arguments.
 opts() {
-  repo=""; dir=""; verify=0; files=()
+  repo=""; dir=""; verify=0; files=(); patterns=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
       -R) repo="$2"; shift 2 ;;
       --dir) dir="$2"; shift 2 ;;
+      --pattern) patterns+=("$2"); shift 2 ;;
       --title|--notes) shift 2 ;;
       --verify-tag) verify=1; shift ;;
       *) files+=("$1"); shift ;;
@@ -130,6 +134,7 @@ case "${a[0]:-} ${a[1]:-}" in
     mkdir -p "$STUB/release" && cp -- "${files[@]}" "$STUB/release/" || exit 1
     [ ! -e "$STUB/asset.tamper" ] || echo '# tampered' >> "$STUB/release/$(cat "$STUB/asset.tamper")"
     [ ! -e "$STUB/asset.omit" ] || rm -f -- "$STUB/release/$(cat "$STUB/asset.omit")"
+    [ ! -e "$STUB/asset.extra" ] || echo 'release notes' > "$STUB/release/notes.txt"
     if [ -e "$STUB/asset.merge" ]; then
       mv -- "$STUB/release/shmutant.sh" "$STUB/release/shmutant.sh CHECKSUMS" && rm -f -- "$STUB/release/CHECKSUMS" || exit 1
     fi
@@ -147,7 +152,10 @@ case "${a[0]:-} ${a[1]:-}" in
     if [ -e "$STUB/replace-tmp" ]; then
       mv -- "$made" "$made.moved" && mkdir -- "$made" && echo victim > "$made/victim" || exit 1
     fi
-    cp -- "$STUB/release/"* "$dir/" || exit 1
+    for f in "$STUB/release/"*; do
+      [ "${#patterns[@]}" -eq 0 ] || { keep=0; for pt in "${patterns[@]}"; do case "${f##*/}" in $pt) keep=1 ;; esac; done; [ "$keep" -eq 1 ] || continue; }
+      cp -- "$f" "$dir/" || exit 1
+    done
     [ ! -e "$STUB/asset.unreadable" ] || chmod 000 "$dir/$(cat "$STUB/asset.unreadable")" ;;
   *) echo "gh stub: unexpected call: ${a[*]}" >&2; exit 3 ;;
 esac
@@ -177,6 +185,11 @@ case "$mode" in
   nowrite) echo "curl: (23) Failure writing output to destination" >&2; exit 23 ;;
   unreachable) echo "curl: (7) Failed to connect" >&2; exit 7 ;;
 esac
+# $STUB/curl.codes: one exit code per call, consumed in order.
+if [ -s "$STUB/curl.codes" ]; then
+  code="$(head -n 1 "$STUB/curl.codes")"; sed -i.bak 1d "$STUB/curl.codes" && rm -f -- "$STUB/curl.codes.bak"
+  echo "curl: ($code) scripted failure" >&2; exit "$code"
+fi
 n="$(cat "$STUB/curl.404s" 2> /dev/null)"
 if [ "${n:-0}" -gt 0 ]; then echo $((n - 1)) > "$STUB/curl.404s"; notfound; fi
 case "$url" in "https://raw.githubusercontent.com/$SLUG/"*/shmutant.sh) ;; *) notfound ;; esac
@@ -277,7 +290,7 @@ relp() {
 toolbox() {
   local d="$1" t p; shift
   mkdir -p "$d" || exit 2
-  for t in bash git jq dirname tr awk grep sort wc mkdir rm mktemp cat cp ls sed head "$@"; do
+  for t in bash git jq dirname tr awk grep sort wc mkdir rmdir rm sleep mktemp cat cp ls sed head "$@"; do
     if [ -x "$tmp/bin/$t" ]; then p="$tmp/bin/$t"; else p="$(command -v "$t")" || continue; fi
     ln -sf "$p" "$d/$t" || exit 2
   done
@@ -748,7 +761,7 @@ c_the_printed_hand_finish_publishes_the_tagged_assets() {
   # The printed steps, run as printed: write the assets, then the "with no release" command.
   while IFS= read -r cmd; do
     (cd -- "$S/finish" && unset GH_HOST && PATH="$tmp/bin:$PATH" STUB="$S" SLUG="$SLUG" \
-       GH_PROMPT_DISABLED=1 GIT_TERMINAL_PROMPT=0 eval "$cmd") 2>> "$S/finish.err" \
+       GH_PROMPT_DISABLED=1 GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=false eval "$cmd") 2>> "$S/finish.err" \
       || fail_ "a printed step failed: $cmd ($(cat "$S/finish.err"))"
   done <<EOF
 $(printf '%s\n' "$err" | sed -n -e 's/^release:   \(git -C .*\)$/\1/p' -e 's/^release:   with no release:   //p')
@@ -1090,7 +1103,7 @@ c_reports_a_temporary_directory_it_cannot_remove() {
   mkdir -p "$S/tmp"; : > "$S/rm.fail"
   TMPDIR="$S/tmp" rel "$VER"
   rc_is "$rc" 0 "the cut still succeeds"
-  has "$err" "could not remove the temporary directory" "and says what it left"
+  has "$err" "could not remove $S/tmp/release." "and says what it could not remove"
   rm -f -- "$S/rm.fail"
 }
 
@@ -1134,6 +1147,47 @@ c_verify_matches_each_asset_name_whole() {
   has "$err" "VERIFY FAILED: the release $TAG has no asset shmutant.sh" "the missing asset is named"
 }
 
+c_verify_downloads_only_the_two_assets_it_checks() {
+  mkdir -p "$S/tmp"; : > "$S/asset.extra"
+  TMPDIR="$S/tmp" rel "$VER"
+  rc_is "$rc" 0 "a release that also carries notes.txt"
+  hasnt "$err" "left $S/tmp" "nothing unexpected was written"
+  eq "$(ls -A "$S/tmp")" "" "and the temporary directory is gone"
+}
+
+c_verify_tells_http_errors_from_other_download_failures() {
+  rel "$VER"
+  rc_is "$rc" 0 "the cut"
+  { echo 7; yes 22 | head -n 11; } > "$S/curl.codes"
+  rel --verify "$VER"
+  rc_is "$rc" 2 "a connection failure, then HTTP errors"
+  has "$err" "not every failure was an HTTP error" "says so"
+  { yes 22 | head -n 11; echo 7; } > "$S/curl.codes"
+  rel --verify "$VER"
+  rc_is "$rc" 2 "HTTP errors, then a connection failure"
+  yes 22 | head -n 12 > "$S/curl.codes"
+  rel --verify "$VER"
+  rc_is "$rc" 1 "an HTTP error every time"
+  has "$err" "answered an HTTP error on each of 12 attempts" "says so"
+}
+
+c_stops_without_a_text_tool_it_needs() {
+  toolbox "$S/box" gh curl sleep
+  rm -f -- "$S/box/sort"
+  relp "$S/box" --dry-run "$VER"
+  rc_is "$rc" 2 "no sort on PATH"
+  has "$err" "sort is not on PATH" "says so"
+}
+
+c_clears_gits_own_tracing() {
+  git -C "$c" remote set-url origin "https://x-access-token:s3cret@github.com/$SLUG.git"
+  git -C "$c" config "url.$S/origin.git.insteadOf" "https://x-access-token:s3cret@github.com/$SLUG.git"
+  rele GIT_TRACE=1 GIT_TRACE_SETUP=1 GIT_TRACE2=1 GIT_TRACE2_EVENT=1 GIT_CURL_VERBOSE=1 -- --dry-run "$VER"
+  rc_is "$rc" 0 "git tracing exported by the caller"
+  hasnt "$err" "s3cret" "the origin URL's token is not traced"
+  hasnt "$err" "trace:" "git traced nothing"
+}
+
 c_verify_exits_2_when_a_read_fails() {
   rel "$VER"
   rc_is "$rc" 0 "the cut"
@@ -1148,7 +1202,7 @@ c_verify_exits_2_when_a_read_fails() {
   echo unreachable > "$S/curl.mode"
   rel --verify "$VER"
   rc_is "$rc" 2 "the raw URL cannot be reached"
-  has "$err" "could not download $URL in 12 attempts (curl exit 7)" "says so"
+  has "$err" "could not download $URL in 12 attempts (the last curl exit was 7" "says so"
 }
 
 c_cleanup_follows_no_symlink_swapped_after_allocation() {
@@ -1167,21 +1221,37 @@ c_cleanup_leaves_a_directory_that_replaced_its_own() {
   mkdir -p "$S/tmp"; : > "$S/replace-tmp"
   TMPDIR="$S/tmp" rel "$VER"
   rc_is "$rc" 2 "the run's directory is replaced during verification"
-  has "$err" "it is no longer the directory this run made" "cleanup says why it removed nothing"
+  has "$err" "it holds something this run did not write" "cleanup says why it left the directory"
   for d in "$S"/tmp/release.*; do
     case "$d" in *.moved) ;; *) [ -f "$d/victim" ] || fail_ "the replacing directory's victim was removed" ;; esac
   done
 }
 
+c_never_adopts_a_directory_that_appears_at_its_chosen_name() {
+  mkdir -p "$S/box-race" "$S/tmp" || exit 2
+  # On the first call for the run's directory, another directory appears at that name, holding a
+  # file, just before the real mkdir runs.
+  printf '#!/usr/bin/env bash\nfor a in "$@"; do case "$a" in */release.[0-9]*) case "${a##*/release.}" in */*) ;; *) [ -e "%s/raced" ] || { /bin/mkdir -- "$a" && echo theirs > "$a/theirs" && : > "%s/raced"; } ;; esac ;; esac; done\nexec /bin/mkdir "$@"\n' \
+    "$S" "$S" > "$S/box-race/mkdir"
+  chmod +x "$S/box-race/mkdir" || exit 2
+  (cd -- "$c" && PATH="$S/box-race:$tmp/bin:$PATH" TMPDIR="$S/tmp" STUB="$S" SLUG="$SLUG" bash scripts/release.sh "$VER") > "$S/out" 2> "$S/err"
+  rc=$?; err="$(cat "$S/err")"
+  rc_is "$rc" 0 "the cut, after a race at its first chosen name"
+  hasnt "$err" "left $S/tmp" "the raced directory was never taken for its own"
+  eq "$(cat "$S"/tmp/release.*/theirs 2> /dev/null)" theirs "and still holds its file"
+}
+
 c_an_interrupt_while_allocating_leaves_nothing() {
-  mkdir -p "$S/box-mktemp" "$S/tmp" || exit 2
-  printf '#!/usr/bin/env bash\nd="$(/usr/bin/mktemp "$@")" || exit 1\nprintf "%%s\\n" "$d"\nkill -TERM 0\n' > "$S/box-mktemp/mktemp"
-  chmod +x "$S/box-mktemp/mktemp" || exit 2
+  mkdir -p "$S/box-mkdir" "$S/tmp" || exit 2
+  # A mkdir that makes the run's directory and then sends TERM to its process group.
+  printf '#!/usr/bin/env bash\n/bin/mkdir "$@" || exit 1\nfor a in "$@"; do case "$a" in */release.[0-9]*) case "${a##*/release.}" in */*) ;; *) kill -TERM 0 ;; esac ;; esac; done\n' \
+    > "$S/box-mkdir/mkdir"
+  chmod +x "$S/box-mkdir/mkdir" || exit 2
   # In a process group of its own (set -m), so the stub's TERM to its group reaches the driver only.
   # The background job is the driver itself, not a list: a subshell around it would take the TERM
   # too and let the wait return before the driver had cleaned up.
   bash -c 'set -m; cd -- "$1" || exit 2; PATH="$2:$PATH" TMPDIR="$3" STUB="$4" SLUG="$5" bash scripts/release.sh "$6" & wait $!' \
-    _ "$c" "$S/box-mktemp:$tmp/bin" "$S/tmp" "$S" "$SLUG" "$VER" > "$S/out" 2> "$S/err"
+    _ "$c" "$S/box-mkdir:$tmp/bin" "$S/tmp" "$S" "$SLUG" "$VER" > "$S/out" 2> "$S/err"
   rc=$?; err="$(cat "$S/err")"
   rc_is "$rc" 143 "TERM while the temporary directory is made"
   eq "$(ls -A "$S/tmp")" "" "and it is removed"

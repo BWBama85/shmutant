@@ -33,10 +33,11 @@
 #
 # The repository is the one origin's single URL names, a github.com HTTPS or SSH URL; every push
 # URL origin has must name the same one. Every gh call names it, on github.com, and gh's account
-# must be able to push to it. Needs git, gh, curl, and sha256sum, shasum or openssl. Git over HTTPS
-# and gh never prompt: a missing credential fails instead of waiting. The caller's exported
-# functions and aliases, its GIT_* repository, git replacement objects and GH_HOST, and the shell
-# options that change what a command does (xtrace, verbose, keyword, allexport, errexit,
+# must be able to push to it. Needs git, gh, curl, the POSIX text tools, and sha256sum, shasum or
+# openssl. Git over HTTPS and gh never prompt: credentials come from a credential helper or gh's
+# login, no askpass program is run, and a missing credential fails instead of waiting. The caller's
+# exported functions and aliases, its GIT_* repository, git's tracing variables, git replacement
+# objects and GH_HOST, and the shell options that change what a command does (xtrace, verbose, keyword, allexport, errexit,
 # noclobber, pipefail, posix, nocasematch) are set aside before anything is read. A function
 # named after a builtin the setup itself calls (builtin, read, unset, declare) cannot be, nor can
 # the options that stop commands from running at all (noexec, onecmd): run the driver with
@@ -55,7 +56,8 @@ unset CDPATH
 export LC_ALL=C GH_HOST=github.com GH_PROMPT_DISABLED=1 GIT_TERMINAL_PROMPT=0 GIT_NO_REPLACE_OBJECTS=1 \
   GIT_NO_LAZY_FETCH=1
 unset -v GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
-  GIT_COMMON_DIR GIT_NAMESPACE
+  GIT_COMMON_DIR GIT_NAMESPACE "${!GIT_TRACE@}" GIT_CURL_VERBOSE
+export GIT_TRACE2=0 GIT_TRACE2_EVENT=0 GIT_TRACE2_PERF=0 GIT_ASKPASS=false
 
 # Downloads of the raw URL before --verify gives up, and the pause between them: a new tag can
 # answer 404 there for a while, and a cached 404 lives up to 300 seconds. Reads of GitHub's tag
@@ -88,7 +90,9 @@ ver="${version#v}"
 [[ "$ver" =~ $re ]] || die "not a version: '$version' (want X.Y.Z or vX.Y.Z)"
 tag="v$ver"
 
-for t in git gh curl; do command -v "$t" > /dev/null 2>&1 || die "$t is not on PATH"; done
+for t in git gh curl grep sed sort awk tr wc dirname mkdir rmdir rm sleep; do
+  command -v "$t" > /dev/null 2>&1 || die "$t is not on PATH"
+done
 
 root="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)" || die "cannot resolve the repository root"
 g() { git -C "$root" "$@"; }
@@ -361,7 +365,7 @@ EOF
 # verify <commit> — the published release, against CHECKSUMS at <commit>, which origin's tag must
 # name; every mismatch is reported. A failed read or a missing tool exits 2.
 verify() {
-  local c="$1" got ck i=0 bad=0 a peel gt rc crc rel draft has_sh has_ck
+  local c="$1" got ck i=0 bad=0 a peel gt rc crc httponly=1 rel draft has_sh has_ck
   peel="$(origin_tag)" || die "cannot read origin's tags (git ls-remote failed)"
   [ "$peel" = "$c" ] || { err "VERIFY FAILED: origin's $tag names ${peel:-nothing}, not $c"; return 1; }
   gt="$(github_tag)" || die "cannot read $slug's tags through the GitHub API"
@@ -376,15 +380,17 @@ verify() {
   mkdir -- "$made/raw" "$made/dl" || die "cannot create the download directories"
 
   # An HTTP error on every attempt is the URL not serving the file: a verify failure. Any other
-  # failure is a read that did not happen: exit 2, at once for one that cannot write its output.
+  # failure on any attempt is a read that did not happen: exit 2, at once for one that cannot
+  # write its output.
   while :; do
     curl -q -fsSL --proto '=https' --connect-timeout 20 --max-time 300 -o "$made/raw/shmutant.sh" "$raw_url"; crc=$?
     [ "$crc" -ne 0 ] || break
     [ "$crc" -ne 23 ] || die "cannot write the download of $raw_url (curl exit 23)"
+    [ "$crc" -eq 22 ] || httponly=0
     i=$((i + 1))
     if [ "$i" -ge "$attempts" ]; then
-      [ "$crc" -ne 22 ] || { err "VERIFY FAILED: $raw_url answered an HTTP error on each of $i attempts"; return 1; }
-      die "could not download $raw_url in $i attempts (curl exit $crc)"
+      [ "$httponly" -eq 0 ] || { err "VERIFY FAILED: $raw_url answered an HTTP error on each of $i attempts"; return 1; }
+      die "could not download $raw_url in $i attempts (the last curl exit was $crc, and not every failure was an HTTP error)"
     fi
     say "downloading $raw_url failed (curl exit $crc, attempt $i of $attempts); retrying in ${pause}s"
     sleep "$pause"
@@ -410,7 +416,7 @@ EOF
   [ "$draft" = false ] || { err "VERIFY FAILED: the release $tag is a draft"; return 1; }
   [ "$has_sh" = true ] || { err "VERIFY FAILED: the release $tag has no asset shmutant.sh"; return 1; }
   [ "$has_ck" = true ] || { err "VERIFY FAILED: the release $tag has no asset CHECKSUMS"; return 1; }
-  gh release download "$tag" -R "github.com/$slug" --dir "$made/dl" \
+  gh release download "$tag" -R "github.com/$slug" --dir "$made/dl" --pattern shmutant.sh --pattern CHECKSUMS \
     || die "could not download the assets of the release $tag"
   for a in shmutant.sh CHECKSUMS; do
     [ -f "$made/dl/$a" ] || die "the download of the release $tag holds no $a"
@@ -435,36 +441,42 @@ interrupted() {
   }
   exit "$1"
 }
-# cleanup — removes this run's temporary directory, only while it is still the one this run made
-# (same physical path, same inode), saying so when it cannot; the run's exit status stands.
-made=""; made_id=""
+# The run's temporary directory, and every file it writes there, by name: cleanup removes exactly
+# these and rmdirs the directories, so it can remove nothing the run did not make. Whatever else is
+# found there stays, and is reported.
+made=""
+made_files="assets/shmutant.sh assets/CHECKSUMS raw/shmutant.sh dl/shmutant.sh dl/CHECKSUMS"
+made_dirs="assets raw dl"
 cleanup() {
-  local id
-  [ -n "$made" ] && [ -d "$made" ] || return 0
-  id="$(ls -di -- "$made" 2> /dev/null | awk '{ print $1 }')"
-  if [ -z "$made_id" ] || [ "$id" != "$made_id" ]; then
-    err "not removing $made: it is no longer the directory this run made"; return 0
-  fi
-  rm -rf -- "$made" || err "could not remove the temporary directory $made"
+  local f
+  [ -n "$made" ] || return 0
+  for f in $made_files; do [ ! -e "$made/$f" ] || rm -f -- "$made/$f" || err "could not remove $made/$f"; done
+  for f in $made_dirs; do [ ! -d "$made/$f" ] || rmdir -- "$made/$f" 2> /dev/null; done
+  [ ! -e "$made" ] || rmdir -- "$made" 2> /dev/null \
+    || err "left $made in place: it holds something this run did not write"
 }
-# newtmp — makes the run's temporary directory. A signal during the allocation is held until the
-# directory is known, then handled, so an interrupt there still removes it.
+# newtmp — makes the run's temporary directory: a random name chosen first, then an atomic mkdir
+# that fails on anything already there. Signals are held until the name is set, so an interrupt
+# at any point is handled with the name known and cleanup can reach the directory.
 newtmp() {
-  local pending="" mrc phys
+  local pending="" base n=0 try
   trap 'pending=130' INT
   trap 'pending=143' TERM
-  made="$(mktemp -d "${TMPDIR:-/tmp}/release.XXXXXX")"; mrc=$?
-  if [ -n "$made" ] && [ -d "$made" ]; then
-    phys="$(cd -P -- "$made" && pwd -P)" && made="$phys"
-    made_id="$(ls -di -- "$made" | awk '{ print $1 }')"
-  else
+  base="$(cd -P -- "${TMPDIR:-/tmp}" && pwd -P)" || base=""
+  while [ -n "$base" ] && [ -z "$pending" ] && [ "$n" -lt 20 ]; do
+    n=$((n + 1))
+    try="$base/release.$$.$RANDOM$RANDOM"
+    [ ! -e "$try" ] && [ ! -L "$try" ] || continue
+    made="$try"
+    mkdir -m 700 -- "$made" 2> /dev/null && break
+    [ -d "$made" ] && [ -n "$pending" ] && break
     made=""
-  fi
+  done
   trap cleanup EXIT
   trap 'interrupted 130' INT
   trap 'interrupted 143' TERM
   [ -z "$pending" ] || interrupted "$pending"
-  [ "$mrc" -eq 0 ] && [ -n "$made" ] && [ -n "$made_id" ] || die "cannot create a temporary directory"
+  [ -n "$made" ] && [ -d "$made" ] || die "cannot create a temporary directory under ${TMPDIR:-/tmp}"
 }
 
 if [ "$mode" = verify ]; then
