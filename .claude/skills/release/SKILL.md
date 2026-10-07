@@ -1,22 +1,24 @@
 ---
 name: release
 description: Cut a shmutant release. Checks every precondition with a dry run, then tags main's CI-green head, publishes the GitHub release with shmutant.sh and CHECKSUMS attached, verifies the documented install URL, and hands off to the milestone roll.
-argument-hint: "<version> (X.Y.Z; defaults to SHMUTANT_VERSION in shmutant.sh)"
+argument-hint: "<version> (X.Y.Z)"
 user-invocable: true
+disable-model-invocation: true
 ---
 
 # /release — cut a shmutant release
 
-`scripts/release.sh` is the procedure. This skill decides the version, runs the driver in its dry
+`scripts/release.sh` is the procedure. This skill settles the version, runs the driver in its dry
 run, gets the operator's go-ahead, and then runs it for real. The driver's header is its contract:
 what each precondition is, what it publishes and how it verifies.
 
 ## Steps
 
-1. **The version.** Use the argument if one was given. Otherwise read it from the source:
-   `bash shmutant.sh version` prints `shmutant <X.Y.Z>`. The driver refuses a version that
-   `SHMUTANT_VERSION` in `shmutant.sh` does not carry. Bumping the version and regenerating
-   `CHECKSUMS` is an ordinary pull request that lands before the cut.
+1. **The version.** Use the argument. Without one, propose the version `bash shmutant.sh version`
+   prints and have the operator confirm it in step 3. The driver refuses a version that
+   `SHMUTANT_VERSION` in `shmutant.sh` does not carry, or that the install URL in
+   `docs/integrating.md` does not name. Bumping both, and regenerating `CHECKSUMS`, is an ordinary
+   pull request that lands before the cut.
 
 2. **The dry run**, from the root of a clean checkout of `main`:
 
@@ -31,8 +33,8 @@ what each precondition is, what it publishes and how it verifies.
    API, or a bad argument). Report that and stop as well.
 
 3. **The go-ahead.** A pushed tag and a published release are permanent and public. Show the
-   operator the dry run's output, including the commit it would tag, and ask before you go on. Do
-   not take an earlier approval as approval for this cut.
+   operator the dry run's output, including the version and the commit it would tag, and ask before
+   you go on. Do not take an earlier approval as approval for this cut.
 
 4. **The cut:**
 
@@ -40,10 +42,10 @@ what each precondition is, what it publishes and how it verifies.
    bash scripts/release.sh <X.Y.Z>
    ```
 
-   It repeats every check, then tags, pushes, publishes, and verifies. If it fails after the tag
-   reached origin, it prints the commands that finish the release by hand. Pass those on as
-   printed. Never delete or move a pushed tag. Once the release is finished,
-   `bash scripts/release.sh --verify <X.Y.Z>` checks what was published.
+   It repeats every check, then tags, pushes, publishes, and verifies. If it fails or is
+   interrupted after the tag may have reached origin, it prints the commands that finish the
+   release by hand. Pass those on as printed. Never delete or move a pushed tag. Once the release is
+   finished, `bash scripts/release.sh --verify <X.Y.Z>` checks what was published.
 
 5. **The hand-off.** On success the driver's last line is
    `release: next: baseline release roll --version v<X.Y.Z>`. Tell the operator to run that
@@ -51,7 +53,9 @@ what each precondition is, what it publishes and how it verifies.
 
 ## Notes
 
-- The driver needs `github.com`, `api.github.com` and `raw.githubusercontent.com`. In an agent
-  sandbox that refuses those hosts, the operator runs steps 2 and 4 themselves.
+- The driver reaches `github.com` (git), `api.github.com`, `uploads.github.com` (the release's
+  assets), `raw.githubusercontent.com`, and the `*.githubusercontent.com` host a release asset
+  download redirects to. In an agent sandbox that refuses any of them, the operator runs steps 2
+  and 4 themselves.
 - Its tests are `bash test/release.sh`. They run it against a local bare origin with `gh`, `curl`
   and `sleep` stubbed, so they never reach GitHub.

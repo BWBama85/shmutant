@@ -135,17 +135,10 @@ The maintainer cuts a release with the project's `/release` skill
 bash scripts/release.sh --dry-run 0.1.0
 ```
 
-The driver refuses unless every one of these holds:
-
-- the checkout is a clean `main` at origin's head;
-- every CI check on that commit passed;
-- `SHMUTANT_VERSION` is the version being cut;
-- `CHECKSUMS` matches `shmutant.sh`;
-- the tag is new.
-
-It then tags that commit, publishes the GitHub release with `shmutant.sh` and `CHECKSUMS`
-attached, and verifies that the install URL in `docs/integrating.md` serves the digest in
-`CHECKSUMS`. The script's header lists every check.
+The driver refuses unless a clean `main` at origin's head is green in CI and carries the version
+being cut. It then tags that commit, publishes the GitHub release with `shmutant.sh` and
+`CHECKSUMS` attached, and verifies that the install URL in `docs/integrating.md` serves the digest
+in `CHECKSUMS`. The script's header lists every check.
 
 ## Machine-readable verdicts
 
@@ -188,8 +181,9 @@ bash test/adapters/check.sh shellspec # the same for ShellSpec
 bash test/release.sh                  # the release driver, against a local origin with gh stubbed
 ```
 
-The last two need the framework on `PATH` at the version CI pins (`BATS_VERSION`,
-`SHELLSPEC_VERSION` in `.github/workflows/ci.yml`), which is the version the doc names.
+The two adapter checks need the framework on `PATH` at the version CI pins (`BATS_VERSION`,
+`SHELLSPEC_VERSION` in `.github/workflows/ci.yml`), which is the version the doc names. The
+release test needs `git` and `jq`.
 
 The second command is the tool's own proof: every guard in `shmutant.sh` is broken in a clone
 and the unit that claims to cover it must go red. If `shmutant` could not mutation-test its own

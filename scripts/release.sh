@@ -11,33 +11,36 @@
 # Preconditions, each refused on stderr with its own `release: refused: …` line:
 #   - HEAD is on main, the work tree is clean (untracked files included), and HEAD is the commit
 #     origin's main names, asked of origin with ls-remote and of GitHub's API;
-#   - every check run GitHub lists on that commit is completed with conclusion success, and every
-#     job in its .github/workflows/ci.yml has one;
+#   - CI is green on that commit: every check run GitHub lists on it is completed with conclusion
+#     success, the ci.yml workflow ran on it and each of its runs there concluded success, and
+#     its commit statuses, if it has any, are success;
 #   - shmutant.sh at HEAD sets SHMUTANT_VERSION=<version>, on one line;
 #   - CHECKSUMS at HEAD is the one line `<sha256>  shmutant.sh`, and the digest is shmutant.sh's;
-#   - docs/integrating.md at HEAD names one raw.githubusercontent.com URL of shmutant.sh, for this
-#     repository at a v<version> tag; its tag segment becomes v<version> to verify the cut;
+#   - docs/integrating.md at HEAD names one raw.githubusercontent.com URL of shmutant.sh: this
+#     repository's, at the tag v<version>;
 #   - no tag v<version> exists in this checkout or on origin, and no GitHub release has it.
 #
 # --dry-run  checks every precondition and changes nothing: no fetch, no tag, no push, no release,
 #            no file.
-# --verify   checks a published release only: the documented URL at the tag and the release's
-#            shmutant.sh must have the digest CHECKSUMS at the tag gives, and the release's CHECKSUMS
-#            must be that file. Needs the tag in this checkout, where origin has it.
+# --verify   checks a published release only: the URL docs/integrating.md documents at the tag
+#            and the release's shmutant.sh must have the digest CHECKSUMS at the tag gives, and
+#            the release's CHECKSUMS must be that file. Needs the tag in this checkout, where
+#            origin has it.
 #
 # The repository is the one origin's URL names, a github.com HTTPS or SSH URL; every gh call names
-# it. Needs git, gh (authenticated), curl, and sha256sum, shasum or openssl.
+# it. Needs git, gh (authenticated), curl, and sha256sum, shasum or openssl. Git and gh never
+# prompt: a missing credential fails instead of waiting.
 #
 # Exit 0 = done, or (--dry-run) every precondition held; 1 = a precondition refused, or a publish
-# or verify step failed, saying so on stderr; 2 = could not run (usage, a missing tool, a failed
-# read).
+# or verify step failed, saying so on stderr; 130/143 = interrupted, saying what may already be
+# published; 2 = could not run (usage, a missing tool, a failed read).
 set -u
 unset CDPATH
-export LC_ALL=C GH_PROMPT_DISABLED=1
+export LC_ALL=C GH_PROMPT_DISABLED=1 GIT_TERMINAL_PROMPT=0
 
 # Downloads of the raw URL before --verify gives up, and the pause between them: a new tag can
-# answer 404 there for a while.
-attempts=10
+# answer 404 there for a while, and a cached 404 lives up to 300 seconds.
+attempts=12
 pause=30
 
 say()   { printf 'release: %s\n' "$*"; }
@@ -76,6 +79,7 @@ url="$(g config --get remote.origin.url)" || die "this checkout has no remote na
 u="${url%/}"; u="${u%.git}"; slug=""
 case "$u" in
   https://github.com/*)   slug="${u#https://github.com/}" ;;
+  https://*@github.com/*) slug="${u#https://*@github.com/}" ;;
   git@github.com:*)       slug="${u#git@github.com:}" ;;
   ssh://git@github.com/*) slug="${u#ssh://git@github.com/}" ;;
 esac
@@ -111,48 +115,32 @@ checksums_digest() {
   digest="${BASH_REMATCH[1]}"
 }
 
-# doc_url <rev> — sets raw_url to the install URL docs/integrating.md at <rev> documents, its tag
-# segment replaced by $tag; status 1, with why set, unless the doc names exactly one such URL, of
-# this repository.
+# doc_url <rev> — sets raw_url to the install URL docs/integrating.md at <rev> documents; status 1,
+# with why set, unless the doc names exactly one, of this repository at the tag $tag.
 doc_url() {
-  local doc urls docslug re='^https://raw\.githubusercontent\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/v[0-9][A-Za-z0-9_.-]*/shmutant\.sh$'
+  local doc urls docslug doctag re='^https://raw\.githubusercontent\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/([^/]+)/shmutant\.sh$'
   raw_url=""
   doc="$(g cat-file blob "$1:docs/integrating.md" 2> /dev/null)" || { why="$1 has no docs/integrating.md"; return 1; }
   urls="$(printf '%s\n' "$doc" | grep -oE 'https://raw\.githubusercontent\.com/[A-Za-z0-9_./-]*/shmutant\.sh' | sort -u)"
-  [ -n "$urls" ] || { why="docs/integrating.md names no raw.githubusercontent.com URL of shmutant.sh"; return 1; }
   case "$urls" in
+    '')      why="docs/integrating.md names no raw.githubusercontent.com URL of shmutant.sh"; return 1 ;;
     *$'\n'*) why="docs/integrating.md names more than one URL of shmutant.sh: $(printf '%s' "$urls" | tr '\n' ' ')"; return 1 ;;
   esac
-  [[ "$urls" =~ $re ]] || { why="docs/integrating.md's URL is not https://raw.githubusercontent.com/<owner>/<repo>/v<version>/shmutant.sh: $urls"; return 1; }
-  docslug="${BASH_REMATCH[1]}"
+  [[ "$urls" =~ $re ]] || { why="docs/integrating.md's URL is not https://raw.githubusercontent.com/<owner>/<repo>/<tag>/shmutant.sh: $urls"; return 1; }
+  docslug="${BASH_REMATCH[1]}"; doctag="${BASH_REMATCH[2]}"
   [ "$(lower "$docslug")" = "$(lower "$slug")" ] \
     || { why="docs/integrating.md's URL is for $docslug, but origin is $slug"; return 1; }
-  raw_url="https://raw.githubusercontent.com/$docslug/$tag/shmutant.sh"
+  [ "$doctag" = "$tag" ] \
+    || { why="docs/integrating.md's URL installs $doctag, not $tag: point it at $tag before the cut"; return 1; }
+  raw_url="$urls"
 }
 
-# ci_jobs <rev> — the job ids .github/workflows/ci.yml at <rev> declares, one per line. A job that
-# sets its own name or a matrix is printed as !<id>: its check runs carry other names.
-ci_jobs() {
-  local y
-  y="$(g cat-file blob "$1:.github/workflows/ci.yml" 2> /dev/null)" || return 1
-  printf '%s\n' "$y" | awk '
-    /^jobs:[[:space:]]*$/                 { on = 1; next }
-    on && /^[^[:space:]#]/                { on = 0 }
-    !on                                   { next }
-    /^  [A-Za-z0-9_-]+:[[:space:]]*$/     { job = $0; sub(/^  /, "", job); sub(/:.*$/, "", job); print job; next }
-    /^    (name|strategy):/               { print "!" job }'
-}
-
-# origin_tag — origin's ref lines for refs/tags/$tag and its peeled form; status 1 when origin
-# cannot be read. The peeled line is listed only when asked for by its own pattern.
+# origin_tag — the commit origin's tag $tag names, empty when origin has no such tag; status 1 when
+# origin cannot be read. The peeled line is listed only when asked for by its own pattern.
 origin_tag() {
   local out
   out="$(g ls-remote origin "refs/tags/$tag" "refs/tags/$tag^{}")" || return 1
-  printf '%s\n' "$out" | awk -v t="refs/tags/$tag" '$2 == t || $2 == t "^{}"'
-}
-# origin_peel <lines> — the commit origin's $tag names, from origin_tag's lines.
-origin_peel() {
-  printf '%s\n' "$1" | awk -v t="refs/tags/$tag" '
+  printf '%s\n' "$out" | awk -v t="refs/tags/$tag" '
     $2 == t "^{}" { peeled = $1 } $2 == t { plain = $1 }
     END { print (peeled != "" ? peeled : plain) }'
 }
@@ -161,16 +149,32 @@ refused=0
 ok()     { say "ok: $*"; }
 refuse() { err "refused: $*"; refused=$((refused + 1)); }
 
+# judge <prefix> <lines> — adds to notgreen each line (`<name>\t<status>\t<conclusion>`) that is not
+# a completed success, naming it <prefix><name>; sets judged to the number of lines.
+judge() {
+  local name status conclusion
+  judged=0
+  while IFS=$'\t' read -r name status conclusion; do
+    [ -n "$name" ] || continue
+    judged=$((judged + 1))
+    if [ "$status" != completed ]; then notgreen="$notgreen, $1$name is $status"
+    elif [ "$conclusion" != success ]; then notgreen="$notgreen, $1$name concluded $conclusion"
+    fi
+  done <<EOF
+$2
+EOF
+}
+
 # preflight — every precondition, each reported; sets head, remote, digest and raw_url.
 preflight() {
-  local branch st ls api cirev jobs runs n notgreen missing name status conclusion job vl v rels lines short
+  local branch st ls api short runs wfruns statuses n w nst state vl v fsum peel rels
 
   branch="$(g symbolic-ref --quiet --short HEAD)" || branch=""
   if [ "$branch" = main ]; then ok "on main"
   else refuse "not on main (on ${branch:-a detached HEAD}): git switch main"
   fi
 
-  st="$(g status --porcelain --untracked-files=normal)" || die "git status failed"
+  st="$(g --no-optional-locks status --porcelain --untracked-files=normal)" || die "git status failed"
   if [ -z "$st" ]; then ok "the work tree is clean"
   else refuse "the work tree is not clean ($(printf '%s\n' "$st" | wc -l | tr -d ' ') path(s) in git status): commit, stash or remove them"
   fi
@@ -196,63 +200,54 @@ preflight() {
   else refuse "GitHub's API says $slug's main is ${api:-nothing}, but origin says $remote: origin is not $slug, or main just moved"
   fi
 
-  cirev="$head"; g cat-file -e "$remote^{commit}" 2> /dev/null && cirev="$remote"
-  jobs="$(ci_jobs "$cirev")" || die "$cirev has no .github/workflows/ci.yml"
-  case "$jobs" in
-    *'!'*) die "a job in .github/workflows/ci.yml sets a name or a matrix, so its check runs are not named by its id: $(printf '%s\n' "$jobs" | grep '^!' | tr -d '!' | tr '\n' ' ')" ;;
-  esac
-  [ -n "$jobs" ] || die ".github/workflows/ci.yml at $cirev declares no jobs"
   runs="$(gh api --paginate "repos/$slug/commits/$remote/check-runs?filter=latest&per_page=100" \
             --jq '.check_runs[] | [.name, .status, (.conclusion // "none")] | @tsv')" \
     || die "cannot read the check runs on $remote from GitHub"
-  n=0; notgreen=""; missing=""
-  while IFS=$'\t' read -r name status conclusion; do
-    [ -n "$name" ] || continue
-    n=$((n + 1))
-    if [ "$status" != completed ]; then notgreen="$notgreen, $name is $status"
-    elif [ "$conclusion" != success ]; then notgreen="$notgreen, $name concluded $conclusion"
-    fi
-  done <<EOF
-$runs
+  wfruns="$(gh api --paginate "repos/$slug/actions/workflows/ci.yml/runs?head_sha=$remote&per_page=100" \
+              --jq '.workflow_runs[] | [.id, .status, (.conclusion // "none")] | @tsv')" \
+    || die "cannot read the ci.yml workflow runs on $remote from GitHub"
+  statuses="$(gh api "repos/$slug/commits/$remote/status" --jq '[.total_count, .state] | @tsv')" \
+    || die "cannot read the commit statuses on $remote from GitHub"
+  notgreen=""
+  judge "" "$runs"; n="$judged"
+  [ "$n" -gt 0 ] || notgreen="$notgreen, GitHub lists no check runs on it"
+  judge "ci.yml run " "$wfruns"; w="$judged"
+  [ "$w" -gt 0 ] || notgreen="$notgreen, the ci.yml workflow has not run on it"
+  IFS=$'\t' read -r nst state <<EOF
+$statuses
 EOF
-  while IFS= read -r job; do
-    [ -n "$job" ] || continue
-    printf '%s\n' "$runs" | cut -f1 | grep -Fxq -- "$job" || missing="$missing $job"
-  done <<EOF
-$jobs
-EOF
-  if [ "$n" -eq 0 ]; then refuse "CI is not green on origin's main ($short): GitHub lists no check runs on it"
-  else
-    [ -z "$notgreen" ] || refuse "CI is not green on origin's main ($short): ${notgreen#, }"
-    [ -z "$missing" ] || refuse "CI is not green on origin's main ($short): no check run for the ci.yml job(s)$missing"
-    [ -n "$notgreen$missing" ] || ok "CI is green on origin's main ($short): $n check run(s), every one a success"
+  [ "${nst:-0}" = 0 ] || [ "$state" = success ] || notgreen="$notgreen, its $nst commit status(es) are $state"
+  if [ -z "$notgreen" ]; then ok "CI is green on origin's main ($short): $n check run(s) and $w ci.yml run(s), each a success"
+  else refuse "CI is not green on origin's main ($short): ${notgreen#, }"
   fi
 
   g cat-file -e "$head:shmutant.sh" 2> /dev/null || die "HEAD has no shmutant.sh"
   vl="$(g cat-file blob "$head:shmutant.sh" | grep -e '^SHMUTANT_VERSION=')"
   v="${vl#SHMUTANT_VERSION=}"; v="${v#[\"\']}"; v="${v%[\"\']}"
-  if [ -z "$vl" ] || [ "$vl" != "${vl%%$'\n'*}" ]; then refuse "shmutant.sh at HEAD does not set SHMUTANT_VERSION on exactly one line"
-  elif [ "$v" = "$ver" ]; then ok "shmutant.sh sets SHMUTANT_VERSION=$ver"
-  else refuse "version mismatch: shmutant.sh sets SHMUTANT_VERSION=$v, not $ver"
-  fi
+  case "$vl" in
+    ''|*$'\n'*) refuse "shmutant.sh at HEAD does not set SHMUTANT_VERSION on exactly one line" ;;
+    *) if [ "$v" = "$ver" ]; then ok "shmutant.sh sets SHMUTANT_VERSION=$ver"
+       else refuse "version mismatch: shmutant.sh sets SHMUTANT_VERSION=$v, not $ver"
+       fi ;;
+  esac
 
   if ! checksums_digest "$head"; then refuse "$why"
   else
-    v="$(blob_sha256 "$head:shmutant.sh")" || die "cannot compute the SHA-256 of shmutant.sh"
-    if [ "$v" = "$digest" ]; then ok "CHECKSUMS matches shmutant.sh ($digest)"
-    else refuse "CHECKSUMS does not match shmutant.sh: it says $digest, the file's SHA-256 is $v"
+    fsum="$(blob_sha256 "$head:shmutant.sh")" || die "cannot compute the SHA-256 of shmutant.sh"
+    if [ "$fsum" = "$digest" ]; then ok "CHECKSUMS matches shmutant.sh ($digest)"
+    else refuse "CHECKSUMS does not match shmutant.sh: it says $digest, the file's SHA-256 is $fsum"
     fi
   fi
 
-  if doc_url "$head"; then ok "docs/integrating.md's install URL, for $tag: $raw_url"
+  if doc_url "$head"; then ok "docs/integrating.md's install URL is $raw_url"
   else refuse "$why"
   fi
 
   if g rev-parse --quiet --verify "refs/tags/$tag" > /dev/null; then refuse "tag $tag already exists in this checkout"
   else ok "no tag $tag in this checkout"
   fi
-  lines="$(origin_tag)" || die "cannot read origin's tags (git ls-remote failed)"
-  if [ -n "$lines" ]; then refuse "tag $tag already exists on origin (if a cut of it stopped partway, finish its release by hand and check it with --verify)"
+  peel="$(origin_tag)" || die "cannot read origin's tags (git ls-remote failed)"
+  if [ -n "$peel" ]; then refuse "tag $tag already exists on origin (if a cut of it stopped partway, finish its release by hand and check it with --verify)"
   else ok "no tag $tag on origin"
   fi
   rels="$(gh api --paginate "repos/$slug/releases?per_page=100" --jq '.[].tag_name')" \
@@ -264,21 +259,21 @@ EOF
 
 # verify — the published release, against CHECKSUMS at the tag; every mismatch is reported.
 verify() {
-  local want got ck i=0 bad=0 pub a
-  checksums_digest "$tag" || { err "VERIFY FAILED: $why at $tag"; return 1; }
-  want="$digest"
-  doc_url "$tag" || { err "VERIFY FAILED: at $tag, $why"; return 1; }
+  local got ck i=0 bad=0 pub a
+  checksums_digest "refs/tags/$tag" || { err "VERIFY FAILED: at $tag, $why"; return 1; }
+  doc_url "refs/tags/$tag" || { err "VERIFY FAILED: at $tag, $why"; return 1; }
+  ck="$(blob_sha256 "refs/tags/$tag:CHECKSUMS")" || return 1
   mkdir -- "$made/raw" "$made/dl" || { err "cannot create the download directories"; return 1; }
 
-  until curl -fsSL --proto '=https' -o "$made/raw/shmutant.sh" "$raw_url"; do
+  until curl -q -fsSL --proto '=https' --connect-timeout 20 --max-time 300 -o "$made/raw/shmutant.sh" "$raw_url"; do
     i=$((i + 1))
     [ "$i" -lt "$attempts" ] || { err "VERIFY FAILED: $raw_url did not download in $i attempts"; return 1; }
     say "downloading $raw_url failed (attempt $i of $attempts); retrying in ${pause}s"
     sleep "$pause"
   done
   got="$(sha256 < "$made/raw/shmutant.sh")" || return 1
-  if [ "$got" = "$want" ]; then say "verified: $raw_url has the SHA-256 CHECKSUMS at $tag gives ($want)"
-  else err "VERIFY FAILED: $raw_url has SHA-256 $got, but CHECKSUMS at $tag says $want"; bad=1
+  if [ "$got" = "$digest" ]; then say "verified: $raw_url has the SHA-256 CHECKSUMS at $tag gives ($digest)"
+  else err "VERIFY FAILED: $raw_url has SHA-256 $got, but CHECKSUMS at $tag says $digest"; bad=1
   fi
 
   pub="$(gh api "repos/$slug/releases/tags/$tag" --jq '.draft')" || pub=""
@@ -286,33 +281,39 @@ verify() {
   gh release download "$tag" -R "$slug" --dir "$made/dl" \
     || { err "VERIFY FAILED: could not download the assets of the release $tag"; return 1; }
   for a in shmutant.sh CHECKSUMS; do
-    [ -f "$made/dl/$a" ] || { err "VERIFY FAILED: the release $tag has no asset $a"; bad=1; }
+    if [ ! -f "$made/dl/$a" ]; then err "VERIFY FAILED: the release $tag has no asset $a"; bad=1; continue; fi
+    got="$(sha256 < "$made/dl/$a")" || return 1
+    case "$a" in
+      shmutant.sh) [ "$got" = "$digest" ] \
+                     || { err "VERIFY FAILED: the release's shmutant.sh has SHA-256 $got, but CHECKSUMS at $tag says $digest"; bad=1; } ;;
+      CHECKSUMS)   [ "$got" = "$ck" ] \
+                     || { err "VERIFY FAILED: the release's CHECKSUMS is not CHECKSUMS at $tag"; bad=1; } ;;
+    esac
   done
-  if [ -f "$made/dl/shmutant.sh" ]; then
-    got="$(sha256 < "$made/dl/shmutant.sh")" || return 1
-    [ "$got" = "$want" ] || { err "VERIFY FAILED: the release's shmutant.sh has SHA-256 $got, but CHECKSUMS at $tag says $want"; bad=1; }
-  fi
-  if [ -f "$made/dl/CHECKSUMS" ]; then
-    got="$(sha256 < "$made/dl/CHECKSUMS")" || return 1
-    ck="$(blob_sha256 "$tag:CHECKSUMS")" || return 1
-    [ "$got" = "$ck" ] || { err "VERIFY FAILED: the release's CHECKSUMS is not CHECKSUMS at $tag"; bad=1; }
-  fi
   [ "$bad" -eq 0 ] || return 1
   say "verified: the release $tag carries shmutant.sh and CHECKSUMS as tagged"
 }
 
+# Set once the tag may be on origin: from then on, every way out says how to finish by hand.
+pushed=0
+interrupted() {
+  [ "$pushed" -eq 0 ] || {
+    err "interrupted once the tag $tag may have reached origin (git ls-remote origin refs/tags/$tag says)."
+    finish_by_hand
+  }
+  exit "$1"
+}
 newtmp() {
   made="$(mktemp -d "${TMPDIR:-/tmp}/release.XXXXXX")" || die "cannot create a temporary directory"
   trap 'rm -rf -- "$made"' EXIT
-  trap 'exit 130' INT
-  trap 'exit 143' TERM
+  trap 'interrupted 130' INT
+  trap 'interrupted 143' TERM
 }
 
 if [ "$mode" = verify ]; then
   local_sha="$(g rev-parse --quiet --verify "refs/tags/$tag^{commit}")" \
     || die "this checkout has no tag $tag: git fetch origin tag $tag"
-  lines="$(origin_tag)" || die "cannot read origin's tags (git ls-remote failed)"
-  peel="$(origin_peel "$lines")"
+  peel="$(origin_tag)" || die "cannot read origin's tags (git ls-remote failed)"
   [ "$peel" = "$local_sha" ] \
     || { err "refused: origin's $tag names ${peel:-nothing}, this checkout's names $local_sha"; exit 1; }
   newtmp
@@ -330,7 +331,6 @@ if [ "$mode" = dry-run ]; then
   exit 0
 fi
 
-sha="$remote"
 notes="shmutant $ver
 
     curl -fsSL -o scripts/shmutant.sh $raw_url
@@ -339,7 +339,7 @@ notes="shmutant $ver
 CHECKSUMS, attached, carries the SHA-256 of shmutant.sh at this tag."
 create=(gh release create "$tag" -R "$slug" --verify-tag --title "shmutant $ver" --notes "$notes" shmutant.sh CHECKSUMS)
 finish_by_hand() {
-  err "the tag $tag is on origin, but its GitHub release is missing or incomplete. To finish:"
+  err "to finish the release of $tag by hand, once origin has the tag:"
   err "  see what exists:   gh release view $tag -R $slug"
   err "  with no release:   from a checkout of $tag (git switch --detach $tag), run"
   err "                     $(printf '%q ' "${create[@]}")"
@@ -349,28 +349,32 @@ finish_by_hand() {
 }
 
 newtmp
-g tag -a "$tag" "$sha" -m "shmutant $ver" || { err "could not create the tag $tag; nothing was pushed"; exit 1; }
-if ! g push origin "refs/tags/$tag"; then
-  if ! lines="$(origin_tag)"; then
-    err "the push of $tag failed, and origin cannot be read to say whether it has the tag: git ls-remote origin refs/tags/$tag"
-  elif [ -z "$lines" ]; then
-    err "could not push $tag; origin does not have it and nothing was published. Delete the local tag (git tag -d $tag) and re-run."
-  elif [ "$(origin_peel "$lines")" = "$sha" ]; then
-    err "the push of $tag reported a failure, but origin has the tag, naming $sha."
-    finish_by_hand
-  else
-    err "origin has a $tag this run did not push (it names $(origin_peel "$lines")); nothing was published. Find out who made it before deleting the local tag (git tag -d $tag)."
-  fi
+g tag -a "$tag" "$remote" -m "shmutant $ver" || { err "could not create the tag $tag; nothing was pushed"; exit 1; }
+pushed=1
+g push origin "refs/tags/$tag"; prc=$?
+if ! peel="$(origin_tag)"; then
+  err "cannot read origin's tags after the push of $tag (git push exited $prc)."
+  finish_by_hand
   exit 1
 fi
-lines="$(origin_tag)" || { err "pushed $tag, but origin cannot be read back"; finish_by_hand; exit 1; }
-peel="$(origin_peel "$lines")"
-[ "$peel" = "$sha" ] || { err "origin's $tag names ${peel:-nothing}, not $sha: inspect it before anything else"; exit 1; }
-say "pushed $tag, naming $sha"
+if [ -z "$peel" ]; then
+  err "could not push $tag; origin does not have it and nothing was published. Delete the local tag (git tag -d $tag) and re-run."
+  exit 1
+elif [ "$peel" != "$remote" ]; then
+  if [ "$prc" -eq 0 ]; then err "origin's $tag names $peel, not $remote: inspect it before anything else"
+  else err "origin has a $tag this run did not push (it names $peel); nothing was published. Find out who made it before deleting the local tag (git tag -d $tag)."
+  fi
+  exit 1
+elif [ "$prc" -ne 0 ]; then
+  err "the push of $tag reported a failure, but origin has the tag, naming $remote."
+  finish_by_hand
+  exit 1
+fi
+say "pushed $tag, naming $remote"
 
 mkdir -- "$made/assets" \
-  && g cat-file blob "$tag:shmutant.sh" > "$made/assets/shmutant.sh" \
-  && g cat-file blob "$tag:CHECKSUMS" > "$made/assets/CHECKSUMS" \
+  && g cat-file blob "refs/tags/$tag:shmutant.sh" > "$made/assets/shmutant.sh" \
+  && g cat-file blob "refs/tags/$tag:CHECKSUMS" > "$made/assets/CHECKSUMS" \
   || { err "could not write the release assets from $tag"; finish_by_hand; exit 1; }
 (cd -- "$made/assets" && "${create[@]}") \
   || { err "gh release create failed"; finish_by_hand; exit 1; }

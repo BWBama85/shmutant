@@ -37,19 +37,20 @@
 - baseline-issue: n/a (CI dependencies are per project)
 
 ## D5 — the release procedure is a project skill over a tested script
-- date:      2026-10-07
+- date:      2026-10-06
 - category:  project-delta
 - unknown:   #8 asks for a project-owned release command that the roadmap artifact's `release-command` marker can name. The baseline ships no `/release` skill, so each project writes its own.
 - decision:
-  - `.claude/skills/release/SKILL.md` names the version, runs `scripts/release.sh --dry-run`, gets the operator's go-ahead, cuts, and hands off to `baseline release roll`.
-  - The script holds every step. `test/release.sh` runs the script against a local bare origin, with `gh`, `curl` and `sleep` stubbed. It runs as the `release` CI job, as a step of the `macos` job, and as the `release-test` gate.
-  - "CI green" means three things:
-    - every check run GitHub lists on origin's main head with `filter=latest` is `completed` with conclusion `success`, so `skipped` and `neutral` refuse;
-    - at least one check run exists;
-    - every job id in `.github/workflows/ci.yml` has a check run. A job that sets its own `name:` or a `strategy:` stops the script with exit 2 rather than being mapped.
-  - `CHECKSUMS` is checked as `sha256sum -c` would check it, without needing `sha256sum`: it must be exactly one `<sha256>  shmutant.sh` line, and the digest must match the file.
+  - `.claude/skills/release/SKILL.md` settles the version, runs `scripts/release.sh --dry-run`, gets the operator's go-ahead, cuts, and hands off to `baseline release roll`. Only the operator can invoke it (`disable-model-invocation: true`).
+  - The script holds every step. `test/release.sh` runs it against a local bare origin, with `gh`, `curl` and `sleep` stubbed. It runs in the `release` CI job (ubuntu, plus macOS under `/bin/bash` 3.2) and as the `release-test` gate (cadence `full`).
+  - CI is green on origin's main head when all of these hold:
+    - every check run GitHub lists there with `filter=latest` is `completed` with conclusion `success`, so `skipped` and `neutral` refuse, and at least one exists;
+    - the `ci.yml` workflow has run on that SHA and each of its runs concluded `success`. A finished run means every job reported, however it is named or matrixed, so ci.yml itself is never parsed;
+    - its commit statuses, if it has any, combine to `success`. With none, GitHub reports `pending`, which is ignored.
   - A pending check refuses at once; the script does not wait.
-  - When a cut fails after its tag reached origin, the script prints how to finish by hand and never deletes the tag.
-- placement: .claude/skills/release/SKILL.md; scripts/release.sh; test/release.sh; .github/workflows/ci.yml (`release` job, a `macos` step); agents.toml [gates] `release-test`; README "Releasing"
-- reason:    a script can be shellchecked and tested where fenced shell in a skill cannot. Every check reads from the commit or from GitHub rather than a local ref, so the dry run needs no fetch.
+  - `CHECKSUMS` is checked as `sha256sum -c` would check it, without needing `sha256sum`: it must be exactly one `<sha256>  shmutant.sh` line, and the digest must match the file. The digest helper is the script's own, not `shmutant.sh`'s `_shmutant_checksum`: that one needs bash 5.3 and a file, and the script runs on macOS's bash 3.2 and hashes git blobs on stdin.
+  - The install URL in `docs/integrating.md` must already name the tag being cut, so the docs at the tag install that release. #8 suggested substituting the version; a doc naming an older tag refuses instead.
+  - When a cut fails or is interrupted after its tag may have reached origin, the script prints how to finish by hand and never deletes the tag.
+- placement: .claude/skills/release/SKILL.md; scripts/release.sh; test/release.sh; .github/workflows/ci.yml (`release` job); agents.toml [gates] `release-test`, [gates.cadence]; README "Releasing"
+- reason:    a script can be shellchecked and tested where fenced shell in a skill cannot. No check reads a remote-tracking ref (origin and GitHub are asked directly), so the dry run needs no fetch.
 - baseline-issue: n/a (release execution is project-owned)

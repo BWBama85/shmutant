@@ -33,11 +33,16 @@ jobs:
         run: sha256sum -c CHECKSUMS
 
   release:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7.0.1
+      - run: /bin/bash --version
+      # /bin first: on macOS the driver then runs under the system bash 3.2 an operator may have.
       - name: the release driver, against a local origin with gh stubbed
-        run: bash test/release.sh
+        run: PATH="/bin:$PATH" bash test/release.sh
 
   linux:
     runs-on: ubuntu-latest
@@ -133,8 +138,6 @@ jobs:
       - run: bash --version
       - name: the floor guard re-executes from bash 3.2
         run: /bin/bash shmutant.sh version
-      - name: the release driver, against a local origin with gh stubbed
-        run: bash test/release.sh
       - name: suite
         run: bash test/run.sh
       - name: self-mutation
