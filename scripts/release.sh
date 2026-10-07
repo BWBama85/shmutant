@@ -90,7 +90,7 @@ ver="${version#v}"
 [[ "$ver" =~ $re ]] || die "not a version: '$version' (want X.Y.Z or vX.Y.Z)"
 tag="v$ver"
 
-for t in git gh curl grep sort awk tr wc dirname mkdir rmdir rm sleep; do
+for t in git gh curl grep sort awk tr wc dirname mkdir rmdir rm sleep ls; do
   command -v "$t" > /dev/null 2>&1 || die "$t is not on PATH"
 done
 
@@ -279,7 +279,7 @@ EOF
 
 # preflight — every precondition, each reported; sets head, remote, digest and raw_url.
 preflight() {
-  local branch st ls api perm short runs ntotal wfruns wtotal statuses n w nst state src vl v fsum peel gt rels rc re behind ahead
+  local branch st ls api perm short runs ntotal nsuites wfruns wtotal statuses n w nst state src vl v fsum peel gt rels rc re behind ahead
 
   branch="$(g symbolic-ref --quiet --short HEAD)"; rc=$?
   [ "$rc" -le 1 ] || die "cannot read HEAD (git symbolic-ref exit $rc)"
@@ -333,6 +333,8 @@ preflight() {
     || die "cannot read the check runs on $remote from GitHub"
   ntotal="$(gh api "repos/$slug/commits/$remote/check-runs?filter=latest&per_page=1" --jq '.total_count')" \
     || die "cannot read the check runs on $remote from GitHub"
+  nsuites="$(gh api "repos/$slug/commits/$remote/check-suites?per_page=1" --jq '.total_count')" \
+    || die "cannot read the check suites on $remote from GitHub"
   wfruns="$(gh api --paginate "repos/$slug/actions/workflows/ci.yml/runs?head_sha=$remote&per_page=100" \
               --jq '.workflow_runs[] | [.id, .status, (.conclusion // "none")] | @tsv')" \
     || die "cannot read the ci.yml workflow runs on $remote from GitHub"
@@ -344,6 +346,8 @@ preflight() {
   judge "" "$runs"; n="$judged"
   [ "$n" -gt 0 ] || notgreen="$notgreen, GitHub lists no check runs on it"
   [ "$n" = "$ntotal" ] || notgreen="$notgreen, GitHub counts $ntotal check runs on it but listed $n, so not all could be checked"
+  [ "${nsuites:-0}" -le 1000 ] 2> /dev/null \
+    || notgreen="$notgreen, it has ${nsuites:-an unknown number of} check suites, and GitHub lists check runs for the latest 1,000 only"
   judge "ci.yml run " "$wfruns"; w="$judged"
   [ "$w" -gt 0 ] || notgreen="$notgreen, the ci.yml workflow has not run on it"
   [ "$w" = "$wtotal" ] || notgreen="$notgreen, GitHub counts $wtotal ci.yml runs on it but listed $w, so not all could be checked"
@@ -494,18 +498,23 @@ interrupted() {
   exit "$1"
 }
 # The run's temporary directory holds only the two release assets, written from the checked commit.
-# Cleanup removes an asset only when it still holds exactly that commit's blob (its git object id),
-# never through a symbolic link, and then rmdirs the directories: it cannot remove what the run did
-# not write. What it leaves, it reports. A cleanup failure does not change the status of a run
+# Each directory and file's inode is recorded as it is made. Cleanup removes an asset only while it
+# is still that inode and still holds exactly that commit's blob (its git object id), never through a
+# symbolic link, and then rmdirs the directories: it cannot remove what the run did not write. What it leaves, it reports. A cleanup failure does not change the status of a run
 # whose outcome is already decided; it is reported beside it.
-made=""
+made=""; made_id=""; assets_id=""; sh_id=""; ck_id=""
+# inode_of <path> — the inode of <path> itself (not of a link's target), or nothing.
+inode_of() { [ ! -L "$1" ] && ls -di -- "$1" 2> /dev/null | awk '{ print $1 }'; }
 cleanup() {
-  local f want
+  local f want id
   [ -n "$made" ] || return 0
-  [ -d "$made" ] && [ ! -L "$made" ] || { err "left $made in place: it is no longer the directory this run made"; return 0; }
-  if [ -n "${remote:-}" ] && [ -d "$made/assets" ] && [ ! -L "$made/assets" ]; then
+  if [ -z "$made_id" ] || [ "$(inode_of "$made")" != "$made_id" ]; then
+    err "left $made in place: it is no longer the directory this run made"; return 0
+  fi
+  if [ -n "${remote:-}" ] && [ -n "$assets_id" ] && [ "$(inode_of "$made/assets")" = "$assets_id" ]; then
     for f in shmutant.sh CHECKSUMS; do
-      [ -f "$made/assets/$f" ] && [ ! -L "$made/assets/$f" ] || continue
+      case "$f" in shmutant.sh) id="$sh_id" ;; *) id="$ck_id" ;; esac
+      [ -n "$id" ] && [ -f "$made/assets/$f" ] && [ "$(inode_of "$made/assets/$f")" = "$id" ] || continue
       want="$(g rev-parse --verify --quiet "$remote:$f" 2> /dev/null)" || continue
       [ "$(g hash-object --no-filters -- "$made/assets/$f" 2> /dev/null)" = "$want" ] || continue
       rm -f -- "$made/assets/$f" || err "could not remove $made/assets/$f"
@@ -528,7 +537,7 @@ newtmp() {
     [ ! -e "$try" ] && [ ! -L "$try" ] || continue
     # mkdir runs with INT and TERM ignored, so its status is the whole truth: only a directory this
     # mkdir made is ever taken, and one it made is always known.
-    if (trap '' INT TERM; exec mkdir -m 700 -- "$try") 2> /dev/null; then made="$try"; break; fi
+    if (trap '' INT TERM; exec mkdir -m 700 -- "$try") 2> /dev/null; then made="$try"; made_id="$(inode_of "$try")"; break; fi
   done
   trap cleanup EXIT
   trap 'interrupted 130' INT
@@ -584,7 +593,7 @@ g push --no-follow-tags origin "refs/tags/$tag"; prc=$?
 if ! peel="$(origin_tag)"; then
   err "cannot read origin's tags after the push of $tag (git push exited $prc)."
   finish_by_hand
-  exit 1
+  exit 2
 fi
 if [ -z "$peel" ] && [ "$prc" -eq 0 ]; then
   err "git push reported success, but origin's URL has no $tag: the push went somewhere else (a push URL rewritten by pushInsteadOf?). Nothing was published; find the tag before deleting it here (git tag -d $tag)."
@@ -604,7 +613,7 @@ elif [ "$prc" -ne 0 ]; then
 fi
 i=0
 while :; do
-  gt="$(github_tag)" || { err "pushed $tag, but $slug's tags cannot be read through the GitHub API."; finish_by_hand; exit 1; }
+  gt="$(github_tag)" || { err "pushed $tag, but $slug's tags cannot be read through the GitHub API."; finish_by_hand; exit 2; }
   i=$((i + 1))
   [ -z "$gt" ] && [ "$i" -lt "$ref_reads" ] || break
   sleep "$ref_pause"
@@ -620,7 +629,9 @@ elif [ "$gt" != "$remote" ]; then
 fi
 say "pushed $tag, naming $remote, on origin and on GitHub"
 
-mkdir -- "$made/assets" \
+mkdir -- "$made/assets" && assets_id="$(inode_of "$made/assets")" \
+  && : > "$made/assets/shmutant.sh" && sh_id="$(inode_of "$made/assets/shmutant.sh")" \
+  && : > "$made/assets/CHECKSUMS" && ck_id="$(inode_of "$made/assets/CHECKSUMS")" \
   && g cat-file blob "$remote:shmutant.sh" > "$made/assets/shmutant.sh" \
   && g cat-file blob "$remote:CHECKSUMS" > "$made/assets/CHECKSUMS" \
   || { err "could not write the release assets from $tag"; finish_by_hand; exit 1; }

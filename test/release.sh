@@ -90,6 +90,8 @@ case "${a[0]:-} ${a[1]:-}" in
     printf '{"object":{"sha":"%s"}}\n' "$sha" | reply ;;
   "api repos/$SLUG")
     printf '{"permissions":{"push":%s}}\n' "$(cat "$STUB/push" 2> /dev/null || echo true)" | reply ;;
+  "api repos/$SLUG/commits/"*"/check-suites?per_page=1")
+    printf '{"total_count":%s}\n' "$(cat "$STUB/suites" 2> /dev/null || echo 1)" | reply ;;
   "api repos/$SLUG/commits/"*"/check-runs?filter=latest&per_page=1")
     reply < "$STUB/checks.json" ;;
   "api repos/$SLUG/actions/workflows/ci.yml/runs?head_sha="*"&per_page=1")
@@ -105,6 +107,10 @@ case "${a[0]:-} ${a[1]:-}" in
     # GitHub's view of the tag: origin's, unless $STUB/github-tag overrides it with a commit,
     # `none`, or `after:<commit>` (none until origin has the tag, then that commit).
     pages; t="${a[1]##*/}"; typ=commit; sha=""
+    # $STUB/github-tag.fail-after: the read fails once origin has the tag.
+    if [ -e "$STUB/github-tag.fail-after" ] && git -C "$STUB/origin.git" rev-parse -q --verify "refs/tags/$t" > /dev/null; then
+      fail "HTTP 502"
+    fi
     if [ -e "$STUB/github-tag" ]; then
       v="$(cat "$STUB/github-tag")"
       case "$v" in
@@ -150,6 +156,16 @@ case "${a[0]:-} ${a[1]:-}" in
     if [ -e "$STUB/link-tmp" ]; then
       mkdir -p "$STUB/elsewhere/assets" && cp -- shmutant.sh "$STUB/elsewhere/assets/" \
         && mv -- "$made" "$made.moved" && ln -s "$STUB/elsewhere" "$made" || exit 1
+    fi
+    # $STUB/replace-asset: within the run's own directory, shmutant.sh becomes a new file, identical.
+    if [ -e "$STUB/replace-asset" ]; then
+      cp -- shmutant.sh .replacement && mv -- .replacement shmutant.sh || exit 1
+    fi
+    # $STUB/replace-identical: the run's directory is moved away, and another made at its path holds
+    # byte-identical copies of both assets.
+    if [ -e "$STUB/replace-identical" ]; then
+      mv -- "$made" "$made.moved" && mkdir -p -- "$made/assets" \
+        && cp -- shmutant.sh CHECKSUMS "$made/assets/" || exit 1
     fi
     # $STUB/replace-tmp: the run's directory is moved away, and another made at its path holds a
     # file of its own under the asset name.
@@ -1267,7 +1283,7 @@ c_cleanup_leaves_a_directory_that_replaced_its_own() {
   mkdir -p "$S/tmp"; : > "$S/replace-tmp"
   TMPDIR="$S/tmp" rel "$VER"
   rc_is "$rc" 0 "the cut, its directory replaced while the release was created"
-  has "$err" "it holds something this run did not write" "cleanup says why it left the directory"
+  has "$err" "it is no longer the directory this run made" "cleanup says why it left the directory"
   for d in "$S"/tmp/release.*; do
     case "$d" in *.moved) ;; *) [ "$(cat "$d/assets/shmutant.sh" 2> /dev/null)" = theirs ] \
       || fail_ "the replacing directory's own assets/shmutant.sh was removed" ;; esac
@@ -1294,6 +1310,51 @@ c_cleanup_never_reaches_through_a_link_that_replaced_its_directory() {
   rc_is "$rc" 0 "the cut, its directory replaced by a link while the release was created"
   has "$err" "it is no longer the directory this run made" "cleanup says why it left it"
   [ -f "$S/elsewhere/assets/shmutant.sh" ] || fail_ "an identical copy behind the link was removed"
+}
+
+c_cleanup_takes_identical_content_for_nothing() {
+  local d
+  mkdir -p "$S/tmp"; : > "$S/replace-identical"
+  TMPDIR="$S/tmp" rel "$VER"
+  rc_is "$rc" 0 "the cut, its directory replaced by one holding identical copies"
+  has "$err" "it is no longer the directory this run made" "cleanup says why it left it"
+  for d in "$S"/tmp/release.*; do
+    case "$d" in *.moved) ;; *) [ -f "$d/assets/shmutant.sh" ] && [ -f "$d/assets/CHECKSUMS" ] \
+      || fail_ "an identical copy in the replacing directory was removed" ;; esac
+  done
+}
+
+c_cleanup_removes_only_the_files_it_wrote() {
+  mkdir -p "$S/tmp"; : > "$S/replace-asset"
+  TMPDIR="$S/tmp" rel "$VER"
+  rc_is "$rc" 0 "the cut, one asset swapped for an identical new file"
+  has "$err" "it holds something this run did not write" "cleanup says why it left the directory"
+  local f found=0
+  for f in "$S"/tmp/release.*/assets/shmutant.sh; do [ ! -f "$f" ] || found=1; done
+  [ "$found" -eq 1 ] || fail_ "the swapped-in file was removed"
+}
+
+c_a_read_that_fails_after_the_push_exits_2() {
+  : > "$S/github-tag.fail-after"
+  rel "$VER"
+  rc_is "$rc" 2 "GitHub's tags unreadable after the push"
+  has "$err" "cannot be read through the GitHub API" "says so"
+  has "$err" "to finish the release of $TAG by hand" "and how to finish"
+  fixture "${_case}_origin"
+  # A git that cannot list origin's tags once origin has this one.
+  mkdir -p "$S/box-ls" || exit 2
+  printf '#!/usr/bin/env bash\ncase "$*" in *"ls-remote origin refs/tags/%s"*) ! %q -C %q rev-parse -q --verify refs/tags/%s > /dev/null || { echo "fatal: injected" >&2; exit 128; } ;; esac\nexec %q "$@"\n' \
+    "$TAG" "$(command -v git)" "$S/origin.git" "$TAG" "$(command -v git)" > "$S/box-ls/git" && chmod +x "$S/box-ls/git" || exit 2
+  relf "$S/box-ls" "$VER"
+  rc_is "$rc" 2 "origin's tags unreadable after the push"
+  has "$err" "cannot read origin's tags after the push of $TAG" "says so"
+  has "$err" "to finish the release of $TAG by hand" "and how to finish"
+}
+
+c_refuses_more_check_suites_than_github_lists_runs_for() {
+  echo 1001 > "$S/suites"
+  rel --dry-run "$VER"
+  refused_once "it has 1001 check suites, and GitHub lists check runs for the latest 1,000 only" "1001 check suites"
 }
 
 c_never_adopts_a_directory_a_signal_arrives_with() {
