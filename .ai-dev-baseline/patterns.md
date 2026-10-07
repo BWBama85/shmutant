@@ -447,4 +447,9 @@ One line per resolved review thread, newest last.
 - `contract-not-honoured` `test/run.sh:4222` `0d77c9e` `PRRT_kwDOUT7q9s6iVkNK` PR #4 2026-09-15 — leftovers were deduplicated by whole line, so one pid sampled under two etime identities was counted twice
 - `contract-not-honoured` `test/run.sh:64` `0d77c9e` `PRRT_kwDOUT7q9s6iVkNN` PR #4 2026-09-15 — wait_gone followed a pid by number only, so a reused number was waited on and then killed
 - `contract-not-honoured` `docs/integrating.md:146` `c10898d` `PRRT_kwDOUT7q9s6ppW5a` PR #11 2026-10-06 — doc said the full-name witness ties a ShellSpec verdict to its example; a selected example whose full name contains the witness can kill the row
+- `host-shell-option-leak` `scripts/release.sh:43` `9ef0fb1` `PRRT_kwDOUT7q9s6pywG0` PR #14 2026-10-07 — exported SHELLOPTS acted before the driver's option reset: xtrace traced the origin URL, noexec exited 0 doing nothing
+- `unanchored-match` `scripts/release.sh:154` `9ef0fb1` `PRRT_kwDOUT7q9s6pywG2` PR #14 2026-10-07 — the install-URL extraction took the shmutant.sh prefix of a longer URL such as shmutant.sh.sig
+- `contract-not-honoured` `scripts/release.sh:299` `9ef0fb1` `PRRT_kwDOUT7q9s6pywG4` PR #14 2026-10-07 — --verify exited 1, not the documented 2, when it could not hash for want of a digest tool
+- `stale-artifact-reuse` `scripts/release.sh:380` `9ef0fb1` `PRRT_kwDOUT7q9s6pywG8` PR #14 2026-10-07 — the printed hand-finish uploaded working-tree files rather than the checked commit's blobs
+- `check-then-act-race` `scripts/release.sh:389` `9ef0fb1` `PRRT_kwDOUT7q9s6pywG_` PR #14 2026-10-07 — the tag was pushed without re-reading that origin's main still named the checked commit
 <!-- adb:hits:end -->
