@@ -1329,6 +1329,46 @@ c_refuses_ci_lists_shorter_than_githubs_count() {
   refused_once "GitHub counts 1001 ci.yml runs on it but listed 1" "a workflow-run list GitHub capped"
 }
 
+# failbox <dir> <tool> <status> <glob> — <dir> holding a <tool> that exits <status> when its
+# arguments, joined by spaces, match <glob>, and is the real <tool> otherwise.
+failbox() {
+  mkdir -p "$1" || exit 2
+  printf '#!/usr/bin/env bash\npat=%q\ncase "$*" in $pat) echo "%s: injected failure" >&2; exit %s ;; esac\nexec %q "$@"\n' \
+    "$4" "$2" "$3" "$(command -v "$2")" > "$1/$2" && chmod +x "$1/$2" || exit 2
+}
+# relf <box> <arg>… — rel with <box> first on PATH.
+relf() {
+  local box="$1"; shift
+  (cd -- "$c" && PATH="$box:$tmp/bin:$PATH" STUB="$S" SLUG="$SLUG" bash scripts/release.sh "$@") > "$S/out" 2> "$S/err"
+  rc=$?
+  out="$(cat "$S/out")"; err="$(cat "$S/err")"
+}
+
+c_exits_2_when_a_read_fails_rather_than_finds_nothing() {
+  local sha head
+  failbox "$S/f1" git 128 '*symbolic-ref --quiet --short HEAD*'
+  relf "$S/f1" --dry-run "$VER"; rc_is "$rc" 2 "HEAD unreadable"; has "$err" "cannot read HEAD" "says so"
+  failbox "$S/f2" git 128 '*config --get-all remote.origin.pushurl*'
+  relf "$S/f2" --dry-run "$VER"; rc_is "$rc" 2 "push URLs unreadable"; has "$err" "cannot read origin's push URLs" "says so"
+  failbox "$S/f3" git 128 '*config --get-regexp*'
+  relf "$S/f3" --dry-run "$VER"; rc_is "$rc" 2 "config unreadable"; has "$err" "cannot read git's config" "says so"
+  failbox "$S/f4" git 128 '*rev-parse --quiet --verify refs/tags/*'
+  relf "$S/f4" --dry-run "$VER"; rc_is "$rc" 2 "local tags unreadable"; has "$err" "cannot read this checkout's tags" "says so"
+  failbox "$S/f5" grep 2 '*^SHMUTANT_VERSION=*'
+  relf "$S/f5" --dry-run "$VER"; rc_is "$rc" 2 "the version search fails"; has "$err" "cannot search shmutant.sh (grep exit 2)" "says so"
+  failbox "$S/f6" grep 2 "*-Fxq -- $TAG*"
+  relf "$S/f6" --dry-run "$VER"; rc_is "$rc" 2 "the release search fails"; has "$err" "cannot search $SLUG's GitHub releases (grep exit 2)" "says so"
+  other_clone; land "$o" newer; sha="$(git -C "$o" rev-parse HEAD)"
+  failbox "$S/f7" git 128 "*rev-parse --verify --quiet $sha^{commit}*"
+  relf "$S/f7" --dry-run "$VER"; rc_is "$rc" 2 "origin's main unreadable here"; has "$err" "cannot read commit $sha" "says so"
+  git -C "$c" fetch -q origin || exit 2
+  head="$(git -C "$c" rev-parse HEAD)"
+  failbox "$S/f8" git 128 "*merge-base --is-ancestor $head $sha*"
+  relf "$S/f8" --dry-run "$VER"; rc_is "$rc" 2 "is HEAD behind: the comparison fails"; has "$err" "cannot compare HEAD with $sha" "says so"
+  failbox "$S/f9" git 128 "*merge-base --is-ancestor $sha $head*"
+  relf "$S/f9" --dry-run "$VER"; rc_is "$rc" 2 "is HEAD ahead: the comparison fails"; has "$err" "cannot compare HEAD with $sha" "says so"
+}
+
 c_an_interrupt_while_allocating_leaves_nothing() {
   mkdir -p "$S/box-mkdir" "$S/tmp" || exit 2
   # A mkdir that makes the run's directory and then sends TERM to its process group.

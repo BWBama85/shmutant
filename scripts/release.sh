@@ -90,7 +90,7 @@ ver="${version#v}"
 [[ "$ver" =~ $re ]] || die "not a version: '$version' (want X.Y.Z or vX.Y.Z)"
 tag="v$ver"
 
-for t in git gh curl grep sed sort awk tr wc dirname mkdir rmdir rm sleep; do
+for t in git gh curl grep sort awk tr wc dirname mkdir rmdir rm sleep; do
   command -v "$t" > /dev/null 2>&1 || die "$t is not on PATH"
 done
 
@@ -125,7 +125,8 @@ slug_of() {
 ourl="$(g config --get-all remote.origin.url)" || die "this checkout has no remote named origin"
 case "$ourl" in *$'\n'*) die "origin has more than one URL; give it one" ;; esac
 slug="$(slug_of "$ourl")" || die "origin's URL is not a github.com HTTPS or SSH repository URL"
-pushurls="$(g config --get-all remote.origin.pushurl)"
+pushurls="$(g config --get-all remote.origin.pushurl)"; rc=$?
+[ "$rc" -le 1 ] || die "cannot read origin's push URLs (git config exit $rc)"
 while IFS= read -r pu; do
   [ -n "$pu" ] || continue
   pslug="$(slug_of "$pu")" && [ "$(lower "$pslug")" = "$(lower "$slug")" ] \
@@ -136,8 +137,13 @@ EOF
 
 hexre='^[0-9a-f]{40}([0-9a-f]{24})?$'
 
-# Any promisor remote, not only origin, can be fetched from lazily.
-if g config --get-regexp '^remote\..*\.promisor$' > /dev/null || [ -n "$(g config --get extensions.partialclone)" ]; then
+# Any promisor remote, not only origin, can be fetched from lazily. A config read that fails, rather
+# than finding nothing (1), is exit 2.
+g config --get-regexp '^remote\..*\.promisor$' > /dev/null; prc=$?
+[ "$prc" -le 1 ] || die "cannot read git's config (exit $prc)"
+pclone="$(g config --get extensions.partialclone)"; rc=$?
+[ "$rc" -le 1 ] || die "cannot read git's config (exit $rc)"
+if [ "$prc" -eq 0 ] || [ -n "$pclone" ]; then
   gv="$(git version)" || die "cannot read git's version"
   re='^git version ([0-9]+)\.([0-9]+)'
   [[ "$gv" =~ $re ]] || die "cannot read git's version: $gv"
@@ -202,13 +208,14 @@ doc_url() {
   raw_url=""
   doc="$(blob "$1" docs/integrating.md)"; rc=$?
   [ "$rc" -eq 0 ] || { blob_why "$rc" "$1" docs/integrating.md; return "$rc"; }
-  # Whole URLs, each to the end of its token less any trailing sentence punctuation, so that a
-  # longer one (shmutant.sh.sig, shmutant.sh?x=y) is never read as its shmutant.sh prefix.
+  # Whole URLs, each to the end of its token, so that a longer one (shmutant.sh.sig, shmutant.sh?x=y,
+  # shmutant.sh!) is never read as its shmutant.sh prefix.
   # Each stage on its own, so a failing tool is exit 2 and never a short list. grep's 1 is "none".
+  # A URL is taken exactly as written: one with anything after shmutant.sh, sentence punctuation
+  # included, is not the install URL.
   urls="$(printf '%s\n' "$doc" | grep -oE 'https://raw\.githubusercontent\.com/[^][[:space:]<>"'"'"'`()]*')"; rc=$?
   [ "$rc" -le 1 ] || { why="cannot search docs/integrating.md (grep exit $rc)"; return 2; }
   if [ -n "$urls" ]; then
-    urls="$(printf '%s\n' "$urls" | sed 's/[.,;:!]*$//')" || { why="cannot read the URLs in docs/integrating.md (sed failed)"; return 2; }
     urls="$(printf '%s\n' "$urls" | grep -E '/shmutant\.sh$')"; rc=$?
     [ "$rc" -le 1 ] || { why="cannot search docs/integrating.md (grep exit $rc)"; return 2; }
   fi
@@ -272,9 +279,10 @@ EOF
 
 # preflight — every precondition, each reported; sets head, remote, digest and raw_url.
 preflight() {
-  local branch st ls api perm short runs ntotal wfruns wtotal statuses n w nst state src vl v fsum peel gt rels rc re
+  local branch st ls api perm short runs ntotal wfruns wtotal statuses n w nst state src vl v fsum peel gt rels rc re behind ahead
 
-  branch="$(g symbolic-ref --quiet --short HEAD)" || branch=""
+  branch="$(g symbolic-ref --quiet --short HEAD)"; rc=$?
+  [ "$rc" -le 1 ] || die "cannot read HEAD (git symbolic-ref exit $rc)"
   if [ "$branch" = main ]; then ok "on main"
   else refuse "not on main (on ${branch:-a detached HEAD}): git switch main"
   fi
@@ -286,18 +294,29 @@ preflight() {
 
   head="$(g rev-parse --verify --quiet 'HEAD^{commit}')" || die "HEAD names no commit"
   ls="$(g ls-remote origin refs/heads/main)" || die "cannot read origin (git ls-remote failed)"
-  remote="$(printf '%s\n' "$ls" | awk '$2 == "refs/heads/main" { print $1 }')"
+  remote="$(printf '%s\n' "$ls" | awk '$2 == "refs/heads/main" { print $1 }')" || die "cannot read origin's main (awk failed)"
   [[ "$remote" =~ $hexre ]] || die "origin has no main branch"
   short="${remote:0:12}"
+  # Each read separates "no" (1) from a read that failed (anything else), which is exit 2.
   if [ "$head" = "$remote" ]; then ok "HEAD is origin's main ($short)"
-  elif ! g cat-file -e "$remote^{commit}" 2> /dev/null; then
-    refuse "behind origin/main, or diverged from it: origin's main is $remote, a commit this checkout has not fetched: git pull --ff-only"
-  elif g merge-base --is-ancestor "$head" "$remote"; then
-    refuse "behind origin/main: origin's main is $remote, ahead of HEAD: git pull --ff-only"
-  elif g merge-base --is-ancestor "$remote" "$head"; then
-    refuse "ahead of origin/main ($remote): HEAD has commits origin's main lacks; land them through a pull request"
   else
-    refuse "diverged from origin/main ($remote): HEAD and origin's main each have commits the other lacks"
+    g rev-parse --verify --quiet "$remote^{commit}" > /dev/null; rc=$?
+    [ "$rc" -le 1 ] || die "cannot read commit $remote (git rev-parse exit $rc)"
+    if [ "$rc" -eq 1 ]; then
+      refuse "behind origin/main, or diverged from it: origin's main is $remote, a commit this checkout has not fetched: git pull --ff-only"
+    else
+      g merge-base --is-ancestor "$head" "$remote"; behind=$?
+      [ "$behind" -le 1 ] || die "cannot compare HEAD with $remote (git merge-base exit $behind)"
+      g merge-base --is-ancestor "$remote" "$head"; ahead=$?
+      [ "$ahead" -le 1 ] || die "cannot compare HEAD with $remote (git merge-base exit $ahead)"
+      if [ "$behind" -eq 0 ]; then
+        refuse "behind origin/main: origin's main is $remote, ahead of HEAD: git pull --ff-only"
+      elif [ "$ahead" -eq 0 ]; then
+        refuse "ahead of origin/main ($remote): HEAD has commits origin's main lacks; land them through a pull request"
+      else
+        refuse "diverged from origin/main ($remote): HEAD and origin's main each have commits the other lacks"
+      fi
+    fi
   fi
 
   api="$(gh api "repos/$slug/git/ref/heads/main" --jq '.object.sha')" || die "cannot read $slug's main through the GitHub API"
@@ -338,7 +357,8 @@ EOF
 
   src="$(blob "$head" shmutant.sh)"; rc=$?
   [ "$rc" -eq 0 ] || { blob_why "$rc" "$head" shmutant.sh; die "$why"; }
-  vl="$(printf '%s\n' "$src" | grep -e '^SHMUTANT_VERSION=')"
+  vl="$(printf '%s\n' "$src" | grep -e '^SHMUTANT_VERSION=')"; rc=$?
+  [ "$rc" -le 1 ] || die "cannot search shmutant.sh (grep exit $rc)"
   case "$vl" in
     "SHMUTANT_VERSION=\""*"\"") v="${vl#SHMUTANT_VERSION=\"}"; v="${v%\"}" ;;
     "SHMUTANT_VERSION='"*"'")   v="${vl#SHMUTANT_VERSION=\'}"; v="${v%\'}" ;;
@@ -369,7 +389,9 @@ EOF
   else refuse "$why"
   fi
 
-  if g rev-parse --quiet --verify "refs/tags/$tag" > /dev/null; then refuse "tag $tag already exists in this checkout"
+  g rev-parse --quiet --verify "refs/tags/$tag" > /dev/null; rc=$?
+  [ "$rc" -le 1 ] || die "cannot read this checkout's tags (git rev-parse exit $rc)"
+  if [ "$rc" -eq 0 ]; then refuse "tag $tag already exists in this checkout"
   else ok "no tag $tag in this checkout"
   fi
   peel="$(origin_tag)" || die "cannot read origin's tags (git ls-remote failed)"
@@ -382,7 +404,9 @@ EOF
   fi
   rels="$(gh api --paginate "repos/$slug/releases?per_page=100" --jq '.[].tag_name')" \
     || die "cannot list $slug's GitHub releases"
-  if printf '%s\n' "$rels" | grep -Fxq -- "$tag"; then refuse "GitHub already has a release for $tag"
+  printf '%s\n' "$rels" | grep -Fxq -- "$tag"; rc=$?
+  [ "$rc" -le 1 ] || die "cannot search $slug's GitHub releases (grep exit $rc)"
+  if [ "$rc" -eq 0 ]; then refuse "GitHub already has a release for $tag"
   else ok "no GitHub release for $tag"
   fi
 }
@@ -551,7 +575,7 @@ finish_by_hand() {
 
 newtmp
 ls="$(g ls-remote origin refs/heads/main)" || die "cannot read origin (git ls-remote failed)"
-now="$(printf '%s\n' "$ls" | awk '$2 == "refs/heads/main" { print $1 }')"
+now="$(printf '%s\n' "$ls" | awk '$2 == "refs/heads/main" { print $1 }')" || die "cannot read origin's main (awk failed)"
 [ "$now" = "$remote" ] \
   || { err "origin's main moved from $remote to ${now:-nothing} since the checks; nothing was tagged. Re-run to check the new head."; exit 1; }
 tagged=1
