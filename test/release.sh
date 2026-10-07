@@ -26,13 +26,14 @@ TAG="v$VER"
 URL="https://raw.githubusercontent.com/$SLUG/$TAG/shmutant.sh"
 
 # No git setting from the caller reaches a fixture: not a repository or index it names, nor a user
-# or system config (a tag.gpgSign there would sign the fixture's tags). https is refused outright,
-# so a fixture whose insteadOf went missing fails rather than reach GitHub.
+# or system config (a tag.gpgSign there would sign the fixture's tags). https and ssh are refused
+# outright, so a fixture whose insteadOf went missing fails rather than reach GitHub.
 unset -v "${!GIT_@}"
 export HOME="$tmp/home" XDG_CONFIG_HOME="$tmp/home/.config" GIT_CONFIG_NOSYSTEM=1 \
   GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=test@example.invalid \
   GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=test@example.invalid \
-  GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=protocol.https.allow GIT_CONFIG_VALUE_0=never
+  GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=protocol.https.allow GIT_CONFIG_VALUE_0=never \
+  GIT_CONFIG_KEY_1=protocol.ssh.allow GIT_CONFIG_VALUE_1=never
 mkdir -p "$HOME" "$tmp/bin" || exit 2
 
 # --- stubs: every call is appended to $STUB/events, one line each ------------------------------
@@ -40,17 +41,22 @@ mkdir -p "$HOME" "$tmp/bin" || exit 2
 cat > "$tmp/bin/gh" <<'EOF'
 #!/usr/bin/env bash
 # gh, as scripts/release.sh calls it, answered from the fixture in $STUB. Exit 3 = a call the
-# driver should not make.
+# driver should not make, or one it made with prompts left on.
+unset -f git
 { printf 'gh'; printf ' %q' "$@"; printf '\n'; } >> "$STUB/events"
-jqx=""; a=()
+[ "${GH_PROMPT_DISABLED:-}" = 1 ] && [ "${GIT_TERMINAL_PROMPT:-}" = 0 ] \
+  || { echo "gh stub: called with prompts enabled" >&2; exit 3; }
+jqx=""; paginate=0; a=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --jq) jqx="$2"; shift 2 ;;
-    --paginate) shift ;;
+    --paginate) paginate=1; shift ;;
     *) a+=("$1"); shift ;;
   esac
 done
 reply() { if [ -n "$jqx" ]; then jq -r "$jqx"; else cat; fi; }
+# pages — a list read must ask for every page.
+pages() { [ "$paginate" -eq 1 ] || { echo "gh stub: a list read without --paginate" >&2; exit 3; }; }
 fail() { echo "gh: $1" >&2; exit 1; }
 # opts <args>… — sets repo, dir, verify and files from a release subcommand's arguments.
 opts() {
@@ -71,18 +77,20 @@ case "${a[0]:-} ${a[1]:-}" in
     [ ! -e "$STUB/api-main.fail" ] || fail "HTTP 502"
     sha="$(cat "$STUB/api-main" 2> /dev/null || git -C "$STUB/origin.git" rev-parse refs/heads/main)" || exit 1
     printf '{"object":{"sha":"%s"}}\n' "$sha" | reply ;;
+  "api repos/$SLUG")
+    printf '{"permissions":{"push":%s}}\n' "$(cat "$STUB/push" 2> /dev/null || echo true)" | reply ;;
   "api repos/$SLUG/commits/"*"/check-runs?filter=latest&per_page=100")
-    [ ! -e "$STUB/checks.fail" ] || fail "HTTP 502"
+    pages; [ ! -e "$STUB/checks.fail" ] || fail "HTTP 502"
     reply < "$STUB/checks.json" ;;
   "api repos/$SLUG/actions/workflows/ci.yml/runs?head_sha="*"&per_page=100")
-    reply < "$STUB/runs.json" ;;
+    pages; reply < "$STUB/runs.json" ;;
   "api repos/$SLUG/commits/"*"/status")
     reply < "$STUB/status.json" ;;
   "api repos/$SLUG/releases?per_page=100")
-    ls -- "$STUB/published" | jq -Rn '[inputs | {tag_name: .}]' | reply ;;
+    pages; ls -- "$STUB/published" | jq -Rn '[inputs | {tag_name: .}]' | reply ;;
   "api repos/$SLUG/releases/tags/"*)
     [ -e "$STUB/published/${a[1]##*/}" ] || fail "Not Found (HTTP 404)"
-    printf '{"draft":false}\n' | reply ;;
+    printf '{"draft":%s}\n' "$([ -e "$STUB/release.draft" ] && echo true || echo false)" | reply ;;
   "release create")
     [ ! -e "$STUB/create.fail" ] || fail "HTTP 500"
     t="${a[2]}"; opts "${a[@]:3}"
@@ -104,7 +112,7 @@ cat > "$tmp/bin/curl" <<'EOF'
 #!/usr/bin/env bash
 # curl … -o <file> <url>, answered from the fixture's origin: <url> must be a raw URL of the
 # fixture's repository. $STUB/curl.404s holds how many downloads fail before one succeeds;
-# $STUB/curl.mode `tamper` alters the bytes, `term` sends TERM to the caller.
+# $STUB/curl.mode `tamper` alters the bytes, `term` and `int` send TERM or INT to the caller.
 out=""; url=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -114,10 +122,11 @@ while [ "$#" -gt 0 ]; do
     *) url="$1"; shift ;;
   esac
 done
+unset -f git
 printf 'curl %s\n' "$url" >> "$STUB/events"
 notfound() { echo "curl: (22) The requested URL returned error: 404" >&2; exit 22; }
 mode="$(cat "$STUB/curl.mode" 2> /dev/null)"
-[ "$mode" != term ] || { kill -TERM "$PPID"; notfound; }
+case "$mode" in term|int) kill "-$(printf '%s' "$mode" | tr a-z A-Z)" "$PPID"; notfound ;; esac
 n="$(cat "$STUB/curl.404s" 2> /dev/null)"
 if [ "${n:-0}" -gt 0 ]; then echo $((n - 1)) > "$STUB/curl.404s"; notfound; fi
 case "$url" in "https://raw.githubusercontent.com/$SLUG/"*/shmutant.sh) ;; *) notfound ;; esac
@@ -250,6 +259,7 @@ c_the_repository_docs_and_version_pass_their_checks() {
   land "$c" real-files
   rel --dry-run "$real"
   has "$out" "release: ok: shmutant.sh sets SHMUTANT_VERSION=$real" "the real version line"
+  has "$out" "release: ok: CHECKSUMS matches shmutant.sh" "the real CHECKSUMS"
   has "$out" "release: ok: docs/integrating.md's install URL is https://raw.githubusercontent.com/$SLUG/v$real/shmutant.sh" \
     "the real doc's URL, at the real version's tag"
 }
@@ -468,9 +478,46 @@ c_reads_every_github_origin_form_and_prints_none() {
   rc_is "$rc" 2 "an origin elsewhere"
   has "$err" "origin's URL is not a github.com HTTPS or SSH repository URL" "says why"
   hasnt "$err" "s3cret" "its credential is not printed"
-  git -C "$c" remote set-url origin "https://github.com/../x.git"
+  for form in "https://github.com/../x.git" "https://evil.example/@github.com/$SLUG.git"; do
+    git -C "$c" remote set-url origin "$form"
+    git -C "$c" config "url.$S/origin.git.insteadOf" "$form"
+    rel --dry-run "$VER"
+    rc_is "$rc" 2 "origin $form"
+    has "$err" "origin's URL is not a github.com HTTPS or SSH repository URL" "origin $form is refused for its URL"
+  done
+}
+
+c_a_push_url_must_name_the_same_repository() {
+  git -C "$c" config remote.origin.pushurl "git@github.com:$SLUG.git"
+  git -C "$c" config "url.$S/origin.git.pushInsteadOf" "git@github.com:$SLUG.git"
   rel --dry-run "$VER"
-  rc_is "$rc" 2 "a .. path segment in the repository"
+  rc_is "$rc" 0 "a push URL for the same repository, over ssh"
+  git -C "$c" config remote.origin.pushurl "git@github.com:someone/else.git"
+  rel --dry-run "$VER"
+  rc_is "$rc" 2 "a push URL for another repository"
+  has "$err" "origin's push URL is not a github.com HTTPS or SSH URL of $SLUG" "says so"
+}
+
+c_refuses_a_token_that_cannot_push() {
+  echo false > "$S/push"
+  rel --dry-run "$VER"
+  refused_once "gh's token cannot push to $SLUG" "a read-only token"
+}
+
+c_ignores_the_callers_git_repository_and_tool_functions() {
+  git() { echo "a shadowing git" >&2; return 1; }
+  export -f git
+  GIT_DIR=/nonexistent GIT_WORK_TREE=/nonexistent GIT_INDEX_FILE=/nonexistent rel --dry-run "$VER"
+  unset -f git
+  rc_is "$rc" 0 "GIT_DIR and a git function exported by the caller"
+}
+
+c_reads_a_quoted_version_and_any_case_of_the_repository() {
+  printf '#!/usr/bin/env bash\nSHMUTANT_VERSION="%s"\n' "$VER" > "$c/shmutant.sh"; checksum "$c"
+  echo "curl https://raw.githubusercontent.com/Shmutant-Test/Fixture/$TAG/shmutant.sh" > "$c/docs/integrating.md"
+  land "$c" quoted
+  rel --dry-run "$VER"
+  rc_is "$rc" 0 "SHMUTANT_VERSION=\"$VER\" and a doc URL in another case"
 }
 
 c_cut_tags_publishes_verifies_and_hands_off() {
@@ -555,8 +602,24 @@ c_an_interrupted_cut_says_how_to_finish() {
   echo term > "$S/curl.mode"
   rel "$VER"
   rc_is "$rc" 143 "TERM during verification"
-  has "$err" "interrupted once the tag $TAG may have reached origin" "says so"
+  has "$err" "interrupted once the tag $TAG may exist" "says so"
   has "$err" "bash scripts/release.sh --verify $VER" "and how to finish"
+}
+
+c_an_interrupt_exits_130_and_says_how_to_finish() {
+  echo int > "$S/curl.mode"
+  rel "$VER"
+  rc_is "$rc" 130 "INT during verification"
+  has "$err" "interrupted once the tag $TAG may exist" "says so"
+}
+
+c_verify_refuses_a_draft_release() {
+  rel "$VER"
+  rc_is "$rc" 0 "the cut"
+  : > "$S/release.draft"
+  rel --verify "$VER"
+  rc_is "$rc" 1 "--verify on a release that is a draft"
+  has "$err" "VERIFY FAILED: GitHub has no published release for $TAG" "says so"
 }
 
 c_failed_release_create_prints_the_way_to_finish() {

@@ -47,10 +47,12 @@
     - every check run GitHub lists there with `filter=latest` is `completed` with conclusion `success`, so `skipped` and `neutral` refuse, and at least one exists;
     - the `ci.yml` workflow has run on that SHA and each of its runs concluded `success`. A finished run means every job reported, however it is named or matrixed, so ci.yml itself is never parsed;
     - its commit statuses, if it has any, combine to `success`. With none, GitHub reports `pending`, which is ignored.
+  - This "green" is stricter than the baseline's `roadmap-lib.sh branch-health`, which counts `skipped` and `neutral` as green, so `/roadmap` can announce a cut that this script then refuses. The refusal is the safe side of that disagreement: a tag is permanent, and a skipped job on the commit being tagged is a check nobody ran.
   - A pending check refuses at once; the script does not wait.
-  - `CHECKSUMS` is checked as `sha256sum -c` would check it, without needing `sha256sum`: it must be exactly one `<sha256>  shmutant.sh` line, and the digest must match the file. The digest helper is the script's own, not `shmutant.sh`'s `_shmutant_checksum`: that one needs bash 5.3 and a file, and the script runs on macOS's bash 3.2 and hashes git blobs on stdin.
+  - `CHECKSUMS` is checked by a stricter form of `sha256sum -c` that needs no `sha256sum`: it must be exactly one `<sha256>  shmutant.sh` line (lowercase hex, text mode), and the digest must match `shmutant.sh` as committed at HEAD. The digest helper is the script's own, not `shmutant.sh`'s `_shmutant_checksum`: that one needs bash 5.3 and a file, and the script runs on macOS's bash 3.2 and hashes git blobs on stdin.
   - The install URL in `docs/integrating.md` must already name the tag being cut, so the docs at the tag install that release. #8 suggested substituting the version; a doc naming an older tag refuses instead.
-  - When a cut fails or is interrupted after its tag may have reached origin, the script prints how to finish by hand and never deletes the tag.
+  - origin's URL, and its push URL when one is set, must name the same github.com repository, and gh's token must be able to push to it, so a cut cannot tag one repository and publish to another, or tag and then fail to publish.
+  - When a cut fails or is interrupted after its tag may exist, the script prints how to finish by hand and never deletes the tag.
 - placement: .claude/skills/release/SKILL.md; scripts/release.sh; test/release.sh; .github/workflows/ci.yml (`release` job); agents.toml [gates] `release-test`, [gates.cadence]; README "Releasing"
 - reason:    a script can be shellchecked and tested where fenced shell in a skill cannot. No check reads a remote-tracking ref (origin and GitHub are asked directly), so the dry run needs no fetch.
 - baseline-issue: n/a (release execution is project-owned)

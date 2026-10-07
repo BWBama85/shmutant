@@ -27,9 +27,10 @@
 #            the release's CHECKSUMS must be that file. Needs the tag in this checkout, where
 #            origin has it.
 #
-# The repository is the one origin's URL names, a github.com HTTPS or SSH URL; every gh call names
-# it. Needs git, gh (authenticated), curl, and sha256sum, shasum or openssl. Git and gh never
-# prompt: a missing credential fails instead of waiting.
+# The repository is the one origin's URL names, a github.com HTTPS or SSH URL (a push URL, if set,
+# must name the same one); every gh call names it, and gh's token must be able to push to it.
+# Needs git, gh, curl, and sha256sum, shasum or openssl. Git over HTTPS and gh never prompt: a
+# missing credential fails instead of waiting.
 #
 # Exit 0 = done, or (--dry-run) every precondition held; 1 = a precondition refused, or a publish
 # or verify step failed, saying so on stderr; 130/143 = interrupted, saying what may already be
@@ -37,6 +38,11 @@
 set -u
 unset CDPATH
 export LC_ALL=C GH_PROMPT_DISABLED=1 GIT_TERMINAL_PROMPT=0
+# A repository the caller's environment names, or a function standing in for a tool, would be
+# used in place of this checkout and the real tools.
+unset -v GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
+  GIT_COMMON_DIR GIT_NAMESPACE
+unset -f git gh curl sleep mktemp sha256sum shasum openssl 2> /dev/null
 
 # Downloads of the raw URL before --verify gives up, and the pause between them: a new tag can
 # answer 404 there for a while, and a cached 404 lives up to 300 seconds.
@@ -74,18 +80,31 @@ top="$(g rev-parse --show-toplevel 2> /dev/null)" && top="$(cd -P -- "$top" && p
   || die "$root is not a git work tree"
 [ "$top" = "$root" ] || die "scripts/release.sh is not at the top of its work tree ($top)"
 
-# The URL itself is never printed: an HTTPS remote can carry a token.
+lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+
+# slug_of <url> — the owner/repo a github.com HTTPS or SSH URL names; status 1 for any other URL.
+slug_of() {
+  local u="${1%/}" s="" re='^https://[^/@]+@github\.com/(.+)$'
+  u="${u%.git}"
+  case "$u" in
+    https://github.com/*)   s="${u#https://github.com/}" ;;
+    git@github.com:*)       s="${u#git@github.com:}" ;;
+    ssh://git@github.com/*) s="${u#ssh://git@github.com/}" ;;
+    *) [[ "$u" =~ $re ]] && s="${BASH_REMATCH[1]}" ;;
+  esac
+  case "/$s/" in */./*|*/../*) return 1 ;; esac
+  re='^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
+  [[ "$s" =~ $re ]] || return 1
+  printf '%s\n' "$s"
+}
+
+# The URLs themselves are never printed: an HTTPS remote can carry a token.
 url="$(g config --get remote.origin.url)" || die "this checkout has no remote named origin"
-u="${url%/}"; u="${u%.git}"; slug=""
-case "$u" in
-  https://github.com/*)   slug="${u#https://github.com/}" ;;
-  https://*@github.com/*) slug="${u#https://*@github.com/}" ;;
-  git@github.com:*)       slug="${u#git@github.com:}" ;;
-  ssh://git@github.com/*) slug="${u#ssh://git@github.com/}" ;;
-esac
-case "/$slug/" in */./*|*/../*) slug="" ;; esac
-re='^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
-[[ "$slug" =~ $re ]] || die "origin's URL is not a github.com HTTPS or SSH repository URL"
+slug="$(slug_of "$url")" || die "origin's URL is not a github.com HTTPS or SSH repository URL"
+if pushurl="$(g config --get remote.origin.pushurl)"; then
+  pslug="$(slug_of "$pushurl")" && [ "$(lower "$pslug")" = "$(lower "$slug")" ] \
+    || die "origin's push URL is not a github.com HTTPS or SSH URL of $slug"
+fi
 
 hexre='^[0-9a-f]{40}([0-9a-f]{24})?$'
 
@@ -103,7 +122,6 @@ sha256() {
   printf '%s\n' "$out"
 }
 blob_sha256() { (set -o pipefail; g cat-file blob "$1" | sha256); }
-lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 
 # checksums_digest <rev> — sets digest to what CHECKSUMS at <rev> gives shmutant.sh; status 1, with
 # why set, when CHECKSUMS is not exactly the line `<sha256>  shmutant.sh`.
@@ -167,7 +185,7 @@ EOF
 
 # preflight — every precondition, each reported; sets head, remote, digest and raw_url.
 preflight() {
-  local branch st ls api short runs wfruns statuses n w nst state vl v fsum peel rels
+  local branch st ls api perm short runs wfruns statuses n w nst state vl v fsum peel rels
 
   branch="$(g symbolic-ref --quiet --short HEAD)" || branch=""
   if [ "$branch" = main ]; then ok "on main"
@@ -198,6 +216,10 @@ preflight() {
   api="$(gh api "repos/$slug/git/ref/heads/main" --jq '.object.sha')" || die "cannot read $slug's main through the GitHub API"
   if [ "$api" = "$remote" ]; then ok "GitHub's API agrees that $slug's main is $short"
   else refuse "GitHub's API says $slug's main is ${api:-nothing}, but origin says $remote: origin is not $slug, or main just moved"
+  fi
+  perm="$(gh api "repos/$slug" --jq '.permissions.push')" || die "cannot read $slug through the GitHub API"
+  if [ "$perm" = true ]; then ok "gh's token can push to $slug"
+  else refuse "gh's token cannot push to $slug, so it could not publish the release after the tag: gh auth login with one that can"
   fi
 
   runs="$(gh api --paginate "repos/$slug/commits/$remote/check-runs?filter=latest&per_page=100" \
@@ -294,11 +316,11 @@ verify() {
   say "verified: the release $tag carries shmutant.sh and CHECKSUMS as tagged"
 }
 
-# Set once the tag may be on origin: from then on, every way out says how to finish by hand.
-pushed=0
+# Set once the tag may exist: from then on, an interrupt says what is left to do.
+tagged=0
 interrupted() {
-  [ "$pushed" -eq 0 ] || {
-    err "interrupted once the tag $tag may have reached origin (git ls-remote origin refs/tags/$tag says)."
+  [ "$tagged" -eq 0 ] || {
+    err "interrupted once the tag $tag may exist. If origin lacks it (git ls-remote origin refs/tags/$tag), delete it here (git tag -d $tag) and re-run; if origin has it, finish by hand."
     finish_by_hand
   }
   exit "$1"
@@ -349,8 +371,8 @@ finish_by_hand() {
 }
 
 newtmp
+tagged=1
 g tag -a "$tag" "$remote" -m "shmutant $ver" || { err "could not create the tag $tag; nothing was pushed"; exit 1; }
-pushed=1
 g push origin "refs/tags/$tag"; prc=$?
 if ! peel="$(origin_tag)"; then
   err "cannot read origin's tags after the push of $tag (git push exited $prc)."
