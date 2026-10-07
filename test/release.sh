@@ -24,6 +24,8 @@ trap 'rm -rf -- "$made" || echo "test/release.sh: could not remove $made" >&2' E
 tmp="$(cd -P -- "$made" && pwd -P)" || exit 2
 
 SLUG=shmutant-test/fixture
+# uid 0 reads through mode bits, so a file made unreadable with chmod stays readable to it.
+ROOT=0; [ "$(id -u)" -ne 0 ] || ROOT=1
 VER=1.2.3
 TAG="v$VER"
 URL="https://raw.githubusercontent.com/$SLUG/$TAG/shmutant.sh"
@@ -117,8 +119,9 @@ case "${a[0]:-} ${a[1]:-}" in
     # last read of the checks, so a cut sees main move between its checks and its tag.
     [ ! -e "$STUB/advance-main" ] || git -C "$STUB/origin.git" update-ref refs/heads/main "$(cat "$STUB/advance-main")" || exit 1
     draft=false; [ ! -e "$STUB/release.draft" ] || draft=true
-    ls -- "$STUB/published" | jq -Rn --argjson d "$draft" --arg as "$(ls "$STUB/release" 2> /dev/null | tr '\n' ' ')" \
-      '[inputs | {tag_name: ., draft: $d, assets: ($as | split(" ") | map(select(. != "") | {name: .}))}]' | reply ;;
+    as="$(ls -1 -- "$STUB/release" 2> /dev/null | jq -Rn '[inputs | {name: .}]')" || exit 1
+    ls -- "$STUB/published" | jq -Rn --argjson d "$draft" --argjson as "$as" \
+      '[inputs | {tag_name: ., draft: $d, assets: $as}]' | reply ;;
   "release create")
     [ ! -e "$STUB/create.fail" ] || fail "HTTP 500"
     t="${a[2]}"; opts "${a[@]:3}"
@@ -127,6 +130,9 @@ case "${a[0]:-} ${a[1]:-}" in
     mkdir -p "$STUB/release" && cp -- "${files[@]}" "$STUB/release/" || exit 1
     [ ! -e "$STUB/asset.tamper" ] || echo '# tampered' >> "$STUB/release/$(cat "$STUB/asset.tamper")"
     [ ! -e "$STUB/asset.omit" ] || rm -f -- "$STUB/release/$(cat "$STUB/asset.omit")"
+    if [ -e "$STUB/asset.merge" ]; then
+      mv -- "$STUB/release/shmutant.sh" "$STUB/release/shmutant.sh CHECKSUMS" && rm -f -- "$STUB/release/CHECKSUMS" || exit 1
+    fi
     : > "$STUB/published/$t" ;;
   "release download")
     t="${a[2]}"; opts "${a[@]:3}"
@@ -936,6 +942,7 @@ c_sets_aside_the_callers_tracing_and_aliases() {
 }
 
 c_verify_exits_2_when_it_cannot_hash_what_it_read() {
+  [ "$ROOT" -eq 0 ] || { echo "note: $_case: running as root, which reads through chmod 000; not exercised" >&2; return; }
   echo unreadable > "$S/curl.mode"
   rel "$VER"
   rc_is "$rc" 2 "the download cannot be read"
@@ -1056,18 +1063,24 @@ c_refuses_a_partial_clone_under_a_git_that_would_fetch() {
   hasnt "$(events)" "gh" "and nothing was asked of GitHub"
 }
 
+# corrupt_blob <rev:path> — overwrite the clone's loose object for <rev:path> with garbage, which no
+# reader, root included, can inflate.
+corrupt_blob() {
+  local obj f
+  obj="$(git -C "$c" rev-parse "$1")" || exit 2
+  f="$c/.git/objects/${obj:0:2}/${obj:2}"
+  chmod u+w "$f" && printf 'not a git object' > "$f" || exit 2
+}
+
 c_exits_2_on_an_unreadable_blob() {
-  local obj
-  obj="$(git -C "$c" rev-parse HEAD:CHECKSUMS)"
   rel "$VER"
   rc_is "$rc" 0 "the cut"
-  chmod 000 "$c/.git/objects/${obj:0:2}/${obj:2}" || exit 2
+  corrupt_blob HEAD:CHECKSUMS
   rel --verify "$VER"
   rc_is "$rc" 2 "--verify, CHECKSUMS unreadable"
   has "$err" "cannot read CHECKSUMS at" "says so"
   fixture "${_case}_dry"
-  obj="$(git -C "$c" rev-parse HEAD:CHECKSUMS)"
-  chmod 000 "$c/.git/objects/${obj:0:2}/${obj:2}" || exit 2
+  corrupt_blob HEAD:CHECKSUMS
   rel --dry-run "$VER"
   rc_is "$rc" 2 "a dry run, CHECKSUMS unreadable"
   has "$err" "cannot read CHECKSUMS at" "says so"
@@ -1112,6 +1125,13 @@ c_verify_refuses_a_github_tag_that_moved() {
   rel --verify "$VER"
   rc_is "$rc" 1 "--verify, GitHub's tag moved while origin's did not"
   has "$err" "VERIFY FAILED: GitHub's $TAG names 0123456789012345678901234567890123456789" "says so"
+}
+
+c_verify_matches_each_asset_name_whole() {
+  : > "$S/asset.merge"
+  rel "$VER"
+  rc_is "$rc" 1 "one asset named 'shmutant.sh CHECKSUMS' in place of both"
+  has "$err" "VERIFY FAILED: the release $TAG has no asset shmutant.sh" "the missing asset is named"
 }
 
 c_verify_exits_2_when_a_read_fails() {

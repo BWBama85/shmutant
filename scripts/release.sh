@@ -361,7 +361,7 @@ EOF
 # verify <commit> — the published release, against CHECKSUMS at <commit>, which origin's tag must
 # name; every mismatch is reported. A failed read or a missing tool exits 2.
 verify() {
-  local c="$1" got ck i=0 bad=0 a peel gt rc crc rel draft assets
+  local c="$1" got ck i=0 bad=0 a peel gt rc crc rel draft has_sh has_ck
   peel="$(origin_tag)" || die "cannot read origin's tags (git ls-remote failed)"
   [ "$peel" = "$c" ] || { err "VERIFY FAILED: origin's $tag names ${peel:-nothing}, not $c"; return 1; }
   gt="$(github_tag)" || die "cannot read $slug's tags through the GitHub API"
@@ -396,18 +396,20 @@ verify() {
 
   # The list, not the by-tag read: it names drafts too, and its failure is a failed read, never
   # an answer. The tag is validated as v<digits and dots> above, so it is safe in the filter.
+  # Each required asset is matched by its whole name inside the filter, never in a joined list.
   rel="$(gh api --paginate "repos/$slug/releases?per_page=100" \
-          --jq ".[] | select(.tag_name == \"$tag\") | [(.draft | tostring), ([.assets[].name] | join(\" \"))] | @tsv")" \
+          --jq ".[] | select(.tag_name == \"$tag\") | [(.draft | tostring), (any(.assets[]; .name == \"shmutant.sh\") | tostring), (any(.assets[]; .name == \"CHECKSUMS\") | tostring)] | @tsv")" \
     || die "cannot list $slug's GitHub releases"
   case "$rel" in
     '')      err "VERIFY FAILED: GitHub has no release for $tag"; return 1 ;;
     *$'\n'*) err "VERIFY FAILED: GitHub lists more than one release for $tag"; return 1 ;;
   esac
-  draft="${rel%%$'\t'*}"; assets=" ${rel#*$'\t'} "
+  IFS=$'\t' read -r draft has_sh has_ck <<EOF
+$rel
+EOF
   [ "$draft" = false ] || { err "VERIFY FAILED: the release $tag is a draft"; return 1; }
-  for a in shmutant.sh CHECKSUMS; do
-    case "$assets" in *" $a "*) : ;; *) err "VERIFY FAILED: the release $tag has no asset $a"; return 1 ;; esac
-  done
+  [ "$has_sh" = true ] || { err "VERIFY FAILED: the release $tag has no asset shmutant.sh"; return 1; }
+  [ "$has_ck" = true ] || { err "VERIFY FAILED: the release $tag has no asset CHECKSUMS"; return 1; }
   gh release download "$tag" -R "github.com/$slug" --dir "$made/dl" \
     || die "could not download the assets of the release $tag"
   for a in shmutant.sh CHECKSUMS; do
