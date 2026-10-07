@@ -54,8 +54,15 @@ what each precondition is, what it publishes and how it verifies.
    was interrupted once the tag may exist, it prints the commands that finish the release by
    hand, from the commit it checked. When origin's tag names another commit, or the published
    release does not verify, it says to investigate before anything else. When it cannot read
-   something it needs, it stops with exit 2. Pass every one of these on as printed. Never delete or move a pushed tag. Once the release is
-   finished, `bash scripts/release.sh --verify <X.Y.Z>` checks what was published.
+   something it needs, it stops with exit 2. Pass every one of these on as printed. Run a later
+   check the same protected way, and take it as passed only when its last line is
+   `release: verified: the release v<X.Y.Z> carries shmutant.sh and CHECKSUMS as tagged`:
+
+   ```sh
+   env -u SHELLOPTS -u BASHOPTS -u BASH_ENV bash scripts/release.sh --verify <X.Y.Z>
+   ```
+
+   Never delete or move a pushed tag.
 
 5. **The hand-off.** On success the driver's last line is
    `release: next: baseline release roll --version v<X.Y.Z>`. Tell the operator to run that

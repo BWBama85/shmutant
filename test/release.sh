@@ -92,13 +92,33 @@ case "${a[0]:-} ${a[1]:-}" in
     pages; reply < "$STUB/runs.json" ;;
   "api repos/$SLUG/commits/"*"/status")
     reply < "$STUB/status.json" ;;
+  "api repos/$SLUG/git/matching-refs/tags/"*)
+    # GitHub's view of the tag: origin's, unless $STUB/github-tag overrides it with a commit,
+    # `none`, or `after:<commit>` (none until origin has the tag, then that commit).
+    pages; t="${a[1]##*/}"; typ=commit; sha=""
+    if [ -e "$STUB/github-tag" ]; then
+      v="$(cat "$STUB/github-tag")"
+      case "$v" in
+        none) sha="" ;;
+        after:*) ! git -C "$STUB/origin.git" rev-parse -q --verify "refs/tags/$t" > /dev/null || sha="${v#after:}" ;;
+        *) sha="$v" ;;
+      esac
+    else
+      line="$(git -C "$STUB/origin.git" for-each-ref --format='%(objecttype) %(objectname)' "refs/tags/$t")"
+      [ -z "$line" ] || { typ="${line%% *}"; sha="${line#* }"; }
+    fi
+    if [ -n "$sha" ]; then printf '[{"ref":"refs/tags/%s","object":{"type":"%s","sha":"%s"}}]\n' "$t" "$typ" "$sha" | reply
+    else echo '[]' | reply; fi ;;
+  "api repos/$SLUG/git/tags/"*)
+    printf '{"object":{"sha":"%s"}}\n' "$(git -C "$STUB/origin.git" rev-parse "${a[1]##*/}^{}")" | reply ;;
   "api repos/$SLUG/releases?per_page=100")
     pages
     # $STUB/advance-main holds a commit origin's main moves to once the releases are listed: the
     # last read of the checks, so a cut sees main move between its checks and its tag.
     [ ! -e "$STUB/advance-main" ] || git -C "$STUB/origin.git" update-ref refs/heads/main "$(cat "$STUB/advance-main")" || exit 1
     draft=false; [ ! -e "$STUB/release.draft" ] || draft=true
-    ls -- "$STUB/published" | jq -Rn --argjson d "$draft" '[inputs | {tag_name: ., draft: $d}]' | reply ;;
+    ls -- "$STUB/published" | jq -Rn --argjson d "$draft" --arg as "$(ls "$STUB/release" 2> /dev/null | tr '\n' ' ')" \
+      '[inputs | {tag_name: ., draft: $d, assets: ($as | split(" ") | map(select(. != "") | {name: .}))}]' | reply ;;
   "release create")
     [ ! -e "$STUB/create.fail" ] || fail "HTTP 500"
     t="${a[2]}"; opts "${a[@]:3}"
@@ -111,6 +131,16 @@ case "${a[0]:-} ${a[1]:-}" in
   "release download")
     t="${a[2]}"; opts "${a[@]:3}"
     [ -e "$STUB/published/$t" ] || fail "Not Found (HTTP 404)"
+    [ ! -e "$STUB/download.fail" ] || fail "HTTP 502"
+    made="$(dirname -- "$dir")"; name="$(basename -- "$made")"
+    # $STUB/retarget: the TMPDIR symlink now leads elsewhere, where a victim sits at the run's name.
+    if [ -e "$STUB/retarget" ]; then
+      ln -sfn "$STUB/b" "$STUB/link" && mkdir -p "$STUB/b/$name" && echo victim > "$STUB/b/$name/victim" || exit 1
+    fi
+    # $STUB/replace-tmp: the run's directory is moved away and another made at its path.
+    if [ -e "$STUB/replace-tmp" ]; then
+      mv -- "$made" "$made.moved" && mkdir -- "$made" && echo victim > "$made/victim" || exit 1
+    fi
     cp -- "$STUB/release/"* "$dir/" || exit 1
     [ ! -e "$STUB/asset.unreadable" ] || chmod 000 "$dir/$(cat "$STUB/asset.unreadable")" ;;
   *) echo "gh stub: unexpected call: ${a[*]}" >&2; exit 3 ;;
@@ -121,8 +151,8 @@ cat > "$tmp/bin/curl" <<'EOF'
 #!/usr/bin/env bash
 # curl … -o <file> <url>, answered from the fixture's origin: <url> must be a raw URL of the
 # fixture's repository. $STUB/curl.404s holds how many downloads fail before one succeeds;
-# $STUB/curl.mode `tamper` alters the bytes, `unreadable` leaves them unreadable, `term` and `int`
-# send TERM or INT to the caller.
+# $STUB/curl.mode `tamper` alters the bytes, `unreadable` leaves them unreadable, `nowrite` and
+# `unreachable` fail as curl does (23, 7), `term` and `int` send TERM or INT to the caller.
 out=""; url=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -136,7 +166,11 @@ unset -f git
 printf 'curl %s\n' "$url" >> "$STUB/events"
 notfound() { echo "curl: (22) The requested URL returned error: 404" >&2; exit 22; }
 mode="$(cat "$STUB/curl.mode" 2> /dev/null)"
-case "$mode" in term|int) kill "-$(printf '%s' "$mode" | tr a-z A-Z)" "$PPID"; notfound ;; esac
+case "$mode" in
+  term|int) kill "-$(printf '%s' "$mode" | tr a-z A-Z)" "$PPID"; notfound ;;
+  nowrite) echo "curl: (23) Failure writing output to destination" >&2; exit 23 ;;
+  unreachable) echo "curl: (7) Failed to connect" >&2; exit 7 ;;
+esac
 n="$(cat "$STUB/curl.404s" 2> /dev/null)"
 if [ "${n:-0}" -gt 0 ]; then echo $((n - 1)) > "$STUB/curl.404s"; notfound; fi
 case "$url" in "https://raw.githubusercontent.com/$SLUG/"*/shmutant.sh) ;; *) notfound ;; esac
@@ -282,7 +316,7 @@ c_dry_run_on_a_clean_green_main_passes_and_changes_nothing() {
   for w in "on main" "the work tree is clean" "HEAD is origin's main" "GitHub's API agrees" \
            "CI is green on origin's main" "shmutant.sh sets SHMUTANT_VERSION=$VER" "CHECKSUMS matches shmutant.sh" \
            "docs/integrating.md's install URL is $URL" "no tag $TAG in this checkout" \
-           "no tag $TAG on origin" "no GitHub release for $TAG"; do
+           "no tag $TAG on origin" "no tag $TAG on GitHub" "no GitHub release for $TAG"; do
     has "$out" "release: ok: $w" "each precondition is reported"
   done
   has "$out" "2 check run(s) and 1 ci.yml run(s), each a success" "CI's evidence is counted"
@@ -451,7 +485,10 @@ c_refuses_an_existing_tag() {
   refused_once "tag $TAG already exists in this checkout" "a local tag"
   git -C "$c" push -q origin "refs/tags/$TAG"; git -C "$c" tag -d "$TAG" > /dev/null
   rel --dry-run "$VER"
-  refused_once "tag $TAG already exists on origin" "a tag on origin"
+  rc_is "$rc" 1 "a tag on origin, which GitHub then has too"
+  has "$err" "tag $TAG already exists on origin" "the origin refusal"
+  has "$err" "tag $TAG already exists on GitHub's $SLUG" "and GitHub's"
+  eq "$(refusals)" 2 "two refusals"
 }
 
 c_refuses_an_existing_release() {
@@ -603,7 +640,7 @@ c_cut_tags_publishes_verifies_and_hands_off() {
   rc_is "$rc" 0 "--verify on the published release"
   rel "$VER"
   rc_is "$rc" 1 "a second cut of the same version"
-  eq "$(refusals)" 3 "refused: the tag here, on origin, and the release"
+  eq "$(refusals)" 4 "refused: the tag here, on origin, on GitHub, and the release"
 }
 
 c_verify_fails_loudly_on_a_mismatched_download() {
@@ -640,7 +677,7 @@ c_verify_retries_a_bounded_number_of_times() {
   echo 99 > "$S/curl.404s"
   rel "$VER"
   rc_is "$rc" 1 "the URL never answers"
-  has "$err" "VERIFY FAILED: $URL did not download in 12 attempts" "says so"
+  has "$err" "VERIFY FAILED: $URL answered an HTTP error on each of 12 attempts" "says so"
   eq "$(events | grep -c '^curl ')" 12 "twelve downloads"
   eq "$(events | grep -c '^sleep 30$')" 11 "eleven pauses"
   rm -f -- "$S/curl.404s"
@@ -965,25 +1002,58 @@ c_pushes_only_its_own_tag() {
   eq "$(origin_tags)" "$TAG" "only the release tag reached origin"
 }
 
+# partial_clone — a blobless clone of the origin, without a checkout, at $pc; sets packs to its
+# pack directory's listing.
+partial_clone() {
+  git -C "$S/origin.git" config uploadpack.allowFilter true || exit 2
+  pc="$S/../partial"
+  git clone -q --filter=blob:none --no-checkout "file://$S/origin.git" "$pc" || exit 2
+  mkdir -p "$pc/scripts" && cp -- "$root/scripts/release.sh" "$pc/scripts/" || exit 2
+  git -C "$pc" remote set-url origin "https://github.com/$SLUG.git" || exit 2
+  git -C "$pc" config "url.$S/origin.git.insteadOf" "https://github.com/$SLUG.git" || exit 2
+  packs="$(ls "$pc/.git/objects/pack")"
+}
+
+# git_box <dir> <version> — <dir> holding a git that reports <version> and is the real one otherwise.
+git_box() {
+  mkdir -p "$1" || exit 2
+  printf '#!/usr/bin/env bash\n[ "${1:-}" != version ] || { echo "git version %s"; exit 0; }\nexec %q "$@"\n' \
+    "$2" "$(command -v git)" > "$1/git" && chmod +x "$1/git" || exit 2
+}
+
 c_dry_run_fetches_nothing_into_a_partial_clone() {
-  local p gv packs
+  local gv
   gv="$(git version | sed 's/^git version //')"
   case "$(printf '%s\n2.45\n' "$gv" | sort -t. -k1,1n -k2,2n | head -n 1)" in
     2.45) : ;;
-    *) echo "note: $_case: git $gv predates GIT_NO_LAZY_FETCH (2.45); not exercised" >&2; return ;;
+    *) echo "note: $_case: git $gv predates GIT_NO_LAZY_FETCH; the old-git refusal case covers it" >&2; return ;;
   esac
-  git -C "$S/origin.git" config uploadpack.allowFilter true || exit 2
-  p="$S/../partial"
-  git clone -q --filter=blob:none --no-checkout "file://$S/origin.git" "$p" || exit 2
-  mkdir -p "$p/scripts" && cp -- "$root/scripts/release.sh" "$p/scripts/" || exit 2
-  git -C "$p" remote set-url origin "https://github.com/$SLUG.git" || exit 2
-  git -C "$p" config "url.$S/origin.git.insteadOf" "https://github.com/$SLUG.git" || exit 2
-  packs="$(ls "$p/.git/objects/pack")"
-  (cd -- "$p" && PATH="$tmp/bin:$PATH" STUB="$S" SLUG="$SLUG" bash scripts/release.sh --dry-run "$VER") > "$S/out" 2> "$S/err"
+  partial_clone
+  (cd -- "$pc" && PATH="$tmp/bin:$PATH" STUB="$S" SLUG="$SLUG" bash scripts/release.sh --dry-run "$VER") > "$S/out" 2> "$S/err"
   rc=$?; err="$(cat "$S/err")"
   rc_is "$rc" 2 "a clone missing the blobs it would check"
   has "$err" "cannot read shmutant.sh at" "says so"
-  eq "$(ls "$p/.git/objects/pack")" "$packs" "nothing was fetched"
+  eq "$(ls "$pc/.git/objects/pack")" "$packs" "nothing was fetched"
+}
+
+c_counts_any_promisor_remote_as_a_partial_clone() {
+  git -C "$c" remote add mirror "file://$S/origin.git" && git -C "$c" config remote.mirror.promisor true || exit 2
+  git_box "$S/oldgit" 2.39.5
+  (cd -- "$c" && PATH="$S/oldgit:$tmp/bin:$PATH" STUB="$S" SLUG="$SLUG" bash scripts/release.sh --dry-run "$VER") > "$S/out" 2> "$S/err"
+  rc=$?; err="$(cat "$S/err")"
+  rc_is "$rc" 2 "a promisor remote other than origin, git 2.39"
+  has "$err" "cannot be kept from fetching objects it lacks" "says why"
+}
+
+c_refuses_a_partial_clone_under_a_git_that_would_fetch() {
+  partial_clone
+  git_box "$S/oldgit" 2.39.5
+  (cd -- "$pc" && PATH="$S/oldgit:$tmp/bin:$PATH" STUB="$S" SLUG="$SLUG" bash scripts/release.sh --dry-run "$VER") > "$S/out" 2> "$S/err"
+  rc=$?; err="$(cat "$S/err")"
+  rc_is "$rc" 2 "a partial clone, git 2.39"
+  has "$err" "cannot be kept from fetching objects it lacks" "says why"
+  eq "$(ls "$pc/.git/objects/pack")" "$packs" "nothing was fetched"
+  hasnt "$(events)" "gh" "and nothing was asked of GitHub"
 }
 
 c_exits_2_on_an_unreadable_blob() {
@@ -1009,6 +1079,92 @@ c_reports_a_temporary_directory_it_cannot_remove() {
   rc_is "$rc" 0 "the cut still succeeds"
   has "$err" "could not remove the temporary directory" "and says what it left"
   rm -f -- "$S/rm.fail"
+}
+
+c_refuses_a_tag_github_already_has() {
+  git -C "$S/origin.git" rev-parse main > "$S/github-tag"
+  rel --dry-run "$VER"
+  refused_once "tag $TAG already exists on GitHub's $SLUG" "a tag GitHub has and origin lacks"
+}
+
+c_publishes_nothing_when_github_lacks_the_pushed_tag() {
+  echo none > "$S/github-tag"
+  rel "$VER"
+  rc_is "$rc" 1 "origin's URL is a mirror GitHub does not see"
+  has "$err" "origin has $TAG, but GitHub's API does not show it on $SLUG after 3 reads" "says so"
+  eq "$(events | grep -c '^sleep 2$')" 2 "re-read twice, pausing between"
+  hasnt "$(events)" "gh release create" "no release"
+}
+
+c_publishes_nothing_when_githubs_tag_names_another_commit() {
+  land "$c" second
+  echo "after:$(git -C "$S/origin.git" rev-parse main~1)" > "$S/github-tag"
+  rel "$VER"
+  rc_is "$rc" 1 "GitHub's tag names another commit after the push"
+  has "$err" "GitHub's $TAG names $(git -C "$S/origin.git" rev-parse main~1), not $(git -C "$S/origin.git" rev-parse main)" "says so"
+  hasnt "$(events)" "gh release create" "no release"
+}
+
+c_verify_refuses_a_github_tag_that_moved() {
+  rel "$VER"
+  rc_is "$rc" 0 "the cut"
+  echo 0123456789012345678901234567890123456789 > "$S/github-tag"
+  rel --verify "$VER"
+  rc_is "$rc" 1 "--verify, GitHub's tag moved while origin's did not"
+  has "$err" "VERIFY FAILED: GitHub's $TAG names 0123456789012345678901234567890123456789" "says so"
+}
+
+c_verify_exits_2_when_a_read_fails() {
+  rel "$VER"
+  rc_is "$rc" 0 "the cut"
+  : > "$S/download.fail"
+  rel --verify "$VER"
+  rc_is "$rc" 2 "the release's assets cannot be downloaded"
+  has "$err" "could not download the assets of the release $TAG" "says so"
+  rm -f -- "$S/download.fail"; echo nowrite > "$S/curl.mode"
+  rel --verify "$VER"
+  rc_is "$rc" 2 "the raw download cannot be written"
+  has "$err" "cannot write the download of $URL" "says so"
+  echo unreachable > "$S/curl.mode"
+  rel --verify "$VER"
+  rc_is "$rc" 2 "the raw URL cannot be reached"
+  has "$err" "could not download $URL in 12 attempts (curl exit 7)" "says so"
+}
+
+c_cleanup_follows_no_symlink_swapped_after_allocation() {
+  local left
+  mkdir -p "$S/a" "$S/b" && ln -s "$S/a" "$S/link" || exit 2
+  : > "$S/retarget"
+  TMPDIR="$S/link" rel "$VER"
+  rc_is "$rc" 0 "the cut, with TMPDIR's symlink retargeted under it"
+  eq "$(ls -A "$S/a")" "" "the directory it made is gone"
+  left="$(ls -A "$S/b")"
+  [ -n "$left" ] && [ -f "$S/b/$left/victim" ] || fail_ "the victim planted at the new target was removed"
+}
+
+c_cleanup_leaves_a_directory_that_replaced_its_own() {
+  local d
+  mkdir -p "$S/tmp"; : > "$S/replace-tmp"
+  TMPDIR="$S/tmp" rel "$VER"
+  rc_is "$rc" 2 "the run's directory is replaced during verification"
+  has "$err" "it is no longer the directory this run made" "cleanup says why it removed nothing"
+  for d in "$S"/tmp/release.*; do
+    case "$d" in *.moved) ;; *) [ -f "$d/victim" ] || fail_ "the replacing directory's victim was removed" ;; esac
+  done
+}
+
+c_an_interrupt_while_allocating_leaves_nothing() {
+  mkdir -p "$S/box-mktemp" "$S/tmp" || exit 2
+  printf '#!/usr/bin/env bash\nd="$(/usr/bin/mktemp "$@")" || exit 1\nprintf "%%s\\n" "$d"\nkill -TERM 0\n' > "$S/box-mktemp/mktemp"
+  chmod +x "$S/box-mktemp/mktemp" || exit 2
+  # In a process group of its own (set -m), so the stub's TERM to its group reaches the driver only.
+  # The background job is the driver itself, not a list: a subshell around it would take the TERM
+  # too and let the wait return before the driver had cleaned up.
+  bash -c 'set -m; cd -- "$1" || exit 2; PATH="$2:$PATH" TMPDIR="$3" STUB="$4" SLUG="$5" bash scripts/release.sh "$6" & wait $!' \
+    _ "$c" "$S/box-mktemp:$tmp/bin" "$S/tmp" "$S" "$SLUG" "$VER" > "$S/out" 2> "$S/err"
+  rc=$?; err="$(cat "$S/err")"
+  rc_is "$rc" 143 "TERM while the temporary directory is made"
+  eq "$(ls -A "$S/tmp")" "" "and it is removed"
 }
 
 # --- run ---------------------------------------------------------------------------------------

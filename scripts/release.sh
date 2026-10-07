@@ -18,16 +18,18 @@
 #   - CHECKSUMS at HEAD is the one line `<sha256>  shmutant.sh`, and the digest is shmutant.sh's;
 #   - docs/integrating.md at HEAD names one raw.githubusercontent.com URL of shmutant.sh: this
 #     repository's, at the tag v<version>;
-#   - no tag v<version> exists in this checkout or on origin, and no GitHub release has it.
-# Just before tagging, origin's main is read again and must still be the commit checked.
+#   - no tag v<version> exists in this checkout, on origin or on GitHub, and no GitHub release has it.
+# Just before tagging, origin's main is read again and must still be the commit checked. After the
+# push, origin's tag and GitHub's tag must both name it before anything is published.
 #
 # --dry-run  checks every precondition and changes nothing: no fetch, no tag, no push, no release,
-#            and no file of its own. In a partial clone that takes git 2.45 or newer, which honours
-#            GIT_NO_LAZY_FETCH; an older git may fetch an object the clone lacks.
-# --verify   checks a published release only: origin's tag must name the commit this checkout's
-#            tag names, the URL docs/integrating.md documents there and the release's shmutant.sh
-#            must have the digest CHECKSUMS there gives, and the release's CHECKSUMS must be that
-#            file. A cut verifies against the commit it checked.
+#            and no file of its own. In a partial clone it needs git 2.45 or newer, which honours
+#            GIT_NO_LAZY_FETCH, and refuses an older git (exit 2) rather than let it fetch.
+# --verify   checks a published release only: origin's and GitHub's tags must name the commit this
+#            checkout's tag names, the URL docs/integrating.md documents there and the release's
+#            shmutant.sh must have the digest CHECKSUMS there gives, and the release's CHECKSUMS
+#            must be that file. A cut verifies against the commit it checked. Its last line on
+#            success is `release: verified: the release <tag> carries …`.
 #
 # The repository is the one origin's single URL names, a github.com HTTPS or SSH URL; every push
 # URL origin has must name the same one. Every gh call names it, on github.com, and gh's account
@@ -36,10 +38,10 @@
 # functions and aliases, its GIT_* repository, git replacement objects and GH_HOST, and the shell
 # options that change what a command does (xtrace, verbose, keyword, allexport, errexit,
 # noclobber, pipefail, posix, nocasematch) are set aside before anything is read. A function
-# named after a builtin the setup itself calls (builtin, read, unset, declare) cannot be. Options that stop commands from running at
-# all (noexec, onecmd) cannot be set aside from inside: run the driver with SHELLOPTS, BASHOPTS and
-# BASH_ENV removed, as the /release skill does, and take success from its last line, not from its
-# exit status alone.
+# named after a builtin the setup itself calls (builtin, read, unset, declare) cannot be, nor can
+# the options that stop commands from running at all (noexec, onecmd): run the driver with
+# SHELLOPTS, BASHOPTS and BASH_ENV removed, as the /release skill does, and take success from its
+# last line, not from its exit status alone.
 #
 # Exit 0 = done, or (--dry-run) every precondition held; 1 = a precondition refused, or a publish
 # or verify step failed, saying so on stderr; 130/143 = interrupted, saying what may already be
@@ -56,9 +58,12 @@ unset -v GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE
   GIT_COMMON_DIR GIT_NAMESPACE
 
 # Downloads of the raw URL before --verify gives up, and the pause between them: a new tag can
-# answer 404 there for a while, and a cached 404 lives up to 300 seconds.
+# answer 404 there for a while, and a cached 404 lives up to 300 seconds. Reads of GitHub's tag
+# just after the push, and their pause, for an API that has not yet shown it.
 attempts=12
 pause=30
+ref_reads=3
+ref_pause=2
 
 say()   { printf 'release: %s\n' "$*"; }
 err()   { printf 'release: %s\n' "$*" >&2; }
@@ -126,6 +131,15 @@ $pushurls
 EOF
 
 hexre='^[0-9a-f]{40}([0-9a-f]{24})?$'
+
+# Any promisor remote, not only origin, can be fetched from lazily.
+if g config --get-regexp '^remote\..*\.promisor$' > /dev/null || [ -n "$(g config --get extensions.partialclone)" ]; then
+  gv="$(git version)" || die "cannot read git's version"
+  re='^git version ([0-9]+)\.([0-9]+)'
+  [[ "$gv" =~ $re ]] || die "cannot read git's version: $gv"
+  [ "${BASH_REMATCH[1]}" -gt 2 ] || { [ "${BASH_REMATCH[1]}" -eq 2 ] && [ "${BASH_REMATCH[2]}" -ge 45 ]; } \
+    || die "this is a partial clone, and $gv (older than 2.45) cannot be kept from fetching objects it lacks: use git 2.45 or newer, or a full clone"
+fi
 
 # sha256 — the SHA-256 of stdin, from whichever tool the platform has; fails rather than print
 # anything but a digest.
@@ -201,6 +215,18 @@ origin_tag() {
     END { print (peeled != "" ? peeled : plain) }'
 }
 
+# github_tag — the commit GitHub's tag $tag names, empty when GitHub has no such tag; status 1 when
+# the API cannot be read. GitHub is asked directly because origin's URL may be rewritten elsewhere.
+github_tag() {
+  local out typ sha
+  out="$(gh api --paginate "repos/$slug/git/matching-refs/tags/$tag" \
+           --jq ".[] | select(.ref == \"refs/tags/$tag\") | [.object.type, .object.sha] | @tsv")" || return 1
+  [ -n "$out" ] || return 0
+  typ="${out%%$'\t'*}"; sha="${out#*$'\t'}"
+  if [ "$typ" = tag ]; then sha="$(gh api "repos/$slug/git/tags/$sha" --jq '.object.sha')" || return 1; fi
+  printf '%s\n' "$sha"
+}
+
 refused=0
 ok()     { say "ok: $*"; }
 refuse() { err "refused: $*"; refused=$((refused + 1)); }
@@ -223,7 +249,7 @@ EOF
 
 # preflight — every precondition, each reported; sets head, remote, digest and raw_url.
 preflight() {
-  local branch st ls api perm short runs wfruns statuses n w nst state src vl v fsum peel rels rc re
+  local branch st ls api perm short runs wfruns statuses n w nst state src vl v fsum peel gt rels rc re
 
   branch="$(g symbolic-ref --quiet --short HEAD)" || branch=""
   if [ "$branch" = main ]; then ok "on main"
@@ -321,6 +347,10 @@ EOF
   if [ -n "$peel" ]; then refuse "tag $tag already exists on origin (if a cut of it stopped partway, finish its release by hand and check it with --verify)"
   else ok "no tag $tag on origin"
   fi
+  gt="$(github_tag)" || die "cannot read $slug's tags through the GitHub API"
+  if [ -n "$gt" ]; then refuse "tag $tag already exists on GitHub's $slug (it names $gt)"
+  else ok "no tag $tag on GitHub"
+  fi
   rels="$(gh api --paginate "repos/$slug/releases?per_page=100" --jq '.[].tag_name')" \
     || die "cannot list $slug's GitHub releases"
   if printf '%s\n' "$rels" | grep -Fxq -- "$tag"; then refuse "GitHub already has a release for $tag"
@@ -331,9 +361,11 @@ EOF
 # verify <commit> — the published release, against CHECKSUMS at <commit>, which origin's tag must
 # name; every mismatch is reported. A failed read or a missing tool exits 2.
 verify() {
-  local c="$1" got ck i=0 bad=0 pub a peel rc
+  local c="$1" got ck i=0 bad=0 a peel gt rc crc rel draft assets
   peel="$(origin_tag)" || die "cannot read origin's tags (git ls-remote failed)"
   [ "$peel" = "$c" ] || { err "VERIFY FAILED: origin's $tag names ${peel:-nothing}, not $c"; return 1; }
+  gt="$(github_tag)" || die "cannot read $slug's tags through the GitHub API"
+  [ "$gt" = "$c" ] || { err "VERIFY FAILED: GitHub's $tag names ${gt:-nothing}, not $c"; return 1; }
   checksums_digest "$c"; rc=$?
   [ "$rc" -ne 2 ] || die "$why"
   [ "$rc" -eq 0 ] || { err "VERIFY FAILED: at $tag, $why"; return 1; }
@@ -343,10 +375,18 @@ verify() {
   ck="$(blob_sha256 "$c:CHECKSUMS")" || die "cannot compute the SHA-256 of CHECKSUMS at $tag"
   mkdir -- "$made/raw" "$made/dl" || die "cannot create the download directories"
 
-  until curl -q -fsSL --proto '=https' --connect-timeout 20 --max-time 300 -o "$made/raw/shmutant.sh" "$raw_url"; do
+  # An HTTP error on every attempt is the URL not serving the file: a verify failure. Any other
+  # failure is a read that did not happen: exit 2, at once for one that cannot write its output.
+  while :; do
+    curl -q -fsSL --proto '=https' --connect-timeout 20 --max-time 300 -o "$made/raw/shmutant.sh" "$raw_url"; crc=$?
+    [ "$crc" -ne 0 ] || break
+    [ "$crc" -ne 23 ] || die "cannot write the download of $raw_url (curl exit 23)"
     i=$((i + 1))
-    [ "$i" -lt "$attempts" ] || { err "VERIFY FAILED: $raw_url did not download in $i attempts"; return 1; }
-    say "downloading $raw_url failed (attempt $i of $attempts); retrying in ${pause}s"
+    if [ "$i" -ge "$attempts" ]; then
+      [ "$crc" -ne 22 ] || { err "VERIFY FAILED: $raw_url answered an HTTP error on each of $i attempts"; return 1; }
+      die "could not download $raw_url in $i attempts (curl exit $crc)"
+    fi
+    say "downloading $raw_url failed (curl exit $crc, attempt $i of $attempts); retrying in ${pause}s"
     sleep "$pause"
   done
   got="$(sha256 < "$made/raw/shmutant.sh")" || die "cannot compute the SHA-256 of the download"
@@ -356,18 +396,22 @@ verify() {
 
   # The list, not the by-tag read: it names drafts too, and its failure is a failed read, never
   # an answer. The tag is validated as v<digits and dots> above, so it is safe in the filter.
-  pub="$(gh api --paginate "repos/$slug/releases?per_page=100" --jq ".[] | select(.tag_name == \"$tag\") | .draft")" \
+  rel="$(gh api --paginate "repos/$slug/releases?per_page=100" \
+          --jq ".[] | select(.tag_name == \"$tag\") | [(.draft | tostring), ([.assets[].name] | join(\" \"))] | @tsv")" \
     || die "cannot list $slug's GitHub releases"
-  case "$pub" in
-    false) : ;;
-    true)  err "VERIFY FAILED: the release $tag is a draft"; return 1 ;;
-    '')    err "VERIFY FAILED: GitHub has no release for $tag"; return 1 ;;
-    *)     err "VERIFY FAILED: GitHub lists more than one release for $tag"; return 1 ;;
+  case "$rel" in
+    '')      err "VERIFY FAILED: GitHub has no release for $tag"; return 1 ;;
+    *$'\n'*) err "VERIFY FAILED: GitHub lists more than one release for $tag"; return 1 ;;
   esac
-  gh release download "$tag" -R "github.com/$slug" --dir "$made/dl" \
-    || { err "VERIFY FAILED: could not download the assets of the release $tag"; return 1; }
+  draft="${rel%%$'\t'*}"; assets=" ${rel#*$'\t'} "
+  [ "$draft" = false ] || { err "VERIFY FAILED: the release $tag is a draft"; return 1; }
   for a in shmutant.sh CHECKSUMS; do
-    if [ ! -f "$made/dl/$a" ]; then err "VERIFY FAILED: the release $tag has no asset $a"; bad=1; continue; fi
+    case "$assets" in *" $a "*) : ;; *) err "VERIFY FAILED: the release $tag has no asset $a"; return 1 ;; esac
+  done
+  gh release download "$tag" -R "github.com/$slug" --dir "$made/dl" \
+    || die "could not download the assets of the release $tag"
+  for a in shmutant.sh CHECKSUMS; do
+    [ -f "$made/dl/$a" ] || die "the download of the release $tag holds no $a"
     got="$(sha256 < "$made/dl/$a")" || die "cannot compute the SHA-256 of the release's $a"
     case "$a" in
       shmutant.sh) [ "$got" = "$digest" ] \
@@ -384,19 +428,41 @@ verify() {
 tagged=0
 interrupted() {
   [ "$tagged" -eq 0 ] || {
-    err "interrupted once the tag $tag may exist. If origin lacks it (git ls-remote origin refs/tags/$tag), delete it here (git tag -d $tag) and re-run; if origin has it, finish by hand."
+    err "interrupted once the tag $tag may exist. Ask origin (git ls-remote origin refs/tags/$tag): if it lacks the tag, delete it here (git tag -d $tag) and re-run; if its tag names $remote, finish by hand as below; if it names another commit, inspect it before anything else."
     finish_by_hand
   }
   exit "$1"
 }
-# cleanup — removes this run's temporary directory, saying so when it cannot; the run's own exit
-# status stands either way.
-cleanup() { rm -rf -- "$made" || err "could not remove the temporary directory $made"; }
+# cleanup — removes this run's temporary directory, only while it is still the one this run made
+# (same physical path, same inode), saying so when it cannot; the run's exit status stands.
+made=""; made_id=""
+cleanup() {
+  local id
+  [ -n "$made" ] && [ -d "$made" ] || return 0
+  id="$(ls -di -- "$made" 2> /dev/null | awk '{ print $1 }')"
+  if [ -z "$made_id" ] || [ "$id" != "$made_id" ]; then
+    err "not removing $made: it is no longer the directory this run made"; return 0
+  fi
+  rm -rf -- "$made" || err "could not remove the temporary directory $made"
+}
+# newtmp — makes the run's temporary directory. A signal during the allocation is held until the
+# directory is known, then handled, so an interrupt there still removes it.
 newtmp() {
-  made="$(mktemp -d "${TMPDIR:-/tmp}/release.XXXXXX")" || die "cannot create a temporary directory"
+  local pending="" mrc phys
+  trap 'pending=130' INT
+  trap 'pending=143' TERM
+  made="$(mktemp -d "${TMPDIR:-/tmp}/release.XXXXXX")"; mrc=$?
+  if [ -n "$made" ] && [ -d "$made" ]; then
+    phys="$(cd -P -- "$made" && pwd -P)" && made="$phys"
+    made_id="$(ls -di -- "$made" | awk '{ print $1 }')"
+  else
+    made=""
+  fi
   trap cleanup EXIT
   trap 'interrupted 130' INT
   trap 'interrupted 143' TERM
+  [ -z "$pending" ] || interrupted "$pending"
+  [ "$mrc" -eq 0 ] && [ -n "$made" ] && [ -n "$made_id" ] || die "cannot create a temporary directory"
 }
 
 if [ "$mode" = verify ]; then
@@ -433,7 +499,7 @@ finish_by_hand() {
   err "  with no release:   $(printf '%q ' "${create[@]}")"
   err "  with a draft:      $(printf '%q ' gh release upload "$tag" -R "github.com/$slug" shmutant.sh CHECKSUMS --clobber)"
   err "                     $(printf '%q ' gh release edit "$tag" -R "github.com/$slug" --draft=false)"
-  err "  then check it:     $(printf '%q ' bash "$root/scripts/release.sh" --verify "$ver")"
+  err "  then check it:     $(printf '%q ' env -u SHELLOPTS -u BASHOPTS -u BASH_ENV bash "$root/scripts/release.sh" --verify "$ver")"
 }
 
 newtmp
@@ -465,7 +531,23 @@ elif [ "$prc" -ne 0 ]; then
   finish_by_hand
   exit 1
 fi
-say "pushed $tag, naming $remote"
+i=0
+while :; do
+  gt="$(github_tag)" || { err "pushed $tag, but $slug's tags cannot be read through the GitHub API."; finish_by_hand; exit 1; }
+  i=$((i + 1))
+  [ -z "$gt" ] && [ "$i" -lt "$ref_reads" ] || break
+  sleep "$ref_pause"
+done
+if [ -z "$gt" ]; then
+  err "origin has $tag, but GitHub's API does not show it on $slug after $i reads: origin's URL may lead somewhere else (a url.insteadOf mirror), or GitHub has not caught up. Nothing was published."
+  err "Ask GitHub (gh api repos/$slug/git/matching-refs/tags/$tag). If it has the tag naming $remote, finish by hand as below; if it has none, find where the push went."
+  finish_by_hand
+  exit 1
+elif [ "$gt" != "$remote" ]; then
+  err "GitHub's $tag names $gt, not $remote: inspect it before anything else. Nothing was published."
+  exit 1
+fi
+say "pushed $tag, naming $remote, on origin and on GitHub"
 
 mkdir -- "$made/assets" \
   && g cat-file blob "$remote:shmutant.sh" > "$made/assets/shmutant.sh" \
