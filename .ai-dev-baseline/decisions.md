@@ -41,7 +41,7 @@
 - category:  project-delta
 - unknown:   #8 asks for a project-owned release command that the roadmap artifact's `release-command` marker can name. The baseline ships no `/release` skill, so each project writes its own.
 - decision:
-  - `.claude/skills/release/SKILL.md` settles the version, runs `scripts/release.sh --dry-run`, gets the operator's go-ahead, cuts, and hands off to `baseline release roll`. Only the operator can invoke it (`disable-model-invocation: true`).
+  - `.claude/skills/release/SKILL.md` (a Claude Code skill: the roadmap marker resolves for Claude, the primary here) settles the version, runs `scripts/release.sh --dry-run`, gets the operator's go-ahead, cuts, and hands off to `baseline release roll`. Only the operator can invoke it (`disable-model-invocation: true`).
   - The script holds every step. `test/release.sh` runs it against a local bare origin, with `gh`, `curl` and `sleep` stubbed. It runs in the `release` CI job (ubuntu, plus macOS under `/bin/bash` 3.2) and as the `release-test` gate (cadence `full`).
   - CI is green on origin's main head when all of these hold:
     - every check run GitHub lists there with `filter=latest` is `completed` with conclusion `success`, so `skipped` and `neutral` refuse, and at least one exists;
@@ -49,7 +49,7 @@
     - its commit statuses, if it has any, combine to `success`. With none, GitHub reports `pending`, which is ignored.
   - This "green" is stricter than the baseline's `roadmap-lib.sh branch-health`, which counts `skipped` and `neutral` as green, so `/roadmap` can announce a cut that this script then refuses. The refusal is the safe side of that disagreement: a tag is permanent, and a skipped job on the commit being tagged is a check nobody ran.
   - A pending check refuses at once; the script does not wait.
-  - `CHECKSUMS` is checked by a stricter form of `sha256sum -c` that needs no `sha256sum`: it must be exactly one `<sha256>  shmutant.sh` line (lowercase hex, text mode), and the digest must match `shmutant.sh` as committed at HEAD. The digest helper is the script's own, not `shmutant.sh`'s `_shmutant_checksum`: that one needs bash 5.3 and a file, and the script runs on macOS's bash 3.2 and hashes git blobs on stdin.
+  - `CHECKSUMS` is checked by a stricter form of `sha256sum -c` that needs no `sha256sum`: it must be exactly one `<sha256>  shmutant.sh` line (lowercase hex, text mode), and the digest must match `shmutant.sh` as committed at HEAD. The digest helper is the script's own, not `shmutant.sh`'s `_shmutant_checksum`: that one needs bash 5.3 and a file, and the script runs on macOS's bash 3.2 and hashes git blobs on stdin. Nor is it the installed baseline's `adb_sha256_stdin`: that library lives in the operator's home, not in this repository, and CI does not have it.
   - The install URL in `docs/integrating.md` must already name the tag being cut, so the docs at the tag install that release. #8 suggested substituting the version; a doc naming an older tag refuses instead. Only a whole URL ending exactly in `/shmutant.sh` counts, so `shmutant.sh.sig` or a `?query` form is never read as the install URL.
   - origin must have exactly one URL, and it and every push URL must name the same github.com repository; HTTPS userinfo is held to characters that cannot end the host. gh is pinned to github.com, and its account must be able to push there. git's own URL rewriting (`insteadOf`, `pushInsteadOf`) is the operator's configuration and is honoured; what binds the cut to GitHub's repository is GitHub-side: the API agreeing on main before the tag, and `--verify-tag` and the post-publish verification after it. A push that git reports done but origin's URL does not show is named as such.
   - The caller's exported functions and aliases, `GIT_*` repository variables, `GH_HOST`, and the shell options that change what a command does are set aside before anything is read. `noexec` and `onecmd` cannot be undone from inside a script, so the skill runs the driver under `env -u SHELLOPTS -u BASHOPTS -u BASH_ENV` and takes success from its last line, not its exit status alone.
@@ -64,7 +64,7 @@
 - date:      2026-10-07
 - category:  project-delta
 - unknown:   the global manifest (`~/.config/ai-dev-baseline/agents.toml`) sets `review = ["claude"]`, so every review in this repository ran on the rung `same-model claude`. On PR #14 the sibling sweep that /resolve-pr-threads runs before any fix came from that same model, and it broke its own grammar 4 times out of 4, so no review thread could be addressed.
-- decision:  `[roles] review = ["codex"]` in this repository's agents.toml. The review rung becomes `independent codex`, for /implement-issue's review and local loop and /resolve-pr-threads' sweep and loop.
+- decision:  `[roles] review = ["codex"]` in this repository's agents.toml. With claude as primary the review rung becomes `independent codex`, for /implement-issue's review and local loop and /resolve-pr-threads' sweep and loop. A codex-driven run would make it same-model again, so a change of primary revisits this.
 - placement: agents.toml [roles]
 - reason:    the owner's call: an independent reviewer should have been configured from the start. The first codex sweep on PR #14 succeeded.
 - baseline-issue: n/a (role assignment is per project; the global manifest is left unchanged)

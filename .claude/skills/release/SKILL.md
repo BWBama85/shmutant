@@ -37,7 +37,8 @@ what each precondition is, what it publishes and how it verifies.
    the operator can change. Exit 2 means it could not run (a missing tool, an unreadable GitHub
    API, or a bad argument). Report that and stop as well.
 
-3. **The go-ahead.** A pushed tag and a published release are permanent and public. Show the
+3. **The go-ahead.** A pushed tag and a published release are public, and this project never
+   moves or deletes one once it is out. Show the
    operator the dry run's output, including the version and the commit it would tag, and ask before
    you go on. Do not take an earlier approval as approval for this cut.
 
@@ -49,9 +50,11 @@ what each precondition is, what it publishes and how it verifies.
 
    It repeats every check, re-reads origin's main just before tagging, then tags, pushes,
    publishes, and verifies. The cut succeeded only when it exits 0 **and** its last line is the
-   hand-off in step 5. If it fails or is interrupted after the tag may have reached origin, it
-   prints the commands that finish the release by hand, from the commit it checked. Pass those on
-   as printed. Never delete or move a pushed tag. Once the release is
+   hand-off in step 5. When origin has the tag but the release could not be created, or the run
+   was interrupted once the tag may exist, it prints the commands that finish the release by
+   hand, from the commit it checked. When origin's tag names another commit, or the published
+   release does not verify, it says to investigate before anything else. When it cannot read
+   something it needs, it stops with exit 2. Pass every one of these on as printed. Never delete or move a pushed tag. Once the release is
    finished, `bash scripts/release.sh --verify <X.Y.Z>` checks what was published.
 
 5. **The hand-off.** On success the driver's last line is

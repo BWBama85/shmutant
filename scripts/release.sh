@@ -22,7 +22,8 @@
 # Just before tagging, origin's main is read again and must still be the commit checked.
 #
 # --dry-run  checks every precondition and changes nothing: no fetch, no tag, no push, no release,
-#            and no file of its own.
+#            and no file of its own. In a partial clone that takes git 2.45 or newer, which honours
+#            GIT_NO_LAZY_FETCH; an older git may fetch an object the clone lacks.
 # --verify   checks a published release only: origin's tag must name the commit this checkout's
 #            tag names, the URL docs/integrating.md documents there and the release's shmutant.sh
 #            must have the digest CHECKSUMS there gives, and the release's CHECKSUMS must be that
@@ -32,9 +33,10 @@
 # URL origin has must name the same one. Every gh call names it, on github.com, and gh's account
 # must be able to push to it. Needs git, gh, curl, and sha256sum, shasum or openssl. Git over HTTPS
 # and gh never prompt: a missing credential fails instead of waiting. The caller's exported
-# functions and aliases, its GIT_* repository and GH_HOST, and the shell options that change what
-# a command does (xtrace, verbose, keyword, allexport, errexit, noclobber, pipefail, posix,
-# nocasematch) are set aside before anything is read. Options that stop commands from running at
+# functions and aliases, its GIT_* repository, git replacement objects and GH_HOST, and the shell
+# options that change what a command does (xtrace, verbose, keyword, allexport, errexit,
+# noclobber, pipefail, posix, nocasematch) are set aside before anything is read. A function
+# named after a builtin the setup itself calls (builtin, read, unset, declare) cannot be. Options that stop commands from running at
 # all (noexec, onecmd) cannot be set aside from inside: run the driver with SHELLOPTS, BASHOPTS and
 # BASH_ENV removed, as the /release skill does, and take success from its last line, not from its
 # exit status alone.
@@ -48,7 +50,8 @@ while IFS=' ' builtin read -r _ _ _fn; do [[ -n $_fn ]] && builtin unset -f "$_f
 $(builtin declare -F)
 EOF
 unset CDPATH
-export LC_ALL=C GH_HOST=github.com GH_PROMPT_DISABLED=1 GIT_TERMINAL_PROMPT=0
+export LC_ALL=C GH_HOST=github.com GH_PROMPT_DISABLED=1 GIT_TERMINAL_PROMPT=0 GIT_NO_REPLACE_OBJECTS=1 \
+  GIT_NO_LAZY_FETCH=1
 unset -v GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
   GIT_COMMON_DIR GIT_NAMESPACE
 
@@ -139,23 +142,38 @@ sha256() {
 }
 blob_sha256() { (set -o pipefail; g cat-file blob "$1" | sha256); }
 
+# blob <rev> <path> — prints <path> as committed at <rev>; status 1 when <rev> has no such file, 2
+# when it cannot be read. Called inside $(…), so it sets nothing: blob_why names the reason.
+blob() {
+  local t
+  t="$(g ls-tree --name-only "$1" -- "$2")" || return 2
+  [ "$t" = "$2" ] || return 1
+  g cat-file blob "$1:$2" || return 2
+}
+# blob_why <status> <rev> <path> — sets why for a blob status of 1 or 2.
+blob_why() { if [ "$1" -eq 1 ]; then why="$2 has no $3"; else why="cannot read $3 at $2"; fi; }
+
 # checksums_digest <rev> — sets digest to what CHECKSUMS at <rev> gives shmutant.sh; status 1, with
-# why set, unless CHECKSUMS is exactly the one line `<sha256>  shmutant.sh`, newline-terminated.
+# why set, unless CHECKSUMS is exactly the one line `<sha256>  shmutant.sh`, newline-terminated;
+# 2 when it cannot be read.
 checksums_digest() {
-  local ck re=$'^([0-9a-f]{64})  shmutant\\.sh\n$'
+  local ck rc re=$'^([0-9a-f]{64})  shmutant\\.sh\n$'
   digest=""
-  ck="$(g cat-file blob "$1:CHECKSUMS" 2> /dev/null && printf x)" || { why="$1 has no CHECKSUMS"; return 1; }
+  ck="$(blob "$1" CHECKSUMS && printf x)"; rc=$?
+  [ "$rc" -eq 0 ] || { blob_why "$rc" "$1" CHECKSUMS; return "$rc"; }
   ck="${ck%x}"
   [[ "$ck" =~ $re ]] || { why="CHECKSUMS is not the one line '<sha256>  shmutant.sh'"; return 1; }
   digest="${BASH_REMATCH[1]}"
 }
 
 # doc_url <rev> — sets raw_url to the install URL docs/integrating.md at <rev> documents; status 1,
-# with why set, unless the doc names exactly one, of this repository at the tag $tag.
+# with why set, unless the doc names exactly one, of this repository at the tag $tag; 2 when the
+# doc cannot be read.
 doc_url() {
-  local doc urls docslug doctag re='^https://raw\.githubusercontent\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/([^/]+)/shmutant\.sh$'
+  local doc urls docslug doctag rc re='^https://raw\.githubusercontent\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/([^/]+)/shmutant\.sh$'
   raw_url=""
-  doc="$(g cat-file blob "$1:docs/integrating.md" 2> /dev/null)" || { why="$1 has no docs/integrating.md"; return 1; }
+  doc="$(blob "$1" docs/integrating.md)"; rc=$?
+  [ "$rc" -eq 0 ] || { blob_why "$rc" "$1" docs/integrating.md; return "$rc"; }
   # Whole URLs, each to the end of its token less any trailing sentence punctuation, so that a
   # longer one (shmutant.sh.sig, shmutant.sh?x=y) is never read as its shmutant.sh prefix.
   urls="$(printf '%s\n' "$doc" | grep -oE 'https://raw\.githubusercontent\.com/[^][[:space:]<>"'"'"'`()]*' \
@@ -205,7 +223,7 @@ EOF
 
 # preflight — every precondition, each reported; sets head, remote, digest and raw_url.
 preflight() {
-  local branch st ls api perm short runs wfruns statuses n w nst state vl v fsum peel rels
+  local branch st ls api perm short runs wfruns statuses n w nst state src vl v fsum peel rels rc re
 
   branch="$(g symbolic-ref --quiet --short HEAD)" || branch=""
   if [ "$branch" = main ]; then ok "on main"
@@ -238,8 +256,8 @@ preflight() {
   else refuse "GitHub's API says $slug's main is ${api:-nothing}, but origin says $remote: origin is not $slug, or main just moved"
   fi
   perm="$(gh api "repos/$slug" --jq '.permissions.push')" || die "cannot read $slug through the GitHub API"
-  if [ "$perm" = true ]; then ok "gh's token can push to $slug"
-  else refuse "gh's token cannot push to $slug, so it could not publish the release after the tag: gh auth login with one that can"
+  if [ "$perm" = true ]; then ok "gh's account has push access to $slug"
+  else refuse "gh's account has no push access to $slug, so it could not publish the release after the tag: gh auth login as one that has"
   fi
 
   runs="$(gh api --paginate "repos/$slug/commits/$remote/check-runs?filter=latest&per_page=100" \
@@ -263,17 +281,26 @@ EOF
   else refuse "CI is not green on origin's main ($short): ${notgreen#, }"
   fi
 
-  g cat-file -e "$head:shmutant.sh" 2> /dev/null || die "HEAD has no shmutant.sh"
-  vl="$(g cat-file blob "$head:shmutant.sh" | grep -e '^SHMUTANT_VERSION=')"
-  v="${vl#SHMUTANT_VERSION=}"; v="${v#[\"\']}"; v="${v%[\"\']}"
+  src="$(blob "$head" shmutant.sh)"; rc=$?
+  [ "$rc" -eq 0 ] || { blob_why "$rc" "$head" shmutant.sh; die "$why"; }
+  vl="$(printf '%s\n' "$src" | grep -e '^SHMUTANT_VERSION=')"
+  case "$vl" in
+    "SHMUTANT_VERSION=\""*"\"") v="${vl#SHMUTANT_VERSION=\"}"; v="${v%\"}" ;;
+    "SHMUTANT_VERSION='"*"'")   v="${vl#SHMUTANT_VERSION=\'}"; v="${v%\'}" ;;
+    *)                          v="${vl#SHMUTANT_VERSION=}" ;;
+  esac
+  re='^[0-9A-Za-z.+-]+$'
   case "$vl" in
     ''|*$'\n'*) refuse "shmutant.sh at HEAD does not set SHMUTANT_VERSION on exactly one line" ;;
-    *) if [ "$v" = "$ver" ]; then ok "shmutant.sh sets SHMUTANT_VERSION=$ver"
+    *) if ! [[ "$v" =~ $re ]]; then refuse "shmutant.sh at HEAD does not assign SHMUTANT_VERSION a plain version: $vl"
+       elif [ "$v" = "$ver" ]; then ok "shmutant.sh sets SHMUTANT_VERSION=$ver"
        else refuse "version mismatch: shmutant.sh sets SHMUTANT_VERSION=$v, not $ver"
        fi ;;
   esac
 
-  if ! checksums_digest "$head"; then refuse "$why"
+  checksums_digest "$head"; rc=$?
+  if [ "$rc" -eq 2 ]; then die "$why"
+  elif [ "$rc" -ne 0 ]; then refuse "$why"
   else
     fsum="$(blob_sha256 "$head:shmutant.sh")" || die "cannot compute the SHA-256 of shmutant.sh"
     if [ "$fsum" = "$digest" ]; then ok "CHECKSUMS matches shmutant.sh ($digest)"
@@ -281,7 +308,9 @@ EOF
     fi
   fi
 
-  if doc_url "$head"; then ok "docs/integrating.md's install URL is $raw_url"
+  doc_url "$head"; rc=$?
+  if [ "$rc" -eq 0 ]; then ok "docs/integrating.md's install URL is $raw_url"
+  elif [ "$rc" -eq 2 ]; then die "$why"
   else refuse "$why"
   fi
 
@@ -302,11 +331,15 @@ EOF
 # verify <commit> — the published release, against CHECKSUMS at <commit>, which origin's tag must
 # name; every mismatch is reported. A failed read or a missing tool exits 2.
 verify() {
-  local c="$1" got ck i=0 bad=0 pub a peel
+  local c="$1" got ck i=0 bad=0 pub a peel rc
   peel="$(origin_tag)" || die "cannot read origin's tags (git ls-remote failed)"
   [ "$peel" = "$c" ] || { err "VERIFY FAILED: origin's $tag names ${peel:-nothing}, not $c"; return 1; }
-  checksums_digest "$c" || { err "VERIFY FAILED: at $tag, $why"; return 1; }
-  doc_url "$c" || { err "VERIFY FAILED: at $tag, $why"; return 1; }
+  checksums_digest "$c"; rc=$?
+  [ "$rc" -ne 2 ] || die "$why"
+  [ "$rc" -eq 0 ] || { err "VERIFY FAILED: at $tag, $why"; return 1; }
+  doc_url "$c"; rc=$?
+  [ "$rc" -ne 2 ] || die "$why"
+  [ "$rc" -eq 0 ] || { err "VERIFY FAILED: at $tag, $why"; return 1; }
   ck="$(blob_sha256 "$c:CHECKSUMS")" || die "cannot compute the SHA-256 of CHECKSUMS at $tag"
   mkdir -- "$made/raw" "$made/dl" || die "cannot create the download directories"
 
@@ -356,9 +389,12 @@ interrupted() {
   }
   exit "$1"
 }
+# cleanup — removes this run's temporary directory, saying so when it cannot; the run's own exit
+# status stands either way.
+cleanup() { rm -rf -- "$made" || err "could not remove the temporary directory $made"; }
 newtmp() {
   made="$(mktemp -d "${TMPDIR:-/tmp}/release.XXXXXX")" || die "cannot create a temporary directory"
-  trap 'rm -rf -- "$made"' EXIT
+  trap cleanup EXIT
   trap 'interrupted 130' INT
   trap 'interrupted 143' TERM
 }
@@ -407,7 +443,7 @@ now="$(printf '%s\n' "$ls" | awk '$2 == "refs/heads/main" { print $1 }')"
   || { err "origin's main moved from $remote to ${now:-nothing} since the checks; nothing was tagged. Re-run to check the new head."; exit 1; }
 tagged=1
 g tag -a "$tag" "$remote" -m "shmutant $ver" || { err "could not create the tag $tag; nothing was pushed"; exit 1; }
-g push origin "refs/tags/$tag"; prc=$?
+g push --no-follow-tags origin "refs/tags/$tag"; prc=$?
 if ! peel="$(origin_tag)"; then
   err "cannot read origin's tags after the push of $tag (git push exited $prc)."
   finish_by_hand

@@ -201,8 +201,12 @@ The maintainer cuts a release with the project's `/release` skill
 `scripts/release.sh`. To check a cut without making it:
 
 ```sh
-bash scripts/release.sh --dry-run 0.1.0
+env -u SHELLOPTS -u BASHOPTS -u BASH_ENV bash scripts/release.sh --dry-run 0.1.0
 ```
+
+The `env -u` keeps shell options exported by the caller (such as `noexec`, which makes any bash
+script exit 0 without running) from reaching the driver, and a run counts as passed only when its
+last line says so, not on exit 0 alone.
 
 The driver refuses unless a clean `main` at origin's head is green in CI and carries the version
 being cut. It then tags that commit, publishes the GitHub release with `shmutant.sh` and

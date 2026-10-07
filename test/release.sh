@@ -9,6 +9,9 @@
 #
 # Needs git and jq (the gh stub answers --jq with it). Exit 0 = every case held; 1 = a case
 # failed, each failure a `FAIL: <case>: …` line; 2 = the test could not run.
+while IFS=' ' builtin read -r _ _ _fn; do [[ -n $_fn ]] && builtin unset -f "$_fn"; done <<EOF
+$(builtin declare -F)
+EOF
 set -u
 unset CDPATH
 
@@ -17,7 +20,7 @@ for t in git jq; do
 done
 root="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)" || exit 2
 made="$(mktemp -d "${TMPDIR:-/tmp}/release-test.XXXXXX")" || exit 2
-trap 'rm -rf -- "$made"' EXIT
+trap 'rm -rf -- "$made" || echo "test/release.sh: could not remove $made" >&2' EXIT
 tmp="$(cd -P -- "$made" && pwd -P)" || exit 2
 
 SLUG=shmutant-test/fixture
@@ -147,7 +150,16 @@ cat > "$tmp/bin/sleep" <<'EOF'
 #!/usr/bin/env bash
 printf 'sleep %s\n' "$*" >> "$STUB/events"
 EOF
-chmod +x "$tmp/bin/gh" "$tmp/bin/curl" "$tmp/bin/sleep" || exit 2
+
+cat > "$tmp/bin/rm" <<'EOF'
+#!/usr/bin/env bash
+# rm, failing on the driver's temporary directory while $STUB/rm.fail exists.
+if [ -e "${STUB:-/nonexistent}/rm.fail" ]; then
+  for a in "$@"; do case "$a" in */release.*) echo "rm: $a: Operation not permitted" >&2; exit 1 ;; esac; done
+fi
+exec /bin/rm "$@"
+EOF
+chmod +x "$tmp/bin/gh" "$tmp/bin/curl" "$tmp/bin/sleep" "$tmp/bin/rm" || exit 2
 
 # --- fixtures ----------------------------------------------------------------------------------
 
@@ -547,7 +559,7 @@ c_a_push_url_must_name_the_same_repository() {
 c_refuses_a_token_that_cannot_push() {
   echo false > "$S/push"
   rel --dry-run "$VER"
-  refused_once "gh's token cannot push to $SLUG" "a read-only token"
+  refused_once "gh's account has no push access to $SLUG" "a read-only token"
 }
 
 c_ignores_the_callers_git_repository_and_tool_functions() {
@@ -899,11 +911,13 @@ c_verify_exits_2_when_it_cannot_hash_what_it_read() {
 
 c_publishes_the_assets_of_the_commit_it_checked() {
   # origin's post-receive hook commits a change to the clone, so HEAD moves once the tag is pushed.
-  printf '#!/bin/sh\necho "# moved" >> %s/shmutant.sh && env -u GIT_DIR -u GIT_QUARANTINE_PATH git -C %s commit -qam moved\n' "$c" "$c" \
-    > "$S/origin.git/hooks/post-receive"
+  printf '#!/bin/sh\necho "# moved" >> %s/shmutant.sh && env -u GIT_DIR -u GIT_QUARANTINE_PATH git -C %s commit -qam moved\n' \
+    "$(printf '%q' "$c")" "$(printf '%q' "$c")" > "$S/origin.git/hooks/post-receive"
   chmod +x "$S/origin.git/hooks/post-receive"
   rel "$VER"
   rc_is "$rc" 0 "the cut, though the checkout moved under it"
+  [ "$(git -C "$c" rev-parse HEAD)" != "$(git -C "$S/origin.git" rev-parse "$TAG^{commit}")" ] \
+    || fail_ "the hook did not move the checkout, so this case proves nothing"
   eq "$(git hash-object "$S/release/shmutant.sh")" "$(git -C "$S/origin.git" rev-parse "$TAG:shmutant.sh")" "the asset is the checked commit's"
 }
 
@@ -927,6 +941,76 @@ c_refuses_to_tag_when_main_moves_after_the_checks() {
   published_nothing "main moved"
 }
 
+c_refuses_a_version_that_is_not_a_plain_assignment() {
+  printf '#!/usr/bin/env bash\nSHMUTANT_VERSION="%s'"'"'\n' "$VER" > "$c/shmutant.sh"; checksum "$c"; land "$c" mismatched-quotes
+  rel --dry-run "$VER"
+  refused_once "shmutant.sh at HEAD does not assign SHMUTANT_VERSION a plain version" "mismatched quotes"
+}
+
+c_ignores_git_replacement_objects() {
+  local orig repl
+  orig="$(git -C "$c" rev-parse HEAD:shmutant.sh)"
+  repl="$( { cat "$c/shmutant.sh"; echo '# replaced'; } | git -C "$c" hash-object -w --stdin)" || exit 2
+  git -C "$c" replace "$orig" "$repl" || exit 2
+  rel --dry-run "$VER"
+  rc_is "$rc" 0 "a replacement for shmutant.sh's blob"
+  has "$out" "release: ok: CHECKSUMS matches shmutant.sh" "the committed bytes were read"
+}
+
+c_pushes_only_its_own_tag() {
+  git -C "$c" config push.followTags true
+  git -C "$c" tag -a unrelated -m unrelated
+  rel "$VER"
+  rc_is "$rc" 0 "the cut, with push.followTags and another annotated tag"
+  eq "$(origin_tags)" "$TAG" "only the release tag reached origin"
+}
+
+c_dry_run_fetches_nothing_into_a_partial_clone() {
+  local p gv packs
+  gv="$(git version | sed 's/^git version //')"
+  case "$(printf '%s\n2.45\n' "$gv" | sort -t. -k1,1n -k2,2n | head -n 1)" in
+    2.45) : ;;
+    *) echo "note: $_case: git $gv predates GIT_NO_LAZY_FETCH (2.45); not exercised" >&2; return ;;
+  esac
+  git -C "$S/origin.git" config uploadpack.allowFilter true || exit 2
+  p="$S/../partial"
+  git clone -q --filter=blob:none --no-checkout "file://$S/origin.git" "$p" || exit 2
+  mkdir -p "$p/scripts" && cp -- "$root/scripts/release.sh" "$p/scripts/" || exit 2
+  git -C "$p" remote set-url origin "https://github.com/$SLUG.git" || exit 2
+  git -C "$p" config "url.$S/origin.git.insteadOf" "https://github.com/$SLUG.git" || exit 2
+  packs="$(ls "$p/.git/objects/pack")"
+  (cd -- "$p" && PATH="$tmp/bin:$PATH" STUB="$S" SLUG="$SLUG" bash scripts/release.sh --dry-run "$VER") > "$S/out" 2> "$S/err"
+  rc=$?; err="$(cat "$S/err")"
+  rc_is "$rc" 2 "a clone missing the blobs it would check"
+  has "$err" "cannot read shmutant.sh at" "says so"
+  eq "$(ls "$p/.git/objects/pack")" "$packs" "nothing was fetched"
+}
+
+c_exits_2_on_an_unreadable_blob() {
+  local obj
+  obj="$(git -C "$c" rev-parse HEAD:CHECKSUMS)"
+  rel "$VER"
+  rc_is "$rc" 0 "the cut"
+  chmod 000 "$c/.git/objects/${obj:0:2}/${obj:2}" || exit 2
+  rel --verify "$VER"
+  rc_is "$rc" 2 "--verify, CHECKSUMS unreadable"
+  has "$err" "cannot read CHECKSUMS at" "says so"
+  fixture "${_case}_dry"
+  obj="$(git -C "$c" rev-parse HEAD:CHECKSUMS)"
+  chmod 000 "$c/.git/objects/${obj:0:2}/${obj:2}" || exit 2
+  rel --dry-run "$VER"
+  rc_is "$rc" 2 "a dry run, CHECKSUMS unreadable"
+  has "$err" "cannot read CHECKSUMS at" "says so"
+}
+
+c_reports_a_temporary_directory_it_cannot_remove() {
+  mkdir -p "$S/tmp"; : > "$S/rm.fail"
+  TMPDIR="$S/tmp" rel "$VER"
+  rc_is "$rc" 0 "the cut still succeeds"
+  has "$err" "could not remove the temporary directory" "and says what it left"
+  rm -f -- "$S/rm.fail"
+}
+
 # --- run ---------------------------------------------------------------------------------------
 
 n=0
@@ -935,6 +1019,7 @@ for f in $(declare -F | awk '$3 ~ /^c_/ { print $3 }'); do
   fixture "$_case"
   "$f"
 done
+[ "$n" -gt 0 ] || { echo "test/release.sh: no case ran" >&2; exit 2; }
 if [ "$fails" -gt 0 ]; then
   printf 'test/release.sh: %d case(s) ran, %d check(s) failed\n' "$n" "$fails" >&2
   exit 1
