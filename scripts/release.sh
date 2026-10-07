@@ -21,28 +21,31 @@
 #   - no tag v<version> exists in this checkout or on origin, and no GitHub release has it.
 #
 # --dry-run  checks every precondition and changes nothing: no fetch, no tag, no push, no release,
-#            no file.
+#            and no file of its own.
 # --verify   checks a published release only: the URL docs/integrating.md documents at the tag
 #            and the release's shmutant.sh must have the digest CHECKSUMS at the tag gives, and
 #            the release's CHECKSUMS must be that file. Needs the tag in this checkout, where
 #            origin has it.
 #
-# The repository is the one origin's URL names, a github.com HTTPS or SSH URL (a push URL, if set,
-# must name the same one); every gh call names it, and gh's token must be able to push to it.
-# Needs git, gh, curl, and sha256sum, shasum or openssl. Git over HTTPS and gh never prompt: a
-# missing credential fails instead of waiting.
+# The repository is the one origin's single URL names, a github.com HTTPS or SSH URL; every push
+# URL origin has must name the same one. Every gh call names it, on github.com, and gh's account
+# must be able to push to it. Needs git, gh, curl, and sha256sum, shasum or openssl. Git over HTTPS
+# and gh never prompt: a missing credential fails instead of waiting. What the caller's
+# environment exports does not change what runs: its functions, shell options, GIT_* repository
+# and GH_HOST are set aside.
 #
 # Exit 0 = done, or (--dry-run) every precondition held; 1 = a precondition refused, or a publish
 # or verify step failed, saying so on stderr; 130/143 = interrupted, saying what may already be
 # published; 2 = could not run (usage, a missing tool, a failed read).
-set -u
+while IFS=' ' builtin read -r _ _ _fn; do [[ -n $_fn ]] && builtin unset -f "$_fn"; done <<EOF
+$(builtin declare -F)
+EOF
+set -u +e +C +o pipefail +o posix
+shopt -u nocasematch
 unset CDPATH
-export LC_ALL=C GH_PROMPT_DISABLED=1 GIT_TERMINAL_PROMPT=0
-# A repository the caller's environment names, or a function standing in for a tool, would be
-# used in place of this checkout and the real tools.
+export LC_ALL=C GH_HOST=github.com GH_PROMPT_DISABLED=1 GIT_TERMINAL_PROMPT=0
 unset -v GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
   GIT_COMMON_DIR GIT_NAMESPACE
-unset -f git gh curl sleep mktemp sha256sum shasum openssl 2> /dev/null
 
 # Downloads of the raw URL before --verify gives up, and the pause between them: a new tag can
 # answer 404 there for a while, and a cached 404 lives up to 300 seconds.
@@ -83,8 +86,10 @@ top="$(g rev-parse --show-toplevel 2> /dev/null)" && top="$(cd -P -- "$top" && p
 lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 
 # slug_of <url> — the owner/repo a github.com HTTPS or SSH URL names; status 1 for any other URL.
+# HTTPS userinfo is held to characters that cannot end the host: git reads `/`, `?` or `#` as its
+# end and would connect to whatever precedes them.
 slug_of() {
-  local u="${1%/}" s="" re='^https://[^/@]+@github\.com/(.+)$'
+  local u="${1%/}" s="" re='^https://[A-Za-z0-9._~%!$&+,;=:-]+@github\.com/(.+)$'
   u="${u%.git}"
   case "$u" in
     https://github.com/*)   s="${u#https://github.com/}" ;;
@@ -98,13 +103,19 @@ slug_of() {
   printf '%s\n' "$s"
 }
 
-# The URLs themselves are never printed: an HTTPS remote can carry a token.
-url="$(g config --get remote.origin.url)" || die "this checkout has no remote named origin"
-slug="$(slug_of "$url")" || die "origin's URL is not a github.com HTTPS or SSH repository URL"
-if pushurl="$(g config --get remote.origin.pushurl)"; then
-  pslug="$(slug_of "$pushurl")" && [ "$(lower "$pslug")" = "$(lower "$slug")" ] \
-    || die "origin's push URL is not a github.com HTTPS or SSH URL of $slug"
-fi
+# The URLs themselves are never printed: an HTTPS remote can carry a token. Git fetches from the
+# first of several URLs and pushes to all of them, so origin may have one.
+ourl="$(g config --get-all remote.origin.url)" || die "this checkout has no remote named origin"
+case "$ourl" in *$'\n'*) die "origin has more than one URL; give it one" ;; esac
+slug="$(slug_of "$ourl")" || die "origin's URL is not a github.com HTTPS or SSH repository URL"
+pushurls="$(g config --get-all remote.origin.pushurl)"
+while IFS= read -r pu; do
+  [ -n "$pu" ] || continue
+  pslug="$(slug_of "$pu")" && [ "$(lower "$pslug")" = "$(lower "$slug")" ] \
+    || die "a push URL of origin is not a github.com HTTPS or SSH URL of $slug"
+done <<EOF
+$pushurls
+EOF
 
 hexre='^[0-9a-f]{40}([0-9a-f]{24})?$'
 
@@ -124,11 +135,12 @@ sha256() {
 blob_sha256() { (set -o pipefail; g cat-file blob "$1" | sha256); }
 
 # checksums_digest <rev> — sets digest to what CHECKSUMS at <rev> gives shmutant.sh; status 1, with
-# why set, when CHECKSUMS is not exactly the line `<sha256>  shmutant.sh`.
+# why set, unless CHECKSUMS is exactly the one line `<sha256>  shmutant.sh`, newline-terminated.
 checksums_digest() {
-  local ck re='^([0-9a-f]{64})  shmutant\.sh$'
+  local ck re=$'^([0-9a-f]{64})  shmutant\\.sh\n$'
   digest=""
-  ck="$(g cat-file blob "$1:CHECKSUMS" 2> /dev/null)" || { why="$1 has no CHECKSUMS"; return 1; }
+  ck="$(g cat-file blob "$1:CHECKSUMS" 2> /dev/null && printf x)" || { why="$1 has no CHECKSUMS"; return 1; }
+  ck="${ck%x}"
   [[ "$ck" =~ $re ]] || { why="CHECKSUMS is not the one line '<sha256>  shmutant.sh'"; return 1; }
   digest="${BASH_REMATCH[1]}"
 }
@@ -223,7 +235,7 @@ preflight() {
   fi
 
   runs="$(gh api --paginate "repos/$slug/commits/$remote/check-runs?filter=latest&per_page=100" \
-            --jq '.check_runs[] | [.name, .status, (.conclusion // "none")] | @tsv')" \
+            --jq '.check_runs[] | [(.name | gsub("[[:cntrl:]]"; "?")), .status, (.conclusion // "none")] | @tsv')" \
     || die "cannot read the check runs on $remote from GitHub"
   wfruns="$(gh api --paginate "repos/$slug/actions/workflows/ci.yml/runs?head_sha=$remote&per_page=100" \
               --jq '.workflow_runs[] | [.id, .status, (.conclusion // "none")] | @tsv')" \
@@ -298,8 +310,9 @@ verify() {
   else err "VERIFY FAILED: $raw_url has SHA-256 $got, but CHECKSUMS at $tag says $digest"; bad=1
   fi
 
-  pub="$(gh api "repos/$slug/releases/tags/$tag" --jq '.draft')" || pub=""
-  [ "$pub" = false ] || { err "VERIFY FAILED: GitHub has no published release for $tag"; return 1; }
+  pub="$(gh api "repos/$slug/releases/tags/$tag" --jq '.draft')" \
+    || { err "VERIFY FAILED: GitHub gave no published release for $tag (none exists, or the API failed)"; return 1; }
+  [ "$pub" = false ] || { err "VERIFY FAILED: the release $tag is a draft"; return 1; }
   gh release download "$tag" -R "$slug" --dir "$made/dl" \
     || { err "VERIFY FAILED: could not download the assets of the release $tag"; return 1; }
   for a in shmutant.sh CHECKSUMS; do
@@ -379,7 +392,10 @@ if ! peel="$(origin_tag)"; then
   finish_by_hand
   exit 1
 fi
-if [ -z "$peel" ]; then
+if [ -z "$peel" ] && [ "$prc" -eq 0 ]; then
+  err "git push reported success, but origin's URL has no $tag: the push went somewhere else (a push URL rewritten by pushInsteadOf?). Nothing was published; find the tag before deleting it here (git tag -d $tag)."
+  exit 1
+elif [ -z "$peel" ]; then
   err "could not push $tag; origin does not have it and nothing was published. Delete the local tag (git tag -d $tag) and re-run."
   exit 1
 elif [ "$peel" != "$remote" ]; then

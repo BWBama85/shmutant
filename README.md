@@ -125,21 +125,6 @@ No submodules. Upgrading is copying a newer file. See [docs/integrating.md](docs
 for the adapter contract, Bats and ShellSpec adapters (CI runs both, as written, against pinned
 releases), and migrating an existing harness.
 
-### Releasing
-
-The maintainer cuts a release with the project's `/release` skill
-([.claude/skills/release/SKILL.md](.claude/skills/release/SKILL.md)), which drives
-`scripts/release.sh`. To check a cut without making it:
-
-```sh
-bash scripts/release.sh --dry-run 0.1.0
-```
-
-The driver refuses unless a clean `main` at origin's head is green in CI and carries the version
-being cut. It then tags that commit, publishes the GitHub release with `shmutant.sh` and
-`CHECKSUMS` attached, and verifies that the install URL in `docs/integrating.md` serves the digest
-in `CHECKSUMS`. The script's header lists every check.
-
 ## Machine-readable verdicts
 
 Everything on stdout is a tab-separated record; prose goes to stderr. Fields never contain a raw
@@ -208,3 +193,18 @@ name `ps`: its baseline aborts, every row is scored `baseline`, and it exits 1. 
 admin-required, by turning unsandboxed retries off in managed settings or with `--settings`,
 ignores this repository's exclusion. The exclusion runs whatever `test/run.sh` and the
 `shmutant.sh` it sources hold at the time with your full access.
+
+## Releasing
+
+The maintainer cuts a release with the project's `/release` skill
+([.claude/skills/release/SKILL.md](.claude/skills/release/SKILL.md)), which drives
+`scripts/release.sh`. To check a cut without making it:
+
+```sh
+bash scripts/release.sh --dry-run 0.1.0
+```
+
+The driver refuses unless a clean `main` at origin's head is green in CI and carries the version
+being cut. It then tags that commit, publishes the GitHub release with `shmutant.sh` and
+`CHECKSUMS` attached, and verifies that the install URL in `docs/integrating.md` serves the digest
+in `CHECKSUMS`. The script's header lists every check.

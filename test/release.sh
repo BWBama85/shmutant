@@ -44,8 +44,8 @@ cat > "$tmp/bin/gh" <<'EOF'
 # driver should not make, or one it made with prompts left on.
 unset -f git
 { printf 'gh'; printf ' %q' "$@"; printf '\n'; } >> "$STUB/events"
-[ "${GH_PROMPT_DISABLED:-}" = 1 ] && [ "${GIT_TERMINAL_PROMPT:-}" = 0 ] \
-  || { echo "gh stub: called with prompts enabled" >&2; exit 3; }
+[ "${GH_PROMPT_DISABLED:-}" = 1 ] && [ "${GIT_TERMINAL_PROMPT:-}" = 0 ] && [ "${GH_HOST:-}" = github.com ] \
+  || { echo "gh stub: called with prompts enabled, or not pinned to github.com" >&2; exit 3; }
 jqx=""; paginate=0; a=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -194,6 +194,33 @@ rel() {
     > "$S/out" 2> "$S/err"
   rc=$?
   out="$(cat "$S/out")"; err="$(cat "$S/err")"
+}
+# rele <var=value>… -- <arg>… — rel with these variables in the driver's environment, through env:
+# a shell's own SHELLOPTS and BASHOPTS are readonly, so a prefix assignment cannot set them.
+rele() {
+  local vars=()
+  while [ "$1" != -- ]; do vars+=("$1"); shift; done
+  shift
+  (cd -- "$c" && PATH="$tmp/bin:$PATH" STUB="$S" SLUG="$SLUG" env "${vars[@]}" bash scripts/release.sh "$@") \
+    > "$S/out" 2> "$S/err"
+  rc=$?
+  out="$(cat "$S/out")"; err="$(cat "$S/err")"
+}
+# relp <path> <arg>… — rel with exactly <path> as PATH.
+relp() {
+  local path="$1"; shift
+  (cd -- "$c" && PATH="$path" STUB="$S" SLUG="$SLUG" bash scripts/release.sh "$@") > "$S/out" 2> "$S/err"
+  rc=$?
+  out="$(cat "$S/out")"; err="$(cat "$S/err")"
+}
+# toolbox <dir> <tool>… — <dir> holding a link to each <tool>, a stub where test/release.sh has one.
+toolbox() {
+  local d="$1" t p; shift
+  mkdir -p "$d" || exit 2
+  for t in bash git jq dirname tr awk grep sort wc mkdir rm mktemp cat cp ls sed head "$@"; do
+    if [ -x "$tmp/bin/$t" ]; then p="$tmp/bin/$t"; else p="$(command -v "$t")" || continue; fi
+    ln -sf "$p" "$d/$t" || exit 2
+  done
 }
 events() { cat "$S/events" 2> /dev/null; }
 refusals() { printf '%s\n' "$err" | grep -c '^release: refused: '; }
@@ -478,7 +505,9 @@ c_reads_every_github_origin_form_and_prints_none() {
   rc_is "$rc" 2 "an origin elsewhere"
   has "$err" "origin's URL is not a github.com HTTPS or SSH repository URL" "says why"
   hasnt "$err" "s3cret" "its credential is not printed"
-  for form in "https://github.com/../x.git" "https://evil.example/@github.com/$SLUG.git"; do
+  for form in "https://github.com/../x.git" "https://evil.example/@github.com/$SLUG.git" \
+              "https://evil.example?@github.com/$SLUG.git" "https://evil.example#@github.com/$SLUG.git" \
+              "https://evil.example\\@github.com/$SLUG.git" "https://github.com/$SLUG.git?x"; do
     git -C "$c" remote set-url origin "$form"
     git -C "$c" config "url.$S/origin.git.insteadOf" "$form"
     rel --dry-run "$VER"
@@ -495,7 +524,16 @@ c_a_push_url_must_name_the_same_repository() {
   git -C "$c" config remote.origin.pushurl "git@github.com:someone/else.git"
   rel --dry-run "$VER"
   rc_is "$rc" 2 "a push URL for another repository"
-  has "$err" "origin's push URL is not a github.com HTTPS or SSH URL of $SLUG" "says so"
+  has "$err" "a push URL of origin is not a github.com HTTPS or SSH URL of $SLUG" "says so"
+  git -C "$c" config remote.origin.pushurl "git@github.com:$SLUG.git"
+  git -C "$c" config --add remote.origin.pushurl "git@github.com:someone/else.git"
+  rel --dry-run "$VER"
+  rc_is "$rc" 2 "a second push URL, for another repository"
+  git -C "$c" config --unset-all remote.origin.pushurl
+  git -C "$c" config --add remote.origin.url "https://github.com/$SLUG.git"
+  rel --dry-run "$VER"
+  rc_is "$rc" 2 "two fetch URLs"
+  has "$err" "origin has more than one URL" "says so"
 }
 
 c_refuses_a_token_that_cannot_push() {
@@ -619,7 +657,7 @@ c_verify_refuses_a_draft_release() {
   : > "$S/release.draft"
   rel --verify "$VER"
   rc_is "$rc" 1 "--verify on a release that is a draft"
-  has "$err" "VERIFY FAILED: GitHub has no published release for $TAG" "says so"
+  has "$err" "VERIFY FAILED: the release $TAG is a draft" "says so"
 }
 
 c_failed_release_create_prints_the_way_to_finish() {
@@ -633,7 +671,7 @@ c_failed_release_create_prints_the_way_to_finish() {
   eq "$(git -C "$S/origin.git" rev-parse "$TAG^{commit}")" "$(git -C "$S/origin.git" rev-parse main)" "the tag is on origin"
   rel --verify "$VER"
   rc_is "$rc" 1 "--verify before the release exists"
-  has "$err" "VERIFY FAILED: GitHub has no published release for $TAG" "says so"
+  has "$err" "VERIFY FAILED: GitHub gave no published release for $TAG" "says so"
 }
 
 c_failed_tag_creation_publishes_nothing() {
@@ -695,6 +733,90 @@ c_verify_needs_the_tag_where_origin_has_it() {
   rel --verify "$VER"
   rc_is "$rc" 1 "a tag origin lacks"
   has "$err" "origin's $TAG names nothing" "says so"
+}
+
+c_stops_without_a_tool_it_needs() {
+  toolbox "$S/box" gh sleep
+  relp "$S/box" --dry-run "$VER"
+  rc_is "$rc" 2 "no curl on PATH"
+  has "$err" "curl is not on PATH" "says so"
+}
+
+c_hashes_with_whichever_digest_tool_there_is() {
+  local t
+  for t in sha256sum shasum openssl; do
+    command -v "$t" > /dev/null || { echo "note: $_case: no $t on this host; its branch is not exercised" >&2; continue; }
+    toolbox "$S/box-$t" gh curl sleep "$t"
+    relp "$S/box-$t" --dry-run "$VER"
+    rc_is "$rc" 0 "only $t"
+    has "$out" "release: ok: CHECKSUMS matches shmutant.sh" "only $t: the digest matches"
+  done
+  toolbox "$S/box-none" gh curl sleep
+  relp "$S/box-none" --dry-run "$VER"
+  rc_is "$rc" 2 "no digest tool"
+  has "$err" "no sha256sum, shasum or openssl on PATH" "says so"
+  toolbox "$S/box-bad" gh curl sleep
+  printf '#!/bin/sh\necho "not a digest  -"\n' > "$S/box-bad/sha256sum"; chmod +x "$S/box-bad/sha256sum"
+  relp "$S/box-bad" --dry-run "$VER"
+  rc_is "$rc" 2 "a digest tool that prints no digest"
+  has "$err" "the digest tool printed no SHA-256" "says so"
+}
+
+c_refuses_a_checksums_line_that_is_not_exactly_one() {
+  printf '%s  shmutant.sh\n\n' "$(sha256 < "$c/shmutant.sh")" > "$c/CHECKSUMS"; land "$c" trailing-blank
+  rel --dry-run "$VER"
+  refused_once "CHECKSUMS is not the one line '<sha256>  shmutant.sh'" "a trailing blank line"
+  printf '%s  shmutant.sh' "$(sha256 < "$c/shmutant.sh")" > "$c/CHECKSUMS"; land "$c" no-newline
+  rel --dry-run "$VER"
+  refused_once "CHECKSUMS is not the one line '<sha256>  shmutant.sh'" "no final newline"
+}
+
+c_prints_no_control_character_from_a_check_name() {
+  checks "$(printf 'evil\033[2Jname'):completed:failure"
+  rel --dry-run "$VER"
+  refused_once "evil?[2Jname concluded failure" "a check name with an escape sequence"
+  case "$err" in *$'\033'*) fail_ "the escape reached stderr" ;; esac
+}
+
+c_stops_when_origin_has_no_main() {
+  git -C "$S/origin.git" update-ref -d refs/heads/main
+  rel --dry-run "$VER"
+  rc_is "$rc" 2 "origin without main"
+  has "$err" "origin has no main branch" "says so"
+}
+
+c_stops_below_the_top_of_its_work_tree() {
+  mkdir -p "$c/sub/scripts" && cp -- "$c/scripts/release.sh" "$c/sub/scripts/" || exit 2
+  (cd -- "$c" && PATH="$tmp/bin:$PATH" STUB="$S" SLUG="$SLUG" bash sub/scripts/release.sh --dry-run "$VER") > "$S/out" 2> "$S/err"
+  rc=$?; err="$(cat "$S/err")"
+  rc_is "$rc" 2 "a copy in a subdirectory"
+  has "$err" "is not at the top of its work tree" "says so"
+}
+
+c_a_push_that_went_elsewhere_is_named() {
+  git init -q --bare -b main "$S/elsewhere.git" || exit 2
+  git -C "$c" config "url.$S/elsewhere.git.pushInsteadOf" "https://github.com/$SLUG.git"
+  rel "$VER"
+  rc_is "$rc" 1 "the push lands where origin's URL does not read"
+  has "$err" "git push reported success, but origin's URL has no $TAG" "says so"
+  hasnt "$(events)" "gh release" "no release call"
+}
+
+c_ignores_the_callers_shell_options_functions_and_host() {
+  awk() { echo "a shadowing awk" >&2; return 1; }
+  export -f awk
+  rele SHELLOPTS=errexit:noclobber:nounset BASHOPTS=nocasematch GH_HOST=ghe.example.invalid -- --dry-run "$VER"
+  unset -f awk
+  rc_is "$rc" 0 "errexit, noclobber, nocasematch, an awk function and GH_HOST from the caller"
+  checks alpha:completed:failure
+  rele SHELLOPTS=errexit BASHOPTS=nocasematch -- --dry-run "$VER"
+  refused_once "alpha concluded failure" "a refusal under errexit and nocasematch"
+}
+
+c_refuses_uppercase_checksums_even_under_the_callers_nocasematch() {
+  printf '%s  shmutant.sh\n' "$(sha256 < "$c/shmutant.sh" | tr a-f A-F)" > "$c/CHECKSUMS"; land "$c" uppercase
+  rele BASHOPTS=nocasematch -- --dry-run "$VER"
+  refused_once "CHECKSUMS is not the one line '<sha256>  shmutant.sh'" "uppercase hex"
 }
 
 # --- run ---------------------------------------------------------------------------------------
