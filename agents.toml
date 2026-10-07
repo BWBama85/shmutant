@@ -1,5 +1,10 @@
 # Project manifest read by the shared workflows (see ai-dev-baseline docs/roles-and-agents.md).
 
+# Code review comes from a model other than the one that wrote the change (D6 in
+# .ai-dev-baseline/decisions.md).
+[roles]
+review = ["codex"]
+
 [reviewers]
 bots = ["chatgpt-codex-connector"]
 

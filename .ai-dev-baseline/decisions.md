@@ -57,3 +57,12 @@
 - placement: .claude/skills/release/SKILL.md; scripts/release.sh; test/release.sh; .github/workflows/ci.yml (`release` job); agents.toml [gates] `release-test`, [gates.cadence]; README "Releasing"
 - reason:    a script can be shellchecked and tested where fenced shell in a skill cannot. No check reads a remote-tracking ref (origin and GitHub are asked directly), so the dry run needs no fetch.
 - baseline-issue: n/a (release execution is project-owned)
+
+## D6 — code review comes from codex, not the model that wrote the change
+- date:      2026-10-07
+- category:  project-delta
+- unknown:   the global manifest (`~/.config/ai-dev-baseline/agents.toml`) sets `review = ["claude"]`, so every review in this repository ran on the rung `same-model claude`. On PR #14 the sibling sweep that /resolve-pr-threads runs before any fix came from that same model, and it broke its own grammar 4 times out of 4, so no review thread could be addressed.
+- decision:  `[roles] review = ["codex"]` in this repository's agents.toml. The review rung becomes `independent codex`, for /implement-issue's review and local loop and /resolve-pr-threads' sweep and loop.
+- placement: agents.toml [roles]
+- reason:    the owner's call: an independent reviewer should have been configured from the start. The first codex sweep on PR #14 succeeded.
+- baseline-issue: n/a (role assignment is per project; the global manifest is left unchanged)
