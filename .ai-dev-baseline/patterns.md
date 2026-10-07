@@ -446,4 +446,5 @@ One line per resolved review thread, newest last.
 - `write-failure-swallowed` `test/run.sh:4261` `0d77c9e` `PRRT_kwDOUT7q9s6iVkNI` PR #4 2026-09-15 — a unit whose identity reads all failed sent an empty identity, and a late sampler then recorded nothing
 - `contract-not-honoured` `test/run.sh:4222` `0d77c9e` `PRRT_kwDOUT7q9s6iVkNK` PR #4 2026-09-15 — leftovers were deduplicated by whole line, so one pid sampled under two etime identities was counted twice
 - `contract-not-honoured` `test/run.sh:64` `0d77c9e` `PRRT_kwDOUT7q9s6iVkNN` PR #4 2026-09-15 — wait_gone followed a pid by number only, so a reused number was waited on and then killed
+- `contract-not-honoured` `docs/integrating.md:146` `c10898d` `PRRT_kwDOUT7q9s6ppW5a` PR #11 2026-10-06 — doc said the full-name witness ties a ShellSpec verdict to its example; a selected example whose full name contains the witness can kill the row
 <!-- adb:hits:end -->

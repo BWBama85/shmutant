@@ -78,32 +78,80 @@ name, a runner that exits 2 when nothing matched.
 ### Bats
 
 Bats filters by test name with `--filter <regex>` and its `tap` formatter prints
-`not ok <n> <name>` for a failure. Use test names as witnesses and anchor the filter:
+`not ok <n> <name>` for a failure. Use test names as witnesses, escape them, and anchor the
+filter:
 
 ```sh
+SHMUTANT_RED_PREFIX='not ok '
 prepare() { shmutant_copy_tree "$SHMUTANT_PLAN_DIR/.." "$1"; }
 run() {
   local re
   re="$(printf '%s' "$2" | sed 's/[][\\.^$*+?(){}|]/\\&/g')"
-  bats --formatter tap --filter "^${re}\$" "$1/test"
+  (cd "$1" && bats --formatter tap --filter "^${re}\$" test)
 }
 shmutant_target lib/parse.sh
 shmutant_mut 'empty input is accepted' 'return 1' 'return 0' 'parse rejects empty input'
 ```
 
-Run with `SHMUTANT_RED_PREFIX='not ok '`. Confirm the exit status Bats uses for a failed test
-on the version you run (`bats --version`; a one-test failing file is a five-second probe) and set
-`SHMUTANT_RED_STATUS` if it is not 1.
+The plan sits in `test/` beside the `.bats` files, one level below the tree it copies; Bats
+loads only the `.bats` files there. `run` changes into the clone because Bats runs the tests
+in the directory it starts in: started from your checkout, a test that loads code by a path
+relative to it tests the original rather than the mutant. CI runs this block as written
+against Bats 1.14.0 on Linux (`test/adapters/check.sh`). A failing test exits 1, the default
+`SHMUTANT_RED_STATUS`. The escaped, anchored filter selects exactly the tests of that name, a
+name holding `.`, `(`, `[`, `{` or another regex character included, and never one whose name
+merely starts or ends with it. Bats refuses a duplicate name only within one file: a test of
+the same name in another file runs too, and its failure carries the same witness. Bats
+filters on a name as written but prints it expanded as a double-quoted string, so a name
+holding `"`, `$`, a backtick or a backslash can print differently: give that test's row the
+printed name as its witness and the written name as its selector, the fifth argument. A
+filter that selects nothing makes Bats exit 1 with no `not ok` line, so a row whose selector
+matches no test is scored `baseline` (`aborted` with `SHMUTANT_BASELINE=0`), never
+`survived`.
 
 ### ShellSpec
 
-ShellSpec selects examples with `--example <pattern>` and has a `--format tap` formatter.
+ShellSpec selects with `--example <pattern>`: a shell pattern, in which `*`, `?` and `[` are
+pattern characters, matched against the whole description of each example and of each group,
+never against part of one (as 0.28.1 behaves; its `--help` says names that include the
+pattern). A group that matches selects every example in it. Its `tap` formatter prints an
+example's full name, its groups' descriptions and its own joined by spaces:
+`not ok <n> - <full name>`. So a row names both, the full name as its witness and the
+example's own description as its selector, the fifth argument (a longer full name that holds
+the witness as a whole token carries it too, as the paragraph after the block says):
 
 ```sh
-run() { shellspec --format tap --example "$2" "$1/spec"; }
+SHMUTANT_RED_PREFIX='not ok '
+SHMUTANT_RED_STATUS=101
+prepare() { shmutant_copy_tree "$SHMUTANT_PLAN_DIR/.." "$1"; }
+run() {
+  local pat
+  pat="$(printf '%s' "$2" | sed 's/[][*?]/[&]/g')"
+  (cd "$1" && shellspec --format tap --no-color --fail-no-examples --example "$pat")
+}
+shmutant_target lib/parse.sh
+shmutant_mut 'empty input is accepted' 'return 1' 'return 0' 'parse rejects empty input' 'rejects empty input'
 ```
 
-Run with `SHMUTANT_RED_PREFIX='not ok '`, and probe the failure exit status as above.
+The plan sits one level below the project root, the directory holding `.shellspec` (in
+`spec/`, say, where its name does not match the `*_spec.sh` pattern). `run` changes into the
+clone because ShellSpec finds its project root, which `Include` paths are resolved from, by
+looking for `.shellspec` from the directory it starts in: started from your checkout, it tests
+the original library rather than the mutant. CI runs this block as written against
+ShellSpec 0.28.1 on Linux (`test/adapters/check.sh`). A failing example exits 101, hence the
+`SHMUTANT_RED_STATUS` above; a fatal error exits 102 and is scored `aborted`. `--no-color`
+keeps the TAP lines plain where the environment sets `FORCE_COLOR`, which would otherwise put
+a color code before every `not ok`. The bracketed pattern selects the examples whose own
+description it names and every example in a group whose description it names, a description
+holding `[`, `*` or `?` included, and never one only because its description starts with it.
+All of them run, and a failure in any whose full name holds the witness as a whole token scores
+the row `killed`: `twin parse prints its input`, an example of the same description under
+another group, carries the witness `parse prints its input`. Keep the descriptions a selector
+reaches distinct enough that only the intended example's full name holds its witness.
+`--fail-no-examples` makes a selector that matches nothing exit 101 with no `not ok` line, so
+its row is scored `baseline` (`aborted` with `SHMUTANT_BASELINE=0`), never `survived`. A
+description holding `|` cannot be selected by itself: ShellSpec reads the `|` as the
+pattern's alternation.
 
 ## 4. Write the plan
 

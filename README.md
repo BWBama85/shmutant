@@ -5,7 +5,7 @@ cover it to go red.
 
 ## The goal
 
-Frameworks exist for *running* shell tests (Bats, shellspec, shtk) and for static analysis
+Frameworks exist for *running* shell tests (Bats, ShellSpec, shtk) and for static analysis
 (ShellCheck). None of them answers the question mutation testing answers: **does this test
 actually detect the bug it claims to cover, or does it merely pass?**
 
@@ -122,7 +122,8 @@ bash shmutant.sh checksum          # compare with CHECKSUMS at the same tag
 ```
 
 No submodules. Upgrading is copying a newer file. See [docs/integrating.md](docs/integrating.md)
-for the adapter contract, Bats and shellspec adapters, and migrating an existing harness.
+for the adapter contract, Bats and ShellSpec adapters (CI runs both, as written, against pinned
+releases), and migrating an existing harness.
 
 ## Machine-readable verdicts
 
@@ -158,16 +159,21 @@ could not run.
 ## Testing shmutant
 
 ```sh
-bash test/run.sh                     # the suite: every `t_*` unit, one at a time
-bash shmutant.sh run test/mutants.sh # the suite, mutation-tested by shmutant itself
+bash test/run.sh                      # the suite: every `t_*` unit, one at a time
+bash shmutant.sh run test/mutants.sh  # the suite, mutation-tested by shmutant itself
+bash test/adapters/check.sh bats      # the doc's Bats adapter, on its fixture
+bash test/adapters/check.sh shellspec # the same for ShellSpec
 ```
+
+The last two need the framework on `PATH` at the version CI pins (`BATS_VERSION`,
+`SHELLSPEC_VERSION` in `.github/workflows/ci.yml`), which is the version the doc names.
 
 The second command is the tool's own proof: every guard in `shmutant.sh` is broken in a clone
 and the unit that claims to cover it must go red. If `shmutant` could not mutation-test its own
 assertions, it would not work.
 
-Both commands need to execute `ps`, the second because it runs `test/run.sh` for its baseline and
-every row. The suite's units read process state through it, and some of their checks that a process
+The first two commands need to execute `ps`, the second because it runs `test/run.sh` for its
+baseline and every row. The suite's units read process state through it, and some of their checks that a process
 is gone would pass vacuously without it. Where there is no `/proc`, as on macOS, the leak check
 after every unit reads the process table through it too, and fails a unit whose table it cannot
 read instead of passing it. So

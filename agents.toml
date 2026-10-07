@@ -10,7 +10,7 @@ max_rounds = 0
 # Gate detection finds no ecosystem in a bash-only repository, so the CI checks are declared here
 # (D2). Each command runs under `sh -c` from the repository root.
 [gates]
-lint = "shellcheck --severity=warning -e SC1091 shmutant.sh test/run.sh test/mutants.sh"
+lint = "shellcheck --severity=warning -e SC1091 shmutant.sh test/run.sh test/mutants.sh test/adapters/check.sh test/adapters/bats/test/mutants.sh test/adapters/bats/lib/parse.sh test/adapters/shellspec/spec/mutants.sh test/adapters/shellspec/lib/parse.sh"
 checksum = "bash shmutant.sh checksum | sed 's/$/  shmutant.sh/' | diff - CHECKSUMS"
 test = "bash test/run.sh"
 

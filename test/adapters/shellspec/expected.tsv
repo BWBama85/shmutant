@@ -1,0 +1,11 @@
+baseline	rejects empty input	green
+baseline	prints its input	green
+baseline	refuses [empty] input *?	green
+baseline	has no such example	aborted
+row	empty input is accepted	killed
+row	the trailing newline is dropped	survived
+row	empty input exits 2	survived
+row	empty input is accepted, pattern-character selector	killed
+row	a selector no example carries	baseline
+summary	6	3
+row	twin input is refused, killed through the twin	killed
