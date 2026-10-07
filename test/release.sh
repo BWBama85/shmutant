@@ -44,8 +44,8 @@ cat > "$tmp/bin/gh" <<'EOF'
 # driver should not make, or one it made with prompts left on.
 unset -f git
 { printf 'gh'; printf ' %q' "$@"; printf '\n'; } >> "$STUB/events"
-[ "${GH_PROMPT_DISABLED:-}" = 1 ] && [ "${GIT_TERMINAL_PROMPT:-}" = 0 ] && [ "${GH_HOST:-}" = github.com ] \
-  || { echo "gh stub: called with prompts enabled, or not pinned to github.com" >&2; exit 3; }
+[ "${GH_PROMPT_DISABLED:-}" = 1 ] && [ "${GIT_TERMINAL_PROMPT:-}" = 0 ] \
+  || { echo "gh stub: called with prompts enabled" >&2; exit 3; }
 jqx=""; paginate=0; a=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -70,8 +70,11 @@ opts() {
       *) files+=("$1"); shift ;;
     esac
   done
-  [ "$repo" = "$SLUG" ] || { echo "gh stub: -R $repo, not $SLUG" >&2; exit 3; }
+  [ "$repo" = "github.com/$SLUG" ] || { echo "gh stub: -R $repo, not github.com/$SLUG" >&2; exit 3; }
 }
+# An api call names no host, so the driver must have pinned GH_HOST; a release command names its
+# own with -R (checked in opts), so a printed one works from the operator's shell too.
+[ "${a[0]:-}" != api ] || [ "${GH_HOST:-}" = github.com ] || { echo "gh stub: api call not pinned to github.com" >&2; exit 3; }
 case "${a[0]:-} ${a[1]:-}" in
   "api repos/$SLUG/git/ref/heads/main")
     [ ! -e "$STUB/api-main.fail" ] || fail "HTTP 502"
@@ -87,10 +90,12 @@ case "${a[0]:-} ${a[1]:-}" in
   "api repos/$SLUG/commits/"*"/status")
     reply < "$STUB/status.json" ;;
   "api repos/$SLUG/releases?per_page=100")
-    pages; ls -- "$STUB/published" | jq -Rn '[inputs | {tag_name: .}]' | reply ;;
-  "api repos/$SLUG/releases/tags/"*)
-    [ -e "$STUB/published/${a[1]##*/}" ] || fail "Not Found (HTTP 404)"
-    printf '{"draft":%s}\n' "$([ -e "$STUB/release.draft" ] && echo true || echo false)" | reply ;;
+    pages
+    # $STUB/advance-main holds a commit origin's main moves to once the releases are listed: the
+    # last read of the checks, so a cut sees main move between its checks and its tag.
+    [ ! -e "$STUB/advance-main" ] || git -C "$STUB/origin.git" update-ref refs/heads/main "$(cat "$STUB/advance-main")" || exit 1
+    draft=false; [ ! -e "$STUB/release.draft" ] || draft=true
+    ls -- "$STUB/published" | jq -Rn --argjson d "$draft" '[inputs | {tag_name: ., draft: $d}]' | reply ;;
   "release create")
     [ ! -e "$STUB/create.fail" ] || fail "HTTP 500"
     t="${a[2]}"; opts "${a[@]:3}"
@@ -103,7 +108,8 @@ case "${a[0]:-} ${a[1]:-}" in
   "release download")
     t="${a[2]}"; opts "${a[@]:3}"
     [ -e "$STUB/published/$t" ] || fail "Not Found (HTTP 404)"
-    cp -- "$STUB/release/"* "$dir/" ;;
+    cp -- "$STUB/release/"* "$dir/" || exit 1
+    [ ! -e "$STUB/asset.unreadable" ] || chmod 000 "$dir/$(cat "$STUB/asset.unreadable")" ;;
   *) echo "gh stub: unexpected call: ${a[*]}" >&2; exit 3 ;;
 esac
 EOF
@@ -112,7 +118,8 @@ cat > "$tmp/bin/curl" <<'EOF'
 #!/usr/bin/env bash
 # curl … -o <file> <url>, answered from the fixture's origin: <url> must be a raw URL of the
 # fixture's repository. $STUB/curl.404s holds how many downloads fail before one succeeds;
-# $STUB/curl.mode `tamper` alters the bytes, `term` and `int` send TERM or INT to the caller.
+# $STUB/curl.mode `tamper` alters the bytes, `unreadable` leaves them unreadable, `term` and `int`
+# send TERM or INT to the caller.
 out=""; url=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -133,6 +140,7 @@ case "$url" in "https://raw.githubusercontent.com/$SLUG/"*/shmutant.sh) ;; *) no
 t="${url#"https://raw.githubusercontent.com/$SLUG/"}"; t="${t%/shmutant.sh}"
 git -C "$STUB/origin.git" cat-file blob "$t:shmutant.sh" > "$out" 2> /dev/null || notfound
 [ "$mode" != tamper ] || echo '# tampered' >> "$out"
+[ "$mode" != unreadable ] || chmod 000 "$out"
 EOF
 
 cat > "$tmp/bin/sleep" <<'EOF'
@@ -166,7 +174,7 @@ commit() { git -C "$1" add -A && git -C "$1" commit -q --allow-empty -m "$2" || 
 land() { commit "$1" "$2"; git -C "$1" push -q origin main || exit 2; }
 
 # checksum <dir> — rewrite <dir>/CHECKSUMS for its shmutant.sh.
-checksum() { printf '%s  shmutant.sh\n' "$(sha256 < "$1/shmutant.sh")" > "$1/CHECKSUMS" || exit 2; }
+checksum() { local d; d="$(sha256 < "$1/shmutant.sh")" || exit 2; printf '%s  shmutant.sh\n' "$d" > "$1/CHECKSUMS" || exit 2; }
 
 # fixture <case> — a fresh origin and clone for <case>; sets S (the stubs' state) and c (the clone).
 fixture() {
@@ -569,7 +577,7 @@ c_cut_tags_publishes_verifies_and_hands_off() {
   eq "$(git hash-object "$S/release/shmutant.sh")" "$(git -C "$c" rev-parse "$TAG:shmutant.sh")" "the shmutant.sh asset is the tag's"
   eq "$(git hash-object "$S/release/CHECKSUMS")" "$(git -C "$c" rev-parse "$TAG:CHECKSUMS")" "the CHECKSUMS asset is the tag's"
   ev="$(events)"
-  has "$ev" "gh release create $TAG -R $SLUG --verify-tag" "the release is created from the pushed tag only"
+  has "$ev" "gh release create $TAG -R github.com/$SLUG --verify-tag" "the release is created from the pushed tag only"
   has "$ev" "curl $URL" "the documented URL is downloaded"
   lc="$(printf '%s\n' "$ev" | grep -n '^gh release create' | head -n 1 | cut -d: -f1)"
   lu="$(printf '%s\n' "$ev" | grep -n '^curl ' | head -n 1 | cut -d: -f1)"
@@ -641,7 +649,7 @@ c_an_interrupted_cut_says_how_to_finish() {
   rel "$VER"
   rc_is "$rc" 143 "TERM during verification"
   has "$err" "interrupted once the tag $TAG may exist" "says so"
-  has "$err" "bash scripts/release.sh --verify $VER" "and how to finish"
+  has "$err" "scripts/release.sh --verify $VER" "and how to finish"
 }
 
 c_an_interrupt_exits_130_and_says_how_to_finish() {
@@ -666,12 +674,33 @@ c_failed_release_create_prints_the_way_to_finish() {
   rc_is "$rc" 1 "gh release create fails"
   has "$err" "gh release create failed" "says so"
   has "$err" "to finish the release of $TAG by hand" "says what is left"
-  has "$err" "gh release create $TAG -R $SLUG --verify-tag" "prints the create command"
-  has "$err" "bash scripts/release.sh --verify $VER" "and the check after it"
+  has "$err" "gh release create $TAG -R github.com/$SLUG --verify-tag" "prints the create command"
+  has "$err" "scripts/release.sh --verify $VER" "and the check after it"
   eq "$(git -C "$S/origin.git" rev-parse "$TAG^{commit}")" "$(git -C "$S/origin.git" rev-parse main)" "the tag is on origin"
   rel --verify "$VER"
   rc_is "$rc" 1 "--verify before the release exists"
-  has "$err" "VERIFY FAILED: GitHub gave no published release for $TAG" "says so"
+  has "$err" "VERIFY FAILED: GitHub has no release for $TAG" "says so"
+}
+
+c_the_printed_hand_finish_publishes_the_tagged_assets() {
+  local cmd
+  : > "$S/create.fail"
+  rel "$VER"
+  rc_is "$rc" 1 "gh release create fails"
+  rm -f -- "$S/create.fail"
+  echo '# an edit made in the work tree afterwards' >> "$c/shmutant.sh"
+  mkdir -p "$S/finish" || exit 2
+  # The printed steps, run as printed: write the assets, then the "with no release" command.
+  while IFS= read -r cmd; do
+    (cd -- "$S/finish" && unset GH_HOST && PATH="$tmp/bin:$PATH" STUB="$S" SLUG="$SLUG" \
+       GH_PROMPT_DISABLED=1 GIT_TERMINAL_PROMPT=0 eval "$cmd") 2>> "$S/finish.err" \
+      || fail_ "a printed step failed: $cmd ($(cat "$S/finish.err"))"
+  done <<EOF
+$(printf '%s\n' "$err" | sed -n -e 's/^release:   \(git -C .*\)$/\1/p' -e 's/^release:   with no release:   //p')
+EOF
+  eq "$(git hash-object "$S/release/shmutant.sh")" "$(git -C "$c" rev-parse "$TAG:shmutant.sh")" "the asset is the tag's, not the edited file"
+  rel --verify "$VER"
+  rc_is "$rc" 0 "--verify after finishing by hand"
 }
 
 c_failed_tag_creation_publishes_nothing() {
@@ -763,10 +792,12 @@ c_hashes_with_whichever_digest_tool_there_is() {
 }
 
 c_refuses_a_checksums_line_that_is_not_exactly_one() {
-  printf '%s  shmutant.sh\n\n' "$(sha256 < "$c/shmutant.sh")" > "$c/CHECKSUMS"; land "$c" trailing-blank
+  local d
+  d="$(sha256 < "$c/shmutant.sh")" || exit 2
+  printf '%s  shmutant.sh\n\n' "$d" > "$c/CHECKSUMS"; land "$c" trailing-blank
   rel --dry-run "$VER"
   refused_once "CHECKSUMS is not the one line '<sha256>  shmutant.sh'" "a trailing blank line"
-  printf '%s  shmutant.sh' "$(sha256 < "$c/shmutant.sh")" > "$c/CHECKSUMS"; land "$c" no-newline
+  printf '%s  shmutant.sh' "$d" > "$c/CHECKSUMS"; land "$c" no-newline
   rel --dry-run "$VER"
   refused_once "CHECKSUMS is not the one line '<sha256>  shmutant.sh'" "no final newline"
 }
@@ -814,9 +845,86 @@ c_ignores_the_callers_shell_options_functions_and_host() {
 }
 
 c_refuses_uppercase_checksums_even_under_the_callers_nocasematch() {
-  printf '%s  shmutant.sh\n' "$(sha256 < "$c/shmutant.sh" | tr a-f A-F)" > "$c/CHECKSUMS"; land "$c" uppercase
+  local d
+  d="$(sha256 < "$c/shmutant.sh")" || exit 2
+  printf '%s  shmutant.sh\n' "$(printf '%s' "$d" | tr a-f A-F)" > "$c/CHECKSUMS"; land "$c" uppercase
   rele BASHOPTS=nocasematch -- --dry-run "$VER"
   refused_once "CHECKSUMS is not the one line '<sha256>  shmutant.sh'" "uppercase hex"
+}
+
+c_reads_only_an_exact_install_url() {
+  printf 'sig: https://raw.githubusercontent.com/%s/%s/shmutant.sh.sig\n' "$SLUG" "$TAG" > "$c/docs/integrating.md"
+  land "$c" sig-only
+  rel --dry-run "$VER"
+  refused_once "docs/integrating.md names no raw.githubusercontent.com URL of shmutant.sh" "a signature URL only"
+  printf 'q: https://raw.githubusercontent.com/%s/%s/shmutant.sh?asset=signature\n' "$SLUG" "$TAG" > "$c/docs/integrating.md"
+  land "$c" query-only
+  rel --dry-run "$VER"
+  refused_once "docs/integrating.md names no raw.githubusercontent.com URL of shmutant.sh" "a URL with a query only"
+  printf '%s\nsig: %s.sig\nAt the end of a sentence: %s.\n' "$URL" "$URL" "$URL" > "$c/docs/integrating.md"
+  land "$c" with-sig
+  rel --dry-run "$VER"
+  rc_is "$rc" 0 "the install URL beside its signature, and at a sentence's end"
+}
+
+c_sets_aside_the_callers_tracing_and_aliases() {
+  git -C "$c" remote set-url origin "https://x-access-token:s3cret@github.com/$SLUG.git"
+  git -C "$c" config "url.$S/origin.git.insteadOf" "https://x-access-token:s3cret@github.com/$SLUG.git"
+  rele SHELLOPTS=xtrace:verbose -- --dry-run "$VER"
+  rc_is "$rc" 0 "xtrace and verbose from the caller"
+  hasnt "$err" "s3cret" "the origin URL's token is not traced"
+  hasnt "$err" "GH_PROMPT_DISABLED" "nor the script's source"
+  rele SHELLOPTS=keyword:allexport -- --dry-run "$VER"
+  rc_is "$rc" 0 "keyword and allexport from the caller"
+  hasnt "$out" "HOME=" "the environment is not dumped"
+  printf 'shopt -s expand_aliases\nalias grep="grep -v"\nalias awk=false\n' > "$S/bash_env"
+  rele BASH_ENV="$S/bash_env" -- --dry-run "$VER"
+  rc_is "$rc" 0 "aliases from the caller's BASH_ENV"
+  # noexec cannot be undone from inside, which is why the skill runs the driver with SHELLOPTS
+  # removed and reads success from its last line: here it exits 0 and prints nothing.
+  rele SHELLOPTS=noexec -- --dry-run "$VER"
+  hasnt "$out" "every precondition holds" "noexec: no verdict line, whatever the status"
+}
+
+c_verify_exits_2_when_it_cannot_hash_what_it_read() {
+  echo unreadable > "$S/curl.mode"
+  rel "$VER"
+  rc_is "$rc" 2 "the download cannot be read"
+  has "$err" "cannot compute the SHA-256 of the download" "says so"
+  rm -f -- "$S/curl.mode"; echo CHECKSUMS > "$S/asset.unreadable"
+  rel --verify "$VER"
+  rc_is "$rc" 2 "a downloaded asset cannot be read"
+  has "$err" "cannot compute the SHA-256 of the release's CHECKSUMS" "says so"
+}
+
+c_publishes_the_assets_of_the_commit_it_checked() {
+  # origin's post-receive hook commits a change to the clone, so HEAD moves once the tag is pushed.
+  printf '#!/bin/sh\necho "# moved" >> %s/shmutant.sh && env -u GIT_DIR -u GIT_QUARANTINE_PATH git -C %s commit -qam moved\n' "$c" "$c" \
+    > "$S/origin.git/hooks/post-receive"
+  chmod +x "$S/origin.git/hooks/post-receive"
+  rel "$VER"
+  rc_is "$rc" 0 "the cut, though the checkout moved under it"
+  eq "$(git hash-object "$S/release/shmutant.sh")" "$(git -C "$S/origin.git" rev-parse "$TAG:shmutant.sh")" "the asset is the checked commit's"
+}
+
+c_verify_exits_2_without_a_digest_tool() {
+  rel "$VER"
+  rc_is "$rc" 0 "the cut"
+  toolbox "$S/box-none" gh curl sleep
+  relp "$S/box-none" --verify "$VER"
+  rc_is "$rc" 2 "--verify with no digest tool"
+  has "$err" "no sha256sum, shasum or openssl on PATH" "says so"
+}
+
+c_refuses_to_tag_when_main_moves_after_the_checks() {
+  other_clone; commit "$o" newer
+  git -C "$o" push -q origin HEAD:refs/heads/next || exit 2
+  git -C "$o" rev-parse HEAD > "$S/advance-main"
+  rel "$VER"
+  rc_is "$rc" 1 "origin's main moves between the checks and the tag"
+  has "$err" "origin's main moved from" "says so"
+  has "$err" "nothing was tagged" "and that nothing was"
+  published_nothing "main moved"
 }
 
 # --- run ---------------------------------------------------------------------------------------

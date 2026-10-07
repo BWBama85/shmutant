@@ -19,29 +19,34 @@
 #   - docs/integrating.md at HEAD names one raw.githubusercontent.com URL of shmutant.sh: this
 #     repository's, at the tag v<version>;
 #   - no tag v<version> exists in this checkout or on origin, and no GitHub release has it.
+# Just before tagging, origin's main is read again and must still be the commit checked.
 #
 # --dry-run  checks every precondition and changes nothing: no fetch, no tag, no push, no release,
 #            and no file of its own.
-# --verify   checks a published release only: the URL docs/integrating.md documents at the tag
-#            and the release's shmutant.sh must have the digest CHECKSUMS at the tag gives, and
-#            the release's CHECKSUMS must be that file. Needs the tag in this checkout, where
-#            origin has it.
+# --verify   checks a published release only: origin's tag must name the commit this checkout's
+#            tag names, the URL docs/integrating.md documents there and the release's shmutant.sh
+#            must have the digest CHECKSUMS there gives, and the release's CHECKSUMS must be that
+#            file. A cut verifies against the commit it checked.
 #
 # The repository is the one origin's single URL names, a github.com HTTPS or SSH URL; every push
 # URL origin has must name the same one. Every gh call names it, on github.com, and gh's account
 # must be able to push to it. Needs git, gh, curl, and sha256sum, shasum or openssl. Git over HTTPS
-# and gh never prompt: a missing credential fails instead of waiting. What the caller's
-# environment exports does not change what runs: its functions, shell options, GIT_* repository
-# and GH_HOST are set aside.
+# and gh never prompt: a missing credential fails instead of waiting. The caller's exported
+# functions and aliases, its GIT_* repository and GH_HOST, and the shell options that change what
+# a command does (xtrace, verbose, keyword, allexport, errexit, noclobber, pipefail, posix,
+# nocasematch) are set aside before anything is read. Options that stop commands from running at
+# all (noexec, onecmd) cannot be set aside from inside: run the driver with SHELLOPTS, BASHOPTS and
+# BASH_ENV removed, as the /release skill does, and take success from its last line, not from its
+# exit status alone.
 #
 # Exit 0 = done, or (--dry-run) every precondition held; 1 = a precondition refused, or a publish
 # or verify step failed, saying so on stderr; 130/143 = interrupted, saying what may already be
 # published; 2 = could not run (usage, a missing tool, a failed read).
+builtin set -u +a +e +k +v +x +C +o pipefail +o posix
+builtin shopt -u nocasematch expand_aliases
 while IFS=' ' builtin read -r _ _ _fn; do [[ -n $_fn ]] && builtin unset -f "$_fn"; done <<EOF
 $(builtin declare -F)
 EOF
-set -u +e +C +o pipefail +o posix
-shopt -u nocasematch
 unset CDPATH
 export LC_ALL=C GH_HOST=github.com GH_PROMPT_DISABLED=1 GIT_TERMINAL_PROMPT=0
 unset -v GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
@@ -151,7 +156,10 @@ doc_url() {
   local doc urls docslug doctag re='^https://raw\.githubusercontent\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/([^/]+)/shmutant\.sh$'
   raw_url=""
   doc="$(g cat-file blob "$1:docs/integrating.md" 2> /dev/null)" || { why="$1 has no docs/integrating.md"; return 1; }
-  urls="$(printf '%s\n' "$doc" | grep -oE 'https://raw\.githubusercontent\.com/[A-Za-z0-9_./-]*/shmutant\.sh' | sort -u)"
+  # Whole URLs, each to the end of its token less any trailing sentence punctuation, so that a
+  # longer one (shmutant.sh.sig, shmutant.sh?x=y) is never read as its shmutant.sh prefix.
+  urls="$(printf '%s\n' "$doc" | grep -oE 'https://raw\.githubusercontent\.com/[^][[:space:]<>"'"'"'`()]*' \
+          | sed 's/[.,;:!]*$//' | grep -E '/shmutant\.sh$' | sort -u)"
   case "$urls" in
     '')      why="docs/integrating.md names no raw.githubusercontent.com URL of shmutant.sh"; return 1 ;;
     *$'\n'*) why="docs/integrating.md names more than one URL of shmutant.sh: $(printf '%s' "$urls" | tr '\n' ' ')"; return 1 ;;
@@ -291,13 +299,16 @@ EOF
   fi
 }
 
-# verify — the published release, against CHECKSUMS at the tag; every mismatch is reported.
+# verify <commit> — the published release, against CHECKSUMS at <commit>, which origin's tag must
+# name; every mismatch is reported. A failed read or a missing tool exits 2.
 verify() {
-  local got ck i=0 bad=0 pub a
-  checksums_digest "refs/tags/$tag" || { err "VERIFY FAILED: at $tag, $why"; return 1; }
-  doc_url "refs/tags/$tag" || { err "VERIFY FAILED: at $tag, $why"; return 1; }
-  ck="$(blob_sha256 "refs/tags/$tag:CHECKSUMS")" || return 1
-  mkdir -- "$made/raw" "$made/dl" || { err "cannot create the download directories"; return 1; }
+  local c="$1" got ck i=0 bad=0 pub a peel
+  peel="$(origin_tag)" || die "cannot read origin's tags (git ls-remote failed)"
+  [ "$peel" = "$c" ] || { err "VERIFY FAILED: origin's $tag names ${peel:-nothing}, not $c"; return 1; }
+  checksums_digest "$c" || { err "VERIFY FAILED: at $tag, $why"; return 1; }
+  doc_url "$c" || { err "VERIFY FAILED: at $tag, $why"; return 1; }
+  ck="$(blob_sha256 "$c:CHECKSUMS")" || die "cannot compute the SHA-256 of CHECKSUMS at $tag"
+  mkdir -- "$made/raw" "$made/dl" || die "cannot create the download directories"
 
   until curl -q -fsSL --proto '=https' --connect-timeout 20 --max-time 300 -o "$made/raw/shmutant.sh" "$raw_url"; do
     i=$((i + 1))
@@ -305,19 +316,26 @@ verify() {
     say "downloading $raw_url failed (attempt $i of $attempts); retrying in ${pause}s"
     sleep "$pause"
   done
-  got="$(sha256 < "$made/raw/shmutant.sh")" || return 1
+  got="$(sha256 < "$made/raw/shmutant.sh")" || die "cannot compute the SHA-256 of the download"
   if [ "$got" = "$digest" ]; then say "verified: $raw_url has the SHA-256 CHECKSUMS at $tag gives ($digest)"
   else err "VERIFY FAILED: $raw_url has SHA-256 $got, but CHECKSUMS at $tag says $digest"; bad=1
   fi
 
-  pub="$(gh api "repos/$slug/releases/tags/$tag" --jq '.draft')" \
-    || { err "VERIFY FAILED: GitHub gave no published release for $tag (none exists, or the API failed)"; return 1; }
-  [ "$pub" = false ] || { err "VERIFY FAILED: the release $tag is a draft"; return 1; }
-  gh release download "$tag" -R "$slug" --dir "$made/dl" \
+  # The list, not the by-tag read: it names drafts too, and its failure is a failed read, never
+  # an answer. The tag is validated as v<digits and dots> above, so it is safe in the filter.
+  pub="$(gh api --paginate "repos/$slug/releases?per_page=100" --jq ".[] | select(.tag_name == \"$tag\") | .draft")" \
+    || die "cannot list $slug's GitHub releases"
+  case "$pub" in
+    false) : ;;
+    true)  err "VERIFY FAILED: the release $tag is a draft"; return 1 ;;
+    '')    err "VERIFY FAILED: GitHub has no release for $tag"; return 1 ;;
+    *)     err "VERIFY FAILED: GitHub lists more than one release for $tag"; return 1 ;;
+  esac
+  gh release download "$tag" -R "github.com/$slug" --dir "$made/dl" \
     || { err "VERIFY FAILED: could not download the assets of the release $tag"; return 1; }
   for a in shmutant.sh CHECKSUMS; do
     if [ ! -f "$made/dl/$a" ]; then err "VERIFY FAILED: the release $tag has no asset $a"; bad=1; continue; fi
-    got="$(sha256 < "$made/dl/$a")" || return 1
+    got="$(sha256 < "$made/dl/$a")" || die "cannot compute the SHA-256 of the release's $a"
     case "$a" in
       shmutant.sh) [ "$got" = "$digest" ] \
                      || { err "VERIFY FAILED: the release's shmutant.sh has SHA-256 $got, but CHECKSUMS at $tag says $digest"; bad=1; } ;;
@@ -348,11 +366,8 @@ newtmp() {
 if [ "$mode" = verify ]; then
   local_sha="$(g rev-parse --quiet --verify "refs/tags/$tag^{commit}")" \
     || die "this checkout has no tag $tag: git fetch origin tag $tag"
-  peel="$(origin_tag)" || die "cannot read origin's tags (git ls-remote failed)"
-  [ "$peel" = "$local_sha" ] \
-    || { err "refused: origin's $tag names ${peel:-nothing}, this checkout's names $local_sha"; exit 1; }
   newtmp
-  verify || exit 1
+  verify "$local_sha" || exit 1
   exit 0
 fi
 
@@ -372,18 +387,24 @@ notes="shmutant $ver
     bash scripts/shmutant.sh checksum   # $digest
 
 CHECKSUMS, attached, carries the SHA-256 of shmutant.sh at this tag."
-create=(gh release create "$tag" -R "$slug" --verify-tag --title "shmutant $ver" --notes "$notes" shmutant.sh CHECKSUMS)
+create=(gh release create "$tag" -R "github.com/$slug" --verify-tag --title "shmutant $ver" --notes "$notes" shmutant.sh CHECKSUMS)
 finish_by_hand() {
-  err "to finish the release of $tag by hand, once origin has the tag:"
-  err "  see what exists:   gh release view $tag -R $slug"
-  err "  with no release:   from a checkout of $tag (git switch --detach $tag), run"
-  err "                     $(printf '%q ' "${create[@]}")"
-  err "  with a draft:      gh release upload $tag -R $slug shmutant.sh CHECKSUMS --clobber"
-  err "                     gh release edit $tag -R $slug --draft=false"
-  err "  then check it:     bash scripts/release.sh --verify $ver"
+  err "to finish the release of $tag by hand, once origin has the tag naming $remote: in an empty"
+  err "directory, write the two assets from that commit, then run the step that applies there:"
+  err "  $(printf '%q ' git -C "$root" cat-file blob "$remote:shmutant.sh")> shmutant.sh"
+  err "  $(printf '%q ' git -C "$root" cat-file blob "$remote:CHECKSUMS")> CHECKSUMS"
+  err "  see what exists:   $(printf '%q ' gh release view "$tag" -R "github.com/$slug")"
+  err "  with no release:   $(printf '%q ' "${create[@]}")"
+  err "  with a draft:      $(printf '%q ' gh release upload "$tag" -R "github.com/$slug" shmutant.sh CHECKSUMS --clobber)"
+  err "                     $(printf '%q ' gh release edit "$tag" -R "github.com/$slug" --draft=false)"
+  err "  then check it:     $(printf '%q ' bash "$root/scripts/release.sh" --verify "$ver")"
 }
 
 newtmp
+ls="$(g ls-remote origin refs/heads/main)" || die "cannot read origin (git ls-remote failed)"
+now="$(printf '%s\n' "$ls" | awk '$2 == "refs/heads/main" { print $1 }')"
+[ "$now" = "$remote" ] \
+  || { err "origin's main moved from $remote to ${now:-nothing} since the checks; nothing was tagged. Re-run to check the new head."; exit 1; }
 tagged=1
 g tag -a "$tag" "$remote" -m "shmutant $ver" || { err "could not create the tag $tag; nothing was pushed"; exit 1; }
 g push origin "refs/tags/$tag"; prc=$?
@@ -411,14 +432,14 @@ fi
 say "pushed $tag, naming $remote"
 
 mkdir -- "$made/assets" \
-  && g cat-file blob "refs/tags/$tag:shmutant.sh" > "$made/assets/shmutant.sh" \
-  && g cat-file blob "refs/tags/$tag:CHECKSUMS" > "$made/assets/CHECKSUMS" \
+  && g cat-file blob "$remote:shmutant.sh" > "$made/assets/shmutant.sh" \
+  && g cat-file blob "$remote:CHECKSUMS" > "$made/assets/CHECKSUMS" \
   || { err "could not write the release assets from $tag"; finish_by_hand; exit 1; }
 (cd -- "$made/assets" && "${create[@]}") \
   || { err "gh release create failed"; finish_by_hand; exit 1; }
 say "published the release $tag"
 
-if ! verify; then
+if ! verify "$remote"; then
   err "the release $tag is published but does not verify: investigate before announcing it or rolling the milestone"
   exit 1
 fi

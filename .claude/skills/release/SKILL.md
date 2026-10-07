@@ -23,8 +23,13 @@ what each precondition is, what it publishes and how it verifies.
 2. **The dry run**, from the root of a clean checkout of `main`:
 
    ```sh
-   bash scripts/release.sh --dry-run <X.Y.Z>
+   env -u SHELLOPTS -u BASHOPTS -u BASH_ENV bash scripts/release.sh --dry-run <X.Y.Z>
    ```
+
+   The `env -u` matters: shell options exported into the driver's environment can stop it from
+   running anything while it still exits 0 (see the script's header). For the same reason, the dry
+   run passed only when it exits 0 **and** its last line is
+   `release: dry run: every precondition holds for v<X.Y.Z> …`.
 
    It prints `release: ok: …` for each precondition that holds and `release: refused: …` for each
    that does not. It creates no tag, release or file, and it does not fetch. Exit 1 means at least
@@ -39,12 +44,14 @@ what each precondition is, what it publishes and how it verifies.
 4. **The cut:**
 
    ```sh
-   bash scripts/release.sh <X.Y.Z>
+   env -u SHELLOPTS -u BASHOPTS -u BASH_ENV bash scripts/release.sh <X.Y.Z>
    ```
 
-   It repeats every check, then tags, pushes, publishes, and verifies. If it fails or is
-   interrupted after the tag may have reached origin, it prints the commands that finish the
-   release by hand. Pass those on as printed. Never delete or move a pushed tag. Once the release is
+   It repeats every check, re-reads origin's main just before tagging, then tags, pushes,
+   publishes, and verifies. The cut succeeded only when it exits 0 **and** its last line is the
+   hand-off in step 5. If it fails or is interrupted after the tag may have reached origin, it
+   prints the commands that finish the release by hand, from the commit it checked. Pass those on
+   as printed. Never delete or move a pushed tag. Once the release is
    finished, `bash scripts/release.sh --verify <X.Y.Z>` checks what was published.
 
 5. **The hand-off.** On success the driver's last line is
