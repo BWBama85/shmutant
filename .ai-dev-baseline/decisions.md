@@ -35,3 +35,21 @@
 - placement: .github/workflows/ci.yml (env, `adapters` job); test/adapters/check.sh; README "Testing shmutant"
 - reason:    a SHA-256 of a generated tag archive can change with GitHub's archiver while the contents do not, failing CI for no reason; a commit pins the contents, by git's SHA-1 object id, which is weaker than the SHA-256 pins beside it. The macOS job's bash comes from Homebrew unpinned, so the adapter verdicts are claimed for the pinned Linux setup only.
 - baseline-issue: n/a (CI dependencies are per project)
+
+## D5 — the release procedure is a project skill over a tested script
+- date:      2026-10-07
+- category:  project-delta
+- unknown:   #8 asks for a project-owned release command that the roadmap artifact's `release-command` marker can name. The baseline ships no `/release` skill, so each project writes its own.
+- decision:
+  - `.claude/skills/release/SKILL.md` names the version, runs `scripts/release.sh --dry-run`, gets the operator's go-ahead, cuts, and hands off to `baseline release roll`.
+  - The script holds every step. `test/release.sh` runs the script against a local bare origin, with `gh`, `curl` and `sleep` stubbed. It runs as the `release` CI job, as a step of the `macos` job, and as the `release-test` gate.
+  - "CI green" means three things:
+    - every check run GitHub lists on origin's main head with `filter=latest` is `completed` with conclusion `success`, so `skipped` and `neutral` refuse;
+    - at least one check run exists;
+    - every job id in `.github/workflows/ci.yml` has a check run. A job that sets its own `name:` or a `strategy:` stops the script with exit 2 rather than being mapped.
+  - `CHECKSUMS` is checked as `sha256sum -c` would check it, without needing `sha256sum`: it must be exactly one `<sha256>  shmutant.sh` line, and the digest must match the file.
+  - A pending check refuses at once; the script does not wait.
+  - When a cut fails after its tag reached origin, the script prints how to finish by hand and never deletes the tag.
+- placement: .claude/skills/release/SKILL.md; scripts/release.sh; test/release.sh; .github/workflows/ci.yml (`release` job, a `macos` step); agents.toml [gates] `release-test`; README "Releasing"
+- reason:    a script can be shellchecked and tested where fenced shell in a skill cannot. Every check reads from the commit or from GitHub rather than a local ref, so the dry run needs no fetch.
+- baseline-issue: n/a (release execution is project-owned)

@@ -125,6 +125,28 @@ No submodules. Upgrading is copying a newer file. See [docs/integrating.md](docs
 for the adapter contract, Bats and ShellSpec adapters (CI runs both, as written, against pinned
 releases), and migrating an existing harness.
 
+### Releasing
+
+The maintainer cuts a release with the project's `/release` skill
+([.claude/skills/release/SKILL.md](.claude/skills/release/SKILL.md)), which drives
+`scripts/release.sh`. To check a cut without making it:
+
+```sh
+bash scripts/release.sh --dry-run 0.1.0
+```
+
+The driver refuses unless every one of these holds:
+
+- the checkout is a clean `main` at origin's head;
+- every CI check on that commit passed;
+- `SHMUTANT_VERSION` is the version being cut;
+- `CHECKSUMS` matches `shmutant.sh`;
+- the tag is new.
+
+It then tags that commit, publishes the GitHub release with `shmutant.sh` and `CHECKSUMS`
+attached, and verifies that the install URL in `docs/integrating.md` serves the digest in
+`CHECKSUMS`. The script's header lists every check.
+
 ## Machine-readable verdicts
 
 Everything on stdout is a tab-separated record; prose goes to stderr. Fields never contain a raw
@@ -163,6 +185,7 @@ bash test/run.sh                      # the suite: every `t_*` unit, one at a ti
 bash shmutant.sh run test/mutants.sh  # the suite, mutation-tested by shmutant itself
 bash test/adapters/check.sh bats      # the doc's Bats adapter, on its fixture
 bash test/adapters/check.sh shellspec # the same for ShellSpec
+bash test/release.sh                  # the release driver, against a local origin with gh stubbed
 ```
 
 The last two need the framework on `PATH` at the version CI pins (`BATS_VERSION`,
