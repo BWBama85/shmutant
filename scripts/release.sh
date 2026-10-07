@@ -12,8 +12,8 @@
 #   - HEAD is on main, the work tree is clean (untracked files included), and HEAD is the commit
 #     origin's main names, asked of origin with ls-remote and of GitHub's API;
 #   - CI is green on that commit: every check run GitHub lists on it is completed with conclusion
-#     success, the ci.yml workflow ran on it and each of its runs there concluded success, and
-#     its commit statuses, if it has any, are success;
+#     success, the ci.yml workflow ran on it and each of its runs there concluded success, each
+#     list is as long as GitHub's own count of it, and its commit statuses, if any, are success;
 #   - shmutant.sh at HEAD sets SHMUTANT_VERSION=<version>, on one line;
 #   - CHECKSUMS at HEAD is the one line `<sha256>  shmutant.sh`, and the digest is shmutant.sh's;
 #   - docs/integrating.md at HEAD names one raw.githubusercontent.com URL of shmutant.sh: this
@@ -159,6 +159,16 @@ sha256() {
   printf '%s\n' "$out"
 }
 blob_sha256() { (set -o pipefail; g cat-file blob "$1" | sha256); }
+# streamed <command>… — runs <command> into sha256; sets s_src and s_sum to the two statuses and
+# s_digest to the digest (meaningful only when both are 0).
+streamed() {
+  local out
+  out="$( { "$@" | sha256; printf '\nstatus %s %s\n' "${PIPESTATUS[0]}" "${PIPESTATUS[1]}"; } )"
+  s_digest="${out%%$'\n'*}"
+  out="${out##*status }"
+  s_src="${out%% *}"; s_sum="${out#* }"
+  case "$s_src$s_sum" in ''|*[!0-9]*) s_src=2; s_sum=2 ;; esac
+}
 
 # blob <rev> <path> — prints <path> as committed at <rev>; status 1 when <rev> has no such file, 2
 # when it cannot be read. Called inside $(…), so it sets nothing: blob_why names the reason.
@@ -194,8 +204,17 @@ doc_url() {
   [ "$rc" -eq 0 ] || { blob_why "$rc" "$1" docs/integrating.md; return "$rc"; }
   # Whole URLs, each to the end of its token less any trailing sentence punctuation, so that a
   # longer one (shmutant.sh.sig, shmutant.sh?x=y) is never read as its shmutant.sh prefix.
-  urls="$(printf '%s\n' "$doc" | grep -oE 'https://raw\.githubusercontent\.com/[^][[:space:]<>"'"'"'`()]*' \
-          | sed 's/[.,;:!]*$//' | grep -E '/shmutant\.sh$' | sort -u)"
+  # Each stage on its own, so a failing tool is exit 2 and never a short list. grep's 1 is "none".
+  urls="$(printf '%s\n' "$doc" | grep -oE 'https://raw\.githubusercontent\.com/[^][[:space:]<>"'"'"'`()]*')"; rc=$?
+  [ "$rc" -le 1 ] || { why="cannot search docs/integrating.md (grep exit $rc)"; return 2; }
+  if [ -n "$urls" ]; then
+    urls="$(printf '%s\n' "$urls" | sed 's/[.,;:!]*$//')" || { why="cannot read the URLs in docs/integrating.md (sed failed)"; return 2; }
+    urls="$(printf '%s\n' "$urls" | grep -E '/shmutant\.sh$')"; rc=$?
+    [ "$rc" -le 1 ] || { why="cannot search docs/integrating.md (grep exit $rc)"; return 2; }
+  fi
+  if [ -n "$urls" ]; then
+    urls="$(printf '%s\n' "$urls" | sort -u)" || { why="cannot sort the URLs in docs/integrating.md (sort failed)"; return 2; }
+  fi
   case "$urls" in
     '')      why="docs/integrating.md names no raw.githubusercontent.com URL of shmutant.sh"; return 1 ;;
     *$'\n'*) why="docs/integrating.md names more than one URL of shmutant.sh: $(printf '%s' "$urls" | tr '\n' ' ')"; return 1 ;;
@@ -253,7 +272,7 @@ EOF
 
 # preflight — every precondition, each reported; sets head, remote, digest and raw_url.
 preflight() {
-  local branch st ls api perm short runs wfruns statuses n w nst state src vl v fsum peel gt rels rc re
+  local branch st ls api perm short runs ntotal wfruns wtotal statuses n w nst state src vl v fsum peel gt rels rc re
 
   branch="$(g symbolic-ref --quiet --short HEAD)" || branch=""
   if [ "$branch" = main ]; then ok "on main"
@@ -293,16 +312,22 @@ preflight() {
   runs="$(gh api --paginate "repos/$slug/commits/$remote/check-runs?filter=latest&per_page=100" \
             --jq '.check_runs[] | [(.name | gsub("[[:cntrl:]]"; "?")), .status, (.conclusion // "none")] | @tsv')" \
     || die "cannot read the check runs on $remote from GitHub"
+  ntotal="$(gh api "repos/$slug/commits/$remote/check-runs?filter=latest&per_page=1" --jq '.total_count')" \
+    || die "cannot read the check runs on $remote from GitHub"
   wfruns="$(gh api --paginate "repos/$slug/actions/workflows/ci.yml/runs?head_sha=$remote&per_page=100" \
               --jq '.workflow_runs[] | [.id, .status, (.conclusion // "none")] | @tsv')" \
+    || die "cannot read the ci.yml workflow runs on $remote from GitHub"
+  wtotal="$(gh api "repos/$slug/actions/workflows/ci.yml/runs?head_sha=$remote&per_page=1" --jq '.total_count')" \
     || die "cannot read the ci.yml workflow runs on $remote from GitHub"
   statuses="$(gh api "repos/$slug/commits/$remote/status" --jq '[.total_count, .state] | @tsv')" \
     || die "cannot read the commit statuses on $remote from GitHub"
   notgreen=""
   judge "" "$runs"; n="$judged"
   [ "$n" -gt 0 ] || notgreen="$notgreen, GitHub lists no check runs on it"
+  [ "$n" = "$ntotal" ] || notgreen="$notgreen, GitHub counts $ntotal check runs on it but listed $n, so not all could be checked"
   judge "ci.yml run " "$wfruns"; w="$judged"
   [ "$w" -gt 0 ] || notgreen="$notgreen, the ci.yml workflow has not run on it"
+  [ "$w" = "$wtotal" ] || notgreen="$notgreen, GitHub counts $wtotal ci.yml runs on it but listed $w, so not all could be checked"
   IFS=$'\t' read -r nst state <<EOF
 $statuses
 EOF
@@ -377,15 +402,18 @@ verify() {
   [ "$rc" -ne 2 ] || die "$why"
   [ "$rc" -eq 0 ] || { err "VERIFY FAILED: at $tag, $why"; return 1; }
   ck="$(blob_sha256 "$c:CHECKSUMS")" || die "cannot compute the SHA-256 of CHECKSUMS at $tag"
-  mkdir -- "$made/raw" "$made/dl" || die "cannot create the download directories"
 
-  # An HTTP error on every attempt is the URL not serving the file: a verify failure. Any other
-  # failure on any attempt is a read that did not happen: exit 2, at once for one that cannot
-  # write its output.
+  # Downloads go straight into the digest, never to a file, and each side's status is read on its
+  # own. An HTTP error on every attempt is the URL not serving the file: a verify failure. Any
+  # other failure on any attempt is a read that did not happen: exit 2.
   while :; do
-    curl -q -fsSL --proto '=https' --connect-timeout 20 --max-time 300 -o "$made/raw/shmutant.sh" "$raw_url"; crc=$?
+    streamed curl -q -fsSL --proto '=https' --connect-timeout 20 --max-time 300 "$raw_url"
+    crc="$s_src"
+    # The digest's own failure first: it closes the pipe, and curl then dies of SIGPIPE, which
+    # would otherwise read as a download that failed and was worth retrying.
+    [ "$s_sum" -eq 0 ] || die "cannot compute the SHA-256 of the download"
     [ "$crc" -ne 0 ] || break
-    [ "$crc" -ne 23 ] || die "cannot write the download of $raw_url (curl exit 23)"
+    [ "$crc" -ne 23 ] || die "the download of $raw_url could not be passed to the digest (curl exit 23)"
     [ "$crc" -eq 22 ] || httponly=0
     i=$((i + 1))
     if [ "$i" -ge "$attempts" ]; then
@@ -395,7 +423,7 @@ verify() {
     say "downloading $raw_url failed (curl exit $crc, attempt $i of $attempts); retrying in ${pause}s"
     sleep "$pause"
   done
-  got="$(sha256 < "$made/raw/shmutant.sh")" || die "cannot compute the SHA-256 of the download"
+  got="$s_digest"
   if [ "$got" = "$digest" ]; then say "verified: $raw_url has the SHA-256 CHECKSUMS at $tag gives ($digest)"
   else err "VERIFY FAILED: $raw_url has SHA-256 $got, but CHECKSUMS at $tag says $digest"; bad=1
   fi
@@ -416,11 +444,11 @@ EOF
   [ "$draft" = false ] || { err "VERIFY FAILED: the release $tag is a draft"; return 1; }
   [ "$has_sh" = true ] || { err "VERIFY FAILED: the release $tag has no asset shmutant.sh"; return 1; }
   [ "$has_ck" = true ] || { err "VERIFY FAILED: the release $tag has no asset CHECKSUMS"; return 1; }
-  gh release download "$tag" -R "github.com/$slug" --dir "$made/dl" --pattern shmutant.sh --pattern CHECKSUMS \
-    || die "could not download the assets of the release $tag"
   for a in shmutant.sh CHECKSUMS; do
-    [ -f "$made/dl/$a" ] || die "the download of the release $tag holds no $a"
-    got="$(sha256 < "$made/dl/$a")" || die "cannot compute the SHA-256 of the release's $a"
+    streamed gh release download "$tag" -R "github.com/$slug" --pattern "$a" -O -
+    [ "$s_sum" -eq 0 ] || die "cannot compute the SHA-256 of the release's $a"
+    [ "$s_src" -eq 0 ] || die "could not download the asset $a of the release $tag"
+    got="$s_digest"
     case "$a" in
       shmutant.sh) [ "$got" = "$digest" ] \
                      || { err "VERIFY FAILED: the release's shmutant.sh has SHA-256 $got, but CHECKSUMS at $tag says $digest"; bad=1; } ;;
@@ -441,23 +469,30 @@ interrupted() {
   }
   exit "$1"
 }
-# The run's temporary directory, and every file it writes there, by name: cleanup removes exactly
-# these and rmdirs the directories, so it can remove nothing the run did not make. Whatever else is
-# found there stays, and is reported.
+# The run's temporary directory holds only the two release assets, written from the checked commit.
+# Cleanup removes an asset only when it still holds exactly that commit's blob (its git object id),
+# never through a symbolic link, and then rmdirs the directories: it cannot remove what the run did
+# not write. What it leaves, it reports. A cleanup failure does not change the status of a run
+# whose outcome is already decided; it is reported beside it.
 made=""
-made_files="assets/shmutant.sh assets/CHECKSUMS raw/shmutant.sh dl/shmutant.sh dl/CHECKSUMS"
-made_dirs="assets raw dl"
 cleanup() {
-  local f
+  local f want
   [ -n "$made" ] || return 0
-  for f in $made_files; do [ ! -e "$made/$f" ] || rm -f -- "$made/$f" || err "could not remove $made/$f"; done
-  for f in $made_dirs; do [ ! -d "$made/$f" ] || rmdir -- "$made/$f" 2> /dev/null; done
-  [ ! -e "$made" ] || rmdir -- "$made" 2> /dev/null \
-    || err "left $made in place: it holds something this run did not write"
+  [ -d "$made" ] && [ ! -L "$made" ] || { err "left $made in place: it is no longer the directory this run made"; return 0; }
+  if [ -n "${remote:-}" ] && [ -d "$made/assets" ] && [ ! -L "$made/assets" ]; then
+    for f in shmutant.sh CHECKSUMS; do
+      [ -f "$made/assets/$f" ] && [ ! -L "$made/assets/$f" ] || continue
+      want="$(g rev-parse --verify --quiet "$remote:$f" 2> /dev/null)" || continue
+      [ "$(g hash-object --no-filters -- "$made/assets/$f" 2> /dev/null)" = "$want" ] || continue
+      rm -f -- "$made/assets/$f" || err "could not remove $made/assets/$f"
+    done
+    rmdir -- "$made/assets" 2> /dev/null
+  fi
+  rmdir -- "$made" 2> /dev/null || err "left $made in place: it holds something this run did not write"
 }
-# newtmp — makes the run's temporary directory: a random name chosen first, then an atomic mkdir
-# that fails on anything already there. Signals are held until the name is set, so an interrupt
-# at any point is handled with the name known and cleanup can reach the directory.
+# newtmp — makes the run's temporary directory: a random name, then an atomic mkdir that fails on
+# anything already there. Signals are held until the directory is the run's own and its name set,
+# then handled, so cleanup can always reach it.
 newtmp() {
   local pending="" base n=0 try
   trap 'pending=130' INT
@@ -467,10 +502,9 @@ newtmp() {
     n=$((n + 1))
     try="$base/release.$$.$RANDOM$RANDOM"
     [ ! -e "$try" ] && [ ! -L "$try" ] || continue
-    made="$try"
-    mkdir -m 700 -- "$made" 2> /dev/null && break
-    [ -d "$made" ] && [ -n "$pending" ] && break
-    made=""
+    # mkdir runs with INT and TERM ignored, so its status is the whole truth: only a directory this
+    # mkdir made is ever taken, and one it made is always known.
+    if (trap '' INT TERM; exec mkdir -m 700 -- "$try") 2> /dev/null; then made="$try"; break; fi
   done
   trap cleanup EXIT
   trap 'interrupted 130' INT
@@ -482,7 +516,6 @@ newtmp() {
 if [ "$mode" = verify ]; then
   local_sha="$(g rev-parse --quiet --verify "refs/tags/$tag^{commit}")" \
     || die "this checkout has no tag $tag: git fetch origin tag $tag"
-  newtmp
   verify "$local_sha" || exit 1
   exit 0
 fi

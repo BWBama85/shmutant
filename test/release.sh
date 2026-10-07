@@ -27,8 +27,6 @@ trap '[ "$(ls -di -- "$tmp" 2> /dev/null | awk "{ print \$1 }")" = "$tmp_id" ] &
   || echo "test/release.sh: left $tmp in place" >&2' EXIT
 
 SLUG=shmutant-test/fixture
-# uid 0 reads through mode bits, so a file made unreadable with chmod stays readable to it.
-ROOT=0; [ "$(id -u)" -ne 0 ] || ROOT=1
 VER=1.2.3
 TAG="v$VER"
 URL="https://raw.githubusercontent.com/$SLUG/$TAG/shmutant.sh"
@@ -66,13 +64,14 @@ reply() { if [ -n "$jqx" ]; then jq -r "$jqx"; else cat; fi; }
 # pages — a list read must ask for every page.
 pages() { [ "$paginate" -eq 1 ] || { echo "gh stub: a list read without --paginate" >&2; exit 3; }; }
 fail() { echo "gh: $1" >&2; exit 1; }
-# opts <args>… — sets repo, dir, verify, patterns and files from a release subcommand's arguments.
+# opts <args>… — sets repo, dir, output, verify, patterns and files from a release subcommand's arguments.
 opts() {
-  repo=""; dir=""; verify=0; files=(); patterns=()
+  repo=""; dir=""; output=""; verify=0; files=(); patterns=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
       -R) repo="$2"; shift 2 ;;
       --dir) dir="$2"; shift 2 ;;
+      -O) output="$2"; shift 2 ;;
       --pattern) patterns+=("$2"); shift 2 ;;
       --title|--notes) shift 2 ;;
       --verify-tag) verify=1; shift ;;
@@ -91,6 +90,10 @@ case "${a[0]:-} ${a[1]:-}" in
     printf '{"object":{"sha":"%s"}}\n' "$sha" | reply ;;
   "api repos/$SLUG")
     printf '{"permissions":{"push":%s}}\n' "$(cat "$STUB/push" 2> /dev/null || echo true)" | reply ;;
+  "api repos/$SLUG/commits/"*"/check-runs?filter=latest&per_page=1")
+    reply < "$STUB/checks.json" ;;
+  "api repos/$SLUG/actions/workflows/ci.yml/runs?head_sha="*"&per_page=1")
+    reply < "$STUB/runs.json" ;;
   "api repos/$SLUG/commits/"*"/check-runs?filter=latest&per_page=100")
     pages; [ ! -e "$STUB/checks.fail" ] || fail "HTTP 502"
     reply < "$STUB/checks.json" ;;
@@ -135,6 +138,24 @@ case "${a[0]:-} ${a[1]:-}" in
     [ ! -e "$STUB/asset.tamper" ] || echo '# tampered' >> "$STUB/release/$(cat "$STUB/asset.tamper")"
     [ ! -e "$STUB/asset.omit" ] || rm -f -- "$STUB/release/$(cat "$STUB/asset.omit")"
     [ ! -e "$STUB/asset.extra" ] || echo 'release notes' > "$STUB/release/notes.txt"
+    # The driver runs this from <its directory>/assets.
+    made="$(dirname -- "$PWD")"; name="$(basename -- "$made")"
+    # $STUB/retarget: the TMPDIR symlink now leads elsewhere, where a victim sits at the run's name.
+    if [ -e "$STUB/retarget" ]; then
+      ln -sfn "$STUB/b" "$STUB/link" && mkdir -p "$STUB/b/$name/assets" \
+        && echo victim > "$STUB/b/$name/victim" && echo theirs > "$STUB/b/$name/assets/shmutant.sh" || exit 1
+    fi
+    # $STUB/link-tmp: the run's directory is replaced by a link to another directory that holds a
+    # byte-identical copy of the asset.
+    if [ -e "$STUB/link-tmp" ]; then
+      mkdir -p "$STUB/elsewhere/assets" && cp -- shmutant.sh "$STUB/elsewhere/assets/" \
+        && mv -- "$made" "$made.moved" && ln -s "$STUB/elsewhere" "$made" || exit 1
+    fi
+    # $STUB/replace-tmp: the run's directory is moved away, and another made at its path holds a
+    # file of its own under the asset name.
+    if [ -e "$STUB/replace-tmp" ]; then
+      mv -- "$made" "$made.moved" && mkdir -p -- "$made/assets" && echo theirs > "$made/assets/shmutant.sh" || exit 1
+    fi
     if [ -e "$STUB/asset.merge" ]; then
       mv -- "$STUB/release/shmutant.sh" "$STUB/release/shmutant.sh CHECKSUMS" && rm -f -- "$STUB/release/CHECKSUMS" || exit 1
     fi
@@ -143,30 +164,26 @@ case "${a[0]:-} ${a[1]:-}" in
     t="${a[2]}"; opts "${a[@]:3}"
     [ -e "$STUB/published/$t" ] || fail "Not Found (HTTP 404)"
     [ ! -e "$STUB/download.fail" ] || fail "HTTP 502"
-    made="$(dirname -- "$dir")"; name="$(basename -- "$made")"
-    # $STUB/retarget: the TMPDIR symlink now leads elsewhere, where a victim sits at the run's name.
-    if [ -e "$STUB/retarget" ]; then
-      ln -sfn "$STUB/b" "$STUB/link" && mkdir -p "$STUB/b/$name" && echo victim > "$STUB/b/$name/victim" || exit 1
-    fi
-    # $STUB/replace-tmp: the run's directory is moved away and another made at its path.
-    if [ -e "$STUB/replace-tmp" ]; then
-      mv -- "$made" "$made.moved" && mkdir -- "$made" && echo victim > "$made/victim" || exit 1
-    fi
+    # -O - writes the one asset the patterns select to stdout; none or several is an error.
+    sel=()
     for f in "$STUB/release/"*; do
+      [ -f "$f" ] || continue
       [ "${#patterns[@]}" -eq 0 ] || { keep=0; for pt in "${patterns[@]}"; do case "${f##*/}" in $pt) keep=1 ;; esac; done; [ "$keep" -eq 1 ] || continue; }
-      cp -- "$f" "$dir/" || exit 1
+      sel+=("$f")
     done
-    [ ! -e "$STUB/asset.unreadable" ] || chmod 000 "$dir/$(cat "$STUB/asset.unreadable")" ;;
+    [ "$output" = - ] || { echo "gh stub: release download without -O -" >&2; exit 3; }
+    [ "${#sel[@]}" -eq 1 ] || fail "${#sel[@]} assets match; -O - takes exactly one"
+    cat -- "${sel[0]}" ;;
   *) echo "gh stub: unexpected call: ${a[*]}" >&2; exit 3 ;;
 esac
 EOF
 
 cat > "$tmp/bin/curl" <<'EOF'
 #!/usr/bin/env bash
-# curl … -o <file> <url>, answered from the fixture's origin: <url> must be a raw URL of the
-# fixture's repository. $STUB/curl.404s holds how many downloads fail before one succeeds;
-# $STUB/curl.mode `tamper` alters the bytes, `unreadable` leaves them unreadable, `nowrite` and
-# `unreachable` fail as curl does (23, 7), `term` and `int` send TERM or INT to the caller.
+# curl … [-o <file>] <url>, answered from the fixture's origin onto <file> or stdout: <url> must be
+# a raw URL of the fixture's repository. $STUB/curl.404s holds how many downloads fail before one
+# succeeds; $STUB/curl.mode `tamper` alters the bytes, `nowrite` and `unreachable` fail as curl
+# does (23, 7), `term` and `int` send TERM or INT to the caller's process group.
 out=""; url=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -181,7 +198,7 @@ printf 'curl %s\n' "$url" >> "$STUB/events"
 notfound() { echo "curl: (22) The requested URL returned error: 404" >&2; exit 22; }
 mode="$(cat "$STUB/curl.mode" 2> /dev/null)"
 case "$mode" in
-  term|int) kill "-$(printf '%s' "$mode" | tr a-z A-Z)" "$PPID"; notfound ;;
+  term|int) kill "-$(printf '%s' "$mode" | tr a-z A-Z)" 0; notfound ;;
   nowrite) echo "curl: (23) Failure writing output to destination" >&2; exit 23 ;;
   unreachable) echo "curl: (7) Failed to connect" >&2; exit 7 ;;
 esac
@@ -194,9 +211,11 @@ n="$(cat "$STUB/curl.404s" 2> /dev/null)"
 if [ "${n:-0}" -gt 0 ]; then echo $((n - 1)) > "$STUB/curl.404s"; notfound; fi
 case "$url" in "https://raw.githubusercontent.com/$SLUG/"*/shmutant.sh) ;; *) notfound ;; esac
 t="${url#"https://raw.githubusercontent.com/$SLUG/"}"; t="${t%/shmutant.sh}"
-git -C "$STUB/origin.git" cat-file blob "$t:shmutant.sh" > "$out" 2> /dev/null || notfound
-[ "$mode" != tamper ] || echo '# tampered' >> "$out"
-[ "$mode" != unreadable ] || chmod 000 "$out"
+body="$(git -C "$STUB/origin.git" cat-file blob "$t:shmutant.sh" 2> /dev/null && printf x)" || notfound
+body="${body%x}"
+[ "$mode" != tamper ] || body="$body# tampered
+"
+if [ -n "$out" ]; then printf '%s' "$body" > "$out"; else printf '%s' "$body"; fi
 EOF
 
 cat > "$tmp/bin/sleep" <<'EOF'
@@ -226,13 +245,17 @@ sha256() {
 # checks <name:status:conclusion>… — the check runs the gh stub lists on any commit (`null` for no
 # conclusion). runs <id:status:conclusion>… — the same for its ci.yml workflow runs.
 checks() {
-  printf '%s\n' "$@" | jq -Rn '{check_runs: [inputs | select(. != "") | split(":")
-    | {name: .[0], status: .[1], conclusion: (if .[2] == "null" then null else .[2] end)}]}' > "$S/checks.json" || exit 2
+  printf '%s\n' "$@" | jq -Rn '[inputs | select(. != "") | split(":")
+    | {name: .[0], status: .[1], conclusion: (if .[2] == "null" then null else .[2] end)}]
+    | {total_count: length, check_runs: .}' > "$S/checks.json" || exit 2
 }
 runs() {
-  printf '%s\n' "$@" | jq -Rn '{workflow_runs: [inputs | select(. != "") | split(":")
-    | {id: (.[0] | tonumber), status: .[1], conclusion: (if .[2] == "null" then null else .[2] end)}]}' > "$S/runs.json" || exit 2
+  printf '%s\n' "$@" | jq -Rn '[inputs | select(. != "") | split(":")
+    | {id: (.[0] | tonumber), status: .[1], conclusion: (if .[2] == "null" then null else .[2] end)}]
+    | {total_count: length, workflow_runs: .}' > "$S/runs.json" || exit 2
 }
+# recount <file> <n> — make GitHub's own count in <file> say <n>, whatever it lists.
+recount() { jq --argjson n "$2" '.total_count = $n' "$S/$1" > "$S/$1.new" && mv -- "$S/$1.new" "$S/$1" || exit 2; }
 
 # commit <dir> <message> — commit everything in <dir>. land <dir> <message> — and push it to main.
 commit() { git -C "$1" add -A && git -C "$1" commit -q --allow-empty -m "$2" || exit 2; }
@@ -265,6 +288,14 @@ other_clone() { o="$S/../other"; git clone -q "$S/origin.git" "$o" || exit 2; }
 rel() {
   (cd -- "$c" && PATH="$tmp/bin:$PATH" STUB="$S" SLUG="$SLUG" bash scripts/release.sh "$@") \
     > "$S/out" 2> "$S/err"
+  rc=$?
+  out="$(cat "$S/out")"; err="$(cat "$S/err")"
+}
+# relg <arg>… — rel with the driver in a process group of its own (set -m), so a stub's signal to
+# its group reaches the driver and its children only. The background job is the driver itself.
+relg() {
+  bash -c 'set -m; cd -- "$1" || exit 2; PATH="$2:$PATH" STUB="$3" SLUG="$4" bash scripts/release.sh "${@:5}" & wait $!' \
+    _ "$c" "$tmp/bin" "$S" "$SLUG" "$@" > "$S/out" 2> "$S/err"
   rc=$?
   out="$(cat "$S/out")"; err="$(cat "$S/err")"
 }
@@ -714,7 +745,7 @@ c_verify_waits_for_a_late_url() {
 
 c_an_interrupted_cut_says_how_to_finish() {
   echo term > "$S/curl.mode"
-  rel "$VER"
+  relg "$VER"
   rc_is "$rc" 143 "TERM during verification"
   has "$err" "interrupted once the tag $TAG may exist" "says so"
   has "$err" "scripts/release.sh --verify $VER" "and how to finish"
@@ -722,7 +753,7 @@ c_an_interrupted_cut_says_how_to_finish() {
 
 c_an_interrupt_exits_130_and_says_how_to_finish() {
   echo int > "$S/curl.mode"
-  rel "$VER"
+  relg "$VER"
   rc_is "$rc" 130 "INT during verification"
   has "$err" "interrupted once the tag $TAG may exist" "says so"
 }
@@ -954,15 +985,29 @@ c_sets_aside_the_callers_tracing_and_aliases() {
   hasnt "$out" "every precondition holds" "noexec: no verdict line, whatever the status"
 }
 
+# sha_box <dir> — <dir> holding a sha256sum that fails on the call $STUB/sha.failat names and is a
+# real digest tool otherwise; calls are counted in $STUB/sha.count.
+sha_box() {
+  local real
+  real="$(command -v sha256sum || command -v shasum)" || exit 2
+  case "$real" in *shasum) real="$real -a 256" ;; esac
+  toolbox "$1" gh curl sleep
+  printf '#!/usr/bin/env bash\nn=$(( $(cat "$STUB/sha.count" 2> /dev/null || echo 0) + 1 )); echo "$n" > "$STUB/sha.count"\n[ "$n" != "$(cat "$STUB/sha.failat" 2> /dev/null)" ] || { echo "sha256sum: read error" >&2; exit 1; }\nexec %s\n' \
+    "$real" > "$1/sha256sum" && chmod +x "$1/sha256sum" || exit 2
+}
+
 c_verify_exits_2_when_it_cannot_hash_what_it_read() {
-  [ "$ROOT" -eq 0 ] || { echo "note: $_case: running as root, which reads through chmod 000; not exercised" >&2; return; }
-  echo unreadable > "$S/curl.mode"
   rel "$VER"
-  rc_is "$rc" 2 "the download cannot be read"
+  rc_is "$rc" 0 "the cut"
+  sha_box "$S/box-sha"
+  # In --verify: 1 CHECKSUMS at the tag, 2 the raw download, 3 the shmutant.sh asset, 4 CHECKSUMS.
+  echo 2 > "$S/sha.failat"; rm -f -- "$S/sha.count"
+  relp "$S/box-sha" --verify "$VER"
+  rc_is "$rc" 2 "the download cannot be hashed"
   has "$err" "cannot compute the SHA-256 of the download" "says so"
-  rm -f -- "$S/curl.mode"; echo CHECKSUMS > "$S/asset.unreadable"
-  rel --verify "$VER"
-  rc_is "$rc" 2 "a downloaded asset cannot be read"
+  echo 4 > "$S/sha.failat"; rm -f -- "$S/sha.count"
+  relp "$S/box-sha" --verify "$VER"
+  rc_is "$rc" 2 "a release asset cannot be hashed"
   has "$err" "cannot compute the SHA-256 of the release's CHECKSUMS" "says so"
 }
 
@@ -1194,11 +1239,11 @@ c_verify_exits_2_when_a_read_fails() {
   : > "$S/download.fail"
   rel --verify "$VER"
   rc_is "$rc" 2 "the release's assets cannot be downloaded"
-  has "$err" "could not download the assets of the release $TAG" "says so"
+  has "$err" "could not download the asset shmutant.sh of the release $TAG" "says so"
   rm -f -- "$S/download.fail"; echo nowrite > "$S/curl.mode"
   rel --verify "$VER"
   rc_is "$rc" 2 "the raw download cannot be written"
-  has "$err" "cannot write the download of $URL" "says so"
+  has "$err" "the download of $URL could not be passed to the digest (curl exit 23)" "says so"
   echo unreachable > "$S/curl.mode"
   rel --verify "$VER"
   rc_is "$rc" 2 "the raw URL cannot be reached"
@@ -1213,17 +1258,19 @@ c_cleanup_follows_no_symlink_swapped_after_allocation() {
   rc_is "$rc" 0 "the cut, with TMPDIR's symlink retargeted under it"
   eq "$(ls -A "$S/a")" "" "the directory it made is gone"
   left="$(ls -A "$S/b")"
-  [ -n "$left" ] && [ -f "$S/b/$left/victim" ] || fail_ "the victim planted at the new target was removed"
+  [ -n "$left" ] && [ -f "$S/b/$left/victim" ] && [ "$(cat "$S/b/$left/assets/shmutant.sh")" = theirs ] \
+    || fail_ "something planted at the new target was removed"
 }
 
 c_cleanup_leaves_a_directory_that_replaced_its_own() {
   local d
   mkdir -p "$S/tmp"; : > "$S/replace-tmp"
   TMPDIR="$S/tmp" rel "$VER"
-  rc_is "$rc" 2 "the run's directory is replaced during verification"
+  rc_is "$rc" 0 "the cut, its directory replaced while the release was created"
   has "$err" "it holds something this run did not write" "cleanup says why it left the directory"
   for d in "$S"/tmp/release.*; do
-    case "$d" in *.moved) ;; *) [ -f "$d/victim" ] || fail_ "the replacing directory's victim was removed" ;; esac
+    case "$d" in *.moved) ;; *) [ "$(cat "$d/assets/shmutant.sh" 2> /dev/null)" = theirs ] \
+      || fail_ "the replacing directory's own assets/shmutant.sh was removed" ;; esac
   done
 }
 
@@ -1239,6 +1286,47 @@ c_never_adopts_a_directory_that_appears_at_its_chosen_name() {
   rc_is "$rc" 0 "the cut, after a race at its first chosen name"
   hasnt "$err" "left $S/tmp" "the raced directory was never taken for its own"
   eq "$(cat "$S"/tmp/release.*/theirs 2> /dev/null)" theirs "and still holds its file"
+}
+
+c_cleanup_never_reaches_through_a_link_that_replaced_its_directory() {
+  mkdir -p "$S/tmp"; : > "$S/link-tmp"
+  TMPDIR="$S/tmp" rel "$VER"
+  rc_is "$rc" 0 "the cut, its directory replaced by a link while the release was created"
+  has "$err" "it is no longer the directory this run made" "cleanup says why it left it"
+  [ -f "$S/elsewhere/assets/shmutant.sh" ] || fail_ "an identical copy behind the link was removed"
+}
+
+c_never_adopts_a_directory_a_signal_arrives_with() {
+  mkdir -p "$S/box-steal" "$S/tmp" || exit 2
+  # Another process makes the run's chosen directory first, with a file of its own, and signals the
+  # run while its mkdir fails.
+  printf '#!/usr/bin/env bash\nfor a in "$@"; do case "$a" in */release.[0-9]*) case "${a##*/release.}" in */*) ;; *) [ -e "%s/stolen" ] || { /bin/mkdir -p -- "$a/assets" && echo theirs > "$a/assets/shmutant.sh" && : > "%s/stolen"; } ;; esac ;; esac; done\n/bin/mkdir "$@"; rc=$?\nkill -TERM 0\nexit "$rc"\n' \
+    "$S" "$S" > "$S/box-steal/mkdir"
+  chmod +x "$S/box-steal/mkdir" || exit 2
+  bash -c 'set -m; cd -- "$1" || exit 2; PATH="$2:$PATH" TMPDIR="$3" STUB="$4" SLUG="$5" bash scripts/release.sh "$6" & wait $!' \
+    _ "$c" "$S/box-steal:$tmp/bin" "$S/tmp" "$S" "$SLUG" "$VER" > "$S/out" 2> "$S/err"
+  rc=$?; err="$(cat "$S/err")"
+  rc_is "$rc" 143 "TERM while mkdir fails on a directory another made"
+  eq "$(cat "$S"/tmp/release.*/assets/shmutant.sh 2> /dev/null)" theirs "the other directory and its file are untouched"
+}
+
+c_exits_2_when_a_text_tool_fails() {
+  toolbox "$S/box" gh curl sleep sha256sum shasum openssl
+  rm -f -- "$S/box/sort"
+  printf '#!/bin/sh\ncat\nexit 1\n' > "$S/box/sort" && chmod +x "$S/box/sort" || exit 2
+  relp "$S/box" --dry-run "$VER"
+  rc_is "$rc" 2 "a sort that fails"
+  has "$err" "cannot sort the URLs in docs/integrating.md" "says so"
+}
+
+c_refuses_ci_lists_shorter_than_githubs_count() {
+  recount checks.json 1001
+  rel --dry-run "$VER"
+  refused_once "GitHub counts 1001 check runs on it but listed 2" "a check-run list GitHub capped"
+  checks alpha:completed:success beta:completed:success
+  recount runs.json 1001
+  rel --dry-run "$VER"
+  refused_once "GitHub counts 1001 ci.yml runs on it but listed 1" "a workflow-run list GitHub capped"
 }
 
 c_an_interrupt_while_allocating_leaves_nothing() {
