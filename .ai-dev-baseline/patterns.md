@@ -58,6 +58,7 @@ Sweep each of these before opening a pull request.
 - `pipeline-status-lost` — For every documented command that runs the tool (README, guide, migration steps), grep the docs for the tool name followed by | or || and for && and check each example carries the tool exit status to its consumer on its own line; a doc example that loses the status ships the defect to every reader.
 - `write-failure-swallowed` — For every command whose failure would leave a promise unkept (a record written, metadata restored, a file replaced), grep for it and check its status reaches the function return; a 2>/dev/null with no || rc=1 beside it is the defect. Test by making the command fail (a read-only target, a closed descriptor, a foreign owner) and asserting the caller reports it.
 - `clock-dependent-deadline` — For every value derived from two readings of a wall clock (EPOCHREALTIME, date, ps etime) — a deadline, a duration, a start-time identity — say what a clock step between the readings does to it (extends, cuts, turns negative, mismatches) and either count elapsed time in bounded per-poll shares, clamp the result, or read a kernel tick instead; test each with a stubbed clock that is frozen, jumps forward, and steps backward.
+- `unanchored-match` — For every check that a required value is present (a name in a list, a URL in a document, a token in output), compare whole values: each element on its own, or a pattern anchored at both ends of a complete token. Never test a substring of a joined string or the prefix of a longer token. Test with a longer value that begins with the required one (x.sig, x?q=1) and with one element that holds two required values.
 <!-- adb:checklist:end -->
 
 ## Hits
@@ -447,4 +448,12 @@ One line per resolved review thread, newest last.
 - `contract-not-honoured` `test/run.sh:4222` `0d77c9e` `PRRT_kwDOUT7q9s6iVkNK` PR #4 2026-09-15 — leftovers were deduplicated by whole line, so one pid sampled under two etime identities was counted twice
 - `contract-not-honoured` `test/run.sh:64` `0d77c9e` `PRRT_kwDOUT7q9s6iVkNN` PR #4 2026-09-15 — wait_gone followed a pid by number only, so a reused number was waited on and then killed
 - `contract-not-honoured` `docs/integrating.md:146` `c10898d` `PRRT_kwDOUT7q9s6ppW5a` PR #11 2026-10-06 — doc said the full-name witness ties a ShellSpec verdict to its example; a selected example whose full name contains the witness can kill the row
+- `host-shell-option-leak` `scripts/release.sh:43` `9ef0fb1` `PRRT_kwDOUT7q9s6pywG0` PR #14 2026-10-07 — exported SHELLOPTS acted before the driver's option reset: xtrace traced the origin URL, noexec exited 0 doing nothing
+- `unanchored-match` `scripts/release.sh:154` `9ef0fb1` `PRRT_kwDOUT7q9s6pywG2` PR #14 2026-10-07 — the install-URL extraction took the shmutant.sh prefix of a longer URL such as shmutant.sh.sig
+- `contract-not-honoured` `scripts/release.sh:299` `9ef0fb1` `PRRT_kwDOUT7q9s6pywG4` PR #14 2026-10-07 — --verify exited 1, not the documented 2, when it could not hash for want of a digest tool
+- `stale-artifact-reuse` `scripts/release.sh:380` `9ef0fb1` `PRRT_kwDOUT7q9s6pywG8` PR #14 2026-10-07 — the printed hand-finish uploaded working-tree files rather than the checked commit's blobs
+- `check-then-act-race` `scripts/release.sh:389` `9ef0fb1` `PRRT_kwDOUT7q9s6pywG_` PR #14 2026-10-07 — the tag was pushed without re-reading that origin's main still named the checked commit
+- `unanchored-match` `scripts/release.sh:400` `0282f6a` `PRRT_kwDOUT7q9s6qAShj` PR #14 2026-10-07 — required asset names were tested as substrings of a space-joined list, so one oddly named asset passed for both
+- `privilege-dependent-check` `test/release.sh:1064` `0282f6a` `PRRT_kwDOUT7q9s6qAShp` PR #14 2026-10-07 — tests simulated read failures with chmod 000, which uid 0 reads through
+- `contract-not-honoured` `scripts/release.sh:341` `bb7e621` `PRRT_kwDOUT7q9s6qD3K1` PR #14 2026-10-07 — the version grep's failure status was ignored, so a failed search read as a missing assignment (exit 1) instead of exit 2
 <!-- adb:hits:end -->

@@ -163,10 +163,12 @@ bash test/run.sh                      # the suite: every `t_*` unit, one at a ti
 bash shmutant.sh run test/mutants.sh  # the suite, mutation-tested by shmutant itself
 bash test/adapters/check.sh bats      # the doc's Bats adapter, on its fixture
 bash test/adapters/check.sh shellspec # the same for ShellSpec
+bash test/release.sh                  # the release driver, against a local origin with gh stubbed
 ```
 
-The last two need the framework on `PATH` at the version CI pins (`BATS_VERSION`,
-`SHELLSPEC_VERSION` in `.github/workflows/ci.yml`), which is the version the doc names.
+The two adapter checks need the framework on `PATH` at the version CI pins (`BATS_VERSION`,
+`SHELLSPEC_VERSION` in `.github/workflows/ci.yml`), which is the version the doc names. The
+release test needs `git` and `jq`.
 
 The second command is the tool's own proof: every guard in `shmutant.sh` is broken in a clone
 and the unit that claims to cover it must go red. If `shmutant` could not mutation-test its own
@@ -191,3 +193,22 @@ name `ps`: its baseline aborts, every row is scored `baseline`, and it exits 1. 
 admin-required, by turning unsandboxed retries off in managed settings or with `--settings`,
 ignores this repository's exclusion. The exclusion runs whatever `test/run.sh` and the
 `shmutant.sh` it sources hold at the time with your full access.
+
+## Releasing
+
+The maintainer cuts a release with the project's `/release` skill
+([.claude/skills/release/SKILL.md](.claude/skills/release/SKILL.md)), which drives
+`scripts/release.sh`. To check a cut without making it:
+
+```sh
+env -u SHELLOPTS -u BASHOPTS -u BASH_ENV bash scripts/release.sh --dry-run 0.1.0
+```
+
+The `env -u` keeps shell options exported by the caller (such as `noexec`, which makes any bash
+script exit 0 without running) from reaching the driver, and a run counts as passed only when its
+last line says so, not on exit 0 alone.
+
+The driver refuses unless a clean `main` at origin's head is green in CI and carries the version
+being cut. It then tags that commit, publishes the GitHub release with `shmutant.sh` and
+`CHECKSUMS` attached, and verifies that the install URL in `docs/integrating.md` serves the digest
+in `CHECKSUMS`. The script's header lists every check.
