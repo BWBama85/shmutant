@@ -77,3 +77,12 @@
 - placement: agents.toml [roles]
 - reason:    the owner's call: an independent reviewer should have been configured from the start. The first codex sweep on PR #14 succeeded.
 - baseline-issue: n/a (role assignment is per project; the global manifest is left unchanged)
+
+## D7 — a unit ends a blocked background pool by process group, never by the subshell's pid
+- date:      2026-10-07
+- category:  project-delta
+- unknown:   the `macos` job failed `self-mutation` on PR #14 twice (runs 37653275109 and 37690037322): the row 'the prepared root is read back by path after prepare' aborted with `exited 129, not 1`. Its witness, `t_prepare_cannot_redirect_its_own_capture`, ended its blocked pool by killing only the subshell. That stranded the command-substitution fork (adopted by launchd) and its `cat` in the suite's own process group, and the suite's sweep then froze both and KILLed them in one `kill`, the fork first. On macOS a process group in launchd's session is treated as newly orphaned when a member whose parent is launchd exits. If another member is still stopped at that moment, the kernel sends SIGHUP and SIGCONT to the whole group, which here held the suite and shmutant's run wrapper. Run as a launchd job (session 1), a model of this ends with status 129; with the sweep's kills spaced out, the real row aborts 3 runs out of 3, and the same copy run in an ordinary session is killed. The CI captures end exactly where the reproduction does, after the sweep's "left behind" listing.
+- decision:  a unit that backgrounds a pool which may block starts it under `set -m` and ends it with `kill -KILL -- -<pid>`, as the units at the top of the pool section already did. Applied to `t_prepare_cannot_redirect_its_own_capture` and `t_verdict_timeout_without_an_identity`, the two units that killed only the subshell.
+- placement: test/run.sh
+- reason:    the strand is the cause the suite owns: a unit that leaves nothing behind gives the sweep nothing to freeze. With the fix, the reproduction that aborted 3 of 3 is killed 3 of 3 with nothing swept. Still open: the sweep freezes leftovers inside its own group, so a future unit that strands two or more processes, one adopted by launchd, can bring the same SIGHUP; no such unit is known.
+- baseline-issue: n/a

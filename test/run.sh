@@ -2287,10 +2287,12 @@ t_prepare_cannot_redirect_its_own_capture() {
   # prepare turns every capture-shaped name in the workdir into a FIFO: reading the root by
   # path afterwards would block forever, before any per-run bound exists
   fifo_prepare() { toy_prepare "$1"; local f; for f in "$1"/../.prepare.*; do [ -e "$f" ] && rm -f "$f" && mkfifo "$f"; done; mkfifo "$1/../.prepare.planted"; }
-  ( SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd" fifo_prepare toy_run > "$T/out" 2>&1; touch "$T/pool-done" ) &
-  local bg=$! i=0
+  # A blocked pool is ended as a whole process group: its blocked reader must not be left in the
+  # suite's own group for the sweep to freeze and kill there (D7).
+  set -m; ( SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd" fifo_prepare toy_run > "$T/out" 2>&1; touch "$T/pool-done" ) &
+  local bg=$! i=0; set +m
   until [ -e "$T/pool-done" ]; do i=$((i + 1)); [ "$i" -lt 100 ] || break; sleep 0.1; done
-  if [ ! -e "$T/pool-done" ]; then kill "$bg" 2>/dev/null; wait "$bg" 2>/dev/null; fail_ 'the pool blocked reading a capture prepare had replaced with a FIFO'; return; fi
+  if [ ! -e "$T/pool-done" ]; then kill -KILL -- -"$bg" 2>/dev/null; wait "$bg" 2>/dev/null; fail_ 'the pool blocked reading a capture prepare had replaced with a FIFO'; return; fi
   wait "$bg" 2>/dev/null
   has "$(cat "$T/out")" 'killed' 'the pool ran to its verdict'
 }
@@ -2756,12 +2758,14 @@ t_verdict_timeout_without_an_identity() {
   slow_run() { bash -c "sleep 6; touch '$T/finished'"; }
   # No identity can be read for the wrapper (no usable ps): the root is still the runner's own
   # unreaped child, and the bound must still end it rather than wait forever.
+  # A pool that never returns is ended as a whole process group (D7).
+  set -m
   ( _shmutant_identity() { return 1; }; _shmutant_identity_table() { SHMUTANT_START=(); }; _shmutant_descendants() { :; }
     SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=1 shmutant_pool lbl "$T/wd" toy_prepare slow_run > "$T/out" 2>&1
     touch "$T/pool-done" ) &
-  local bg=$!
+  local bg=$!; set +m
   local i=0; until [ -e "$T/pool-done" ]; do i=$((i + 1)); [ "$i" -lt 150 ] || break; sleep 0.1; done
-  if [ ! -e "$T/pool-done" ]; then kill "$bg" 2>/dev/null; wait "$bg" 2>/dev/null; fail_ 'without an identity the timeout never ended the run'; return; fi
+  if [ ! -e "$T/pool-done" ]; then kill -KILL -- -"$bg" 2>/dev/null; wait "$bg" 2>/dev/null; fail_ 'without an identity the timeout never ended the run'; return; fi
   wait "$bg" 2>/dev/null
   has "$(cat "$T/out")" 'timeout' 'the verdict is timeout'
   sleep 6
