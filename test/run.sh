@@ -3890,7 +3890,7 @@ t_suite_sweeps_what_a_unit_leaves_behind() {
 main "\$@"
 EOF
   } > "$T/suite/test/run.sh"
-  local out c pid
+  local out c pid hold
   for c in leaks leaks_then_exits reparents; do
     out="$(SHMUTANT_SELECT="t_zz_$c" bash "$T/suite/test/run.sh" 2>&1)"; rc_is $? 1 "t_zz_$c leaves a process behind and fails the suite"
     has "$out" "FAIL: t_zz_$c: 1 process(es) outlived the unit" "t_zz_$c is named with the count"
@@ -3998,6 +3998,25 @@ EOF
   [ -n "$pid" ] || fail_ "the slow-sampler unit never left its process, so its handshake with the sampler did not complete: [$out]"
   command -p grep -qx released "$T/late_reparents.log" 2>/dev/null || fail_ "the slow-sampler read held for the test never saw the unit end: [$out]"
   [ -z "$pid" ] || { kill -KILL "$pid" 2>/dev/null; wait_gone "$pid"; }
+  # Both again with every write of the sampler failing (its output opened read-only): an unverified
+  # it owes but cannot write fails the unit, never reads as a clean sample.
+  mkdir -p "$T/suite-nowrite/test"
+  cp -- "$SHMUTANT" "$T/suite-nowrite/shmutant.sh"
+  { sed '$d' "$T/suite/test/run.sh"
+    printf '%s\n' 'eval "_real_identity() $(declare -f _shmutant_identity | sed 1d)"' \
+      'eval "_real_sample_unit() $(declare -f sample_unit | sed 1d)"' \
+      'sample_unit() { _real_sample_unit "$@" 1< /dev/null; }' \
+      '_shmutant_identity() { if [ "${FUNCNAME[1]}" = _real_sample_unit ]; then late_identity "$LATE_HOLD" "$1"; else _real_identity "$@"; fi; }' 'main "$@"'
+  } > "$T/suite-nowrite/test/run.sh"
+  for hold in 11 2; do
+    rm -f "$T/late_reparents.pid" "$T/late_reparents.flag" "$T/late_reparents.log" || { fail_ 'could not reset the unwritable-sampler records'; return; }
+    out="$(LATE_HOLD="$hold" SHMUTANT_SELECT=t_zz_late_reparents bash "$T/suite-nowrite/test/run.sh" 2>&1)"; rc_is $? 1 "a sampler that cannot write the unverified owed after read $hold fails the unit"
+    has "$out" 'FAIL: t_zz_late_reparents: the descendant sampler stopped abnormally (status 1)' "and says so after read $hold"
+    pid="$(cat "$T/late_reparents.pid" 2>/dev/null)"
+    [ -n "$pid" ] || fail_ "the unwritable-sampler unit (read $hold) never left its process, so its handshake with the sampler did not complete: [$out]"
+    command -p grep -qx released "$T/late_reparents.log" 2>/dev/null || fail_ "the unwritable-sampler read $hold, held for the test, never saw the unit end: [$out]"
+    [ -z "$pid" ] || { kill -KILL "$pid" 2>/dev/null; wait_gone "$pid"; }
+  done
   # A unit that cannot read its own identity hands the sampler nothing to check; a sampler that
   # then starts only after the unit has ended records nothing either. The unit itself says so.
   mkdir -p "$T/suite-noid/test"
@@ -4296,7 +4315,8 @@ unit_snapshot() {
 # attached when it ends. Both run the shmutant.sh the suite sourced, so in a mutation row they use
 # the mutated primitives; the outer pool's own cleanup still ends that row's leftovers.
 # Returns 3 when the unit is still running but its identity cannot be read, so nothing could be
-# sampled; a unit already gone by then has nothing to sample, and that is not a failure.
+# sampled; a unit already gone by then has nothing to sample, and that is not a failure. Returns 1
+# when it cannot write an `unverified` its retries owe.
 sample_unit() {
   local up uid="" id="" now="" i
   # The unit sends its pid with the identity it read for itself: a number reused by the time this
@@ -4317,12 +4337,12 @@ sample_unit() {
     now="$(_shmutant_identity "$up")" || now=""
     for (( i = 0; i < 10 && ${#now} == 0; i++ )); do
       # Past the first pass, a read already failed while the unit ran: what it did since is unverified.
-      kill -0 "$up" 2>/dev/null || { [ "$i" -eq 0 ] || printf 'unverified\n'; return 0; }
+      kill -0 "$up" 2>/dev/null || { [ "$i" -eq 0 ] || printf 'unverified\n' || return 1; return 0; }
       command -p sleep 0.05
       now="$(_shmutant_identity "$up")" || now=""
     done
     # Spent retries are all past the first pass: unverified, whether or not the unit has ended since.
-    if [ -z "$now" ]; then printf 'unverified\n'; return 0; fi
+    if [ -z "$now" ]; then printf 'unverified\n' || return 1; return 0; fi
     _shmutant_same_start "$now" "$id" || return 0
     unit_snapshot "$up"
     IFS= read -t 0.5 -r _ <&"$1" && break
