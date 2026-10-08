@@ -36,7 +36,7 @@
 # must be able to push to it. Needs git, gh, curl, the POSIX text tools, and sha256sum, shasum or
 # openssl. Git over HTTPS and gh never prompt: credentials come from a credential helper or gh's
 # login, no askpass program is run, and a missing credential fails instead of waiting. The caller's
-# exported functions and aliases, its GIT_* repository, git's tracing variables, git replacement
+# exported functions and aliases, its IFS, its GIT_* repository, git's tracing variables, git replacement
 # objects and GH_HOST, and the shell options that change what a command does (xtrace, verbose, keyword, allexport, errexit,
 # noclobber, pipefail, posix, nocasematch) are set aside before anything is read. A function
 # named after a builtin the setup itself calls (builtin, read, unset, declare) cannot be, nor can
@@ -53,6 +53,7 @@ while IFS=' ' builtin read -r _ _ _fn; do [[ -n $_fn ]] && builtin unset -f "$_f
 $(builtin declare -F)
 EOF
 unset CDPATH
+IFS=$' \t\n'
 export LC_ALL=C GH_HOST=github.com GH_PROMPT_DISABLED=1 GIT_TERMINAL_PROMPT=0 GIT_NO_REPLACE_OBJECTS=1 \
   GIT_NO_LAZY_FETCH=1
 unset -v GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
@@ -457,7 +458,7 @@ verify() {
       die "could not download $raw_url in $i attempts (the last curl exit was $crc, and not every failure was an HTTP error)"
     fi
     say "downloading $raw_url failed (curl exit $crc, attempt $i of $attempts); retrying in ${pause}s"
-    sleep "$pause"
+    sleep "$pause" || die "cannot pause before the next download of $raw_url (sleep failed)"
   done
   got="$s_digest"
   if [ "$got" = "$digest" ]; then say "verified: $raw_url has the SHA-256 CHECKSUMS at $tag gives ($digest)"
@@ -611,6 +612,10 @@ ls="$(g ls-remote origin refs/heads/main)" || die "cannot read origin (git ls-re
 now="$(printf '%s\n' "$ls" | awk '$2 == "refs/heads/main" { print $1 }')" || die "cannot read origin's main (awk failed)"
 [ "$now" = "$remote" ] \
   || { err "origin's main moved from $remote to ${now:-nothing} since the checks; nothing was tagged. Re-run to check the new head."; exit 1; }
+# GitHub's too: origin's URL may lead to a mirror (url.insteadOf) that GitHub has moved ahead of.
+api="$(gh api "repos/$slug/git/ref/heads/main" --jq '.object.sha')" || die "cannot read $slug's main through the GitHub API; nothing was tagged"
+[ "$api" = "$remote" ] \
+  || { err "GitHub's main moved from $remote to ${api:-nothing} since the checks; nothing was tagged. Re-run to check the new head."; exit 1; }
 tagged=1
 g tag -a "$tag" "$remote" -m "shmutant $ver" || { err "could not create the tag $tag; nothing was pushed"; exit 1; }
 g push --no-follow-tags origin "refs/tags/$tag"; prc=$?
@@ -640,7 +645,7 @@ while :; do
   gt="$(github_tag)" || { err "pushed $tag, but $slug's tags cannot be read through the GitHub API."; finish_by_hand; exit 2; }
   i=$((i + 1))
   [ -z "$gt" ] && [ "$i" -lt "$ref_reads" ] || break
-  sleep "$ref_pause"
+  sleep "$ref_pause" || { err "pushed $tag, but cannot pause before reading $slug's tags again (sleep failed)."; finish_by_hand; exit 2; }
 done
 if [ -z "$gt" ]; then
   err "origin has $tag, but GitHub's API does not show it on $slug after $i reads: origin's URL may lead somewhere else (a url.insteadOf mirror), or GitHub has not caught up. Nothing was published."
@@ -653,10 +658,13 @@ elif [ "$gt" != "$remote" ]; then
 fi
 say "pushed $tag, naming $remote, on origin and on GitHub"
 
-mkdir -- "$made/assets" && assets_id="$(inode_of "$made/assets")" \
-  && : > "$made/assets/shmutant.sh" && sh_id="$(inode_of "$made/assets/shmutant.sh")" \
-  && : > "$made/assets/CHECKSUMS" && ck_id="$(inode_of "$made/assets/CHECKSUMS")" \
-  || { err "could not write the release assets from $tag"; finish_by_hand; exit 1; }
+# Each inode is read as soon as its file exists: a write that fails is exit 1, a read that fails 2.
+mkdir -- "$made/assets" || { err "could not write the release assets from $tag"; finish_by_hand; exit 1; }
+assets_id="$(inode_of "$made/assets")" || { err "cannot read the inode of $made/assets"; finish_by_hand; exit 2; }
+: > "$made/assets/shmutant.sh" || { err "could not write the release assets from $tag"; finish_by_hand; exit 1; }
+sh_id="$(inode_of "$made/assets/shmutant.sh")" || { err "cannot read the inode of $made/assets/shmutant.sh"; finish_by_hand; exit 2; }
+: > "$made/assets/CHECKSUMS" || { err "could not write the release assets from $tag"; finish_by_hand; exit 1; }
+ck_id="$(inode_of "$made/assets/CHECKSUMS")" || { err "cannot read the inode of $made/assets/CHECKSUMS"; finish_by_hand; exit 2; }
 for a in shmutant.sh CHECKSUMS; do
   want="$(g rev-parse --verify --quiet "$remote:$a")" \
     || { err "cannot read $a at $remote"; finish_by_hand; exit 2; }

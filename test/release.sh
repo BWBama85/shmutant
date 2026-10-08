@@ -142,6 +142,11 @@ case "${a[0]:-} ${a[1]:-}" in
     # $STUB/advance-main holds a commit origin's main moves to once the releases are listed: the
     # last read of the checks, so a cut sees main move between its checks and its tag.
     [ ! -e "$STUB/advance-main" ] || git -C "$STUB/origin.git" update-ref refs/heads/main "$(cat "$STUB/advance-main")" || exit 1
+    # $STUB/advance-api-main: at the same point GitHub's main, as the API reports it, moves there
+    # while origin's stays (origin's URL leading to a mirror).
+    [ ! -e "$STUB/advance-api-main" ] || cp -- "$STUB/advance-api-main" "$STUB/api-main" || exit 1
+    # $STUB/api-main.fail-later: from the same point, reads of GitHub's main fail.
+    [ ! -e "$STUB/api-main.fail-later" ] || : > "$STUB/api-main.fail" || exit 1
     draft=false; [ ! -e "$STUB/release.draft" ] || draft=true
     as="$(ls -1 -- "$STUB/release" 2> /dev/null | jq -Rn '[inputs | {name: .}]')" || exit 1
     ls -- "$STUB/published" | jq -Rn --argjson d "$draft" --argjson as "$as" \
@@ -248,6 +253,8 @@ EOF
 cat > "$tmp/bin/sleep" <<'EOF'
 #!/usr/bin/env bash
 printf 'sleep %s\n' "$*" >> "$STUB/events"
+# $STUB/sleep.fail: the pause cannot run.
+[ ! -e "$STUB/sleep.fail" ] || exit 1
 EOF
 
 cat > "$tmp/bin/rm" <<'EOF'
@@ -1101,6 +1108,45 @@ c_refuses_to_tag_when_main_moves_after_the_checks() {
   published_nothing "main moved"
 }
 
+c_refuses_to_tag_when_githubs_main_moves_after_the_checks() {
+  echo 0123456789012345678901234567890123456789 > "$S/advance-api-main"
+  rel "$VER"
+  rc_is "$rc" 1 "GitHub's main moves between the checks and the tag, origin's does not"
+  has "$err" "GitHub's main moved from" "says so"
+  has "$err" "nothing was tagged" "and that nothing was"
+  published_nothing "GitHub's main moved"
+  rm -f -- "$S/advance-api-main" "$S/api-main"; : > "$S/api-main.fail-later"
+  rel "$VER"
+  rc_is "$rc" 2 "GitHub's main cannot be read again before the tag"
+  has "$err" "cannot read $SLUG's main through the GitHub API; nothing was tagged" "says so"
+  published_nothing "GitHub's main unreadable"
+}
+
+c_reads_an_inode_whatever_ifs_the_caller_set() {
+  # The driver's own shell only: BASH_ENV reaches every bash, the stubs included.
+  printf '[ "${0##*/}" != release.sh ] || IFS=:\n' > "$S/ifs.sh"
+  rele BASH_ENV="$S/ifs.sh" -- "$VER"
+  rc_is "$rc" 0 "the cut, with IFS=: set before the driver runs"
+}
+
+c_a_pause_that_cannot_run_exits_2() {
+  : > "$S/sleep.fail"
+  echo 1 > "$S/curl.404s"
+  rel "$VER"
+  rc_is "$rc" 2 "a retry of the download cannot pause"
+  has "$err" "cannot pause before the next download" "says so"
+}
+
+c_a_pause_between_tag_reads_that_cannot_run_exits_2() {
+  : > "$S/sleep.fail"
+  echo none > "$S/github-tag"
+  rel "$VER"
+  rc_is "$rc" 2 "a re-read of GitHub's tags cannot pause"
+  has "$err" "cannot pause before reading $SLUG's tags again" "says so"
+  has "$err" "to finish the release of $TAG by hand" "and how to finish"
+  hasnt "$(events)" "gh release create" "nothing was published"
+}
+
 c_refuses_a_version_that_is_not_a_plain_assignment() {
   printf '#!/usr/bin/env bash\nSHMUTANT_VERSION="%s'"'"'\n' "$VER" > "$c/shmutant.sh"; checksum "$c"; land "$c" mismatched-quotes
   rel --dry-run "$VER"
@@ -1491,15 +1537,20 @@ c_an_unreadable_inode_stops_the_cut_before_the_tag() {
   published_nothing "an inode ls did not read"
 }
 
-c_an_unreadable_asset_inode_stops_before_the_release() {
+# asset_inode_unreadable <path under the run's directory> — a cut whose ls cannot read that path's
+# inode, once the tag is pushed: a failed read, so exit 2, with the way to finish and no release.
+asset_inode_unreadable() {
   mkdir -p "$S/tmp"
-  failbox "$S/i2" ls 1 '-di -- */assets'
-  TMPDIR="$S/tmp" relf "$S/i2" "$VER"
-  rc_is "$rc" 1 "the assets directory has no readable inode"
-  has "$err" "could not write the release assets from $TAG" "says so"
+  failbox "$S/ia" ls 1 "-di -- */$1"
+  TMPDIR="$S/tmp" relf "$S/ia" "$VER"
+  rc_is "$rc" 2 "$1 has no readable inode"
+  has "$err" "cannot read the inode of $S/tmp/release." "says so"
   has "$err" "to finish the release of $TAG by hand" "and how to finish"
   hasnt "$(events)" "gh release create" "no release was created"
 }
+c_an_unreadable_assets_directory_inode_exits_2() { asset_inode_unreadable assets; }
+c_an_unreadable_shmutant_sh_asset_inode_exits_2() { asset_inode_unreadable assets/shmutant.sh; }
+c_an_unreadable_checksums_asset_inode_exits_2() { asset_inode_unreadable assets/CHECKSUMS; }
 
 c_ignores_the_callers_shallow_file() {
   printf 'not a commit id\n' > "$S/bad"

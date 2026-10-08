@@ -14,8 +14,10 @@ what each precondition is, what it publishes and how it verifies.
 
 ## Steps
 
-1. **The version.** Use the argument. Without one, propose the version `bash shmutant.sh version`
-   prints and have the operator confirm it in step 3. The driver refuses a version that
+1. **The version.** Use the argument. Without one, propose the version on the
+   `SHMUTANT_VERSION=` line of `shmutant.sh` (`grep '^SHMUTANT_VERSION=' shmutant.sh`; read as text,
+   as the driver reads it, since running `shmutant.sh` needs bash 5.3 and the driver does not) and
+   have the operator confirm it in step 3. The driver refuses a version that
    `SHMUTANT_VERSION` in `shmutant.sh` does not carry, or that the install URL in
    `docs/integrating.md` does not name. Bumping both, and regenerating `CHECKSUMS`, is an ordinary
    pull request that lands before the cut.
