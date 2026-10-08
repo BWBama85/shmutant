@@ -3877,7 +3877,7 @@ t_suite_sweeps_what_a_unit_leaves_behind() {
       n="\$(command -p grep -cx failed '$T/late_reparents.log')"
       if [ "\$n" = "\$1" ]; then
         printf 'stalled\n' >> '$T/late_reparents.log'
-        for (( i = 0; i < 200; i++ )); do kill -0 "\$2" 2>/dev/null || break; command -p sleep 0.05; done
+        for (( i = 0; i < 200; i++ )); do kill -0 "\$2" 2>/dev/null || { printf 'released\n' >> '$T/late_reparents.log'; break; }; command -p sleep 0.05; done
       fi
       return 1
     fi
@@ -3967,8 +3967,9 @@ EOF
   # An identity the sampler can no longer read later in the unit is retried, then recorded as
   # unverified: a sampler that stopped silently would miss what the rest of the unit leaves behind.
   # No sleep times it: the sampler's reads are logged, the unit flags itself once the sampler is in
-  # its loop, and it leaves its process once the sampler is held in the flagged read under test,
-  # which lasts until the unit has ended. Here that is the 11th, the first read and all ten retries.
+  # its loop, and it leaves its process once the sampler is held in the flagged read under test. That
+  # read logs `released` only once it has seen the unit end, and each case requires the line: a hold
+  # that expired with the unit alive tests nothing. Here it is the 11th, the first and ten retries.
   mkdir -p "$T/suite-latesampler/test"
   cp -- "$SHMUTANT" "$T/suite-latesampler/shmutant.sh"
   { sed '$d' "$T/suite/test/run.sh"
@@ -3980,6 +3981,7 @@ EOF
   has "$out" 'FAIL: t_zz_late_reparents: the process table could not be read' 'and its leftovers are reported unverified'
   pid="$(cat "$T/late_reparents.pid" 2>/dev/null)"
   [ -n "$pid" ] || fail_ "the late-sampler unit never left its process, so its handshake with the sampler did not complete: [$out]"
+  command -p grep -qx released "$T/late_reparents.log" 2>/dev/null || fail_ "the late-sampler read held for the test never saw the unit end: [$out]"
   [ -z "$pid" ] || { kill -KILL "$pid" 2>/dev/null; wait_gone "$pid"; }
   # The same, held in the second read (a loaded host): the unit ends while the sampler is still
   # retrying, and a read that already failed while it ran leaves the rest of it unverified.
@@ -3994,6 +3996,7 @@ EOF
   has "$out" 'FAIL: t_zz_late_reparents: the process table could not be read' 'and its leftovers are reported unverified'
   pid="$(cat "$T/late_reparents.pid" 2>/dev/null)"
   [ -n "$pid" ] || fail_ "the slow-sampler unit never left its process, so its handshake with the sampler did not complete: [$out]"
+  command -p grep -qx released "$T/late_reparents.log" 2>/dev/null || fail_ "the slow-sampler read held for the test never saw the unit end: [$out]"
   [ -z "$pid" ] || { kill -KILL "$pid" 2>/dev/null; wait_gone "$pid"; }
   # A unit that cannot read its own identity hands the sampler nothing to check; a sampler that
   # then starts only after the unit has ended records nothing either. The unit itself says so.
