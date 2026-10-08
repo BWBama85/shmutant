@@ -19,12 +19,23 @@ for t in git jq; do
   command -v "$t" > /dev/null || { echo "test/release.sh: $t is not on PATH" >&2; exit 2; }
 done
 root="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)" || exit 2
-made="$(mktemp -d "${TMPDIR:-/tmp}/release-test.XXXXXX")" || exit 2
-tmp="$(cd -P -- "$made" && pwd -P)" || exit 2
-tmp_id="$(ls -di -- "$tmp" | awk '{ print $1 }')" || exit 2
-# The physical directory, and only while it keeps the inode it was made with.
-trap '[ "$(ls -di -- "$tmp" 2> /dev/null | awk "{ print \$1 }")" = "$tmp_id" ] && rm -rf -- "$tmp" \
-  || echo "test/release.sh: left $tmp in place" >&2' EXIT
+# ino <path> — the inode of <path> itself; status 1, printing nothing, when ls cannot read it.
+ino() {
+  local out id
+  out="$(ls -di -- "$1" 2> /dev/null)" || return 1
+  read -r id _ <<< "$out"
+  case "$id" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$id"
+}
+# Made under the physical TMPDIR, so its name is final when mktemp returns. It is removed only
+# while it keeps the inode read just after; until that inode is read, only an empty directory there.
+base="$(cd -P -- "${TMPDIR:-/tmp}" && pwd -P)" || exit 2
+tmp="$(mktemp -d "$base/release-test.XXXXXX")" || exit 2
+tmp_id=""
+trap 'if [ -z "$tmp_id" ]; then rmdir -- "$tmp" 2> /dev/null || echo "test/release.sh: left $tmp in place" >&2
+  elif id="$(ino "$tmp")" && [ "$id" = "$tmp_id" ]; then rm -rf -- "$tmp"
+  else echo "test/release.sh: left $tmp in place" >&2; fi' EXIT
+tmp_id="$(ino "$tmp")" || exit 2
 
 SLUG=shmutant-test/fixture
 VER=1.2.3
@@ -798,7 +809,13 @@ c_failed_release_create_prints_the_way_to_finish() {
 }
 
 c_the_printed_hand_finish_publishes_the_tagged_assets() {
-  local cmd
+  local cmd a orig repl
+  # A replacement for each asset's blob in the checkout: the printed steps must not write them.
+  for a in shmutant.sh CHECKSUMS; do
+    orig="$(git -C "$c" rev-parse "HEAD:$a")"
+    repl="$( { cat "$c/$a"; echo '# replaced'; } | git -C "$c" hash-object -w --stdin)" || exit 2
+    git -C "$c" replace "$orig" "$repl" || exit 2
+  done
   : > "$S/create.fail"
   rel "$VER"
   rc_is "$rc" 1 "gh release create fails"
@@ -1428,6 +1445,66 @@ relf() {
   (cd -- "$c" && PATH="$box:$tmp/bin:$PATH" STUB="$S" SLUG="$SLUG" bash scripts/release.sh "$@") > "$S/out" 2> "$S/err"
   rc=$?
   out="$(cat "$S/out")"; err="$(cat "$S/err")"
+}
+
+# trbox <dir> <input> fail|empty — <dir> holding a tr that, given exactly <input> on stdin, exits 1
+# (fail) or prints nothing and exits 0 (empty), and is the real tr otherwise.
+trbox() {
+  mkdir -p "$1" || exit 2
+  printf '#!/usr/bin/env bash\nf="$(mktemp %q)" || exit 2\ncat > "$f"\nif [ "$(cat "$f")" = %q ]; then rm -f -- "$f"; [ %q = empty ] && exit 0; echo "tr: injected failure" >&2; exit 1; fi\n%q "$@" < "$f"; s=$?; rm -f -- "$f"; exit "$s"\n' \
+    "$1/in.XXXXXX" "$2" "$3" "$(command -v tr)" > "$1/tr" && chmod +x "$1/tr" || exit 2
+}
+
+c_a_failed_lower_case_exits_2_and_never_matches() {
+  trbox "$S/t1" "$SLUG" fail
+  relf "$S/t1" --dry-run "$VER"; rc_is "$rc" 2 "origin's name"; has "$err" "cannot lower-case origin's repository name" "says so"
+  trbox "$S/t2" "$SLUG" empty
+  relf "$S/t2" --dry-run "$VER"; rc_is "$rc" 2 "origin's name, lower-cased to nothing"; has "$err" "cannot lower-case origin's repository name" "says so"
+  # Names in another case than origin's, so that only their own lower-casing fails.
+  git -C "$c" config remote.origin.pushurl "git@github.com:SHMUTANT-TEST/FIXTURE.git"
+  rel --dry-run "$VER"; rc_is "$rc" 0 "a push URL naming origin's repository in capitals"
+  trbox "$S/t3" SHMUTANT-TEST/FIXTURE fail
+  relf "$S/t3" --dry-run "$VER"; rc_is "$rc" 2 "a push URL's name"; has "$err" "cannot lower-case a push URL's repository name" "says so"
+  git -C "$c" config --unset remote.origin.pushurl
+  echo "https://raw.githubusercontent.com/Shmutant-Test/fixture/$TAG/shmutant.sh" > "$c/docs/integrating.md"
+  land "$c" doc-in-capitals
+  rel --dry-run "$VER"; rc_is "$rc" 0 "an install URL naming origin's repository in capitals"
+  trbox "$S/t4" Shmutant-Test/fixture fail
+  relf "$S/t4" --dry-run "$VER"; rc_is "$rc" 2 "the install URL's name"
+  has "$err" "cannot lower-case the repository name in docs/integrating.md's URL" "says so"
+}
+
+c_an_unreadable_inode_stops_the_cut_before_the_tag() {
+  mkdir -p "$S/tmp"
+  failbox "$S/i1" ls 1 '-di -- *'
+  TMPDIR="$S/tmp" relf "$S/i1" "$VER"
+  rc_is "$rc" 2 "the run's directory has no readable inode"
+  has "$err" "cannot read the inode of the temporary directory" "says so"
+  published_nothing "an unreadable inode"
+  for d in "$S"/tmp/release.*; do [ ! -e "$d" ] || fail_ "left $d behind"; done
+  # An ls that prints an inode but fails, and one that succeeds but prints no inode.
+  mkdir -p "$S/i3" "$S/i4" || exit 2
+  printf '#!/bin/sh\necho "1 $3"\nexit 1\n' > "$S/i3/ls"; printf '#!/bin/sh\necho "x $3"\n' > "$S/i4/ls"
+  chmod +x "$S/i3/ls" "$S/i4/ls" || exit 2
+  TMPDIR="$S/tmp" relf "$S/i3" "$VER"; rc_is "$rc" 2 "ls fails after printing an inode"
+  TMPDIR="$S/tmp" relf "$S/i4" "$VER"; rc_is "$rc" 2 "ls prints no inode"
+  published_nothing "an inode ls did not read"
+}
+
+c_an_unreadable_asset_inode_stops_before_the_release() {
+  mkdir -p "$S/tmp"
+  failbox "$S/i2" ls 1 '-di -- */assets'
+  TMPDIR="$S/tmp" relf "$S/i2" "$VER"
+  rc_is "$rc" 1 "the assets directory has no readable inode"
+  has "$err" "could not write the release assets from $TAG" "says so"
+  has "$err" "to finish the release of $TAG by hand" "and how to finish"
+  hasnt "$(events)" "gh release create" "no release was created"
+}
+
+c_ignores_the_callers_shallow_file() {
+  printf 'not a commit id\n' > "$S/bad"
+  rele GIT_SHALLOW_FILE="$S/bad" -- --dry-run "$VER"
+  rc_is "$rc" 0 "a caller's malformed shallow file"
 }
 
 c_exits_2_when_a_read_fails_rather_than_finds_nothing() {

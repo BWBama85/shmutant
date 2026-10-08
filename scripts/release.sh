@@ -56,7 +56,7 @@ unset CDPATH
 export LC_ALL=C GH_HOST=github.com GH_PROMPT_DISABLED=1 GIT_TERMINAL_PROMPT=0 GIT_NO_REPLACE_OBJECTS=1 \
   GIT_NO_LAZY_FETCH=1
 unset -v GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
-  GIT_COMMON_DIR GIT_NAMESPACE "${!GIT_TRACE@}" GIT_CURL_VERBOSE
+  GIT_COMMON_DIR GIT_NAMESPACE GIT_SHALLOW_FILE "${!GIT_TRACE@}" GIT_CURL_VERBOSE
 export GIT_TRACE2=0 GIT_TRACE2_EVENT=0 GIT_TRACE2_PERF=0 GIT_ASKPASS=false
 
 # Downloads of the raw URL before --verify gives up, and the pause between them: a new tag can
@@ -100,7 +100,8 @@ top="$(g rev-parse --show-toplevel 2> /dev/null)" && top="$(cd -P -- "$top" && p
   || die "$root is not a git work tree"
 [ "$top" = "$root" ] || die "scripts/release.sh is not at the top of its work tree ($top)"
 
-lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+# lower <s> — <s> in lower case; status 1 when tr fails or prints nothing for a non-empty <s>.
+lower() { local l; l="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" && [ -n "$l" ] && printf '%s\n' "$l"; }
 
 # slug_of <url> — the owner/repo a github.com HTTPS or SSH URL names; status 1 for any other URL.
 # HTTPS userinfo is held to characters that cannot end the host: git reads `/`, `?` or `#` as its
@@ -125,12 +126,14 @@ slug_of() {
 ourl="$(g config --get-all remote.origin.url)" || die "this checkout has no remote named origin"
 case "$ourl" in *$'\n'*) die "origin has more than one URL; give it one" ;; esac
 slug="$(slug_of "$ourl")" || die "origin's URL is not a github.com HTTPS or SSH repository URL"
+lslug="$(lower "$slug")" || die "cannot lower-case origin's repository name (tr failed)"
 pushurls="$(g config --get-all remote.origin.pushurl)"; rc=$?
 [ "$rc" -le 1 ] || die "cannot read origin's push URLs (git config exit $rc)"
 while IFS= read -r pu; do
   [ -n "$pu" ] || continue
-  pslug="$(slug_of "$pu")" && [ "$(lower "$pslug")" = "$(lower "$slug")" ] \
-    || die "a push URL of origin is not a github.com HTTPS or SSH URL of $slug"
+  pslug="$(slug_of "$pu")" || die "a push URL of origin is not a github.com HTTPS or SSH URL of $slug"
+  lpslug="$(lower "$pslug")" || die "cannot lower-case a push URL's repository name (tr failed)"
+  [ "$lpslug" = "$lslug" ] || die "a push URL of origin is not a github.com HTTPS or SSH URL of $slug"
 done <<EOF
 $pushurls
 EOF
@@ -208,7 +211,7 @@ checksums_digest() {
 # with why set, unless the doc names exactly one, of this repository at the tag $tag; 2 when the
 # doc cannot be read.
 doc_url() {
-  local doc urls docslug doctag rc re='^https://raw\.githubusercontent\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/([^/]+)/shmutant\.sh$'
+  local doc urls docslug ldocslug doctag rc re='^https://raw\.githubusercontent\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/([^/]+)/shmutant\.sh$'
   raw_url=""
   doc="$(blob "$1" docs/integrating.md)"; rc=$?
   [ "$rc" -eq 0 ] || { blob_why "$rc" "$1" docs/integrating.md; return "$rc"; }
@@ -232,7 +235,8 @@ doc_url() {
   esac
   [[ "$urls" =~ $re ]] || { why="docs/integrating.md's URL is not https://raw.githubusercontent.com/<owner>/<repo>/<tag>/shmutant.sh: $urls"; return 1; }
   docslug="${BASH_REMATCH[1]}"; doctag="${BASH_REMATCH[2]}"
-  [ "$(lower "$docslug")" = "$(lower "$slug")" ] \
+  ldocslug="$(lower "$docslug")" || { why="cannot lower-case the repository name in docs/integrating.md's URL (tr failed)"; return 2; }
+  [ "$ldocslug" = "$lslug" ] \
     || { why="docs/integrating.md's URL is for $docslug, but origin is $slug"; return 1; }
   [ "$doctag" = "$tag" ] \
     || { why="docs/integrating.md's URL installs $doctag, not $tag: point it at $tag before the cut"; return 1; }
@@ -508,12 +512,26 @@ interrupted() {
 # before; nothing closes that instant, as nothing in a shell can remove by inode. What it leaves, it reports. A cleanup failure does not change the status of a run
 # whose outcome is already decided; it is reported beside it.
 made=""; made_id=""; assets_id=""; sh_id=""; ck_id=""
-# inode_of <path> — the inode of <path> itself (not of a link's target), or nothing.
-inode_of() { [ ! -L "$1" ] && ls -di -- "$1" 2> /dev/null | awk '{ print $1 }'; }
+# inode_of <path> — the inode of <path> itself (not of a link's target); status 1, printing
+# nothing, for a link or when ls cannot read it.
+inode_of() {
+  local out id
+  [ ! -L "$1" ] || return 1
+  out="$(ls -di -- "$1" 2> /dev/null)" || return 1
+  read -r id _ <<EOF
+$out
+EOF
+  case "$id" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$id"
+}
 cleanup() {
   local f want id
   [ -n "$made" ] || return 0
-  if [ -z "$made_id" ] || [ "$(inode_of "$made")" != "$made_id" ]; then
+  if [ -z "$made_id" ]; then
+    rmdir -- "$made" 2> /dev/null || err "left $made in place: its inode was never read, so only an empty directory there is removed"
+    return 0
+  fi
+  if [ "$(inode_of "$made")" != "$made_id" ]; then
     err "left $made in place: it is no longer the directory this run made"; return 0
   fi
   if [ -n "${remote:-}" ] && [ -n "$assets_id" ] && [ "$(inode_of "$made/assets")" = "$assets_id" ]; then
@@ -549,6 +567,7 @@ newtmp() {
   trap 'interrupted 143' TERM
   [ -z "$pending" ] || interrupted "$pending"
   [ -n "$made" ] && [ -d "$made" ] || die "cannot create a temporary directory under ${TMPDIR:-/tmp}"
+  [ -n "$made_id" ] || die "cannot read the inode of the temporary directory $made"
 }
 
 if [ "$mode" = verify ]; then
@@ -578,8 +597,8 @@ create=(gh release create "$tag" -R "github.com/$slug" --verify-tag --title "shm
 finish_by_hand() {
   err "to finish the release of $tag by hand, once origin has the tag naming $remote: in an empty"
   err "directory, write the two assets from that commit, then run the step that applies there:"
-  err "  $(printf '%q ' git -C "$root" cat-file blob "$remote:shmutant.sh")> shmutant.sh"
-  err "  $(printf '%q ' git -C "$root" cat-file blob "$remote:CHECKSUMS")> CHECKSUMS"
+  err "  $(printf '%q ' git -C "$root" --no-replace-objects cat-file blob "$remote:shmutant.sh")> shmutant.sh"
+  err "  $(printf '%q ' git -C "$root" --no-replace-objects cat-file blob "$remote:CHECKSUMS")> CHECKSUMS"
   err "  see what exists:   $(printf '%q ' gh release view "$tag" -R "github.com/$slug")"
   err "  with no release:   $(printf '%q ' "${create[@]}")"
   err "  with a draft:      $(printf '%q ' gh release upload "$tag" -R "github.com/$slug" shmutant.sh CHECKSUMS --clobber)"
