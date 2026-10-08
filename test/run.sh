@@ -3869,7 +3869,23 @@ t_suite_sweeps_what_a_unit_leaves_behind() {
   t_zz_leaks() { set -m; sleep 30 > /dev/null 2>&1 & echo \$! > '$T/leaks.pid'; set +m; }
   t_zz_leaks_then_exits() { sleep 30 > /dev/null 2>&1 & echo \$! > '$T/leaks_then_exits.pid'; exit 0; }
   t_zz_reparents() { ( sleep 30 > /dev/null 2>&1 & echo \$! > '$T/reparents.pid'; sleep 2 ); sleep 0.3; }
-  t_zz_late_reparents() { sleep 1.2; printf '%s\n' "\$BASHPID" > '$T/late_reparents.flag'; ( sleep 30 > /dev/null 2>&1 & echo \$! > '$T/late_reparents.pid'; sleep 1 ); sleep 0.3; }
+  late_await() { local i; for (( i = 0; i < 200; i++ )); do command -p grep -qx "\$1" '$T/late_reparents.log' 2>/dev/null && return 0; sleep 0.05; done; fail_ "the sampler never logged \$1"; return 1; }
+  late_identity() {
+    local n i
+    if [ -s '$T/late_reparents.flag' ] && [ "\$2" = "\$(cat '$T/late_reparents.flag')" ]; then
+      printf 'failed\n' >> '$T/late_reparents.log'
+      n="\$(command -p grep -cx failed '$T/late_reparents.log')"
+      if [ "\$n" = "\$1" ]; then
+        printf 'stalled\n' >> '$T/late_reparents.log'
+        for (( i = 0; i < 200; i++ )); do kill -0 "\$2" 2>/dev/null || break; command -p sleep 0.05; done
+      fi
+      return 1
+    fi
+    _real_identity "\$2" || return 1
+    printf 'read\n' >> '$T/late_reparents.log'
+    [ "\$(command -p grep -cx read '$T/late_reparents.log')" != 2 ] || printf 'sampling\n' >> '$T/late_reparents.log'
+  }
+  t_zz_late_reparents() { late_await sampling && printf '%s\n' "\$BASHPID" > '$T/late_reparents.flag' && late_await stalled && ( sleep 30 > /dev/null 2>&1 & echo \$! > '$T/late_reparents.pid' ); }
   t_zz_clean() { sleep 0.2 & wait; }
 main "\$@"
 EOF
@@ -3950,29 +3966,34 @@ EOF
   [ -z "$pid" ] || { kill -KILL "$pid" 2>/dev/null; wait_gone "$pid"; }
   # An identity the sampler can no longer read later in the unit is retried, then recorded as
   # unverified: a sampler that stopped silently would miss what the rest of the unit leaves behind.
+  # No sleep times it: the sampler's reads are logged, the unit flags itself once the sampler is in
+  # its loop, and it leaves its process once the sampler is held in the flagged read under test,
+  # which lasts until the unit has ended. Here that is the 11th, the first read and all ten retries.
   mkdir -p "$T/suite-latesampler/test"
   cp -- "$SHMUTANT" "$T/suite-latesampler/shmutant.sh"
   { sed '$d' "$T/suite/test/run.sh"
     printf '%s\n' 'eval "_real_identity() $(declare -f _shmutant_identity | sed 1d)"' \
-      "_shmutant_identity() { if [ -s '$T/late_reparents.flag' ] && [ \"\$1\" = \"\$(cat '$T/late_reparents.flag')\" ]; then return 1; fi; _real_identity \"\$@\"; }" 'main "$@"'
+      '_shmutant_identity() { if [ "${FUNCNAME[1]}" = sample_unit ]; then late_identity 11 "$1"; else _real_identity "$@"; fi; }' 'main "$@"'
   } > "$T/suite-latesampler/test/run.sh"
-  rm -f "$T/late_reparents.pid" "$T/late_reparents.flag"
+  rm -f "$T/late_reparents.pid" "$T/late_reparents.flag" "$T/late_reparents.log" || { fail_ 'could not reset the late-sampler records'; return; }
   out="$(SHMUTANT_SELECT=t_zz_late_reparents bash "$T/suite-latesampler/test/run.sh" 2>&1)"; rc_is $? 1 'a unit whose identity the sampler can no longer read fails'
   has "$out" 'FAIL: t_zz_late_reparents: the process table could not be read' 'and its leftovers are reported unverified'
   pid="$(cat "$T/late_reparents.pid" 2>/dev/null)"
+  [ -n "$pid" ] || fail_ "the late-sampler unit never left its process, so its handshake with the sampler did not complete: [$out]"
   [ -z "$pid" ] || { kill -KILL "$pid" 2>/dev/null; wait_gone "$pid"; }
-  # The same, with each failing read slow (a loaded host): the unit ends while the sampler is still
+  # The same, held in the second read (a loaded host): the unit ends while the sampler is still
   # retrying, and a read that already failed while it ran leaves the rest of it unverified.
   mkdir -p "$T/suite-slowsampler/test"
   cp -- "$SHMUTANT" "$T/suite-slowsampler/shmutant.sh"
   { sed '$d' "$T/suite/test/run.sh"
     printf '%s\n' 'eval "_real_identity() $(declare -f _shmutant_identity | sed 1d)"' \
-      "_shmutant_identity() { if [ -s '$T/late_reparents.flag' ] && [ \"\$1\" = \"\$(cat '$T/late_reparents.flag')\" ]; then sleep 0.2; return 1; fi; _real_identity \"\$@\"; }" 'main "$@"'
+      '_shmutant_identity() { if [ "${FUNCNAME[1]}" = sample_unit ]; then late_identity 2 "$1"; else _real_identity "$@"; fi; }' 'main "$@"'
   } > "$T/suite-slowsampler/test/run.sh"
-  rm -f "$T/late_reparents.pid" "$T/late_reparents.flag"
+  rm -f "$T/late_reparents.pid" "$T/late_reparents.flag" "$T/late_reparents.log" || { fail_ 'could not reset the slow-sampler records'; return; }
   out="$(SHMUTANT_SELECT=t_zz_late_reparents bash "$T/suite-slowsampler/test/run.sh" 2>&1)"; rc_is $? 1 'a unit that ends while its failing identity reads are retried fails'
   has "$out" 'FAIL: t_zz_late_reparents: the process table could not be read' 'and its leftovers are reported unverified'
   pid="$(cat "$T/late_reparents.pid" 2>/dev/null)"
+  [ -n "$pid" ] || fail_ "the slow-sampler unit never left its process, so its handshake with the sampler did not complete: [$out]"
   [ -z "$pid" ] || { kill -KILL "$pid" 2>/dev/null; wait_gone "$pid"; }
   # A unit that cannot read its own identity hands the sampler nothing to check; a sampler that
   # then starts only after the unit has ended records nothing either. The unit itself says so.
@@ -4297,7 +4318,8 @@ sample_unit() {
       command -p sleep 0.05
       now="$(_shmutant_identity "$up")" || now=""
     done
-    if [ -z "$now" ]; then kill -0 "$up" 2>/dev/null && printf 'unverified\n'; return 0; fi
+    # Spent retries are all past the first pass: unverified, whether or not the unit has ended since.
+    if [ -z "$now" ]; then printf 'unverified\n'; return 0; fi
     _shmutant_same_start "$now" "$id" || return 0
     unit_snapshot "$up"
     IFS= read -t 0.5 -r _ <&"$1" && break
