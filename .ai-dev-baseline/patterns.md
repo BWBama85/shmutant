@@ -456,4 +456,5 @@ One line per resolved review thread, newest last.
 - `unanchored-match` `scripts/release.sh:400` `0282f6a` `PRRT_kwDOUT7q9s6qAShj` PR #14 2026-10-07 — required asset names were tested as substrings of a space-joined list, so one oddly named asset passed for both
 - `privilege-dependent-check` `test/release.sh:1064` `0282f6a` `PRRT_kwDOUT7q9s6qAShp` PR #14 2026-10-07 — tests simulated read failures with chmod 000, which uid 0 reads through
 - `contract-not-honoured` `scripts/release.sh:341` `bb7e621` `PRRT_kwDOUT7q9s6qD3K1` PR #14 2026-10-07 — the version grep's failure status was ignored, so a failed search read as a missing assignment (exit 1) instead of exit 2
+- `clock-dependent-deadline` `test/run.sh:386` `a914e55` `PRRT_kwDOUT7q9s6qrdUI` PR #21 2026-10-09 — a performance guard timed a whole pool between two wall-clock readings; now a CPU-time bound on the counting call itself
 <!-- adb:hits:end -->

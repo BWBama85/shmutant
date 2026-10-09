@@ -7,9 +7,11 @@
 # The harness driving this plan is the working tree's shmutant.sh; each row mutates a clone.
 
 prepare() {
-  mkdir -p "$1/test" || return 1
+  mkdir -p "$1/test" "$1/docs" || return 1
   cp -- "$SHMUTANT_PLAN_DIR/../shmutant.sh" "$1/" || return 1
   cp -- "$SHMUTANT_PLAN_DIR/run.sh" "$1/test/" || return 1
+  # t_doc_witness_check_refuses_a_row runs a block of the guide as written
+  cp -- "$SHMUTANT_PLAN_DIR/../docs/integrating.md" "$1/docs/" || return 1
 }
 
 run() { bash "$1/test/run.sh"; }
@@ -328,8 +330,8 @@ shmutant_mut 'prepare runs in a subshell' \
   '( "$prep" "$wd/pristine" >&"$pout_w" ); _shmutant_pool_stash "$?"' \
   't_pool_runs_prepare_in_its_own_shell'
 shmutant_mut 'surplus mutation arguments are accepted' \
-  'if [ "$#" -lt 4 ] || [ "$#" -gt 5 ]; then' \
-  'if [ "$#" -lt 4 ]; then' \
+  'if [ "$#" -lt 4 ] || [ "$#" -gt 5 ]; then _shmutant_refuse "mut: usage' \
+  'if [ "$#" -lt 4 ]; then _shmutant_refuse "mut: usage' \
   't_mut_validates_rows'
 
 # --- guards added for the eighth review round ---
@@ -478,8 +480,8 @@ shmutant_mut 'KEEP set inside the plan is not carried back to the CLI' \
   '    :' \
   't_cli_run'
 shmutant_mut 'containment honours the caller nocasematch' \
-  '  ( shopt -u nocasematch' \
-  '  ( :' \
+  '  ( shopt -u nocasematch; if [ "$1" = / ]' \
+  '  ( :; if [ "$1" = / ]' \
   't_inside_ignores_nocasematch'
 shmutant_mut 'an old literal with a newline is accepted' \
   '  case "$2" in *$'"'"'\n'"'"'*) _shmutant_refuse "mut' \
@@ -496,8 +498,8 @@ shmutant_mut 'the verdict is written straight to its fixed name' \
   '  { printf '"'"'verdict %s %s %s\n'"'"' "$2" "$3" "$4" >&"$SHMUTANT_VERDICT_FD"; } 2>/dev/null; printf '"'"'%s\n'"'"' "$2" > "$1/verdict"' \
   't_worker_verdict_cannot_be_forged_through_a_link'
 shmutant_mut 'the filesystem root contains nothing' \
-  '    if [ "$1" = / ]; then case "$2" in /*) exit 0 ;; esac; exit 1; fi' \
-  '    :' \
+  '; if [ "$1" = / ]; then case "$2" in /*) exit 0 ;; esac; exit 1; fi' \
+  '; :' \
   't_inside_ignores_nocasematch'
 shmutant_mut 'copy_tree copies a hard-linked source' \
   '  if [ -n "$linked" ]; then' \
@@ -544,8 +546,8 @@ shmutant_mut 'the stream is reopened by path for every record' \
   '{ printf '"'"'%s\n'"'"' "$out" >> "$SHMUTANT_STREAM"; } 2>/dev/null || SHMUTANT_EMIT_FAILED=1' \
   't_stream_descriptor_survives_a_callback_swapping_the_path'
 shmutant_mut 'a validation failure after prepare keeps the pristine tree' \
-  '      _shmutant_pool_fail "$label" "$wd"; return 2' \
-  '      return 2' \
+  'a clone could not keep inside itself)"; _shmutant_pool_fail "$label" "$wd"; return 2' \
+  'a clone could not keep inside itself)"; return 2' \
   't_pool_failure_after_prepare_removes_pristine'
 shmutant_mut 'the destination root does not get the source root mode' \
   '  command -p chmod -- "$(_shmutant_mode_spec "${rootls%% *}")" "$2" 2>/dev/null || rc=1' \
@@ -614,8 +616,8 @@ shmutant_mut 'a root given with an identity is stopped without checking it' \
   '  else rootid="${spec#*:}"; [ -n "$rootid" ] && root_ok=1' \
   't_post_run_cleanup_never_signals_a_reaped_root_by_number'
 shmutant_mut 'the baseline arrays are not reset after prepare' \
-  '  killed=0; rc=0; base_sel=(); base_verdict=()' \
-  '  killed=0; rc=0' \
+  '  killed=0; rc=0; ambiguous=0; base_sel=(); base_verdict=(); base_why=(); row_why=()' \
+  '  killed=0; rc=0; ambiguous=0; base_why=(); row_why=()' \
   't_pool_bookkeeping_survives_prepare_assignments'
 
 # --- guards added for the eighteenth review round ---
@@ -628,8 +630,8 @@ shmutant_mut 'a verdict is read from whatever directory has the name' \
   '  if false; then' \
   't_pool_never_trusts_a_verdict_from_a_replaced_directory'
 shmutant_mut 'the stream cache is set before the open succeeds' \
-  '  unset SHMUTANT_STREAM_OPENED' \
-  '  SHMUTANT_STREAM_OPENED="${SHMUTANT_STREAM:-}"' \
+  '  unset SHMUTANT_STREAM_OPENED; [ -n' \
+  '  SHMUTANT_STREAM_OPENED="${SHMUTANT_STREAM:-}"; [ -n' \
   't_stream_write_failure_is_a_harness_error'
 
 # --- guards added for the nineteenth review round ---
@@ -642,8 +644,8 @@ shmutant_mut 'the snapshot on return is dropped, leaving only the trap' \
   '      trap - EXIT; builtin exit "$rrc" )' \
   't_run_cannot_lose_the_leftover_record_by_locking_its_dir'
 shmutant_mut 'a rejected root is still searched from while freezing' \
-  '  if [ "$root_ok" = 1 ]; then' \
-  '  roots=("$pid"); if [ "$root_ok" = 1 ]; then' \
+  '  if [ "$root_ok" = 1 ]; then roots=("$pid")' \
+  '  roots=("$pid"); if [ "$root_ok" = 1 ]; then :' \
   't_post_run_cleanup_never_signals_a_reaped_root_by_number'
 shmutant_mut 'a rejected root is still searched from by the final kill' \
   '  else _shmutant_kill_tree KILL "" "${frozen[@]}"' \
@@ -827,8 +829,8 @@ shmutant_mut 'errtrace is mistaken for errexit under nocasematch' \
   '  case "$-" in *[eE]*) errexit_before=1 ;; esac' \
   't_mode_spec_is_immune_to_nocasematch'
 shmutant_mut 'aliases in the sourcing shell are baked into the library' \
-  'shopt -u expand_aliases' \
-  ':' \
+  '; :)"; \builtin shopt -u expand_aliases' \
+  '; :)"; \builtin :' \
   't_library_is_immune_to_aliases_at_parse_time'
 shmutant_mut 'the alias setting of the sourcing shell is not put back' \
   '\builtin eval "$_shmutant_alias_state"; \builtin unset -v _shmutant_alias_state' \
@@ -967,8 +969,8 @@ shmutant_mut 'a relative copy destination is rebased on the PWD variable' \
 
 # --- guards added for the twenty-sixth review round ---
 shmutant_mut 'the prologue runs whatever shopt the caller aliased' \
-  '\builtin shopt -u expand_aliases' \
-  'shopt -u expand_aliases' \
+  '; :)"; \builtin shopt -u expand_aliases' \
+  '; :)"; shopt -u expand_aliases' \
   't_library_is_immune_to_aliases_at_parse_time'
 shmutant_mut 'a builtin disabled with enable passes the shadow check' \
   '    kinds="$(builtin type -at -- "$n" 2>/dev/null)"' \
@@ -991,8 +993,8 @@ shmutant_mut 'a run callback prepare removed is not noticed' \
   '  :' \
   't_pool_reads_the_table_prepare_declared'
 shmutant_mut 'the capture keeps its name while run executes' \
-  '  command -p rm -f -- "$outf" "$mark" "$left" "$seen" "$fifo" "$mark.hold" "$mark.hp" "$mark.go"' \
-  '  command -p rm -f -- "$mark" "$left" "$seen" "$fifo" "$mark.hold" "$mark.hp" "$mark.go"' \
+  'if ! command -p rm -f -- "$outf" ${counts:+"$counts"} "$mark" "$left" "$seen" "$fifo" "$mark.hold" "$mark.hp" "$mark.go" 2>/dev/null; then' \
+  'if ! command -p rm -f -- ${counts:+"$counts"} "$mark" "$left" "$seen" "$fifo" "$mark.hold" "$mark.hp" "$mark.go" 2>/dev/null; then' \
   't_run_capture_has_no_name_while_run_executes'
 shmutant_mut 'a baseline-skipped row keeps an earlier pool directory' \
   '        _shmutant_fresh_dir "$wd/mut-$i" "$wd" || { _shmutant_err "$label: cannot recreate $wd/mut-$i"; _shmutant_pool_fail "$label" "$wd"; return 2; }' \
@@ -1215,7 +1217,7 @@ shmutant_mut 'a stream whose private copy cannot be made is left cached' \
   '  copy="$(command -p mktemp "$tmpd/shmutant-stream.XXXXXX" 2>/dev/null)" || { _shmutant_err "$label: cannot create the private copy of the verdict stream (in ${TMPDIR:-/tmp})"; return 2; }' \
   't_stream_open_failure_is_rolled_back'
 shmutant_mut 'a function named builtin survives the bootstrap' \
-  'unset -f builtin 2>/dev/null' \
+  '\unset -f builtin 2>/dev/null' \
   ':' \
   't_bash_floor'
 
@@ -1251,8 +1253,8 @@ shmutant_mut 'a link chain that leaves the root is accepted when it comes back' 
   '      case "$comp" in '"'"''"'"'|.) continue ;; ..) here="${here%/*}"; case "$here" in "$root"|"$root"/*) ;; *) return 0 ;; esac; continue ;; esac' \
   't_target_through_a_link_chain_to_an_absolute_link_is_refused'
 shmutant_mut 'a function named builtin prepare defined answers the shadow check' \
-  '  _shmutant_drop_builtin_fn' \
-  '  :' \
+  '  local n kinds; _shmutant_drop_builtin_fn' \
+  '  local n kinds; :' \
   't_pool_refuses_shadowed_builtins_and_posix_mode'
 shmutant_mut 'a builtin passes as a callback' \
   '  case "$(builtin type -t -- "$1" 2>/dev/null)" in function|file) return 0 ;; esac' \
@@ -1310,8 +1312,8 @@ shmutant_mut 'the pinned relative cd consults CDPATH' \
 
 # --- guards added for the thirty-ninth review round ---
 shmutant_mut 'the baseline arrays are not in the readonly guard' \
-  '    _shmutant_pool_t0 _shmutant_pool_wd after_ck base base_sel base_verdict cap cksum_bin clone_id comp copy d \' \
-  '    _shmutant_pool_t0 _shmutant_pool_wd after_ck base cap cksum_bin clone_id comp copy d \' \
+  '    _shmutant_pool_t0 _shmutant_pool_wd after_ck ambiguous base base_sel base_verdict base_why cap cksum_bin clone_id comp copy counts counts_bad counts_end counts_got counts_r counts_w cwhy d \' \
+  '    _shmutant_pool_t0 _shmutant_pool_wd after_ck ambiguous base base_why cap cksum_bin clone_id comp copy counts counts_bad counts_end counts_got counts_r counts_w cwhy d \' \
   't_readonly_settings_do_not_kill_the_caller'
 shmutant_mut 'a readonly refusal leaves the prepare capture open' \
   '    exec {_shmutant_pool_pout_w}>&- {_shmutant_pool_pout_r}<&-' \
@@ -1414,8 +1416,8 @@ shmutant_mut 'a non-ASCII letter is a witness boundary' \
   '        if (pre !~ /[A-Za-z0-9_.-]/ && post !~ /[A-Za-z0-9_.-]/) return 1' \
   't_witness_matches_a_whole_token'
 shmutant_mut 'the bootstrap turns aliases off through an alias-expandable word' \
-  '\builtin shopt -u expand_aliases' \
-  'builtin shopt -u expand_aliases' \
+  '; :)"; \builtin shopt -u expand_aliases' \
+  '; :)"; builtin shopt -u expand_aliases' \
   't_bootstrap_is_immune_to_a_builtin_alias'
 shmutant_mut 'the bootstrap drops a builtin function through an alias-expandable word' \
   '\unset -f builtin 2>/dev/null' \
@@ -1640,3 +1642,149 @@ shmutant_mut 'a failed etime table read lists no descendants and succeeds' \
   '  table="$(command -p ps -A -o pid= -o ppid= -o etime= 2>/dev/null)" && [ -n "$table" ] || return 1' \
   '  table="$(command -p ps -A -o pid= -o ppid= -o etime= 2>/dev/null)" || return 0' \
   't_descendants_started_reports_an_unreadable_table'
+
+# --- an old literal occurs once in its target (#15) ---
+shmutant_mut 'a literal that occurs twice is accepted' \
+  'if [ "$starts" -gt 1 ]; then' \
+  'if [ "$starts" -gt 2 ]; then' \
+  't_pool_refuses_a_literal_that_occurs_more_than_once'
+shmutant_mut 'overlapping starts are not counted' \
+  's = substr(s, i + 1)' \
+  's = substr(s, i + length(old))' \
+  't_pool_refuses_a_literal_that_occurs_more_than_once'
+shmutant_mut 'rows refused for a repeated literal still run' \
+  'if [ "$ambiguous" -ne 0 ]; then' \
+  'if false; then' \
+  't_pool_refuses_a_literal_that_occurs_more_than_once'
+shmutant_mut 'only the first row with a repeated literal is named' \
+  '      ambiguous=$((ambiguous + 1))' \
+  '      ambiguous=$((ambiguous + 1)); break' \
+  't_pool_refuses_a_literal_that_occurs_more_than_once'
+
+# --- a plan refuses its own declarations (#16) ---
+shmutant_mut 'a plan refusal is not counted' \
+  '  _shmutant_refuse "refused: $1"' \
+  '  _shmutant_err "refused: $1"' \
+  't_refuse_fails_the_pool'
+shmutant_mut 'a refusal without one reason is not counted' \
+  'then _shmutant_refuse "refuse: usage:' \
+  'then _shmutant_err "refuse: usage:' \
+  't_refuse_fails_the_pool'
+shmutant_mut 'a readonly refusal count is assigned anyway' \
+  '  _shmutant_decl_writable refuse || return 2' \
+  '  true || return 2' \
+  't_refuse_fails_the_pool'
+
+# --- a selection is counted against the whole suite (#17) ---
+shmutant_mut 'SHMUTANT_COUNTS accepts any value' \
+  'case "${SHMUTANT_COUNTS-0}" in 0|1) ;;' \
+  'case "${SHMUTANT_COUNTS-0}" in *) ;;' \
+  't_counts_need_the_baseline'
+shmutant_mut 'the counts run without the baseline' \
+  'if [ "${SHMUTANT_COUNTS:-0}" = 1 ] && [ "${SHMUTANT_BASELINE:-1}" = 0 ]; then' \
+  'if false; then' \
+  't_counts_need_the_baseline'
+shmutant_mut 'no unselected run is made' \
+  '[ "${SHMUTANT_COUNTS:-0}" != 1 ] || base_sel=("")' \
+  '[ "${SHMUTANT_COUNTS:-0}" != 1 ] || base_sel=()' \
+  't_counts_pass_a_complete_selection'
+shmutant_mut 'the run gets no count descriptor' \
+  'export SHMUTANT_COUNTS_FD="$counts_w"' \
+  'export SHMUTANT_COUNTS_FD=""' \
+  't_counts_pass_a_complete_selection'
+shmutant_mut 'an inherited count descriptor reaches the run' \
+  'else unset SHMUTANT_COUNTS_FD; fi' \
+  'else :; fi' \
+  't_counts_pass_a_complete_selection'
+shmutant_mut 'the count lines are never read' \
+  '[ "${SHMUTANT_COUNTS:-0}" != 1 ] || _shmutant_read_counts "$counts_r"' \
+  '[ "${SHMUTANT_COUNTS:-0}" != 1 ] || :' \
+  't_counts_pass_a_complete_selection'
+shmutant_mut 'a count line with a third field passes' \
+  'NF != 2 ||' \
+  'NF < 2 ||' \
+  't_counts_refuse_a_malformed_line'
+shmutant_mut 'a count line with no unit passes' \
+  '|| $1 == "" ||' \
+  '||' \
+  't_counts_refuse_a_malformed_line'
+shmutant_mut 'a count past nine digits passes' \
+  'length($2) > 9 {' \
+  'length($2) > 10 {' \
+  't_counts_refuse_a_malformed_line'
+shmutant_mut 'a unit reported twice keeps its last count' \
+  'c[$1] += $2' \
+  'c[$1] = $2' \
+  't_counts_pass_a_complete_selection'
+shmutant_mut 'why the count lines are unusable is not passed on' \
+  '{ printf '"'"'counts-bad %s\n'"'"' "$SHMUTANT_RUN_COUNTS_BAD"' \
+  '{ : '"'"'counts-bad %s\n'"'"' "$SHMUTANT_RUN_COUNTS_BAD"' \
+  't_counts_refuse_a_malformed_line'
+shmutant_mut 'the collector drops the count lines' \
+  '"count "*)   counts+="${line#count }"$'"'"'\n'"'"'; counts_got=$((counts_got + 1)) ;;' \
+  '"count "*)   : ;;' \
+  't_counts_pass_a_complete_selection'
+shmutant_mut 'a run that reports no unit passes' \
+  'if [ -z "${SHMUTANT_RES_COUNTS[base-$k]:-}" ]; then' \
+  'if false; then' \
+  't_counts_need_a_unit_and_a_reference'
+shmutant_mut 'the unselected run is compared with itself' \
+  '[ "$k" -ne 0 ] || return 0' \
+  '[ "$k" -ne 99 ] || return 0' \
+  't_counts_pass_a_complete_selection'
+shmutant_mut 'an unusable reference is compared anyway' \
+  'if [ "$2" != green ]; then builtin printf' \
+  'if false; then builtin printf' \
+  't_counts_need_a_unit_and_a_reference'
+shmutant_mut 'a count mismatch passes' \
+  '!($1 in ref) || ref[$1] != $2 {' \
+  '!($1 in ref) {' \
+  't_counts_score_an_incomplete_selection_baseline'
+shmutant_mut 'a unit the reference lacks passes' \
+  '!($1 in ref) || ref[$1] != $2 {' \
+  '($1 in ref) && ref[$1] != $2 {' \
+  't_counts_score_an_incomplete_selection_baseline'
+shmutant_mut 'an incomplete selection reads green' \
+  '          SHMUTANT_V_VERDICT=incomplete' \
+  '          SHMUTANT_V_VERDICT=green' \
+  't_counts_score_an_incomplete_selection_baseline'
+shmutant_mut 'the row of an incomplete selection is not told why' \
+  '|| row_why[i]="the baseline of [' \
+  '|| true "the baseline of [' \
+  't_counts_score_an_incomplete_selection_baseline'
+shmutant_mut 'the row keeps the generic baseline detail' \
+  'if [ -n "${row_why[$i]:-}" ]; then detail="${row_why[$i]}"' \
+  'if false; then detail="${row_why[$i]}"' \
+  't_counts_score_an_incomplete_selection_baseline'
+shmutant_mut 'an empty SHMUTANT_COUNTS reads as off' \
+  'case "${SHMUTANT_COUNTS-0}" in 0|1) ;;' \
+  'case "${SHMUTANT_COUNTS:-0}" in 0|1) ;;' \
+  't_counts_need_the_baseline'
+shmutant_mut 'a NUL byte in the count lines is let through' \
+  '*) SHMUTANT_RUN_COUNTS_BAD="its count lines hold a NUL byte' \
+  '*) : "its count lines hold a NUL byte' \
+  't_counts_reading_fails_closed'
+shmutant_mut 'a unit'"'"'s total past nine digits is accepted' \
+  'c[$1] > 999999999 {' \
+  'c[$1] > 9999999999 {' \
+  't_counts_refuse_a_malformed_line'
+shmutant_mut 'counts that did not all reach the pool are compared anyway' \
+  '[ -z "$counts_bad" ] && [ "$counts_end" != "$counts_got" ]; then' \
+  '[ -z "$counts_bad" ] && false; then' \
+  't_counts_need_their_end_marker'
+shmutant_mut 'a NUL count that failed partway reads as none' \
+  'nul="$(set -o pipefail; command -p tr' \
+  'nul="$(command -p tr' \
+  't_counts_reading_fails_closed'
+shmutant_mut 'counting runs on past the second start' \
+  '{ if (++n > 1) exit; s = substr(s, i + 1) }' \
+  '{ ++n; s = substr(s, i + 1) }' \
+  't_pool_refuses_a_literal_that_occurs_more_than_once'
+shmutant_mut 'the count comparison drops its first difference' \
+  '!($1 in ref) || ref[$1] != $2 { if (!d) { fu = $1;' \
+  '!($1 in ref) || ref[$1] != $2 { if (d) { fu = $1;' \
+  't_counts_diff_names_the_first_difference'
+shmutant_mut 'the count channel is opened with the counts off' \
+  '[ "${SHMUTANT_COUNTS:-0}" != 1 ] || counts="$(command -p mktemp' \
+  'counts="$(command -p mktemp' \
+  't_counts_off_cost_a_run_no_descriptor'
