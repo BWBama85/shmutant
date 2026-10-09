@@ -181,22 +181,28 @@ if shmutant_selected 'removal keeps operator edits'; then
 fi
 ```
 
-- A line is a unit, a tab, and a count: the unit is not empty and holds no tab, and the count is
-  at most nine digits (leading zeros allowed: `007` is 7). Any other line, an empty one
-  included, makes that run's baseline `incomplete`. A last line without its newline is read like
-  any other.
-- A unit reported more than once in one run is summed. Bats runs every test a filter names, in
-  every file, so a name that recurs is counted whole by both the selected and the unselected
-  run.
+- A line is a unit, a tab, and a count: the unit is not empty and holds no tab and no NUL byte,
+  and the count is at most nine digits (leading zeros allowed: `007` is 7). Any other line, an
+  empty one included, makes that run's baseline `incomplete`. A last line without its newline is
+  read like any other.
+- A unit reported more than once in one run is summed, and the total may not pass nine digits
+  either. Bats runs every test a filter names, in every file, so a name that recurs is counted
+  whole by both the selected and the unselected run.
 - Units are compared whole and byte for byte: `Add` is not `add`, and `add` is not
   `add-works`. A unit the unselected run never reported does not match.
 - When the unselected run is not green, reports no unit, or reports a line it cannot use, no
-  selection can be compared with it. Every selection's baseline is then `incomplete`, and every
-  row `baseline`.
+  selection can be compared with it. Every selection whose own baseline is green is then
+  `incomplete` (one that is red, aborted or timed out keeps that verdict), and every row is
+  scored `baseline`.
 - Write through the descriptor (`>&"$SHMUTANT_COUNTS_FD"`) from the run or anything it starts.
-  The file behind it has no name. The runs of rows get a descriptor too, so the suite behaves the
-  same under a row as under its baseline, but only the baseline's lines are read. With the counts
-  off, `SHMUTANT_COUNTS_FD` is unset in every run.
+  The file behind it has no name. It is opened for appending, so writers never overwrite one
+  another, but a line is whole only when one write carries it. Bash's `printf` writes a short
+  line in one call. Units that report from parallel processes keep their lines short or report
+  through one process. Lines interleaved from parallel writers are malformed, which makes the
+  selection `incomplete`, never complete.
+- The runs of rows get a descriptor too, so the suite behaves the same under a row as under its
+  baseline, but only the baselines' counts are compared. With the counts off,
+  `SHMUTANT_COUNTS_FD` is unset in every run.
 - Equal counts show that a selection ran as many assertions per unit as the full suite did, not
   that they were the same assertions.
 - It costs one more run of the whole suite per pass, bounded by `SHMUTANT_TIMEOUT` like every
@@ -456,7 +462,7 @@ A process that detached within half a second of forking is out of reach, as for 
 | `SHMUTANT_JOBS` | CPU count | Worker budget, a positive integer. The pool's cap (argument 5, default 8, validated the same way) still applies. |
 | `SHMUTANT_TIMEOUT` | 300 | Seconds per run before the run is killed. The kill freezes the tree first (SIGSTOP the root, then every descendant found, until a pass finds nothing new), adds every descendant the watchdog saw while the run was alive (snapshotted twice a second), and then sends KILL. There is no TERM and no grace, so a test runner's TERM handler does not run: after a deadline nothing may run. When a run returns normally, whatever it backgrounded is ended the same way before its verdict is accepted: its descendants are recorded on return, on `exit`, and by an EXIT trap of the wrapper the run executes in (a run that removes that trap and leaves through `builtin exit` or a signal to itself has dismantled the wrapper on purpose). The run's process group is kept in being by a holder process until that cleanup is over, so the group is ended by number whether or not `ps` can identify anything. The holder ends by itself once nothing of its run is left, so a run killed from outside before that cleanup (a deadline or an interrupt one level up, as when shmutant mutation-tests a suite that itself runs shmutant) does not leave it behind. A clone a run left behind that cannot be removed afterwards is a harness error (exit 2), and so is a `SHMUTANT_STREAM` file that a callback removed or replaced while the pool wrote to it. A run's output is scanned once, streaming, for the red prefix and the witness, so a suite that prints until its deadline costs disk, not memory. Durations in the records are wall-clock spans; a span made negative by a clock set back is recorded as 0.000, never as a malformed number. A process that detached into its own session within half a second of forking is out of reach; that needs cgroups or `setsid`, which this tool does not depend on. Raise the bound for a suite that cannot select; 0 disables the deadline only — the watchdog still snapshots descendants twice a second, so what a run backgrounds is still ended at its return. The deadline is elapsed time as the watchdog sees it, accumulated one poll at a time with each poll's share clamped between its own half-second sleep and five seconds, so a clock set back while a run is alive cannot extend it and one set forward cannot cut it by more than five seconds per poll. |
 | `SHMUTANT_BASELINE` | 1 | Run every distinct selector once, uninjected, and require green. Set 0 when the suite was proven green in a previous step. 0 or 1 only. |
-| `SHMUTANT_COUNTS` | 0 | Also run the whole suite once, unselected, and require each selection to report, per unit, the assertion count the whole suite reports (section 3). Costs one full suite run per pass, within `SHMUTANT_TIMEOUT`. Needs `SHMUTANT_BASELINE=1`. 0 or 1 only. |
+| `SHMUTANT_COUNTS` | 0 | Also run the whole suite once, unselected, and require each selection to report, per unit, the assertion count the whole suite reports (section 3). Costs one full suite run per pass, within `SHMUTANT_TIMEOUT`. Needs `SHMUTANT_BASELINE=1`. 0 or 1 only; set and empty is refused rather than read as 0. |
 | `SHMUTANT_KEEP` | 0 | Keep every clone and the pristine tree. 0 or 1 only. |
 | `SHMUTANT_STREAM` | stdout | Append the verdict stream to a file instead. Its directory must exist; it must be a regular file or absent (no symlink, no FIFO), outside the workdir. It is opened once, before any callback runs, and every record goes to that descriptor; a path `prepare` assigns is validated and opened the same way when it returns. A relative path is resolved where the CLI was invoked. |
 | `SHMUTANT_RED_STATUS` | 1 | The exit status that means red, 1 to 255. |

@@ -9,7 +9,7 @@
 #   shmutant_target <file>                               file (relative to the tree root) that
 #                                                        subsequent rows mutate
 #   shmutant_mut <name> <old> <new> <witness> [select]   append one row (literals, never regexes;
-#                                                        <old> must occur once in the target)
+#                                                        <old> may occur at most once in the target)
 #   shmutant_refuse <reason>                             refuse a declaration the plan checked
 #                                                        itself; the pool then exits 2
 #   shmutant_reset                                       empty the table
@@ -555,9 +555,10 @@ shmutant_target() {
 }
 
 # shmutant_mut <name> <old> <new> <witness> [select] — append one row for the current target.
-# <old> and <new> are literals; <old> must start at exactly one position in the target, which the
-# pool checks against the prepared tree when it starts. <witness> is the text a red line must
-# carry. <select> is what `run` receives to narrow the suite; it defaults to <witness>.
+# <old> and <new> are literals; <old> may start at no more than one position in the target, which
+# the pool checks against the prepared tree when it starts (none at all is scored unapplied).
+# <witness> is the text a red line must carry. <select> is what `run` receives to narrow the
+# suite; it defaults to <witness>.
 shmutant_mut() {
   _shmutant_decl_writable mut || return 2
   if [ "$#" -lt 4 ] || [ "$#" -gt 5 ]; then _shmutant_refuse "mut: usage: shmutant_mut <name> <old> <new> <witness> [select] (got $# arguments — an unquoted witness?)"; return 2; fi
@@ -1078,16 +1079,21 @@ _shmutant_run_bounded() {
   fifo="$mark.fired"
   { command -p mkfifo -- "$fifo" "$mark.hold" "$mark.hp" "$mark.go"; } 2>/dev/null \
     || { command -p rm -f -- "$mark" "$left" "$seen" "$outf" "$counts" "$fifo" "$mark.hold" "$mark.hp" "$mark.go"; return 0; }
-  # The count lines are appended (>>): a suite whose units write from parallel processes shares
-  # one descriptor, and each line lands whole at the end.
+  # The count lines are appended (>>): each write lands at the end, so parallel writers never
+  # overwrite one another. A line is whole only if one write carries it; lines interleaved from
+  # parallel writers are malformed, which fails the selection, never passes it.
   if ! exec {left_w}>|"$left" {left_r}<"$left" {seen_w}>|"$seen" {seen_r}<"$seen" {fired}<>"$fifo" {out_w}>|"$outf" {out_r}<"$outf" {out_r2}<"$outf" {counts_w}>>"$counts" {counts_r}<"$counts" {hold}<>"$mark.hold" {hold_r}<"$mark.hold" {hp}<>"$mark.hp" {go}<>"$mark.go" {err_fd}>&2; then
     # A partial open (a descriptor limit) is a setup failure, not a run: close what did open.
     for fd in "${left_w:-}" "${left_r:-}" "${seen_w:-}" "${seen_r:-}" "${fired:-}" "${out_w:-}" "${out_r:-}" "${out_r2:-}" "${counts_w:-}" "${counts_r:-}" "${hold:-}" "${hold_r:-}" "${hp:-}" "${go:-}" "${err_fd:-}"; do [ -n "$fd" ] && exec {fd}>&-; done
     command -p rm -f -- "$mark" "$left" "$seen" "$outf" "$counts" "$fifo" "$mark.hold" "$mark.hp" "$mark.go"; return 0
   fi
   # The capture too has no name while the run executes: it is read back through one descriptor
-  # for the verdict and copied out through another for the artifact afterwards.
-  command -p rm -f -- "$outf" "$counts" "$mark" "$left" "$seen" "$fifo" "$mark.hold" "$mark.hp" "$mark.go"
+  # for the verdict and copied out through another for the artifact afterwards. A name that
+  # cannot be removed is a setup failure: the callback could reopen the channel by it.
+  if ! command -p rm -f -- "$outf" "$counts" "$mark" "$left" "$seen" "$fifo" "$mark.hold" "$mark.hp" "$mark.go" 2>/dev/null; then
+    exec {left_w}>&- {left_r}<&- {seen_w}>&- {seen_r}<&- {fired}<&- {out_w}>&- {out_r}<&- {out_r2}<&- {counts_w}>&- {counts_r}<&- {hold}<&- {hold_r}<&- {hp}<&- {go}<&- {err_fd}>&-
+    return 0
+  fi
   # An unsettled freeze, from this shell or the watchdog, is reported on the sightings channel.
   local SHMUTANT_UNSETTLED_FD="$seen_w"
   (
@@ -1276,16 +1282,21 @@ _shmutant_run_bounded() {
 # SHMUTANT_RUN_COUNTS to one `<unit>\t<n>` line per unit, in the order first reported, the counts of
 # a unit reported more than once summed (a Bats test name may recur across files, and every run
 # that selects one runs them all); or SHMUTANT_RUN_COUNTS_BAD to why the lines cannot be used: one
-# that is not <unit><TAB><digits> (a unit that is empty or holds a tab, a count past nine
-# digits), or a read that failed. A last line without its newline is read like any other.
+# that is not <unit><TAB><digits> (a unit that is empty or holds a tab or a NUL byte, a count past
+# nine digits), a unit whose total passes nine digits, or a read that failed. A last line without
+# its newline is read like any other. A NUL becomes a tab before awk reads it: some awks keep NUL
+# bytes and the shell drops them, so `a<NUL>b` would otherwise come back as unit `ab`; as a tab it
+# makes its line malformed, whatever awk does. Totals stay within nine digits, so awk's doubles
+# hold them exactly.
 _shmutant_read_counts() {
   local got
-  if ! got="$(command -p awk '
+  if ! got="$(command -p tr '\000' '\t' <&"$1" | command -p awk '
       BEGIN { FS = "\t"; k = 0; bad = 0 }
       NF != 2 || $1 == "" || $2 !~ /^[0-9]+$/ || length($2) > 9 { printf "\tline %d is not <unit><TAB><digits> (a unit with no tab, a count of at most nine digits)\n", NR; bad = 1; exit }
       { if (!($1 in c)) u[++k] = $1; c[$1] += $2 }
-      END { if (!bad) for (j = 1; j <= k; j++) printf "%s\t%.0f\n", u[j], c[u[j]] }
-    ' <&"$1" 2>/dev/null)"; then
+      c[$1] > 999999999 { printf "\tunit [%s] totals more than 999999999 assertions\n", $1; bad = 1; exit }
+      END { if (!bad) for (j = 1; j <= k; j++) printf "%s\t%d\n", u[j], c[u[j]] }
+    ' 2>/dev/null)"; then
     SHMUTANT_RUN_COUNTS_BAD="its count lines could not be read"; return 0
   fi
   # The refusal starts with a tab, which no unit line can: a unit is never empty.
@@ -1492,12 +1503,18 @@ _shmutant_worker() {
   fi
   # A baseline run's counts go to the pool on the verdict channel, one unit per line (a unit holds
   # no tab and no newline, so the line is unambiguous), or why they cannot be used.
+  # They end with `counts-end <lines>`, which the collector requires: a write that failed partway
+  # would otherwise hand the pool a subset of the units, and a unit that never arrives is never
+  # compared.
   if [ "$kind" = base ] && [ "${SHMUTANT_COUNTS:-0}" = 1 ]; then
+    local -a sent=()
     if [ -n "${SHMUTANT_RUN_COUNTS_BAD:-}" ]; then
       { printf 'counts-bad %s\n' "$SHMUTANT_RUN_COUNTS_BAD" >&"$SHMUTANT_VERDICT_FD"; } 2>/dev/null
     elif [ -n "${SHMUTANT_RUN_COUNTS:-}" ]; then
-      { printf 'count %s\n' "${SHMUTANT_RUN_COUNTS//$'\n'/$'\n'count }" >&"$SHMUTANT_VERDICT_FD"; } 2>/dev/null
+      mapfile -t sent <<< "$SHMUTANT_RUN_COUNTS"
+      { printf 'count %s\n' "${sent[@]}" >&"$SHMUTANT_VERDICT_FD"; } 2>/dev/null
     fi
+    { printf 'counts-end %s\n' "${#sent[@]}" >&"$SHMUTANT_VERDICT_FD"; } 2>/dev/null
   fi
   _shmutant_worker_finish "$dir" "$verdict" "$(( t1 - t0 ))" "$status"
   return 0
@@ -1518,7 +1535,7 @@ _shmutant_dir_id() {
 # SHMUTANT_RES_*[key] (and SHMUTANT_V_*): the last `verdict <v> <us> <status>` line, or `lost`
 # when there is none, the line is damaged, or the worker did not exit 0. Closes the channel.
 _shmutant_collect() {
-  local dir="$1" key="$2" wstatus="$3" line fd unpublished=0 setup_failed=0 swapped=0 clone_id="" counts="" counts_bad=""
+  local dir="$1" key="$2" wstatus="$3" line fd unpublished=0 setup_failed=0 swapped=0 clone_id="" counts="" counts_bad="" counts_end="" counts_got=0
   SHMUTANT_V_VERDICT=lost; SHMUTANT_V_US=0; SHMUTANT_V_STATUS=""
   fd="${SHMUTANT_VERDICT_R[$key]:-}"
   if [ -n "$fd" ]; then
@@ -1533,8 +1550,9 @@ _shmutant_collect() {
         unpublished) unpublished=1 ;;
         setup-failed) setup_failed=1 ;;
         swapped)     swapped=1 ;;
-        "count "*)   counts+="${line#count }"$'\n' ;;
+        "count "*)   counts+="${line#count }"$'\n'; counts_got=$((counts_got + 1)) ;;
         "counts-bad "*) counts_bad="${line#counts-bad }" ;;
+        "counts-end "*) counts_end="${line#counts-end }" ;;
       esac
     done
     exec {fd}<&-
@@ -1559,6 +1577,13 @@ _shmutant_collect() {
   [ -n "$SHMUTANT_V_VERDICT" ] || SHMUTANT_V_VERDICT=lost
   _shmutant_pos_int "$SHMUTANT_V_US" > /dev/null || SHMUTANT_V_US=0
   SHMUTANT_RES_VERDICT["$key"]="$SHMUTANT_V_VERDICT"; SHMUTANT_RES_US["$key"]="$SHMUTANT_V_US"; SHMUTANT_RES_STATUS["$key"]="$SHMUTANT_V_STATUS"
+  # A baseline's counts are whole only up to its end marker: a worker whose writes failed partway
+  # would otherwise have the pool compare the units that happened to arrive.
+  case "$key" in
+    base-*) if [ "${SHMUTANT_COUNTS:-0}" = 1 ] && [ -z "$counts_bad" ] && [ "$counts_end" != "$counts_got" ]; then
+              counts_bad="its count lines did not all reach the pool (${counts_end:-no end marker} sent, $counts_got received)"
+            fi ;;
+  esac
   SHMUTANT_RES_COUNTS["$key"]="${counts%$'\n'}"; SHMUTANT_RES_COUNTS_BAD["$key"]="$counts_bad"
   if [ "$setup_failed" = 1 ]; then
     _shmutant_err "$dir: the run could not be set up (a channel could not be made or opened) — the row was never run"; SHMUTANT_CLEANUP_FAILED=1
@@ -1865,7 +1890,8 @@ _shmutant_validate_settings() {
   if [ -n "${SHMUTANT_RED_STATUS+x}" ]; then _shmutant_canon "$label" SHMUTANT_RED_STATUS "$(( 10#$v_red ))" || return 2; fi
   if [ -n "$v_jobs" ]; then _shmutant_canon "$label" SHMUTANT_JOBS "$(( 10#$v_jobs ))" || return 2; fi
   case "${SHMUTANT_BASELINE:-1}" in 0|1) ;; *) _shmutant_err "$label: SHMUTANT_BASELINE must be 0 or 1, got [${SHMUTANT_BASELINE:-}]"; return 2 ;; esac
-  case "${SHMUTANT_COUNTS:-0}" in 0|1) ;; *) _shmutant_err "$label: SHMUTANT_COUNTS must be 0 or 1, got [${SHMUTANT_COUNTS:-}]"; return 2 ;; esac
+  # Set and empty is refused, not read as off: an empty value must not drop the check it names.
+  case "${SHMUTANT_COUNTS-0}" in 0|1) ;; *) _shmutant_err "$label: SHMUTANT_COUNTS must be 0 or 1, got [${SHMUTANT_COUNTS:-}]"; return 2 ;; esac
   # The counts are compared in the baseline pass: without it they would be collected and never
   # read, and every selection would pass for complete.
   if [ "${SHMUTANT_COUNTS:-0}" = 1 ] && [ "${SHMUTANT_BASELINE:-1}" = 0 ]; then
@@ -2013,7 +2039,7 @@ _shmutant_pool_stash() {
 _shmutant_pool_locals_writable() {
   _shmutant_locals_writable "$1" "$2" \
     SHMUTANT_FREEZE_UNSETTLED SHMUTANT_KILL_GROUP SHMUTANT_START SHMUTANT_UNSETTLED_FD _shmutant_pool_cap _shmutant_pool_errexit _shmutant_pool_label _shmutant_pool_n _shmutant_pool_pout_r _shmutant_pool_pout_w _shmutant_pool_prc _shmutant_pool_run \
-    _shmutant_pool_t0 _shmutant_pool_wd after_ck ambiguous base base_sel base_verdict base_why cap cksum_bin clone_id comp copy counts counts_bad counts_r counts_w cwhy d \
+    _shmutant_pool_t0 _shmutant_pool_wd after_ck ambiguous base base_sel base_verdict base_why cap cksum_bin clone_id comp copy counts counts_bad counts_end counts_got counts_r counts_w cwhy d \
     dbg depth detail dir dirmode done_pid err_fd errexit_before etime f fd fifo \
     fired fmt found frozen go got grp h have held helpers here \
     hms hold hold_r holder holderid hp i id intact jobs k kept key \
@@ -2021,7 +2047,7 @@ _shmutant_pool_locals_writable() {
     mode ms mutate_aliases n new nl now out out_r out_r2 out_w outf \
     p parent path pending phys pid pids pool_aliases pout pout_r pout_w prc \
     prep r rc red rel rest ret rjrc root root_ok rootid rootls \
-    roots rounds row_why run s sdir sec seen seen_r seen_w sel setup_failed sig starts \
+    roots rounds row_why run s sdir sec seen seen_r seen_w sel sent setup_failed sig starts \
     spec st stat_bin state status stillours stillpids suffix swapped t t0 t1 \
     table target target_ck targets timeout tmp unpublished us v v_jobs v_red v_timeout \
     verdict vr vw wd who wit wrc wstatus \

@@ -993,8 +993,8 @@ shmutant_mut 'a run callback prepare removed is not noticed' \
   '  :' \
   't_pool_reads_the_table_prepare_declared'
 shmutant_mut 'the capture keeps its name while run executes' \
-  '  command -p rm -f -- "$outf" "$counts" "$mark" "$left" "$seen" "$fifo" "$mark.hold" "$mark.hp" "$mark.go"' \
-  '  command -p rm -f -- "$counts" "$mark" "$left" "$seen" "$fifo" "$mark.hold" "$mark.hp" "$mark.go"' \
+  'if ! command -p rm -f -- "$outf" "$counts" "$mark" "$left" "$seen" "$fifo" "$mark.hold" "$mark.hp" "$mark.go" 2>/dev/null; then' \
+  'if ! command -p rm -f -- "$counts" "$mark" "$left" "$seen" "$fifo" "$mark.hold" "$mark.hp" "$mark.go" 2>/dev/null; then' \
   't_run_capture_has_no_name_while_run_executes'
 shmutant_mut 'a baseline-skipped row keeps an earlier pool directory' \
   '        _shmutant_fresh_dir "$wd/mut-$i" "$wd" || { _shmutant_err "$label: cannot recreate $wd/mut-$i"; _shmutant_pool_fail "$label" "$wd"; return 2; }' \
@@ -1312,8 +1312,8 @@ shmutant_mut 'the pinned relative cd consults CDPATH' \
 
 # --- guards added for the thirty-ninth review round ---
 shmutant_mut 'the baseline arrays are not in the readonly guard' \
-  '    _shmutant_pool_t0 _shmutant_pool_wd after_ck ambiguous base base_sel base_verdict base_why cap cksum_bin clone_id comp copy counts counts_bad counts_r counts_w cwhy d \' \
-  '    _shmutant_pool_t0 _shmutant_pool_wd after_ck ambiguous base base_why cap cksum_bin clone_id comp copy counts counts_bad counts_r counts_w cwhy d \' \
+  '    _shmutant_pool_t0 _shmutant_pool_wd after_ck ambiguous base base_sel base_verdict base_why cap cksum_bin clone_id comp copy counts counts_bad counts_end counts_got counts_r counts_w cwhy d \' \
+  '    _shmutant_pool_t0 _shmutant_pool_wd after_ck ambiguous base base_why cap cksum_bin clone_id comp copy counts counts_bad counts_end counts_got counts_r counts_w cwhy d \' \
   't_readonly_settings_do_not_kill_the_caller'
 shmutant_mut 'a readonly refusal leaves the prepare capture open' \
   '    exec {_shmutant_pool_pout_w}>&- {_shmutant_pool_pout_r}<&-' \
@@ -1677,8 +1677,8 @@ shmutant_mut 'a readonly refusal count is assigned anyway' \
 
 # --- a selection is counted against the whole suite (#17) ---
 shmutant_mut 'SHMUTANT_COUNTS accepts any value' \
-  'case "${SHMUTANT_COUNTS:-0}" in 0|1) ;;' \
-  'case "${SHMUTANT_COUNTS:-0}" in *) ;;' \
+  'case "${SHMUTANT_COUNTS-0}" in 0|1) ;;' \
+  'case "${SHMUTANT_COUNTS-0}" in *) ;;' \
   't_counts_need_the_baseline'
 shmutant_mut 'the counts run without the baseline' \
   'if [ "${SHMUTANT_COUNTS:-0}" = 1 ] && [ "${SHMUTANT_BASELINE:-1}" = 0 ]; then' \
@@ -1721,7 +1721,7 @@ shmutant_mut 'why the count lines are unusable is not passed on' \
   '{ : '"'"'counts-bad %s\n'"'"' "$SHMUTANT_RUN_COUNTS_BAD"' \
   't_counts_refuse_a_malformed_line'
 shmutant_mut 'the collector drops the count lines' \
-  '"count "*)   counts+="${line#count }"$'"'"'\n'"'"' ;;' \
+  '"count "*)   counts+="${line#count }"$'"'"'\n'"'"'; counts_got=$((counts_got + 1)) ;;' \
   '"count "*)   : ;;' \
   't_counts_pass_a_complete_selection'
 shmutant_mut 'a run that reports no unit passes' \
@@ -1756,3 +1756,19 @@ shmutant_mut 'the row keeps the generic baseline detail' \
   'if [ -n "${row_why[$i]:-}" ]; then detail="${row_why[$i]}"' \
   'if false; then detail="${row_why[$i]}"' \
   't_counts_score_an_incomplete_selection_baseline'
+shmutant_mut 'an empty SHMUTANT_COUNTS reads as off' \
+  'case "${SHMUTANT_COUNTS-0}" in 0|1) ;;' \
+  'case "${SHMUTANT_COUNTS:-0}" in 0|1) ;;' \
+  't_counts_need_the_baseline'
+shmutant_mut 'a NUL byte inside a unit is dropped' \
+  'command -p tr '"'"'\000'"'"' '"'"'\t'"'"' <&"$1" | command -p awk '"'"'' \
+  'command -p tr -d '"'"'\000'"'"' <&"$1" | command -p awk '"'"'' \
+  't_counts_refuse_a_malformed_line'
+shmutant_mut 'a unit'"'"'s total past nine digits is accepted' \
+  'c[$1] > 999999999 {' \
+  'c[$1] > 9999999999 {' \
+  't_counts_refuse_a_malformed_line'
+shmutant_mut 'counts that did not all reach the pool are compared anyway' \
+  '[ -z "$counts_bad" ] && [ "$counts_end" != "$counts_got" ]; then' \
+  '[ -z "$counts_bad" ] && false; then' \
+  't_counts_need_their_end_marker'

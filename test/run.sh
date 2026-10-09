@@ -51,7 +51,8 @@ toy_run() { bash "$1/test.sh"; }
 # `<unit>\t<assertions>` on SHMUTANT_COUNTS_FD. Its environment bends it: TOY_DEPENDENT=1 makes
 # even-works run its second assertion only after add-works ran, so a selection of even-works alone
 # runs fewer; TOY_LINE is written, raw, in place of each count line of a selected run (without its
-# newline when TOY_NO_NL=1); TOY_SILENT=1
+# newline when TOY_NO_NL=1, twice when TOY_TWICE=1); TOY_NUL=1 writes `add<NUL>-works<TAB>1` there
+# instead; TOY_SILENT=1
 # (a selected run) and TOY_FULL_SILENT=1 (the unselected one) report nothing; TOY_SPLIT=1 makes the
 # unselected run report each assertion on a line of its own; TOY_FULL_RED=1 fails the unselected run.
 mk_counted_toy() {
@@ -66,7 +67,9 @@ count() {
   [ -n "${SHMUTANT_COUNTS_FD:-}" ] || return 0
   if [ -n "$sel" ]; then
     [ -z "${TOY_SILENT:-}" ] || return 0
+    if [ -n "${TOY_NUL:-}" ]; then printf 'add\000-works\t1\n' >&"$SHMUTANT_COUNTS_FD"; return 0; fi
     if [ -n "${TOY_LINE+x}" ] && [ -n "${TOY_NO_NL:-}" ]; then printf '%s' "$TOY_LINE" >&"$SHMUTANT_COUNTS_FD"; return 0; fi
+    if [ -n "${TOY_LINE+x}" ] && [ -n "${TOY_TWICE:-}" ]; then printf '%s\n%s\n' "$TOY_LINE" "$TOY_LINE" >&"$SHMUTANT_COUNTS_FD"; return 0; fi
     if [ -n "${TOY_LINE+x}" ]; then printf '%s\n' "$TOY_LINE" >&"$SHMUTANT_COUNTS_FD"; return 0; fi
   else
     [ -z "${TOY_FULL_SILENT:-}" ] || return 0
@@ -2173,6 +2176,45 @@ t_counts_refuse_a_malformed_line() {
     has "$(baseline_of add-works 7)" 'line 1 is not <unit><TAB><digits>' 'and names the line'
     eq "$(verdict_of 'add subtracts')" baseline "the selection's row is scored baseline"
   done
+  # a NUL byte inside a unit makes its line malformed: dropped, `add<NUL>-works` would pass for
+  # add-works
+  TOY_NUL=1 SHMUTANT_COUNTS=1 pool lbl "$T/wd" toy_prepare toy_run
+  eq "$(baseline_of add-works)" incomplete 'a unit holding a NUL byte is refused, never read as another unit'
+  has "$(baseline_of add-works 7)" 'line 1 is not <unit><TAB><digits>' 'as a malformed line'
+  # a unit's total stays within nine digits, where awk's arithmetic is exact
+  TOY_TWICE=1 TOY_LINE=$'add-works\t999999999' SHMUTANT_COUNTS=1 pool lbl "$T/wd" toy_prepare toy_run
+  eq "$(baseline_of add-works)" incomplete 'a unit whose total passes nine digits is refused'
+  has "$(baseline_of add-works 7)" 'unit [add-works] totals more than 999999999 assertions' 'says why'
+}
+
+t_counts_need_their_end_marker() {
+  # the collector takes a baseline's counts as whole only up to the worker's end marker: a worker
+  # whose writes failed partway would otherwise have the pool compare the units that arrived
+  local fd
+  # shellcheck disable=SC2034
+  declare -gA SHMUTANT_VERDICT_R=() SHMUTANT_DIR_IDS=() SHMUTANT_RES_VERDICT=() SHMUTANT_RES_US=() \
+    SHMUTANT_RES_STATUS=() SHMUTANT_RES_CLONE=() SHMUTANT_RES_COUNTS=() SHMUTANT_RES_COUNTS_BAD=()
+  mkdir -p "$T/base-0" "$T/mut-0"
+  SHMUTANT_DIR_IDS[base-0]="$(_shmutant_dir_id "$T/base-0")"; SHMUTANT_DIR_IDS[mut-0]="$(_shmutant_dir_id "$T/mut-0")"
+  channel() { local k="$1"; shift; printf '%s\n' "$@" > "$T/ch"; exec {fd}<"$T/ch"; SHMUTANT_VERDICT_R[$k]="$fd"; }
+  # shellcheck disable=SC2034
+  SHMUTANT_COUNTS=1
+  channel base-0 $'count a\t1' $'count b\t2' 'counts-end 2' 'verdict green 5 0'
+  _shmutant_collect "$T/base-0" base-0 0
+  eq "${SHMUTANT_RES_COUNTS_BAD[base-0]}" '' 'counts that end with their marker are whole'
+  eq "${SHMUTANT_RES_COUNTS[base-0]}" $'a\t1\nb\t2' 'and are kept in order'
+  channel base-0 $'count a\t1' 'verdict green 5 0'
+  _shmutant_collect "$T/base-0" base-0 0
+  has "${SHMUTANT_RES_COUNTS_BAD[base-0]}" 'did not all reach the pool (no end marker sent, 1 received)' 'counts with no end marker are refused'
+  channel base-0 $'count a\t1' 'counts-end 2' 'verdict green 5 0'
+  _shmutant_collect "$T/base-0" base-0 0
+  has "${SHMUTANT_RES_COUNTS_BAD[base-0]}" 'did not all reach the pool (2 sent, 1 received)' 'and fewer lines than the marker names'
+  channel base-0 'counts-bad line 3 is not <unit><TAB><digits>' 'counts-end 0' 'verdict green 5 0'
+  _shmutant_collect "$T/base-0" base-0 0
+  eq "${SHMUTANT_RES_COUNTS_BAD[base-0]}" 'line 3 is not <unit><TAB><digits>' "the worker's own reason is kept"
+  channel mut-0 'verdict killed 5 1'
+  _shmutant_collect "$T/mut-0" mut-0 0
+  eq "${SHMUTANT_RES_COUNTS_BAD[mut-0]}" '' "a row's run needs no counts"
 }
 
 t_counts_need_a_unit_and_a_reference() {
@@ -2207,6 +2249,9 @@ t_counts_need_the_baseline() {
   SHMUTANT_COUNTS=yes pool lbl "$T/wd" toy_prepare toy_run
   rc_is "$RC" 2 'SHMUTANT_COUNTS=yes is refused, not read as 0 or 1'
   has "$ERR" 'SHMUTANT_COUNTS must be 0 or 1' 'names it'
+  SHMUTANT_COUNTS='' pool lbl "$T/wd" toy_prepare toy_run
+  rc_is "$RC" 2 'an empty SHMUTANT_COUNTS is refused, not read as off'
+  has "$ERR" 'SHMUTANT_COUNTS must be 0 or 1, got []' 'names it'
   SHMUTANT_COUNTS=1 SHMUTANT_BASELINE=0 pool lbl "$T/wd" toy_prepare toy_run
   rc_is "$RC" 2 'the counts without the baseline are refused'
   has "$ERR" 'SHMUTANT_COUNTS=1 needs the baseline' 'says why'
