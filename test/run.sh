@@ -100,13 +100,14 @@ wait_for() {
 }
 
 # wait_gone <pid> [identity [looks]] — block until <pid> no longer runs, looking at most <looks> times
-# a tenth of a second apart (30: three seconds); false on expiry. The bound counts looks and reads no
-# clock, so a clock step cannot change it. A process just sent KILL answers `kill -0` until it is
-# reaped, and one whose parent never reaps it answers forever: a zombie has already exited, and
-# counts as gone. The process waited on is the one carrying <identity> (read on entry when none is
-# given): a pid carrying another was reused.
+# a tenth of a second apart (30: three seconds); 1 on expiry, 2 for <looks> that is not a positive
+# integer. The bound counts looks and reads no clock, so a clock step cannot change it. A process
+# just sent KILL answers `kill -0` until it is reaped, and one whose parent never reaps it answers
+# forever: a zombie has already exited, and counts as gone. The process waited on is the one
+# carrying <identity> (read on entry when none is given): a pid carrying another was reused.
 wait_gone() {
   local i=0 id="${2:-}" looks="${3:-30}" now
+  [[ "$looks" =~ ^[1-9][0-9]{0,3}$ ]] || { echo "wait_gone: looks must be 1 to 9999, got [$looks]" >&2; return 2; }
   [ -n "$id" ] || id="$(_shmutant_identity "$1" 2>/dev/null)"
   while kill -0 "$1" 2>/dev/null; do
     case "$(command -p ps -o stat= -p "$1" 2>/dev/null)" in *Z*) return 0 ;; esac
@@ -3307,13 +3308,24 @@ t_kill_tree_skips_a_reused_pid() {
   sleep 1.2
   # the identity is a /proc tick count, the start time ps recorded (lstart), or, where ps has
   # no lstart, a start in epoch seconds; a wrong one differs in each form
-  local id wrong frozen; id="$(_shmutant_identity "$p")"
+  local id wrong; id="$(_shmutant_identity "$p")"
+  # The last form is two readings, the clock less ps's etime, so a clock step between two of its
+  # identities would decide the checks below. It is checked on every host, against a clock and an
+  # etime both stubbed and moved on together; where it is this host's own form, that is all.
+  ( SHMUTANT_PROC=0; SHMUTANT_PS_LSTART=0; printf '2000000000 2\n' > "$T/clock"
+    _shmutant_now() { local n e; read -r n e < "$T/clock"; printf '%s' "$(( n * 1000000 ))"; }
+    command() { local n e; case "$*" in "-p ps -o etime= -p $p") read -r n e < "$T/clock"; printf '00:%02d\n' "$e" ;; *) builtin command "$@" ;; esac; }
+    eid="$(_shmutant_identity "$p")"
+    eq "$eid" e1999999998 'an elapsed-time identity is the clock less the elapsed time'
+    _shmutant_alive_since "$p" "$eid"; rc_is $? 0 'a process seen a moment ago with this elapsed-time identity is the same process'
+    printf '2000000001 3\n' > "$T/clock"
+    _shmutant_alive_since "$p" "$eid"; rc_is $? 0 'the elapsed-time identity is stable while the process lives'
+    _shmutant_alive_since "$p" "e$(( ${eid#e} - 100 ))"; rc_is $? 1 'a pid recorded with another elapsed-time start is a reused pid'
+    _shmutant_kill_tree TERM 2147483000 "$p:e$(( ${eid#e} - 100 ))"; sleep 0.2
+    kill -0 "$p" 2>/dev/null; rc_is $? 0 'a retained pid that fails the elapsed-time identity check is not signalled'
+    exit "$_failed" ) || _failed=1
   case "$id" in
-    e*)
-      # read again against a frozen clock, so the comparison takes nothing from a clock that moves
-      frozen="$( _shmutant_now() { printf '%s' 2000000000000000; }; _shmutant_identity "$p" )"
-      [ "${frozen#e}" -le 2000000000 ] || fail_ 'an elapsed-time identity in the future'
-      wrong="e$(( ${id#e} - 100 ))" ;;
+    e*) kill "$p" 2>/dev/null; wait "$p" 2>/dev/null; return ;;
     ''|*[!0-9]*)
       [ -n "$id" ] || fail_ 'no identity for a live process'
       eq "$id" "$(ps -o lstart= -p "$p" | awk 'NF { $1 = $1; print; exit }')" 'a non-numeric identity is the start time ps recorded, normalised'
@@ -4321,6 +4333,7 @@ t_suite_sweeps_what_a_unit_leaves_behind() {
     printf '%s\n' "\$T" > '$T/unrecordable.dir'; SWEEP_SEEN='$T/no-such-dir/seen'
     if [ -n "\${STRICT:-}" ]; then set -euC -o pipefail; IFS=:; shopt -s nocasematch extglob; exec 1< /dev/null; fi
   }
+  t_zz_undeletable() { printf '%s\n' "\$T" > '$T/undeletable.dir'; make_unremovable "\$T/held" && printf '%s\n' "\$UNREMOVABLE_HOW" > '$T/undeletable.how'; true; }
   t_zz_reparents() { ( sleep 30 > /dev/null 2>&1 & echo \$! > '$T/reparents.pid'; sleep 2 ); sleep 0.3; }
   late_await() { local i; for (( i = 0; i < 200; i++ )); do command -p grep -qx "\$1" '$T/late_reparents.log' 2>/dev/null && return 0; sleep 0.05; done; fail_ "the sampler never logged \$1"; return 1; }
   late_identity() {
@@ -4343,7 +4356,7 @@ t_suite_sweeps_what_a_unit_leaves_behind() {
 main "\$@"
 EOF
   } > "$T/suite/test/run.sh"
-  local out c pid hold unverified dir
+  local out c pid hold unverified dir rc
   for c in leaks leaks_then_exits reparents; do
     out="$(SHMUTANT_SELECT="t_zz_$c" bash "$T/suite/test/run.sh" 2>&1)"; rc_is $? 1 "t_zz_$c leaves a process behind and fails the suite"
     has "$out" "FAIL: t_zz_$c: 1 process(es) outlived the unit" "t_zz_$c is named with the count"
@@ -4517,6 +4530,17 @@ EOF
   dir="$(cat "$T/unrecordable.dir" 2>/dev/null)"
   if [ -z "$dir" ]; then fail_ "the strict unrecordable unit never recorded its directory: [$out]"
   elif [ -e "$dir" ]; then fail_ 'under the options the unit set, a record that could not be opened left its directory behind'; fi
+  # A directory the trap cannot remove (it holds one this user cannot delete) fails the unit too.
+  rm -f "$T/undeletable.dir" "$T/undeletable.how"
+  rc=0; out="$(SHMUTANT_SELECT=t_zz_undeletable bash "$T/suite/test/run.sh" 2>&1)" || rc=$?
+  dir="$(cat "$T/undeletable.dir" 2>/dev/null)"
+  if [ -z "$dir" ]; then fail_ "the undeletable unit never recorded its directory: [$out]"
+  elif [ ! -s "$T/undeletable.how" ]; then echo "note: $_unit: no way to make a directory unremovable here; the undeletable case was skipped"
+  else
+    rc_is "$rc" 1 'a unit whose directory cannot be removed fails'
+    has "$out" "FAIL: t_zz_undeletable: its directory $dir could not be removed" 'and names it'
+    UNREMOVABLE_HOW="$(cat "$T/undeletable.how")" unmake_unremovable "$dir/held"; rm -rf -- "$dir"
+  fi
   # A unit that cannot read its own identity hands the sampler nothing to check; a sampler that
   # then starts only after the unit has ended records nothing either. The unit itself says so.
   mkdir -p "$T/suite-noid/test"
@@ -4795,6 +4819,12 @@ t_wait_gone_takes_a_reused_pid_as_gone() {
   case "$real" in e*) stale=e1 ;; *[!0-9]*) stale='Thu Jan  1 00:00:00 1970' ;; *) stale=1 ;; esac
   wait_gone "$p" "$stale" 1 || rc=$?
   [ "$rc" = 0 ] || fail_ 'a pid carrying another identity was waited on as if it were the process'
+  # a bound that is not a count of looks is refused, never read as a wait that expired
+  local bad
+  for bad in 0 -1 x 10000; do
+    rc=0; wait_gone "$p" "$real" "$bad" 2>/dev/null || rc=$?
+    rc_is "$rc" 2 "a bound of [$bad] looks is refused"
+  done
   kill -KILL "$p" 2>/dev/null; wait "$p" 2>/dev/null
 }
 
@@ -4838,15 +4868,16 @@ unit_snapshot() {
 
 # unit_finish — a unit's EXIT trap, run in the unit's own shell: record what is still attached to
 # the unit, then remove its directory. A record that could not be written fails the unit, whatever
-# status it was leaving with: what that record would have named is otherwise never swept. The
-# directory goes first, so a report that cannot be printed under the unit's own errexit still
-# leaves nothing behind, and still fails it.
+# status it was leaving with: what that record would have named is otherwise never swept. So does
+# a directory that could not be removed. Both are attempted before either is reported, and no
+# report can stop the exit, so the unit's own errexit cannot skip a step or pass the unit.
 unit_finish() {
-  local recorded=1
+  local recorded=1 removed=1
   unit_snapshot "$BASHPID" >> "$SWEEP_SEEN" 2>/dev/null || recorded=0
-  rm -rf -- "$T"
-  [ "$recorded" = 0 ] || return 0
-  printf 'FAIL: %s: its last snapshot could not be written to the sweep record, so what the unit left behind is unverified\n' "$_unit"
+  rm -rf -- "$T" || removed=0
+  [ "$recorded" = 0 ] || [ "$removed" = 0 ] || return 0
+  [ "$recorded" = 1 ] || printf 'FAIL: %s: its last snapshot could not be written to the sweep record, so what the unit left behind is unverified\n' "$_unit" || :
+  [ "$removed" = 1 ] || printf 'FAIL: %s: its directory %s could not be removed\n' "$_unit" "$T" || :
   exit 1
 }
 
