@@ -50,7 +50,8 @@ toy_run() { bash "$1/test.sh"; }
 # mk_counted_toy <dir> — mk_toy's library under a suite that also reports, for each unit it ran,
 # `<unit>\t<assertions>` on SHMUTANT_COUNTS_FD. Its environment bends it: TOY_DEPENDENT=1 makes
 # even-works run its second assertion only after add-works ran, so a selection of even-works alone
-# runs fewer; TOY_LINE is written, raw, in place of each count line of a selected run; TOY_SILENT=1
+# runs fewer; TOY_LINE is written, raw, in place of each count line of a selected run (without its
+# newline when TOY_NO_NL=1); TOY_SILENT=1
 # (a selected run) and TOY_FULL_SILENT=1 (the unselected one) report nothing; TOY_SPLIT=1 makes the
 # unselected run report each assertion on a line of its own; TOY_FULL_RED=1 fails the unselected run.
 mk_counted_toy() {
@@ -65,6 +66,7 @@ count() {
   [ -n "${SHMUTANT_COUNTS_FD:-}" ] || return 0
   if [ -n "$sel" ]; then
     [ -z "${TOY_SILENT:-}" ] || return 0
+    if [ -n "${TOY_LINE+x}" ] && [ -n "${TOY_NO_NL:-}" ]; then printf '%s' "$TOY_LINE" >&"$SHMUTANT_COUNTS_FD"; return 0; fi
     if [ -n "${TOY_LINE+x}" ]; then printf '%s\n' "$TOY_LINE" >&"$SHMUTANT_COUNTS_FD"; return 0; fi
   else
     [ -z "${TOY_FULL_SILENT:-}" ] || return 0
@@ -402,6 +404,11 @@ t_refuse_fails_the_pool() {
   eq "$SHMUTANT_DECL_ERRORS" 3 'each of those counts as a refusal'
   shmutant_reset
   eq "$SHMUTANT_DECL_ERRORS" 0 'reset clears the refusals'
+  # the count lives in the calling shell: a call from a subshell is reported there and lost here,
+  # as the guide says
+  ( shmutant_refuse 'from a subshell' ) 2>"$T/e-sub"
+  has "$(cat "$T/e-sub")" 'refused: from a subshell' 'a refusal from a subshell is reported'
+  eq "$SHMUTANT_DECL_ERRORS" 0 'but is not counted in the calling shell'
   # a counter the caller made readonly: refused, never assigned, and the shell survives
   ( readonly SHMUTANT_DECL_ERRORS; shmutant_refuse 'x' 2>"$T/e-ro"; echo "refuse=$?" > "$T/o-ro" )
   eq "$(cat "$T/o-ro" 2>/dev/null)" 'refuse=2' 'a readonly refusal count is refused (2), and the shell survives'
@@ -2115,6 +2122,9 @@ t_counts_pass_a_complete_selection() {
   # a count of up to nine digits, leading zeros included, is a number
   TOY_LINE=$'add-works\t000000001' SHMUTANT_COUNTS=1 pool lbl "$T/wd" toy_prepare toy_run
   eq "$(baseline_of add-works)" green 'a nine-digit count with leading zeros is the number it spells'
+  # a last line without its newline is read like any other
+  TOY_NO_NL=1 TOY_LINE=$'add-works\t1' SHMUTANT_COUNTS=1 pool lbl "$T/wd" toy_prepare toy_run
+  eq "$(baseline_of add-works)" green 'a last count line without its newline still counts'
   # off by default: no unselected run, and a descriptor an outer pool exported never reaches a run
   rm -f "$T/runs"
   export SHMUTANT_COUNTS_FD=7
