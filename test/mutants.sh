@@ -1776,3 +1776,11 @@ shmutant_mut 'a NUL count that failed partway reads as none' \
   'nul="$(set -o pipefail; command -p tr' \
   'nul="$(command -p tr' \
   't_counts_reading_fails_closed'
+shmutant_mut 'counting runs on past the second start' \
+  '{ if (++n > 1) exit; s = substr(s, i + 1) }' \
+  '{ ++n; s = substr(s, i + 1) }' \
+  't_pool_refuses_a_literal_that_occurs_more_than_once'
+shmutant_mut 'the count comparison drops its first difference' \
+  '!($1 in ref) || ref[$1] != $2 { if (!d) { fu = $1;' \
+  '!($1 in ref) || ref[$1] != $2 { if (d) { fu = $1;' \
+  't_counts_diff_names_the_first_difference'

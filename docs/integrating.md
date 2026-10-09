@@ -398,13 +398,15 @@ shmutant_target lib/common.sh
 mut_checked 'removal drops operator edits' 'keep=1' 'keep=0' 'removal keeps operator edits'
 ```
 
-The check is a substring of the source, not the whole-token match a verdict makes, so it never
-refuses a witness the unit writes out: a witness the block holds only inside a longer label
-passes and is scored at run time as before. A suite that builds its labels at run time (from a
-variable, say) needs a check of its own. So does one whose blocks open otherwise than with the
-exact line `if shmutant_selected '<unit>'; then` and close with a `fi` alone on its line (other
-quoting, indentation or spacing, or a unit name holding an apostrophe): the check finds no
-such block and refuses the row. A suite file that cannot be read refuses every row.
+The block it reads opens with the exact line `if shmutant_selected '<unit>'; then` and ends at
+the first `fi` alone at the start of a line, so every `fi` nested inside it is indented. In a
+block of that shape the check never refuses a witness the unit writes out: it is a substring of
+the source, not the whole-token match a verdict makes, so a witness the block holds only inside
+a longer label passes and is scored at run time as before. A suite that builds its labels at run
+time (from a variable, say) needs a check of its own. So does one whose blocks are shaped
+otherwise (other quoting, indentation or spacing, an unindented inner `fi`, a unit name holding
+an apostrophe): the check finds no block, or too short a one, and refuses the row. A suite file
+that cannot be read refuses every row.
 
 ```sh
 bash scripts/shmutant.sh run test/mutants.sh                # from the repo root

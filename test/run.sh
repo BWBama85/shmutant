@@ -320,6 +320,9 @@ if shmutant_selected 'removal keeps operator edits'; then
   [ "$keep" = 1 ] || echo "FAIL: removal keeps operator edits: keep is $keep"
 fi
 if shmutant_selected 'another unit'; then
+  if [ -n "$y" ]; then
+    echo "y is set"
+  fi
   [ -n "$x" ] || echo "FAIL: another unit: x is empty"
 fi
 EOF
@@ -332,7 +335,7 @@ EOF
   mut_checked 'x' 'a' 'b' 'another unit' 'removal keeps operator edits' 2>"$T/e-doc"; rc_is $? 2 'a witness from another unit is refused'
   has "$(cat "$T/e-doc")" 'witness [another unit] is not in unit [removal keeps operator edits]' 'naming both'
   eq "${#SHMUTANT_ROWS_NAME[@]}/$SHMUTANT_DECL_ERRORS" '1/1' 'the row is not appended, and the refusal is counted'
-  mut_checked 'y' 'a' 'b' 'another unit' 2>/dev/null; rc_is $? 0 'a witness its own unit holds is accepted'
+  mut_checked 'y' 'a' 'b' 'another unit' 2>/dev/null; rc_is $? 0 'a witness its own unit holds, past a nested and indented fi, is accepted'
   ( set -u; mut_checked 'short' 'a' 'b' 2>/dev/null; echo "rc=$? errors=$SHMUTANT_DECL_ERRORS" > "$T/o-short" )
   eq "$(cat "$T/o-short" 2>/dev/null)" 'rc=2 errors=2' 'under set -u a row short of a witness is a counted refusal, not an unbound-variable abort'
   mv "$T/plan/run.sh" "$T/plan/moved.sh"
@@ -356,9 +359,9 @@ t_pool_refuses_a_literal_that_occurs_more_than_once() {
   pool lbl "$T/wd" toy_prepare counting_run
   rc_is "$RC" 2 'a table with a literal that occurs more than once does not run'
   [ ! -e "$T/runs" ] || fail_ "a run happened, the baseline included: $(tr '\n' ' ' < "$T/runs")"
-  has "$ERR" "row 'two lines' is refused: its old literal starts at 2 positions in lib.sh" 'a literal on two lines is refused, by name'
-  has "$ERR" "row 'overlapping' is refused: its old literal starts at 2 positions in overlap.sh" 'overlapping starts are counted'
-  has "$ERR" "row 'one line' is refused: its old literal starts at 2 positions in inline.sh" 'two starts on one line are counted'
+  has "$ERR" "row 'two lines' is refused: its old literal starts at more than one position in lib.sh" 'a literal on two lines is refused, by name'
+  has "$ERR" "row 'overlapping' is refused: its old literal starts at more than one position in overlap.sh" 'overlapping starts are counted'
+  has "$ERR" "row 'one line' is refused: its old literal starts at more than one position in inline.sh" 'two starts on one line are counted'
   hasnt "$ERR" "row 'unique'" 'a literal that occurs once is not named'
   has "$ERR" '3 row(s) refused' 'every refused row is named before the pool stops'
   # counted in the prepared tree, which is what every clone copies: a prepare that copies the
@@ -368,7 +371,20 @@ t_pool_refuses_a_literal_that_occurs_more_than_once() {
   doubling_prepare() { toy_prepare "$1" && printf 'sum() { echo $(( $1 + $2 )); }\n' >> "$1/lib.sh"; }
   SHMUTANT_BASELINE=0 pool lbl "$T/wd" doubling_prepare toy_run
   rc_is "$RC" 2 'a literal the prepared tree holds twice is refused'
-  has "$ERR" "row 'a' is refused: its old literal starts at 2 positions in lib.sh" 'says why'
+  has "$ERR" "row 'a' is refused: its old literal starts at more than one position in lib.sh" 'says why'
+  # counting stops at the second start: a line of 524,288 repeats is refused at once, where
+  # counting every start takes seconds (17 on the machine that wrote this)
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  shmutant_target repeats.sh
+  shmutant_mut 'repeats' 'aa' 'bb' 'add-works'
+  awk 'BEGIN { s = "a"; for (i = 0; i < 18; i++) s = s s; print s s }' > "$T/toy/repeats.sh"
+  local t0 t1; t0="$(_shmutant_now)"
+  SHMUTANT_BASELINE=0 pool lbl "$T/wd" toy_prepare toy_run
+  t1="$(_shmutant_now)"
+  rc_is "$RC" 2 'a literal repeated along one long line is refused'
+  [ $(( (t1 - t0) / 1000000 )) -lt 10 ] || fail_ "counting a long line of repeats took $(( (t1 - t0) / 1000000 ))s"
+  rm -f "$T/toy/repeats.sh"
   # byte for byte, whatever the caller's nocasematch: a copy that differs in case is another literal
   printf '# ECHO the sum\n' >> "$T/toy/lib.sh"
   shmutant_reset; shmutant_target lib.sh
@@ -2222,6 +2238,16 @@ t_counts_reading_fails_closed() {
   rd "$T/ok" closed
   eq "$SHMUTANT_RUN_COUNTS_BAD" 'its count lines could not be read' 'a NUL check that could not read is a failed read'
   eq "$SHMUTANT_RUN_COUNTS" '' 'and nothing is counted'
+}
+
+t_counts_diff_names_the_first_difference() {
+  # _shmutant_count_diff on its own: nothing when every unit matches, else the first unit that
+  # differs or that the reference lacks, both counts, and how many more differ
+  eq "$(_shmutant_count_diff $'a\t1\nb\t2' $'b\t2\na\t1')" '' 'the same counts in another order match'
+  eq "$(_shmutant_count_diff $'a\t1\nb\t2' $'b\t2')" '' 'a selection may report fewer units'
+  eq "$(_shmutant_count_diff $'a\t1\nb\t2' $'a\t1\nb\t3')" 'unit [b] ran 3 assertion(s) here and 2 in the unselected run' 'a count that differs is named, with both counts'
+  eq "$(_shmutant_count_diff $'a\t1' $'c\t1\na\t2')" 'unit [c] ran 1 assertion(s) here and is absent from the unselected run; 1 more unit(s) differ' 'a unit the reference lacks, and how many more differ'
+  eq "$(_shmutant_count_diff $'a\t1' $'A\t1')" 'unit [A] ran 1 assertion(s) here and is absent from the unselected run' 'units are compared byte for byte'
 }
 
 t_counts_need_their_end_marker() {

@@ -531,14 +531,15 @@ _shmutant_mutate_body() {
   return 0
 }
 
-# _shmutant_starts <file> <literal> — print how many positions <literal> starts at in <file>,
-# overlapping starts included (`aa` starts twice in `aaa`), matched line by line as
-# shmutant_mutate matches it: awk's index(), the literal through ENVIRON. Fails, printing
+# _shmutant_starts <file> <literal> — print how many positions <literal> starts at in <file>, 0, 1
+# or 2 (two meaning two or more: counting stops there, so a long line of repeats costs no more
+# than two matches), overlapping starts included (`aa` starts twice in `aaa`), matched line by line
+# as shmutant_mutate matches it: awk's index(), the literal through ENVIRON. Fails, printing
 # nothing usable, when <file> cannot be read: a read that failed must never count as no match.
 _shmutant_starts() {
   SHMUTANT_MUT_OLD="$2" command -p awk '
     BEGIN { old = ENVIRON["SHMUTANT_MUT_OLD"]; n = 0; if (old == "") exit }
-    { s = $0; while ((i = index(s, old)) > 0) { n++; s = substr(s, i + 1) } }
+    { s = $0; while ((i = index(s, old)) > 0) { if (++n > 1) exit; s = substr(s, i + 1) } }
     END { print n }
   ' "$1" 2>/dev/null
 }
@@ -1334,9 +1335,11 @@ _shmutant_count_check() {
 # once: for the first unit of <counts> whose count differs from <reference>'s, or that <reference>
 # lacks, print the sentence naming it and both counts; nothing when every unit matches. Units are
 # compared whole and byte for byte, as awk keys, whatever the caller's shell options; an empty
-# line separates the two lists on input, and no unit line is empty.
+# line separates the two lists on input, and no unit line is empty. The lists reach awk as a
+# here-string, not from a pipe: there is no writer whose failure awk would read as a short list
+# that matches, and a redirection that cannot be made fails the call.
 _shmutant_count_diff() {
-  builtin printf '%s\n\n%s\n' "$1" "$2" | command -p awk '
+  command -p awk '
     BEGIN { FS = "\t"; sep = 0; d = 0 }
     !sep && $0 == "" { sep = 1; next }
     !sep { ref[$1] = $2; next }
@@ -1346,7 +1349,7 @@ _shmutant_count_diff() {
       printf "unit [%s] ran %s assertion(s) here", fu, fn
       if (fr == "") printf " and is absent from the unselected run"; else printf " and %s in the unselected run", fr
       if (d > 1) printf "; %d more unit(s) differ", d - 1
-    }'
+    }' <<< "$1"$'\n\n'"$2"
 }
 
 # _shmutant_held_group <pgid> — set SHMUTANT_HELD to `-g <pgid>` when the run's holder is still
@@ -2501,7 +2504,7 @@ _shmutant_pool_body() {
       _shmutant_pool_fail "$label" "$wd"; return 2
     fi
     if [ "$starts" -gt 1 ]; then
-      _shmutant_err "$label: row '${SHMUTANT_ROWS_NAME[$i]}' is refused: its old literal starts at $starts positions in ${SHMUTANT_ROWS_FILE[$i]} — the rewrite takes the first, which may not be the one the row means; lengthen the literal until it occurs once"
+      _shmutant_err "$label: row '${SHMUTANT_ROWS_NAME[$i]}' is refused: its old literal starts at more than one position in ${SHMUTANT_ROWS_FILE[$i]} — the rewrite takes the first, which may not be the one the row means; lengthen the literal until it occurs once"
       ambiguous=$((ambiguous + 1))
     fi
   done
