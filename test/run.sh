@@ -372,19 +372,13 @@ t_pool_refuses_a_literal_that_occurs_more_than_once() {
   SHMUTANT_BASELINE=0 pool lbl "$T/wd" doubling_prepare toy_run
   rc_is "$RC" 2 'a literal the prepared tree holds twice is refused'
   has "$ERR" "row 'a' is refused: its old literal starts at more than one position in lib.sh" 'says why'
-  # counting stops at the second start: a line of 524,288 repeats is refused at once, where
-  # counting every start takes seconds (17 on the machine that wrote this)
-  shmutant_reset; shmutant_target lib.sh
-  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
-  shmutant_target repeats.sh
-  shmutant_mut 'repeats' 'aa' 'bb' 'add-works'
-  awk 'BEGIN { s = "a"; for (i = 0; i < 18; i++) s = s s; print s s }' > "$T/toy/repeats.sh"
-  local t0 t1; t0="$(_shmutant_now)"
-  SHMUTANT_BASELINE=0 pool lbl "$T/wd" toy_prepare toy_run
-  t1="$(_shmutant_now)"
-  rc_is "$RC" 2 'a literal repeated along one long line is refused'
-  [ $(( (t1 - t0) / 1000000 )) -lt 10 ] || fail_ "counting a long line of repeats took $(( (t1 - t0) / 1000000 ))s"
-  rm -f "$T/toy/repeats.sh"
+  # counting stops at the second start. Bounded by CPU time, which neither a loaded host nor a
+  # clock step changes: on a line of 1,048,576 repeats the count takes milliseconds, where counting
+  # every start runs past five CPU seconds and is killed (SIGXCPU)
+  local got
+  awk 'BEGIN { s = "a"; for (i = 0; i < 19; i++) s = s s; print s s }' > "$T/repeats"
+  got="$( ulimit -t 5; _shmutant_starts "$T/repeats" aa )"; rc_is $? 0 'a long line of repeats is counted within five CPU seconds'
+  eq "$got" 2 'and the count stops at the second start'
   # byte for byte, whatever the caller's nocasematch: a copy that differs in case is another literal
   printf '# ECHO the sum\n' >> "$T/toy/lib.sh"
   shmutant_reset; shmutant_target lib.sh
