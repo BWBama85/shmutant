@@ -2569,14 +2569,21 @@ t_verdict_timeout_with_a_leading_zero() {
   shmutant_reset; shmutant_target lib.sh
   shmutant_mut 'hangs' '$1 + $2' '$1 - $2' 'add-works'
   # 08: digits only, but not a valid octal constant, which is what bash arithmetic would read.
-  slow_run() { bash -c "echo \$\$ > '$T/run.pid'; sleep 6; : > '$T/six'; sleep 30"; }
+  slow_run() { bash -c 'echo "$$" > "$1/run.pid"; sleep 6; : > "$1/six"; sleep 30' _ "$T"; }
   # The pool reads a frozen clock, so each of the watchdog's polls counts as its half-second sleep
   # and nothing else: eight seconds is sixteen polls, each reading the clock once after the reading
   # the deadline starts from. Those reads are counted, and the run marks six seconds of its own
-  # sleep, which sixteen polls that each slept their half second outlast. Between them the
-  # deadline's length is checked with no clock read, whatever a real clock does meanwhile.
+  # sleep, which sixteen polls that each slept their half second outlast. That first reading waits
+  # for the run to have started, so the two begin together however late the run is scheduled.
+  # Between them the deadline's length is checked with no clock read, whatever a real clock does.
   : > "$T/reads"
-  OUT="$( _shmutant_now() { [ "${FUNCNAME[1]}" != _shmutant_run_bounded ] || printf 'read\n' >> "$T/reads"; printf '%s' 1000000000000000; }
+  OUT="$( _shmutant_now() {
+      local i=0
+      if [ "${FUNCNAME[1]}" = _shmutant_run_bounded ]; then
+        [ -s "$T/reads" ] || until [ -e "$T/run.pid" ] || [ "$i" -ge 100 ]; do i=$((i + 1)); command -p sleep 0.1; done
+        printf 'read\n' >> "$T/reads"
+      fi
+      printf '%s' 1000000000000000; }
     SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=08 shmutant_pool lbl "$T/wd" toy_prepare slow_run 2> "$T/err" )"
   ERR="$(cat "$T/err")"
   eq "$(verdict_of 'hangs')" timeout 'a timeout of 08 is eight seconds, not an octal error that disarms the watchdog'
@@ -4328,33 +4335,35 @@ t_suite_sweeps_what_a_unit_leaves_behind() {
   [ "$(tail -n 1 "$here/run.sh")" = 'main "$@"' ] || { fail_ 'run.sh no longer ends with main "$@"'; return; }
   mkdir -p "$T/suite/test"
   cp -- "$SHMUTANT" "$T/suite/shmutant.sh"
+  # The units below are written as source, so this directory goes into them quoted for the shell.
+  local qt; printf -v qt '%q' "$T"
   { sed '$d' "$here/run.sh"
     cat <<EOF
-  t_zz_leaks() { set -m; sleep 30 > /dev/null 2>&1 & echo \$! > '$T/leaks.pid'; set +m; }
-  t_zz_leaks_then_exits() { sleep 30 > /dev/null 2>&1 & echo \$! > '$T/leaks_then_exits.pid'; printf '%s\n' "\$T" > '$T/leaks_then_exits.dir'; exit 0; }
+  t_zz_leaks() { set -m; sleep 30 > /dev/null 2>&1 & echo \$! > $qt/leaks.pid; set +m; }
+  t_zz_leaks_then_exits() { sleep 30 > /dev/null 2>&1 & echo \$! > $qt/leaks_then_exits.pid; printf '%s\n' "\$T" > $qt/leaks_then_exits.dir; exit 0; }
   t_zz_unrecordable() {
-    printf '%s\n' "\$T" > '$T/unrecordable.dir'; SWEEP_SEEN='$T/no-such-dir/seen'
+    printf '%s\n' "\$T" > $qt/unrecordable.dir; SWEEP_SEEN=$qt/no-such-dir/seen
     if [ -n "\${STRICT:-}" ]; then set -euC -o pipefail; IFS=:; shopt -s nocasematch extglob; exec 1< /dev/null; fi
   }
-  t_zz_undeletable() { printf '%s\n' "\$T" > '$T/undeletable.dir'; make_unremovable "\$T/held" && printf '%s\n' "\$UNREMOVABLE_HOW" > '$T/undeletable.how'; true; }
-  t_zz_reparents() { ( sleep 30 > /dev/null 2>&1 & echo \$! > '$T/reparents.pid'; sleep 2 ); sleep 0.3; }
-  late_await() { local i; for (( i = 0; i < 200; i++ )); do command -p grep -qx "\$1" '$T/late_reparents.log' 2>/dev/null && return 0; sleep 0.05; done; fail_ "the sampler never logged \$1"; return 1; }
+  t_zz_undeletable() { printf '%s\n' "\$T" > $qt/undeletable.dir; make_unremovable "\$T/held" && printf '%s\n' "\$UNREMOVABLE_HOW" > $qt/undeletable.how; true; }
+  t_zz_reparents() { ( sleep 30 > /dev/null 2>&1 & echo \$! > $qt/reparents.pid; sleep 2 ); sleep 0.3; }
+  late_await() { local i; for (( i = 0; i < 200; i++ )); do command -p grep -qx "\$1" $qt/late_reparents.log 2>/dev/null && return 0; sleep 0.05; done; fail_ "the sampler never logged \$1"; return 1; }
   late_identity() {
     local n i
-    if [ -s '$T/late_reparents.flag' ] && [ "\$2" = "\$(cat '$T/late_reparents.flag')" ]; then
-      printf 'failed\n' >> '$T/late_reparents.log'
-      n="\$(command -p grep -cx failed '$T/late_reparents.log')"
+    if [ -s $qt/late_reparents.flag ] && [ "\$2" = "\$(cat $qt/late_reparents.flag)" ]; then
+      printf 'failed\n' >> $qt/late_reparents.log
+      n="\$(command -p grep -cx failed $qt/late_reparents.log)"
       if [ "\$n" = "\$1" ]; then
-        printf 'stalled\n' >> '$T/late_reparents.log'
-        for (( i = 0; i < 200; i++ )); do kill -0 "\$2" 2>/dev/null || { printf 'released\n' >> '$T/late_reparents.log'; break; }; command -p sleep 0.05; done
+        printf 'stalled\n' >> $qt/late_reparents.log
+        for (( i = 0; i < 200; i++ )); do kill -0 "\$2" 2>/dev/null || { printf 'released\n' >> $qt/late_reparents.log; break; }; command -p sleep 0.05; done
       fi
       return 1
     fi
     _real_identity "\$2" || return 1
-    printf 'read\n' >> '$T/late_reparents.log'
-    [ "\$(command -p grep -cx read '$T/late_reparents.log')" != 2 ] || printf 'sampling\n' >> '$T/late_reparents.log'
+    printf 'read\n' >> $qt/late_reparents.log
+    [ "\$(command -p grep -cx read $qt/late_reparents.log)" != 2 ] || printf 'sampling\n' >> $qt/late_reparents.log
   }
-  t_zz_late_reparents() { late_await sampling && printf '%s\n' "\$BASHPID" > '$T/late_reparents.flag' && late_await stalled && ( sleep 30 > /dev/null 2>&1 & echo \$! > '$T/late_reparents.pid' ); }
+  t_zz_late_reparents() { late_await sampling && printf '%s\n' "\$BASHPID" > $qt/late_reparents.flag && late_await stalled && ( sleep 30 > /dev/null 2>&1 & echo \$! > $qt/late_reparents.pid ); }
   t_zz_clean() { sleep 0.2 & wait; }
 main "\$@"
 EOF
@@ -4833,6 +4842,12 @@ t_wait_gone_takes_a_reused_pid_as_gone() {
     rc=0; wait_gone "$p" "$real" "$bad" 2>/dev/null || rc=$?
     rc_is "$rc" 2 "a bound of [$bad] looks is refused"
   done
+  # and the bound given is the one kept: a live process given three looks is looked at three times,
+  # two naps apart (counted by a stub for the nap), then given up on
+  : > "$T/naps"
+  rc=0; ( sleep() { printf 'nap\n' >> "$T/naps"; command sleep "$@"; }; wait_gone "$p" "$real" 3 ) || rc=$?
+  rc_is "$rc" 1 'a live process outlasts three looks'
+  eq "$(grep -cx nap "$T/naps")" 2 'three looks are two naps apart'
   kill -KILL "$p" 2>/dev/null; wait "$p" 2>/dev/null
 }
 
