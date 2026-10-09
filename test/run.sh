@@ -52,7 +52,7 @@ toy_run() { bash "$1/test.sh"; }
 # even-works run its second assertion only after add-works ran, so a selection of even-works alone
 # runs fewer; TOY_LINE is written, raw, in place of each count line of a selected run (without its
 # newline when TOY_NO_NL=1, twice when TOY_TWICE=1); TOY_NUL=1 writes `add<NUL>-works<TAB>1` there
-# instead; TOY_SILENT=1
+# instead, TOY_NUL=sep `add-works<NUL>1`; TOY_SILENT=1
 # (a selected run) and TOY_FULL_SILENT=1 (the unselected one) report nothing; TOY_SPLIT=1 makes the
 # unselected run report each assertion on a line of its own; TOY_FULL_RED=1 fails the unselected run.
 mk_counted_toy() {
@@ -67,6 +67,7 @@ count() {
   [ -n "${SHMUTANT_COUNTS_FD:-}" ] || return 0
   if [ -n "$sel" ]; then
     [ -z "${TOY_SILENT:-}" ] || return 0
+    if [ "${TOY_NUL:-}" = sep ]; then printf 'add-works\0%s\n' 1 >&"$SHMUTANT_COUNTS_FD"; return 0; fi
     if [ -n "${TOY_NUL:-}" ]; then printf 'add\000-works\t1\n' >&"$SHMUTANT_COUNTS_FD"; return 0; fi
     if [ -n "${TOY_LINE+x}" ] && [ -n "${TOY_NO_NL:-}" ]; then printf '%s' "$TOY_LINE" >&"$SHMUTANT_COUNTS_FD"; return 0; fi
     if [ -n "${TOY_LINE+x}" ] && [ -n "${TOY_TWICE:-}" ]; then printf '%s\n%s\n' "$TOY_LINE" "$TOY_LINE" >&"$SHMUTANT_COUNTS_FD"; return 0; fi
@@ -332,6 +333,8 @@ EOF
   has "$(cat "$T/e-doc")" 'witness [another unit] is not in unit [removal keeps operator edits]' 'naming both'
   eq "${#SHMUTANT_ROWS_NAME[@]}/$SHMUTANT_DECL_ERRORS" '1/1' 'the row is not appended, and the refusal is counted'
   mut_checked 'y' 'a' 'b' 'another unit' 2>/dev/null; rc_is $? 0 'a witness its own unit holds is accepted'
+  ( set -u; mut_checked 'short' 'a' 'b' 2>/dev/null; echo "rc=$? errors=$SHMUTANT_DECL_ERRORS" > "$T/o-short" )
+  eq "$(cat "$T/o-short" 2>/dev/null)" 'rc=2 errors=2' 'under set -u a row short of a witness is a counted refusal, not an unbound-variable abort'
   mv "$T/plan/run.sh" "$T/plan/moved.sh"
   mut_checked 'z' 'a' 'b' 'another unit' 2>/dev/null; rc_is $? 2 'a suite file that cannot be read refuses the row'
   eq "${#SHMUTANT_ROWS_NAME[@]}/$SHMUTANT_DECL_ERRORS" '2/2' 'and counts it'
@@ -2176,15 +2179,49 @@ t_counts_refuse_a_malformed_line() {
     has "$(baseline_of add-works 7)" 'line 1 is not <unit><TAB><digits>' 'and names the line'
     eq "$(verdict_of 'add subtracts')" baseline "the selection's row is scored baseline"
   done
-  # a NUL byte inside a unit makes its line malformed: dropped, `add<NUL>-works` would pass for
-  # add-works
-  TOY_NUL=1 SHMUTANT_COUNTS=1 pool lbl "$T/wd" toy_prepare toy_run
-  eq "$(baseline_of add-works)" incomplete 'a unit holding a NUL byte is refused, never read as another unit'
-  has "$(baseline_of add-works 7)" 'line 1 is not <unit><TAB><digits>' 'as a malformed line'
+  # a NUL byte refuses the lines: dropped, `add<NUL>-works` would pass for add-works, and as a tab
+  # `add-works<NUL>1` would pass for a well-formed line
+  local nul
+  for nul in 1 sep; do
+    TOY_NUL="$nul" SHMUTANT_COUNTS=1 pool lbl "$T/wd" toy_prepare toy_run
+    eq "$(baseline_of add-works)" incomplete "a count line holding a NUL byte ($nul) is refused, never read as another line"
+    has "$(baseline_of add-works 7)" 'hold a NUL byte' 'says why'
+  done
   # a unit's total stays within nine digits, where awk's arithmetic is exact
   TOY_TWICE=1 TOY_LINE=$'add-works\t999999999' SHMUTANT_COUNTS=1 pool lbl "$T/wd" toy_prepare toy_run
   eq "$(baseline_of add-works)" incomplete 'a unit whose total passes nine digits is refused'
   has "$(baseline_of add-works 7)" 'unit [add-works] totals more than 999999999 assertions' 'says why'
+}
+
+t_counts_reading_fails_closed() {
+  # _shmutant_read_counts, through two descriptors on one file as the run hands it them: a NUL
+  # byte anywhere refuses the lines, and a NUL count that could not be taken is a failed read,
+  # never zero NUL bytes
+  local r r2 c
+  # rd <file> [closed] — read <file>; with `closed`, the NUL check gets a descriptor number that
+  # is closed, taken after the reading ones so that neither reuses it
+  rd() {
+    local use
+    exec {r}<"$1" {r2}<"$1"; use="$r2"
+    if [ "${2:-}" = closed ]; then exec {c}<"$1"; exec {c}<&-; use="$c"; fi
+    SHMUTANT_RUN_COUNTS=""; SHMUTANT_RUN_COUNTS_BAD=""
+    _shmutant_read_counts "$r" "$use" 2>/dev/null
+    exec {r}<&- {r2}<&-
+  }
+  printf 'a\t1\nb\t2\na\t3\n' > "$T/ok"
+  rd "$T/ok"
+  eq "$SHMUTANT_RUN_COUNTS" $'a\t4\nb\t2' 'well-formed lines are summed per unit, in the order first reported'
+  eq "$SHMUTANT_RUN_COUNTS_BAD" '' 'and accepted'
+  printf 'a\0%s\n' 1 > "$T/nul-sep"
+  rd "$T/nul-sep"
+  has "$SHMUTANT_RUN_COUNTS_BAD" 'hold a NUL byte' 'a NUL where the tab belongs is refused'
+  printf 'a\t1\0%s\t2\n' b > "$T/nul-mid"
+  rd "$T/nul-mid"
+  has "$SHMUTANT_RUN_COUNTS_BAD" 'hold a NUL byte' 'a NUL joining two well-formed lines is refused'
+  eq "$SHMUTANT_RUN_COUNTS" '' 'and nothing is counted'
+  rd "$T/ok" closed
+  eq "$SHMUTANT_RUN_COUNTS_BAD" 'its count lines could not be read' 'a NUL check that could not read is a failed read'
+  eq "$SHMUTANT_RUN_COUNTS" '' 'and nothing is counted'
 }
 
 t_counts_need_their_end_marker() {

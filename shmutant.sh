@@ -1055,7 +1055,7 @@ _shmutant_snapshot() {
 _shmutant_run_bounded() {
   local dir="$1" run="$2" root="$3" sel="$4" wit="${5:-}" timeout mark fifo fd left seen outf line
   local left_w left_r seen_w seen_r fired out_w out_r out_r2 hold hold_r hp go holder holderid err_fd l kept
-  local counts counts_w counts_r
+  local counts counts_w counts_r counts_r2
   timeout="$(_shmutant_pos_int "${SHMUTANT_TIMEOUT:-300}")" || timeout=0
   SHMUTANT_RUN_FIRED=0; SHMUTANT_RUN_RED=0; SHMUTANT_RUN_WITNESSED=0; SHMUTANT_RUN_UNSETTLED=0; SHMUTANT_RUN_PUBLISHED=1
   SHMUTANT_RUN_COUNTS=""; SHMUTANT_RUN_COUNTS_BAD=""
@@ -1080,18 +1080,18 @@ _shmutant_run_bounded() {
   { command -p mkfifo -- "$fifo" "$mark.hold" "$mark.hp" "$mark.go"; } 2>/dev/null \
     || { command -p rm -f -- "$mark" "$left" "$seen" "$outf" "$counts" "$fifo" "$mark.hold" "$mark.hp" "$mark.go"; return 0; }
   # The count lines are appended (>>): each write lands at the end, so parallel writers never
-  # overwrite one another. A line is whole only if one write carries it; lines interleaved from
-  # parallel writers are malformed, which fails the selection, never passes it.
-  if ! exec {left_w}>|"$left" {left_r}<"$left" {seen_w}>|"$seen" {seen_r}<"$seen" {fired}<>"$fifo" {out_w}>|"$outf" {out_r}<"$outf" {out_r2}<"$outf" {counts_w}>>"$counts" {counts_r}<"$counts" {hold}<>"$mark.hold" {hold_r}<"$mark.hold" {hp}<>"$mark.hp" {go}<>"$mark.go" {err_fd}>&2; then
+  # overwrite one another. A line is whole only if one write carries it: lines interleaved from
+  # parallel writers are corrupt, and not always detectably.
+  if ! exec {left_w}>|"$left" {left_r}<"$left" {seen_w}>|"$seen" {seen_r}<"$seen" {fired}<>"$fifo" {out_w}>|"$outf" {out_r}<"$outf" {out_r2}<"$outf" {counts_w}>>"$counts" {counts_r}<"$counts" {counts_r2}<"$counts" {hold}<>"$mark.hold" {hold_r}<"$mark.hold" {hp}<>"$mark.hp" {go}<>"$mark.go" {err_fd}>&2; then
     # A partial open (a descriptor limit) is a setup failure, not a run: close what did open.
-    for fd in "${left_w:-}" "${left_r:-}" "${seen_w:-}" "${seen_r:-}" "${fired:-}" "${out_w:-}" "${out_r:-}" "${out_r2:-}" "${counts_w:-}" "${counts_r:-}" "${hold:-}" "${hold_r:-}" "${hp:-}" "${go:-}" "${err_fd:-}"; do [ -n "$fd" ] && exec {fd}>&-; done
+    for fd in "${left_w:-}" "${left_r:-}" "${seen_w:-}" "${seen_r:-}" "${fired:-}" "${out_w:-}" "${out_r:-}" "${out_r2:-}" "${counts_w:-}" "${counts_r:-}" "${counts_r2:-}" "${hold:-}" "${hold_r:-}" "${hp:-}" "${go:-}" "${err_fd:-}"; do [ -n "$fd" ] && exec {fd}>&-; done
     command -p rm -f -- "$mark" "$left" "$seen" "$outf" "$counts" "$fifo" "$mark.hold" "$mark.hp" "$mark.go"; return 0
   fi
   # The capture too has no name while the run executes: it is read back through one descriptor
   # for the verdict and copied out through another for the artifact afterwards. A name that
   # cannot be removed is a setup failure: the callback could reopen the channel by it.
   if ! command -p rm -f -- "$outf" "$counts" "$mark" "$left" "$seen" "$fifo" "$mark.hold" "$mark.hp" "$mark.go" 2>/dev/null; then
-    exec {left_w}>&- {left_r}<&- {seen_w}>&- {seen_r}<&- {fired}<&- {out_w}>&- {out_r}<&- {out_r2}<&- {counts_w}>&- {counts_r}<&- {hold}<&- {hold_r}<&- {hp}<&- {go}<&- {err_fd}>&-
+    exec {left_w}>&- {left_r}<&- {seen_w}>&- {seen_r}<&- {fired}<&- {out_w}>&- {out_r}<&- {out_r2}<&- {counts_w}>&- {counts_r}<&- {counts_r2}<&- {hold}<&- {hold_r}<&- {hp}<&- {go}<&- {err_fd}>&-
     return 0
   fi
   # An unsettled freeze, from this shell or the watchdog, is reported on the sightings channel.
@@ -1252,7 +1252,7 @@ _shmutant_run_bounded() {
   _shmutant_scan_output "$out_r" "${SHMUTANT_RED_PREFIX:-FAIL: }" "$wit"
   # An output the scan could not read is not a green run: the row is a harness error.
   [ "${SHMUTANT_RUN_SCAN_FAILED:-0}" = 0 ] || SHMUTANT_RUN_SETUP_FAILED=1
-  [ "${SHMUTANT_COUNTS:-0}" != 1 ] || _shmutant_read_counts "$counts_r"
+  [ "${SHMUTANT_COUNTS:-0}" != 1 ] || _shmutant_read_counts "$counts_r" "$counts_r2"
   # The capture takes its documented name by rename: a symlink a callback planted there is
   # replaced, never written through.
   # A directory planted there would make mv publish INTO it: it goes first, and the result is
@@ -1275,28 +1275,37 @@ _shmutant_run_bounded() {
       SHMUTANT_RUN_PUBLISHED=0
     fi
   fi
-  exec {left_w}>&- {left_r}<&- {seen_w}>&- {seen_r}<&- {fired}<&- {out_w}>&- {out_r}<&- {out_r2}<&- {counts_w}>&- {counts_r}<&- {hold}<&- {hold_r}<&- {hp}<&- {go}<&- {err_fd}>&-
+  exec {left_w}>&- {left_r}<&- {seen_w}>&- {seen_r}<&- {fired}<&- {out_w}>&- {out_r}<&- {out_r2}<&- {counts_w}>&- {counts_r}<&- {counts_r2}<&- {hold}<&- {hold_r}<&- {hp}<&- {go}<&- {err_fd}>&-
 }
 
-# _shmutant_read_counts <fd> — read a run's count lines through <fd>, once, streaming. Sets
+# _shmutant_read_counts <fd> <fd2> — read a run's count lines through <fd>, once, streaming, after
+# checking through <fd2>, a second descriptor on the same file, that they hold no NUL byte. Sets
 # SHMUTANT_RUN_COUNTS to one `<unit>\t<n>` line per unit, in the order first reported, the counts of
 # a unit reported more than once summed (a Bats test name may recur across files, and every run
 # that selects one runs them all); or SHMUTANT_RUN_COUNTS_BAD to why the lines cannot be used: one
-# that is not <unit><TAB><digits> (a unit that is empty or holds a tab or a NUL byte, a count past
+# that is not <unit><TAB><digits> (a unit that is empty or holds a tab, a count past
 # nine digits), a unit whose total passes nine digits, or a read that failed. A last line without
-# its newline is read like any other. A NUL becomes a tab before awk reads it: some awks keep NUL
-# bytes and the shell drops them, so `a<NUL>b` would otherwise come back as unit `ab`; as a tab it
-# makes its line malformed, whatever awk does. Totals stay within nine digits, so awk's doubles
-# hold them exactly.
+# its newline is read like any other. A NUL byte anywhere refuses them all: awks differ on it (one
+# keeps it, another ends the line there), and the shell drops it, so `a<NUL>b` could come back as
+# unit `ab`. Totals stay within nine digits, so awk's doubles hold them exactly. The NUL count is a
+# pipeline, run under pipefail: a tr that failed partway must not read as none.
 _shmutant_read_counts() {
-  local got
-  if ! got="$(command -p tr '\000' '\t' <&"$1" | command -p awk '
+  local got nul
+  if ! nul="$(set -o pipefail; command -p tr -cd '\000' <&"$2" 2>/dev/null | command -p wc -c 2>/dev/null)"; then
+    SHMUTANT_RUN_COUNTS_BAD="its count lines could not be read"; return 0
+  fi
+  case "${nul//[[:space:]]/}" in
+    0) ;;
+    ''|*[!0-9]*) SHMUTANT_RUN_COUNTS_BAD="its count lines could not be read"; return 0 ;;
+    *) SHMUTANT_RUN_COUNTS_BAD="its count lines hold a NUL byte, which no unit or count may hold"; return 0 ;;
+  esac
+  if ! got="$(command -p awk '
       BEGIN { FS = "\t"; k = 0; bad = 0 }
       NF != 2 || $1 == "" || $2 !~ /^[0-9]+$/ || length($2) > 9 { printf "\tline %d is not <unit><TAB><digits> (a unit with no tab, a count of at most nine digits)\n", NR; bad = 1; exit }
       { if (!($1 in c)) u[++k] = $1; c[$1] += $2 }
       c[$1] > 999999999 { printf "\tunit [%s] totals more than 999999999 assertions\n", $1; bad = 1; exit }
       END { if (!bad) for (j = 1; j <= k; j++) printf "%s\t%d\n", u[j], c[u[j]] }
-    ' 2>/dev/null)"; then
+    ' <&"$1" 2>/dev/null)"; then
     SHMUTANT_RUN_COUNTS_BAD="its count lines could not be read"; return 0
   fi
   # The refusal starts with a tab, which no unit line can: a unit is never empty.
@@ -2047,7 +2056,7 @@ _shmutant_pool_locals_writable() {
     mode ms mutate_aliases n new nl now out out_r out_r2 out_w outf \
     p parent path pending phys pid pids pool_aliases pout pout_r pout_w prc \
     prep r rc red rel rest ret rjrc root root_ok rootid rootls \
-    roots rounds row_why run s sdir sec seen seen_r seen_w sel sent setup_failed sig starts \
+    roots rounds row_why run s sdir sec seen seen_r seen_w sel sent setup_failed sig starts nul counts_r2 \
     spec st stat_bin state status stillours stillpids suffix swapped t t0 t1 \
     table target target_ck targets timeout tmp unpublished us v v_jobs v_red v_timeout \
     verdict vr vw wd who wit wrc wstatus \

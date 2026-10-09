@@ -181,10 +181,10 @@ if shmutant_selected 'removal keeps operator edits'; then
 fi
 ```
 
-- A line is a unit, a tab, and a count: the unit is not empty and holds no tab and no NUL byte,
-  and the count is at most nine digits (leading zeros allowed: `007` is 7). Any other line, an
-  empty one included, makes that run's baseline `incomplete`. A last line without its newline is
-  read like any other.
+- A line is a unit, a tab, and a count: the unit is not empty and holds no tab, and the count is
+  at most nine digits (leading zeros allowed: `007` is 7). Any other line, an empty one
+  included, makes that run's baseline `incomplete`, and so does a NUL byte anywhere. A last line
+  without its newline is read like any other.
 - A unit reported more than once in one run is summed, and the total may not pass nine digits
   either. Bats runs every test a filter names, in every file, so a name that recurs is counted
   whole by both the selected and the unselected run.
@@ -198,16 +198,16 @@ fi
   The file behind it has no name. It is opened for appending, so writers never overwrite one
   another, but a line is whole only when one write carries it. Bash's `printf` writes a short
   line in one call. Units that report from parallel processes keep their lines short or report
-  through one process. Lines interleaved from parallel writers are malformed, which makes the
-  selection `incomplete`, never complete.
+  through one process: lines interleaved from parallel writers are corrupt, usually malformed
+  (which makes the selection `incomplete`), but not always detectably.
 - The runs of rows get a descriptor too, so the suite behaves the same under a row as under its
   baseline, but only the baselines' counts are compared. With the counts off,
   `SHMUTANT_COUNTS_FD` is unset in every run.
 - Equal counts show that a selection ran as many assertions per unit as the full suite did, not
   that they were the same assertions.
 - It costs one more run of the whole suite per pass, bounded by `SHMUTANT_TIMEOUT` like every
-  run, so the bound must cover the whole suite. This repository's own suite takes 412 to 451
-  seconds in CI (see the README), longer than the 300-second default. That cost is why the
+  run, so the bound must cover the whole suite. This repository's own suite took 412 to 451
+  seconds in CI at the commit the README times, longer than the 300-second default. That cost is why the
   setting is off by default. It needs the baseline: `SHMUTANT_COUNTS=1` with
   `SHMUTANT_BASELINE=0` or `--no-baseline` is refused (status 2).
 
@@ -387,6 +387,8 @@ in_unit() {
 }
 # mut_checked — shmutant_mut's arguments; the selector defaults to the witness, as there
 mut_checked() {
+  # a wrong argument count goes to shmutant_mut, which refuses it, before $4 is read (set -u)
+  [ "$#" -ge 4 ] && [ "$#" -le 5 ] || { shmutant_mut "$@"; return; }
   in_unit "${5:-$4}" "$4" ||
     { shmutant_refuse "row '$1': witness [$4] is not in unit [${5:-$4}] of $suite — selecting it could never show it"; return; }
   shmutant_mut "$@"
@@ -399,7 +401,10 @@ mut_checked 'removal drops operator edits' 'keep=1' 'keep=0' 'removal keeps oper
 The check is a substring of the source, not the whole-token match a verdict makes, so it never
 refuses a witness the unit writes out: a witness the block holds only inside a longer label
 passes and is scored at run time as before. A suite that builds its labels at run time (from a
-variable, say) needs a check of its own. A suite file that cannot be read refuses every row.
+variable, say) needs a check of its own. So does one whose blocks open otherwise than with the
+exact line `if shmutant_selected '<unit>'; then` and close with a `fi` alone on its line (other
+quoting, indentation or spacing, or a unit name holding an apostrophe): the check finds no
+such block and refuses the row. A suite file that cannot be read refuses every row.
 
 ```sh
 bash scripts/shmutant.sh run test/mutants.sh                # from the repo root

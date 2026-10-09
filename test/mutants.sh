@@ -1760,10 +1760,10 @@ shmutant_mut 'an empty SHMUTANT_COUNTS reads as off' \
   'case "${SHMUTANT_COUNTS-0}" in 0|1) ;;' \
   'case "${SHMUTANT_COUNTS:-0}" in 0|1) ;;' \
   't_counts_need_the_baseline'
-shmutant_mut 'a NUL byte inside a unit is dropped' \
-  'command -p tr '"'"'\000'"'"' '"'"'\t'"'"' <&"$1" | command -p awk '"'"'' \
-  'command -p tr -d '"'"'\000'"'"' <&"$1" | command -p awk '"'"'' \
-  't_counts_refuse_a_malformed_line'
+shmutant_mut 'a NUL byte in the count lines is let through' \
+  '*) SHMUTANT_RUN_COUNTS_BAD="its count lines hold a NUL byte' \
+  '*) : "its count lines hold a NUL byte' \
+  't_counts_reading_fails_closed'
 shmutant_mut 'a unit'"'"'s total past nine digits is accepted' \
   'c[$1] > 999999999 {' \
   'c[$1] > 9999999999 {' \
@@ -1772,3 +1772,7 @@ shmutant_mut 'counts that did not all reach the pool are compared anyway' \
   '[ -z "$counts_bad" ] && [ "$counts_end" != "$counts_got" ]; then' \
   '[ -z "$counts_bad" ] && false; then' \
   't_counts_need_their_end_marker'
+shmutant_mut 'a NUL count that failed partway reads as none' \
+  'nul="$(set -o pipefail; command -p tr' \
+  'nul="$(command -p tr' \
+  't_counts_reading_fails_closed'
