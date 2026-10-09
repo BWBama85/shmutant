@@ -374,7 +374,7 @@ t_pool_refuses_a_literal_that_occurs_more_than_once() {
   has "$ERR" "row 'a' is refused: its old literal starts at more than one position in lib.sh" 'says why'
   # counting stops at the second start. Bounded by CPU time, which neither a loaded host nor a
   # clock step changes: on a line of 1,048,576 repeats the count takes milliseconds, where counting
-  # every start runs past five CPU seconds and is killed (SIGXCPU)
+  # every start runs past five CPU seconds and the CPU limit kills it
   local got
   awk 'BEGIN { s = "a"; for (i = 0; i < 19; i++) s = s s; print s s }' > "$T/repeats"
   got="$( ulimit -t 5; _shmutant_starts "$T/repeats" aa )"; rc_is $? 0 'a long line of repeats is counted within five CPU seconds'
