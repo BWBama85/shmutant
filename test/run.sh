@@ -99,17 +99,19 @@ wait_for() {
   until [ -e "$1" ]; do i=$((i + 1)); [ "$i" -lt 100 ] || return 1; sleep 0.1; done
 }
 
-# wait_gone <pid> [identity] — block until <pid> no longer runs, at most three seconds; false on expiry.
-# A process just sent KILL answers `kill -0` until it is reaped, and one whose parent never reaps
-# it answers forever: a zombie has already exited, and counts as gone. The process waited on is the
-# one carrying <identity> (read on entry when none is given): a pid carrying another was reused.
+# wait_gone <pid> [identity [looks]] — block until <pid> no longer runs, looking at most <looks> times
+# a tenth of a second apart (30: three seconds); false on expiry. The bound counts looks and reads no
+# clock, so a clock step cannot change it. A process just sent KILL answers `kill -0` until it is
+# reaped, and one whose parent never reaps it answers forever: a zombie has already exited, and
+# counts as gone. The process waited on is the one carrying <identity> (read on entry when none is
+# given): a pid carrying another was reused.
 wait_gone() {
-  local i=0 id="${2:-}" now
+  local i=0 id="${2:-}" looks="${3:-30}" now
   [ -n "$id" ] || id="$(_shmutant_identity "$1" 2>/dev/null)"
   while kill -0 "$1" 2>/dev/null; do
     case "$(command -p ps -o stat= -p "$1" 2>/dev/null)" in *Z*) return 0 ;; esac
     if [ -n "$id" ] && now="$(_shmutant_identity "$1" 2>/dev/null)"; then _shmutant_same_start "$now" "$id" || return 0; fi
-    i=$((i + 1)); [ "$i" -lt 30 ] || return 1; sleep 0.1
+    i=$((i + 1)); [ "$i" -lt "$looks" ] || return 1; sleep 0.1
   done
 }
 
@@ -2565,13 +2567,21 @@ t_verdict_timeout_with_a_leading_zero() {
   shmutant_reset; shmutant_target lib.sh
   shmutant_mut 'hangs' '$1 + $2' '$1 - $2' 'add-works'
   # 08: digits only, but not a valid octal constant, which is what bash arithmetic would read.
-  slow_run() { bash -c "sleep 12; touch '$T/finished'"; }
-  SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=08 pool lbl "$T/wd" toy_prepare slow_run
+  slow_run() { bash -c "echo \$\$ > '$T/run.pid'; sleep 30"; }
+  # The pool reads a frozen clock, so each of the watchdog's polls counts as its half-second sleep
+  # and nothing else: eight seconds is sixteen polls, each reading the clock once after the reading
+  # the deadline starts from. Those reads are counted, so the deadline's length is checked without
+  # timing anything, whatever a real clock does meanwhile.
+  : > "$T/reads"
+  OUT="$( _shmutant_now() { [ "${FUNCNAME[1]}" != _shmutant_run_bounded ] || printf 'read\n' >> "$T/reads"; printf '%s' 1000000000000000; }
+    SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=08 shmutant_pool lbl "$T/wd" toy_prepare slow_run 2> "$T/err" )"
+  ERR="$(cat "$T/err")"
   eq "$(verdict_of 'hangs')" timeout 'a timeout of 08 is eight seconds, not an octal error that disarms the watchdog'
-  [ "${OUT##*$'\t'hangs$'\t'}" != "$OUT" ] && [ "$(field row 8 | cut -d. -f1)" -ge 8 ] || fail_ "the run was cut short of eight seconds: $(field row 8)s"
+  eq "$(grep -cx read "$T/reads")" 17 'the deadline is sixteen half-second polls, eight seconds, not cut short or stretched'
   has "$ERR" 'within 8s' 'the bound is reported in its canonical form, not as 08'
-  sleep 3
-  [ -e "$T/finished" ] && fail_ 'the run outlived the leading-zero timeout'
+  local runpid; runpid="$(cat "$T/run.pid" 2>/dev/null)"
+  if [ -z "$runpid" ]; then fail_ 'fixture: the run never started'
+  else wait_gone "$runpid" || fail_ 'the run outlived the leading-zero timeout'; fi
 }
 
 t_run_leftovers_are_killed_after_a_normal_return() {
@@ -3107,13 +3117,14 @@ t_pool_abort_waits_only_for_its_helpers() {
   # the caller has a long job of its own; the interrupt must not wait for it
   ( sleep 30 & echo "$!" > "$T/own.pid"; SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=0 shmutant_pool lbl "$T/wd" toy_prepare unbounded_run > /dev/null 2>&1 ) & local pp=$!
   wait_for "$T/started" || fail_ 'the run never started'
-  local t0; t0="$(_shmutant_now)"
+  local own; own="$(cat "$T/own.pid" 2>/dev/null)"
   kill -TERM "$pp"; wait "$pp" 2>/dev/null
-  [ $(( ($(_shmutant_now) - t0) / 1000000 )) -lt 10 ] || fail_ 'the interrupt handler blocked on the caller'"'"'s own background job'
+  # Timed by nothing: a handler that waited on the caller's job returns only once that job has
+  # ended, and the caller's job is the caller's to end, so the pool must have left it running.
+  if [ -z "$own" ]; then fail_ 'fixture: the caller'"'"'s own job never started'
+  elif ! kill -0 "$own" 2>/dev/null; then fail_ 'the interrupt handler blocked on the caller'"'"'s own background job'; fi
   sleep 4
   [ -e "$T/finished" ] && fail_ 'the worker survived the interrupt'
-  # the caller's job is the caller's to end: the pool rightly left it running
-  local own; own="$(cat "$T/own.pid" 2>/dev/null)"
   [ -z "$own" ] || { kill -KILL "$own" 2>/dev/null; wait_gone "$own"; }
 }
 
@@ -3247,12 +3258,10 @@ t_callback_bare_wait_does_not_block_on_the_holder() {
   shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
   # the job's own status, then a bare wait
   waiting_run() { bash "$1/test.sh" & local j=$! rc; wait "$j"; rc=$?; wait; return "$rc"; }
-  # a wait that blocked on the holder would run until the timeout and score `timeout`: the
-  # bound below is well under it and well above what the pool needs even on a loaded host
-  local t0; t0="$(_shmutant_now)"
+  # a wait that blocked on the holder would run until the timeout and score `timeout`, not the
+  # callback's own verdict: the verdict says so, with nothing timed here
   SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=30 pool lbl "$T/wd" toy_prepare waiting_run
   eq "$(verdict_of a)" killed 'a callback that backgrounds its suite and waits gets its own verdict'
-  [ $(( ($(_shmutant_now) - t0) / 1000000 )) -lt 25 ] || fail_ 'a bare wait in the callback blocked on the holder until the timeout'
 }
 
 t_verdict_timeout_stops_a_run_that_keeps_forking() {
@@ -3298,10 +3307,12 @@ t_kill_tree_skips_a_reused_pid() {
   sleep 1.2
   # the identity is a /proc tick count, the start time ps recorded (lstart), or, where ps has
   # no lstart, a start in epoch seconds; a wrong one differs in each form
-  local id wrong; id="$(_shmutant_identity "$p")"
+  local id wrong frozen; id="$(_shmutant_identity "$p")"
   case "$id" in
     e*)
-      [ "${id#e}" -le "$(( $(_shmutant_now) / 1000000 ))" ] || fail_ 'an elapsed-time identity in the future'
+      # read again against a frozen clock, so the comparison takes nothing from a clock that moves
+      frozen="$( _shmutant_now() { printf '%s' 2000000000000000; }; _shmutant_identity "$p" )"
+      [ "${frozen#e}" -le 2000000000 ] || fail_ 'an elapsed-time identity in the future'
       wrong="e$(( ${id#e} - 100 ))" ;;
     ''|*[!0-9]*)
       [ -n "$id" ] || fail_ 'no identity for a live process'
@@ -3459,12 +3470,13 @@ t_pool_aborts_running_workers_when_a_dir_cannot_be_recreated() {
   # observe (a worker still fingerprinting pristine when aborted has neither).
   eval "$(declare -f _shmutant_fresh_dir | sed '1s/_shmutant_fresh_dir/_shmutant_fresh_dir_real/')"
   _shmutant_fresh_dir() { local i=0; case "$1" in */mut-1) until [ -e "$T/${WAIT_FOR:-started}" ] || [ "$i" -ge 100 ]; do i=$((i + 1)); sleep 0.1; done ;; esac; _shmutant_fresh_dir_real "$@"; }
-  local t0; t0="$(_shmutant_now)"
   WAIT_FOR=started SHMUTANT_JOBS=2 SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=0 pool lbl "$T/wd" toy_prepare hanging_run
   unmake_unremovable "$T/wd/mut-1/held"
   [ -e "$T/started" ] || fail_ 'fixture: the running worker never started its callback before the abort'
   rc_is "$RC" 2 'the harness error is reported'
-  [ $(( ($(_shmutant_now) - t0) / 1000000 )) -lt 15 ] || fail_ 'the pool waited on the unbounded worker instead of ending it'
+  # timed by nothing: a pool that waited on the worker returns only once the worker has ended, and
+  # the worker's last act is the marker
+  [ -e "$T/finished" ] && fail_ 'the pool waited on the unbounded worker instead of ending it'
   [ -e "$T/wd/mut-0/tree" ] && fail_ 'the ended worker'"'"'s clone was left behind'
   [ "${#SHMUTANT_VERDICT_R[@]}" -eq 0 ] || fail_ 'the ended workers'"'"' channels were left open in the caller shell'
   sleep 1
@@ -3668,13 +3680,13 @@ t_pool_refuses_unremovable_worker_dir() {
   shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
   mkdir -p "$T/wd/mut-0"; printf 'killed\n1\n1\n' > "$T/wd/mut-0/verdict"; printf 'shmutant workdir\n' > "$T/wd/.shmutant"
   make_unremovable "$T/wd/mut-0/held" || { echo "note: $_unit: no way to make a directory unremovable here; skipped"; return; }
-  # with a long caller job of its own, so a bare wait in the failure path would block on it
+  # with a long caller job of its own, so a bare wait in the failure path would block on it: timed
+  # by nothing, such a wait returns only once the job has ended, so the job must still be running
   sleep 30 & local job=$!
-  local t0; t0="$(_shmutant_now)"
   SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd" toy_prepare toy_run > "$T/o" 2> "$T/err"; RC=$?
   OUT="$(cat "$T/o")"; ERR="$(cat "$T/err")"
   unmake_unremovable "$T/wd/mut-0/held"
-  [ $(( ($(_shmutant_now) - t0) / 1000000 )) -lt 10 ] || fail_ 'the failure path waited on the caller'"'"'s own background job'
+  kill -0 "$job" 2>/dev/null || fail_ 'the failure path waited on the caller'"'"'s own background job'
   kill "$job" 2>/dev/null; wait "$job" 2>/dev/null
   rc_is "$RC" 2 'a worker directory that cannot be recreated aborts the pool'
   has "$ERR" 'cannot recreate' 'says why'
@@ -4245,9 +4257,10 @@ EOF
   { cat "$T/toy/plan-base.sh"; printf 'exec bash -c "sleep 4; touch %s/execd"\n' "$T/toy"; } > "$T/toy/plan-exec-hang.sh"
   TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-exec-hang.sh" --timeout 0 > /dev/null 2>&1 & cli=$!
   sleep 1
-  local t0; t0="$(_shmutant_now)"
+  # Timed by nothing: a CLI that blocked on the command instead of killing it returns only once the
+  # command has ended, and the command's last act is the marker.
   kill -TERM "$cli"; wait "$cli" 2>/dev/null
-  [ $(( ($(_shmutant_now) - t0) / 1000000 )) -lt 10 ] || fail_ 'interrupting a CLI whose plan execd a command blocked instead of killing it'
+  [ -e "$T/toy/execd" ] && fail_ 'interrupting a CLI whose plan execd a command blocked instead of killing it'
   sleep 4
   [ -e "$T/toy/execd" ] && fail_ 'the command the plan execd into outlived the interrupted CLI'
   # A plan forging the marker while loading, by every name the workdir could give it.
@@ -4773,23 +4786,26 @@ t_freeze_without_any_listing_is_not_unsettled() {
 
 t_wait_gone_takes_a_reused_pid_as_gone() {
   # A pid that now carries another identity is not the process waited on: that one is gone, and a
-  # caller that kills on a timeout must not be handed a stranger's number.
+  # caller that kills on a timeout must not be handed a stranger's number. Given one look, which
+  # times nothing, the wait must answer on it: a wait that treated the pid as the process would
+  # need another, and expire.
   sleep 30 > /dev/null 2>&1 & local p=$!
-  local real stale rc=0 t0=$SECONDS
+  local real stale rc=0
   real="$(_shmutant_identity "$p")" || { fail_ 'fixture: no identity for the sleep'; kill -KILL "$p"; wait "$p" 2>/dev/null; return; }
   case "$real" in e*) stale=e1 ;; *[!0-9]*) stale='Thu Jan  1 00:00:00 1970' ;; *) stale=1 ;; esac
-  wait_gone "$p" "$stale" || rc=$?
-  [ "$rc" = 0 ] || fail_ 'a pid carrying another identity was waited on until the timeout'
-  [ $(( SECONDS - t0 )) -lt 2 ] || fail_ 'a pid carrying another identity was waited on as if it were the process'
+  wait_gone "$p" "$stale" 1 || rc=$?
+  [ "$rc" = 0 ] || fail_ 'a pid carrying another identity was waited on as if it were the process'
   kill -KILL "$p" 2>/dev/null; wait "$p" 2>/dev/null
 }
 
 t_wait_gone_takes_a_zombie_as_gone() {
   # A child that has exited but was never reaped still answers `kill -0`, as a reparented one does
   # forever under a PID 1 that does not reap. Its parent here execs into a sleep, which never waits.
+  # Given one look, which times nothing, the wait must answer on it: a zombie taken for a running
+  # process would need another, and expire.
   bash -c 'sleep 0.2 & echo "$!" > child.pid; exec sleep 30' & local parent=$!
   wait_for "$T/child.pid" || { fail_ 'the child never started'; kill -KILL "$parent" 2>/dev/null; wait "$parent" 2>/dev/null; return; }
-  local child i=0 t0
+  local child i=0
   child="$(cat "$T/child.pid")"
   until case "$(ps -o stat= -p "$child" 2>/dev/null)" in *Z*) true ;; *) false ;; esac; do
     i=$((i + 1)); [ "$i" -lt 50 ] || break; sleep 0.1
@@ -4798,9 +4814,7 @@ t_wait_gone_takes_a_zombie_as_gone() {
     *Z*) ;;
     *) fail_ 'fixture: the child never became a zombie'; kill -KILL "$parent" 2>/dev/null; wait "$parent" 2>/dev/null; return ;;
   esac
-  t0="$(_shmutant_now)"
-  wait_gone "$child" || fail_ 'a zombie was waited on as if it were still running'
-  [ $(( ($(_shmutant_now) - t0) / 1000000 )) -lt 2 ] || fail_ 'waiting on a zombie ran until the bound'
+  wait_gone "$child" '' 1 || fail_ 'a zombie was waited on as if it were still running'
   kill -KILL "$parent" 2>/dev/null; wait "$parent" 2>/dev/null
 }
 
