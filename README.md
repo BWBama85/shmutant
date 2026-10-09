@@ -36,7 +36,7 @@ exactly the way the tests it checks do:
 | Verdict | Meaning |
 |---|---|
 | `unapplied` | The old literal matched nothing. The row injected no defect and tests **nothing**. |
-| `baseline` | The selected tests were not green before any defect was injected (red, or aborted: the red status with no red line). A red result would prove nothing. |
+| `baseline` | The selected tests were not green before any defect was injected (red, or aborted: the red status with no red line), or, with `SHMUTANT_COUNTS=1`, did not count for each of their units the assertions the whole suite counts for it. A red result would prove nothing. |
 
 And four that describe a run that never produced an answer: `aborted` (the suite exited
 with a status other than green or red, or red without a failure line), `timeout`, `unsettled`
@@ -87,10 +87,15 @@ real, the test is green over it, and the exit status is 1.
 ## How a row is run
 
 1. `prepare <dir>` is called **once** to build a pristine copy of the tree. The working tree is
-   never mutated; a prepare that points outside its directory is refused.
-2. Every distinct selector is run once, uninjected, and must come back green (`baseline`).
-3. For each row, the pristine tree is cloned, the first occurrence of the old literal on a single
-   line is replaced, and `run <root> <select>` executes only the tests covering that selector.
+   never mutated; a prepare that points outside its directory is refused. A row whose old
+   literal occurs more than once in its target there is refused: the rewrite takes the first
+   copy, which might not be the one the row means.
+2. Every distinct selector is run once, uninjected, and must come back green (`baseline`). With
+   `SHMUTANT_COUNTS=1` the whole suite also runs once, unselected, and each selection must count,
+   per unit, the assertions the whole suite counts ([docs/integrating.md](docs/integrating.md)
+   section 3).
+3. For each row, the pristine tree is cloned, the old literal is replaced on its line, and
+   `run <root> <select>` executes only the tests covering that selector.
 4. The exit status and the output decide the verdict. Red is exit 1 with a line starting
    `FAIL: ` that carries the witness as a whole token (`parse-empty` is not found in
    `parse-empty-list`); both are configurable for TAP-style suites.
@@ -136,7 +141,10 @@ shmutant  1  row       <verdict> <name>  <target>  <select>  <seconds>  <detail>
 shmutant  1  summary   <label>   <rows>  <killed>  <jobs>  <seconds>
 ```
 
-The second field is the stream format version. CI can consume it with `awk -F'\t'`. Keep the
+The second field is the stream format version. A baseline record's verdict is `green`, `red`,
+`aborted`, `timeout`, `unsettled`, `lost` or, with `SHMUTANT_COUNTS=1`, `incomplete`; that setting
+adds one baseline record with an empty `<select>`, the unselected run. CI can consume it with
+`awk -F'\t'`. Keep the
 exit status of `shmutant` itself; behind a pipe it would be replaced by `awk`'s:
 
 ```sh

@@ -12,7 +12,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 SHMUTANT="$here/../shmutant.sh"
 
 unset SHMUTANT_TIMEOUT SHMUTANT_JOBS SHMUTANT_KEEP SHMUTANT_STREAM SHMUTANT_BASELINE \
-  SHMUTANT_RED_PREFIX SHMUTANT_RED_STATUS
+  SHMUTANT_RED_PREFIX SHMUTANT_RED_STATUS SHMUTANT_COUNTS SHMUTANT_COUNTS_FD
 
 # --- assertions: every failure names the unit, so a witness is a unit name ----------------------
 
@@ -46,6 +46,46 @@ EOF
 }
 toy_prepare() { shmutant_copy_tree "$TOY" "$1"; }
 toy_run() { bash "$1/test.sh"; }
+
+# mk_counted_toy <dir> — mk_toy's library under a suite that also reports, for each unit it ran,
+# `<unit>\t<assertions>` on SHMUTANT_COUNTS_FD. Its environment bends it: TOY_DEPENDENT=1 makes
+# even-works run its second assertion only after add-works ran, so a selection of even-works alone
+# runs fewer; TOY_LINE is written, raw, in place of each count line of a selected run; TOY_SILENT=1
+# (a selected run) and TOY_FULL_SILENT=1 (the unselected one) report nothing; TOY_SPLIT=1 makes the
+# unselected run report each assertion on a line of its own; TOY_FULL_RED=1 fails the unselected run.
+mk_counted_toy() {
+  mk_toy "$1"
+  cat > "$1/test.sh" <<'EOF'
+#!/usr/bin/env bash
+. "$(dirname "$0")/lib.sh"
+sel="${SHMUTANT_SELECT:-}"; n=0; rc=0; state=""
+want() { if [ -z "$sel" ] || [ "$sel" = "$1" ]; then n=$((n + 1)); return 0; fi; return 1; }
+count() {
+  local i
+  [ -n "${SHMUTANT_COUNTS_FD:-}" ] || return 0
+  if [ -n "$sel" ]; then
+    [ -z "${TOY_SILENT:-}" ] || return 0
+    if [ -n "${TOY_LINE+x}" ]; then printf '%s\n' "$TOY_LINE" >&"$SHMUTANT_COUNTS_FD"; return 0; fi
+  else
+    [ -z "${TOY_FULL_SILENT:-}" ] || return 0
+    if [ -n "${TOY_SPLIT:-}" ]; then for (( i = 0; i < $2; i++ )); do printf '%s\t1\n' "$1" >&"$SHMUTANT_COUNTS_FD"; done; return 0; fi
+  fi
+  printf '%s\t%s\n' "$1" "$2" >&"$SHMUTANT_COUNTS_FD"
+}
+[ -n "$sel" ] || [ -z "${TOY_FULL_RED:-}" ] || { echo "FAIL: everything: the unselected run fails"; exit 1; }
+if want add-works; then
+  a=1; [ "$(add 2 3)" = 5 ] || { echo "FAIL: add-works: got $(add 2 3)"; rc=1; }
+  state=ready; count add-works "$a"
+fi
+if want even-works; then
+  a=1; is_even 4 || { echo "FAIL: even-works: 4 is even"; rc=1; }
+  if [ -n "$state" ] || [ -z "${TOY_DEPENDENT:-}" ]; then a=$((a + 1)); is_even 6 || { echo "FAIL: even-works: 6 is even"; rc=1; }; fi
+  count even-works "$a"
+fi
+[ "$n" -gt 0 ] || exit 2
+exit $rc
+EOF
+}
 
 # wait_for <file> — block until <file> exists, at most ten seconds; false on expiry.
 wait_for() {
@@ -92,6 +132,10 @@ pool() {
 verdict_of() { printf '%s\n' "$OUT" | awk -F'\t' -v n="$1" '$3 == "row" && $5 == n { print $4 }'; }
 # field <record-type> <n> — field <n> of the first record of that type.
 field() { printf '%s\n' "$OUT" | awk -F'\t' -v t="$1" -v n="$2" '$3 == t { print $n; exit }'; }
+# baseline_of <select> [field] — the verdict (or field <n>) of the baseline record for <select>.
+baseline_of() { printf '%s\n' "$OUT" | awk -F'\t' -v s="$1" -v n="${2:-5}" '$3 == "baseline" && $4 == s { print $n }'; }
+# row_detail <row-name> — the detail field of that row's stream record.
+row_detail() { printf '%s\n' "$OUT" | awk -F'\t' -v r="$1" '$3 == "row" && $5 == r { print $9 }'; }
 
 # --- units: shmutant_mutate ----------------------------------------------------------------------
 
@@ -251,6 +295,129 @@ t_refused_declarations_fail_the_pool() {
   has "$ERR" 'refused' 'says why'
   shmutant_reset
   eq "$SHMUTANT_DECL_ERRORS" 0 'reset clears the count'
+}
+
+t_doc_witness_check_refuses_a_row() {
+  # the witness check docs/integrating.md gives, as written: its own row is accepted, a witness
+  # the selected unit does not hold is refused and counted, and so is every row once the suite
+  # file cannot be read
+  local doc="$here/../docs/integrating.md"
+  awk '$0 == "### Checks the plan makes itself" { on = 1; next }
+       on && /^#/ && !inb { exit }
+       on && $0 == "```sh" { inb = 1; next }
+       inb && $0 == "```" { exit }
+       inb { print }' "$doc" > "$T/check.sh"
+  [ -s "$T/check.sh" ] || { fail_ "no sh block under '### Checks the plan makes itself' in $doc"; return; }
+  mkdir -p "$T/plan"
+  cat > "$T/plan/run.sh" <<'EOF'
+if shmutant_selected 'removal keeps operator edits'; then
+  [ "$keep" = 1 ] || echo "FAIL: removal keeps operator edits: keep is $keep"
+fi
+if shmutant_selected 'another unit'; then
+  [ -n "$x" ] || echo "FAIL: another unit: x is empty"
+fi
+EOF
+  shmutant_reset
+  # shellcheck disable=SC2034
+  SHMUTANT_PLAN_DIR="$T/plan"
+  # shellcheck disable=SC1091
+  . "$T/check.sh" 2>"$T/e-doc"; rc_is $? 0 "the doc's block loads with its own row accepted: $(cat "$T/e-doc")"
+  eq "${#SHMUTANT_ROWS_NAME[@]}/$SHMUTANT_DECL_ERRORS" '1/0' 'its row is appended and nothing is refused'
+  mut_checked 'x' 'a' 'b' 'another unit' 'removal keeps operator edits' 2>"$T/e-doc"; rc_is $? 2 'a witness from another unit is refused'
+  has "$(cat "$T/e-doc")" 'witness [another unit] is not in unit [removal keeps operator edits]' 'naming both'
+  eq "${#SHMUTANT_ROWS_NAME[@]}/$SHMUTANT_DECL_ERRORS" '1/1' 'the row is not appended, and the refusal is counted'
+  mut_checked 'y' 'a' 'b' 'another unit' 2>/dev/null; rc_is $? 0 'a witness its own unit holds is accepted'
+  mv "$T/plan/run.sh" "$T/plan/moved.sh"
+  mut_checked 'z' 'a' 'b' 'another unit' 2>/dev/null; rc_is $? 2 'a suite file that cannot be read refuses the row'
+  eq "${#SHMUTANT_ROWS_NAME[@]}/$SHMUTANT_DECL_ERRORS" '2/2' 'and counts it'
+  shmutant_reset
+}
+
+t_pool_refuses_a_literal_that_occurs_more_than_once() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  printf 'aaa\n' > "$T/toy/overlap.sh"
+  printf 'x=$(add 1 2)$(add 3 4)\n' > "$T/toy/inline.sh"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'two lines' '$1' '$9' 'add-works'
+  shmutant_mut 'unique' '$1 + $2' '$1 - $2' 'add-works'
+  shmutant_target overlap.sh
+  shmutant_mut 'overlapping' 'aa' 'bb' 'add-works'
+  shmutant_target inline.sh
+  shmutant_mut 'one line' '$(add ' '$(sub ' 'add-works'
+  counting_run() { printf '%s\n' "$2" >> "$T/runs"; bash "$1/test.sh"; }
+  pool lbl "$T/wd" toy_prepare counting_run
+  rc_is "$RC" 2 'a table with a literal that occurs more than once does not run'
+  [ ! -e "$T/runs" ] || fail_ "a run happened, the baseline included: $(tr '\n' ' ' < "$T/runs")"
+  has "$ERR" "row 'two lines' is refused: its old literal starts at 2 positions in lib.sh" 'a literal on two lines is refused, by name'
+  has "$ERR" "row 'overlapping' is refused: its old literal starts at 2 positions in overlap.sh" 'overlapping starts are counted'
+  has "$ERR" "row 'one line' is refused: its old literal starts at 2 positions in inline.sh" 'two starts on one line are counted'
+  hasnt "$ERR" "row 'unique'" 'a literal that occurs once is not named'
+  has "$ERR" '3 row(s) refused' 'every refused row is named before the pool stops'
+  # counted in the prepared tree, which is what every clone copies: a prepare that copies the
+  # literal in a second time is refused, though the source holds it once
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  doubling_prepare() { toy_prepare "$1" && printf 'sum() { echo $(( $1 + $2 )); }\n' >> "$1/lib.sh"; }
+  SHMUTANT_BASELINE=0 pool lbl "$T/wd" doubling_prepare toy_run
+  rc_is "$RC" 2 'a literal the prepared tree holds twice is refused'
+  has "$ERR" "row 'a' is refused: its old literal starts at 2 positions in lib.sh" 'says why'
+  # byte for byte, whatever the caller's nocasematch: a copy that differs in case is another literal
+  printf '# ECHO the sum\n' >> "$T/toy/lib.sh"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' 'echo' 'echo 0' 'add-works'
+  shopt -s nocasematch
+  SHMUTANT_BASELINE=0 pool lbl "$T/wd" toy_prepare toy_run
+  shopt -u nocasematch
+  rc_is "$RC" 0 'a literal whose other copy differs in case occurs once, and its row runs'
+  eq "$(verdict_of a)" killed 'and is scored'
+}
+
+t_refuse_fails_the_pool() {
+  mk_toy "$T/toy"; TOY="$T/toy"
+  counting_run() { printf '%s\n' "$2" >> "$T/runs"; bash "$1/test.sh"; }
+  # while the plan loads: its own check refuses a row, and nothing runs, the baseline included
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'good' '$1 + $2' '$1 - $2' 'add-works'
+  shmutant_refuse "row 'bad': witness [nope] is not in unit [add-works]" 2>"$T/e-load"; rc_is $? 2 'a refusal returns 2, as a refused shmutant_mut does'
+  has "$(cat "$T/e-load")" "refused: row 'bad': witness [nope] is not in unit [add-works]" 'and reports its reason at once'
+  eq "$SHMUTANT_DECL_ERRORS" 1 'and is counted'
+  pool lbl "$T/wd" toy_prepare counting_run
+  rc_is "$RC" 2 'a plan that refused a declaration does not run'
+  [ ! -e "$T/runs" ] || fail_ "a run happened, the baseline included: $(tr '\n' ' ' < "$T/runs")"
+  has "$ERR" '1 declaration(s) were refused' 'the pool says why'
+  # from prepare, which may declare rows too
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'good' '$1 + $2' '$1 - $2' 'add-works'
+  refusing_prepare() { toy_prepare "$1" || return 1; shmutant_refuse 'checked against the prepared tree'; true; }
+  pool lbl "$T/wd" refusing_prepare counting_run
+  rc_is "$RC" 2 'a refusal from prepare stops the pool'
+  [ ! -e "$T/runs" ] || fail_ "a run happened after a refusal in prepare: $(tr '\n' ' ' < "$T/runs")"
+  has "$ERR" 'refused: checked against the prepared tree' 'and is reported'
+  # a call without one non-empty reason refuses all the same
+  shmutant_reset
+  shmutant_refuse 2>/dev/null; rc_is $? 2 'no reason is refused'
+  shmutant_refuse '' 2>/dev/null; rc_is $? 2 'an empty reason is refused'
+  shmutant_refuse not quoted 2>"$T/e-use"; rc_is $? 2 'an unquoted reason is refused'
+  has "$(cat "$T/e-use")" 'shmutant_refuse <reason> (got 2 arguments)' 'says how it was called'
+  eq "$SHMUTANT_DECL_ERRORS" 3 'each of those counts as a refusal'
+  shmutant_reset
+  eq "$SHMUTANT_DECL_ERRORS" 0 'reset clears the refusals'
+  # a counter the caller made readonly: refused, never assigned, and the shell survives
+  ( readonly SHMUTANT_DECL_ERRORS; shmutant_refuse 'x' 2>"$T/e-ro"; echo "refuse=$?" > "$T/o-ro" )
+  eq "$(cat "$T/o-ro" 2>/dev/null)" 'refuse=2' 'a readonly refusal count is refused (2), and the shell survives'
+  has "$(cat "$T/e-ro")" "made 'SHMUTANT_DECL_ERRORS' readonly" 'says why'
+  # through the CLI: a plan that refuses while loading, though its last command succeeds
+  cat > "$T/plan.sh" <<EOF
+prepare() { shmutant_copy_tree "$TOY" "\$1"; }
+run() { printf '%s\n' "\$2" >> "$T/cli-runs"; bash "\$1/test.sh"; }
+shmutant_target lib.sh
+shmutant_refuse 'the plan checked a row and refused it'
+shmutant_mut 'good' '\$1 + \$2' '\$1 - \$2' 'add-works'
+EOF
+  bash "$SHMUTANT" run "$T/plan.sh" > "$T/cli-out" 2>"$T/cli-err"; rc_is $? 2 'the CLI exits 2 for a plan that refused a declaration'
+  [ ! -e "$T/cli-runs" ] || fail_ 'the CLI ran a plan that refused a declaration'
+  has "$(cat "$T/cli-err")" 'refused: the plan checked a row and refused it' 'and reports the reason'
+  eq "$(cat "$T/cli-out")" '' 'no verdict record is written'
 }
 
 t_reset_clears_table() {
@@ -803,9 +970,9 @@ t_readonly_settings_do_not_kill_the_caller() {
   has "$(cat "$T/e-gl")" "the calling shell made 'SHMUTANT_DIR_IDS' readonly" 'says why'
   # the table's own arrays, made readonly: each declaration entry point refuses (2) instead of
   # ending the plan's shell at the first row
-  ( declare -ar SHMUTANT_ROWS_NAME=(); shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works' 2>"$T/e-decl"; echo "mut=$?" > "$T/o-decl"; shmutant_target lib.sh 2>>"$T/e-decl"; echo "target=$?" >> "$T/o-decl"; shmutant_reset 2>>"$T/e-decl"; echo "reset=$?" >> "$T/o-decl" )
-  eq "$(cat "$T/o-decl" 2>/dev/null)" $'mut=2\ntarget=2\nreset=2' 'shmutant_mut, shmutant_target and shmutant_reset refuse a readonly table array, and the shell survives'
-  eq "$(grep -c "made 'SHMUTANT_ROWS_NAME' readonly" "$T/e-decl")" 3 'each says why'
+  ( declare -ar SHMUTANT_ROWS_NAME=(); shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works' 2>"$T/e-decl"; echo "mut=$?" > "$T/o-decl"; shmutant_target lib.sh 2>>"$T/e-decl"; echo "target=$?" >> "$T/o-decl"; shmutant_reset 2>>"$T/e-decl"; echo "reset=$?" >> "$T/o-decl"; shmutant_refuse 'r' 2>>"$T/e-decl"; echo "refuse=$?" >> "$T/o-decl" )
+  eq "$(cat "$T/o-decl" 2>/dev/null)" $'mut=2\ntarget=2\nreset=2\nrefuse=2' 'shmutant_mut, shmutant_target, shmutant_reset and shmutant_refuse refuse a readonly table array, and the shell survives'
+  eq "$(grep -c "made 'SHMUTANT_ROWS_NAME' readonly" "$T/e-decl")" 4 'each says why'
   [ -z "$(grep -c readonly "$T/e-set2" | grep -v '^0$')" ] || fail_ 'copy_tree under a set function reported a false readonly collision'
   # and a refused pool leaves no descriptor behind in the caller shell
   ( before="$(ls /dev/fd | wc -l | tr -d ' ')"; SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd-fd" readonly_prepare toy_run > /dev/null 2>&1; after="$(ls /dev/fd | wc -l | tr -d ' ')"; echo "$before $after" > "$T/fds" )
@@ -1381,7 +1548,7 @@ t_readonly_preflight_names_every_local() {
     /^\}/ { f = "" }
     f != "" && f !~ /^_shmutant_cli_/ && f != "shmutant_main" && f != "_shmutant_checksum" { if ($0 ~ /^[ \t]*#/) next; print }
   ' "$SHMUTANT" | grep -oE 'SHMUTANT_[A-Z_]+(\[[^]]*\])?\+?=' | grep -oE 'SHMUTANT_[A-Z_]+' | sort -u \
-    | grep -vxE 'SHMUTANT_(KEEP|TIMEOUT|JOBS|RED_STATUS|RED_PREFIX|STREAM|BASELINE|SELECT)')"
+    | grep -vxE 'SHMUTANT_(KEEP|TIMEOUT|JOBS|RED_STATUS|RED_PREFIX|STREAM|BASELINE|COUNTS|SELECT)')"
   gcount="$(printf '%s\n' "$globals" | grep -c .)"
   [ "$gcount" -ge 50 ] || fail_ "fixture: the extraction found only $gcount assigned globals"
   missing=""
@@ -1804,7 +1971,7 @@ t_readonly_preflight_covers_every_name_the_pool_assigns() {
   for n in $names; do
     # settings the caller owns, shell state, and what only looks like an assignment: dd and ps
     # operands (if= bs= count= pid= ppid= etime= stat= args=)
-    case "$n" in SHMUTANT_KEEP|SHMUTANT_TIMEOUT|SHMUTANT_JOBS|SHMUTANT_RED_STATUS|SHMUTANT_RED_PREFIX|SHMUTANT_STREAM|SHMUTANT_BASELINE|SHMUTANT_SELECT|LC_ALL|POSIXLY_CORRECT|GLOBIGNORE|IFS|PATH|PWD|OLDPWD|_|prepare|run|exit|if|bs|count|of|seek|conv|pid|ppid|etime|stat|args) continue ;; esac
+    case "$n" in SHMUTANT_KEEP|SHMUTANT_TIMEOUT|SHMUTANT_JOBS|SHMUTANT_RED_STATUS|SHMUTANT_RED_PREFIX|SHMUTANT_STREAM|SHMUTANT_BASELINE|SHMUTANT_COUNTS|SHMUTANT_SELECT|LC_ALL|POSIXLY_CORRECT|GLOBIGNORE|IFS|PATH|PWD|OLDPWD|_|prepare|run|exit|if|bs|count|of|seek|conv|pid|ppid|etime|stat|args) continue ;; esac
     count=$((count + 1))
     printf '%s\n' "$listed" | grep -qx -- "$n" || unlisted="$unlisted $n"
   done
@@ -1925,6 +2092,128 @@ t_verdict_baseline_red() {
   eq "$(verdict_of 'still green')" killed 'a row on a green selector still runs'
   eq "$(grep -c '^add-works$' "$T/runs")" 1 'the red selector ran once (baseline) and never for the row'
   has "$ERR" 'BEFORE any defect' 'explains the verdict'
+}
+
+t_counts_pass_a_complete_selection() {
+  mk_counted_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'add subtracts' '$1 + $2' '$1 - $2' 'add-works'
+  shmutant_mut 'even flips' '-eq 0' '-ne 0' 'even-works'
+  fd_run() { printf '[%s] %s\n' "$2" "${SHMUTANT_COUNTS_FD-unset}" >> "$T/runs"; bash "$1/test.sh"; }
+  SHMUTANT_COUNTS=1 pool lbl "$T/wd" toy_prepare fd_run
+  rc_is "$RC" 0 'selections that count, per unit, what the unselected run counts pass'
+  eq "$(verdict_of 'add subtracts') $(verdict_of 'even flips')" 'killed killed' 'and their rows are scored'
+  eq "$(printf '%s\n' "$OUT" | awk -F'\t' '$3 == "baseline" { print "[" $4 "] " $5 }')" $'[] green\n[add-works] green\n[even-works] green' 'one unselected baseline, with an empty selector and first, beside each selector'
+  has "$(baseline_of '' 7)" 'the reference for the counts' 'the unselected record says what it is'
+  eq "$(grep -c '^\[\] ' "$T/runs")" 1 'the unselected run ran once'
+  eq "$(grep -cvE '^\[[^]]*\] [0-9]+$' "$T/runs")" 0 "every run, the rows' included, was given a descriptor number: $(tr '\n' ' ' < "$T/runs")"
+  # a unit the unselected run reports one assertion at a time, and a selection reports at once,
+  # is summed: the same count
+  TOY_SPLIT=1 SHMUTANT_COUNTS=1 pool lbl "$T/wd" toy_prepare toy_run
+  rc_is "$RC" 0 'a unit reported on several lines is summed before it is compared'
+  eq "$(baseline_of even-works)" green 'two lines of 1 count as the 2 a selection reports'
+  # a count of up to nine digits, leading zeros included, is a number
+  TOY_LINE=$'add-works\t000000001' SHMUTANT_COUNTS=1 pool lbl "$T/wd" toy_prepare toy_run
+  eq "$(baseline_of add-works)" green 'a nine-digit count with leading zeros is the number it spells'
+  # off by default: no unselected run, and a descriptor an outer pool exported never reaches a run
+  rm -f "$T/runs"
+  export SHMUTANT_COUNTS_FD=7
+  pool lbl "$T/wd" toy_prepare fd_run
+  unset SHMUTANT_COUNTS_FD
+  rc_is "$RC" 0 'with the counts off the pool runs as before'
+  eq "$(grep -c '^\[\] ' "$T/runs")" 0 'and makes no unselected run'
+  eq "$(grep -cv ' unset$' "$T/runs")" 0 "and no run sees a count descriptor, an inherited one included: $(tr '\n' ' ' < "$T/runs")"
+}
+
+t_counts_score_an_incomplete_selection_baseline() {
+  mk_counted_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'add subtracts' '$1 + $2' '$1 - $2' 'add-works'
+  shmutant_mut 'even flips' '-eq 0' '-ne 0' 'even-works'
+  counting_run() { printf '[%s]\n' "$2" >> "$T/runs"; bash "$1/test.sh"; }
+  TOY_DEPENDENT=1 SHMUTANT_COUNTS=1 pool lbl "$T/wd" toy_prepare counting_run
+  rc_is "$RC" 1 'a selection that runs fewer assertions than the full suite fails the pool'
+  eq "$(baseline_of even-works)" incomplete 'its baseline is incomplete, though green'
+  has "$(baseline_of even-works 7)" 'unit [even-works] ran 1 assertion(s) here and 2 in the unselected run' 'the record names the unit and both counts'
+  eq "$(verdict_of 'even flips')" baseline 'its row is scored baseline'
+  has "$(row_detail 'even flips')" 'unit [even-works] ran 1 assertion(s) here and 2 in the unselected run' 'and the row says why, with both counts'
+  eq "$(verdict_of 'add subtracts')" killed 'a complete selection beside it is still scored'
+  eq "$(grep -cx '\[even-works\]' "$T/runs")" 1 'the incomplete selector ran for its baseline only, never for its row'
+  has "$ERR" 'baseline [even-works]: green, but the selection is not shown to run' 'stderr says so'
+  # a unit the unselected run never reported, compared whole and byte for byte
+  local line
+  for line in $'stranger\t1' $'Add-works\t1' $'add-work\t1'; do
+    shopt -s nocasematch
+    TOY_LINE="$line" SHMUTANT_COUNTS=1 pool lbl "$T/wd" toy_prepare toy_run
+    shopt -u nocasematch
+    eq "$(baseline_of add-works)" incomplete "a selection reporting [${line%%$'\t'*}] is incomplete"
+    has "$(baseline_of add-works 7)" "unit [${line%%$'\t'*}] ran 1 assertion(s) here and is absent from the unselected run" 'says the unit is absent there'
+  done
+}
+
+t_counts_refuse_a_malformed_line() {
+  mk_counted_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'add subtracts' '$1 + $2' '$1 - $2' 'add-works'
+  local line
+  for line in 'add-works 1' $'add-works\t1\textra' $'\t1' $'add-works\t1234567890' $'add-works\tone' $'add-works\t' ''; do
+    TOY_LINE="$line" SHMUTANT_COUNTS=1 pool lbl "$T/wd" toy_prepare toy_run
+    rc_is "$RC" 1 "a selected run whose count line is [$line] fails the pool, not the harness"
+    eq "$(baseline_of add-works)" incomplete "a count line [$line] makes the selection incomplete"
+    has "$(baseline_of add-works 7)" 'line 1 is not <unit><TAB><digits>' 'and names the line'
+    eq "$(verdict_of 'add subtracts')" baseline "the selection's row is scored baseline"
+  done
+}
+
+t_counts_need_a_unit_and_a_reference() {
+  mk_counted_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'add subtracts' '$1 + $2' '$1 - $2' 'add-works'
+  shmutant_mut 'even flips' '-eq 0' '-ne 0' 'even-works'
+  # a selected run that reports no unit
+  TOY_SILENT=1 SHMUTANT_COUNTS=1 pool lbl "$T/wd" toy_prepare toy_run
+  rc_is "$RC" 1 'a selection that reports nothing fails the pool'
+  eq "$(baseline_of add-works) $(baseline_of even-works)" 'incomplete incomplete' 'each such selection is incomplete'
+  has "$(baseline_of add-works 7)" 'it reported no unit' 'says why'
+  # an unselected run that fails: nothing can be compared, so every selection is incomplete
+  TOY_FULL_RED=1 SHMUTANT_COUNTS=1 pool lbl "$T/wd" toy_prepare toy_run
+  rc_is "$RC" 1 'a red unselected run fails the pool'
+  eq "$(baseline_of '')" red 'its baseline record is red'
+  eq "$(baseline_of add-works) $(baseline_of even-works)" 'incomplete incomplete' 'and no selection is proven whole'
+  has "$(baseline_of add-works 7)" 'the unselected run, the reference, is red' 'says why'
+  eq "$(verdict_of 'add subtracts') $(verdict_of 'even flips')" 'baseline baseline' 'every row is scored baseline'
+  # an unselected run that is green and reports nothing is no reference either
+  TOY_FULL_SILENT=1 SHMUTANT_COUNTS=1 pool lbl "$T/wd" toy_prepare toy_run
+  eq "$(baseline_of '')" incomplete 'a green unselected run that counts nothing is incomplete'
+  has "$(baseline_of '' 7)" 'cannot be the reference' 'says why'
+  eq "$(baseline_of add-works)" incomplete 'and every selection with it'
+  has "$(baseline_of add-works 7)" 'the unselected run, the reference, is incomplete' 'naming the reference'
+}
+
+t_counts_need_the_baseline() {
+  mk_counted_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'add subtracts' '$1 + $2' '$1 - $2' 'add-works'
+  SHMUTANT_COUNTS=yes pool lbl "$T/wd" toy_prepare toy_run
+  rc_is "$RC" 2 'SHMUTANT_COUNTS=yes is refused, not read as 0 or 1'
+  has "$ERR" 'SHMUTANT_COUNTS must be 0 or 1' 'names it'
+  SHMUTANT_COUNTS=1 SHMUTANT_BASELINE=0 pool lbl "$T/wd" toy_prepare toy_run
+  rc_is "$RC" 2 'the counts without the baseline are refused'
+  has "$ERR" 'SHMUTANT_COUNTS=1 needs the baseline' 'says why'
+  # a prepare that turns the baseline off is caught too: settings are checked again after it
+  # shellcheck disable=SC2034
+  unbaselining_prepare() { toy_prepare "$1"; SHMUTANT_BASELINE=0; }
+  SHMUTANT_COUNTS=1 pool lbl "$T/wd" unbaselining_prepare toy_run
+  rc_is "$RC" 2 'a prepare that turns the baseline off under the counts is refused'
+  has "$ERR" 'needs the baseline' 'says why'
+  # and the CLI's flag
+  printf 'prepare() { shmutant_copy_tree "%s" "$1"; }\nrun() { bash "$1/test.sh"; }\nshmutant_target lib.sh\nshmutant_mut a '"'"'$1 + $2'"'"' '"'"'$1 - $2'"'"' add-works\n' "$TOY" > "$T/plan.sh"
+  SHMUTANT_COUNTS=1 bash "$SHMUTANT" run "$T/plan.sh" --no-baseline > /dev/null 2>"$T/cli-err"; rc_is $? 2 'the CLI refuses --no-baseline under the counts'
+  has "$(cat "$T/cli-err")" 'needs the baseline' 'says why'
+  # a descriptor variable the caller made readonly: the pool sets it for every run, so refused
+  ( readonly SHMUTANT_COUNTS_FD=9; SHMUTANT_COUNTS=1 shmutant_pool lbl "$T/wd-ro" toy_prepare toy_run > /dev/null 2>"$T/e-ro"; echo "pool=$?" > "$T/o-ro" )
+  eq "$(cat "$T/o-ro" 2>/dev/null)" 'pool=2' 'a readonly SHMUTANT_COUNTS_FD is refused (2), and the shell survives'
+  has "$(cat "$T/e-ro")" "made 'SHMUTANT_COUNTS_FD' readonly" 'says why'
 }
 
 t_verdict_timeout() {
