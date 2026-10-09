@@ -3655,11 +3655,12 @@ t_pool_reports_a_clone_it_could_not_remove() {
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
   shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
-  # the callback leaves something in its clone that nobody can delete, then fails its witness
-  pinning_run() { make_unremovable "$1/pinned" || printf 'unavailable\n' > "$T/skip"; bash "$1/test.sh"; }
+  # the callback leaves something in its clone that nobody can delete, then fails its witness; it
+  # runs in a worker's shell, so how it did that comes back in a file for the undo below
+  pinning_run() { if make_unremovable "$1/pinned"; then printf '%s\n' "$UNREMOVABLE_HOW" > "$T/how"; else printf 'unavailable\n' > "$T/skip"; fi; bash "$1/test.sh"; }
   SHMUTANT_BASELINE=0 pool lbl "$T/wd" toy_prepare pinning_run
   if [ -e "$T/skip" ]; then echo "note: $_unit: no way to make a directory unremovable here; skipped"; return; fi
-  unmake_unremovable "$T/wd/mut-0/tree/pinned"
+  UNREMOVABLE_HOW="$(cat "$T/how" 2>/dev/null)" unmake_unremovable "$T/wd/mut-0/tree/pinned"
   rc_is "$RC" 2 'a clone that could not be removed is a harness error, not a pass'
   has "$ERR" 'was not removed' 'names the clone'
   has "$ERR" 'as promised' 'and says the run is unclean'
