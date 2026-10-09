@@ -100,13 +100,14 @@ wait_for() {
 }
 
 # wait_gone <pid> [identity [looks]] — block until <pid> no longer runs, looking at most <looks> times
-# a tenth of a second apart (30: three seconds); 1 on expiry, 2 for <looks> that is not a positive
-# integer. The bound counts looks and reads no clock, so a clock step cannot change it. A process
+# a tenth of a second apart (30, three seconds, when not given); 1 on expiry, 2 for <looks> that is
+# not a decimal from 1 to 9999 without leading zeros (an empty one included). The bound counts
+# looks and reads no clock, so a clock step cannot change it. A process
 # just sent KILL answers `kill -0` until it is reaped, and one whose parent never reaps it answers
 # forever: a zombie has already exited, and counts as gone. The process waited on is the one
 # carrying <identity> (read on entry when none is given): a pid carrying another was reused.
 wait_gone() {
-  local i=0 id="${2:-}" looks="${3:-30}" now
+  local i=0 id="${2:-}" looks="${3-30}" now
   [[ "$looks" =~ ^[1-9][0-9]{0,3}$ ]] || { echo "wait_gone: looks must be 1 to 9999, got [$looks]" >&2; return 2; }
   [ -n "$id" ] || id="$(_shmutant_identity "$1" 2>/dev/null)"
   while kill -0 "$1" 2>/dev/null; do
@@ -2568,17 +2569,19 @@ t_verdict_timeout_with_a_leading_zero() {
   shmutant_reset; shmutant_target lib.sh
   shmutant_mut 'hangs' '$1 + $2' '$1 - $2' 'add-works'
   # 08: digits only, but not a valid octal constant, which is what bash arithmetic would read.
-  slow_run() { bash -c "echo \$\$ > '$T/run.pid'; sleep 30"; }
+  slow_run() { bash -c "echo \$\$ > '$T/run.pid'; sleep 6; : > '$T/six'; sleep 30"; }
   # The pool reads a frozen clock, so each of the watchdog's polls counts as its half-second sleep
   # and nothing else: eight seconds is sixteen polls, each reading the clock once after the reading
-  # the deadline starts from. Those reads are counted, so the deadline's length is checked without
-  # timing anything, whatever a real clock does meanwhile.
+  # the deadline starts from. Those reads are counted, and the run marks six seconds of its own
+  # sleep, which sixteen polls that each slept their half second outlast. Between them the
+  # deadline's length is checked with no clock read, whatever a real clock does meanwhile.
   : > "$T/reads"
   OUT="$( _shmutant_now() { [ "${FUNCNAME[1]}" != _shmutant_run_bounded ] || printf 'read\n' >> "$T/reads"; printf '%s' 1000000000000000; }
     SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=08 shmutant_pool lbl "$T/wd" toy_prepare slow_run 2> "$T/err" )"
   ERR="$(cat "$T/err")"
   eq "$(verdict_of 'hangs')" timeout 'a timeout of 08 is eight seconds, not an octal error that disarms the watchdog'
-  eq "$(grep -cx read "$T/reads")" 17 'the deadline is sixteen half-second polls, eight seconds, not cut short or stretched'
+  eq "$(grep -cx read "$T/reads")" 17 'the deadline is sixteen polls, neither fewer nor more'
+  [ -e "$T/six" ] || fail_ 'the deadline came before six seconds of the run'"'"'s own sleep: its polls did not each sleep their half second'
   has "$ERR" 'within 8s' 'the bound is reported in its canonical form, not as 08'
   local runpid; runpid="$(cat "$T/run.pid" 2>/dev/null)"
   if [ -z "$runpid" ]; then fail_ 'fixture: the run never started'
@@ -4367,9 +4370,14 @@ EOF
   done
   # A relative TMPDIR: the unit changes into its own directory before its EXIT trap snapshots, so
   # the sweep's paths must already be absolute or that snapshot is written somewhere else.
-  mkdir -p "$T/reltmp"; rm -f "$T/leaks_then_exits.pid"
+  mkdir -p "$T/reltmp"; rm -f "$T/leaks_then_exits.pid" "$T/leaks_then_exits.dir"
   out="$( cd "$T" && TMPDIR=reltmp SHMUTANT_SELECT=t_zz_leaks_then_exits bash "$T/suite/test/run.sh" 2>&1 )"; rc_is $? 1 'with a relative TMPDIR, a unit that leaves a process and exits still fails'
   has "$out" 'FAIL: t_zz_leaks_then_exits: 1 process(es) outlived the unit' 'and its leftover is counted'
+  # and its own directory, removed by that trap, really goes: a relative one is read from where the suite ran
+  dir="$(cat "$T/leaks_then_exits.dir" 2>/dev/null)"
+  case "$dir" in /*|'') ;; *) dir="$T/$dir" ;; esac
+  if [ -z "$dir" ]; then fail_ "with a relative TMPDIR the unit never recorded its directory: [$out]"
+  elif [ -e "$dir" ]; then fail_ 'with a relative TMPDIR the unit'"'"'s directory was left behind, its removal reported as done'; fi
   pid="$(cat "$T/leaks_then_exits.pid" 2>/dev/null)"
   [ -z "$pid" ] || wait_gone "$pid" || { fail_ 'with a relative TMPDIR the leftover survived the sweep'; kill -KILL "$pid" 2>/dev/null; }
   # The process-state query failing must not clear a leftover: nothing then proves it gone. A copy
@@ -4821,7 +4829,7 @@ t_wait_gone_takes_a_reused_pid_as_gone() {
   [ "$rc" = 0 ] || fail_ 'a pid carrying another identity was waited on as if it were the process'
   # a bound that is not a count of looks is refused, never read as a wait that expired
   local bad
-  for bad in 0 -1 x 10000; do
+  for bad in 0 -1 x 01 10000 ''; do
     rc=0; wait_gone "$p" "$real" "$bad" 2>/dev/null || rc=$?
     rc_is "$rc" 2 "a bound of [$bad] looks is refused"
   done
@@ -5001,6 +5009,10 @@ main() {
       printf '%s %s\n' "$_sweep_up" "$_sweep_id" >&"$pfd"; exec {pfd}>&-
       _unit="$u"; _failed=0
       T="$(mktemp -d "${TMPDIR:-/tmp}/shmutant-test.XXXXXX")" || exit 1
+      # Absolute before the unit changes into it: from there, its EXIT trap would remove a path
+      # relative to the directory itself, find nothing there, and report it removed.
+      _sweep_t="$(_shmutant_abs "$T")" || { printf 'FAIL: %s: its directory %s could not be resolved\n' "$u" "$T"; rm -rf -- "$T"; exit 1; }
+      T="$_sweep_t"
       trap unit_finish EXIT
       cd "$T" || exit 1
       "$u"
