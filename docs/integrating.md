@@ -8,8 +8,8 @@ How a project vendors `shmutant.sh`, wires its own suite to it, and migrates an 
 Copy `shmutant.sh` into the project. One file, no submodule, no install step.
 
 ```sh
-curl -fsSL -o scripts/shmutant.sh https://raw.githubusercontent.com/BWBama85/shmutant/v0.1.0/shmutant.sh
-bash scripts/shmutant.sh version      # shmutant 0.1.0
+curl -fsSL -o scripts/shmutant.sh https://raw.githubusercontent.com/BWBama85/shmutant/v0.2.0/shmutant.sh
+bash scripts/shmutant.sh version      # shmutant 0.2.0
 bash scripts/shmutant.sh checksum     # compare against CHECKSUMS at that tag
 ```
 
