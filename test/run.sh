@@ -501,6 +501,9 @@ t_pool_refuses_missing_target() {
   pool lbl "$T/wd" toy_prepare toy_run
   rc_is "$RC" 2 'a target the prepared tree lacks is refused before any run'
   has "$ERR" 'absent.sh' 'names the target'
+  # by the target check, with its reason: the literal count after it fails on a missing file too,
+  # and would otherwise stand in for it
+  has "$ERR" 'which the prepared tree does not contain as a regular file' 'and says the tree lacks it'
 }
 
 t_pool_refuses_symlink_target() {
