@@ -4303,7 +4303,11 @@ t_suite_sweeps_what_a_unit_leaves_behind() {
   { sed '$d' "$here/run.sh"
     cat <<EOF
   t_zz_leaks() { set -m; sleep 30 > /dev/null 2>&1 & echo \$! > '$T/leaks.pid'; set +m; }
-  t_zz_leaks_then_exits() { sleep 30 > /dev/null 2>&1 & echo \$! > '$T/leaks_then_exits.pid'; exit 0; }
+  t_zz_leaks_then_exits() { sleep 30 > /dev/null 2>&1 & echo \$! > '$T/leaks_then_exits.pid'; printf '%s\n' "\$T" > '$T/leaks_then_exits.dir'; exit 0; }
+  t_zz_unrecordable() {
+    printf '%s\n' "\$T" > '$T/unrecordable.dir'; SWEEP_SEEN='$T/no-such-dir/seen'
+    if [ -n "\${STRICT:-}" ]; then set -euC -o pipefail; IFS=:; shopt -s nocasematch extglob; exec 1< /dev/null; fi
+  }
   t_zz_reparents() { ( sleep 30 > /dev/null 2>&1 & echo \$! > '$T/reparents.pid'; sleep 2 ); sleep 0.3; }
   late_await() { local i; for (( i = 0; i < 200; i++ )); do command -p grep -qx "\$1" '$T/late_reparents.log' 2>/dev/null && return 0; sleep 0.05; done; fail_ "the sampler never logged \$1"; return 1; }
   late_identity() {
@@ -4326,7 +4330,7 @@ t_suite_sweeps_what_a_unit_leaves_behind() {
 main "\$@"
 EOF
   } > "$T/suite/test/run.sh"
-  local out c pid hold
+  local out c pid hold unverified dir
   for c in leaks leaks_then_exits reparents; do
     out="$(SHMUTANT_SELECT="t_zz_$c" bash "$T/suite/test/run.sh" 2>&1)"; rc_is $? 1 "t_zz_$c leaves a process behind and fails the suite"
     has "$out" "FAIL: t_zz_$c: 1 process(es) outlived the unit" "t_zz_$c is named with the count"
@@ -4434,14 +4438,17 @@ EOF
   [ -n "$pid" ] || fail_ "the slow-sampler unit never left its process, so its handshake with the sampler did not complete: [$out]"
   command -p grep -qx released "$T/late_reparents.log" 2>/dev/null || fail_ "the slow-sampler read held for the test never saw the unit end: [$out]"
   [ -z "$pid" ] || { kill -KILL "$pid" 2>/dev/null; wait_gone "$pid"; }
-  # Both again with every write of the sampler failing (its output opened read-only): an unverified
-  # it owes but cannot write fails the unit, never reads as a clean sample.
+  # Both again with the sampler's own writes failing (its output opened read-only) while its samples
+  # still reach the record, as they must for it to get that far: an unverified it owes but cannot
+  # write fails the unit, never reads as a clean sample.
   mkdir -p "$T/suite-nowrite/test"
   cp -- "$SHMUTANT" "$T/suite-nowrite/shmutant.sh"
   { sed '$d' "$T/suite/test/run.sh"
     printf '%s\n' 'eval "_real_identity() $(declare -f _shmutant_identity | sed 1d)"' \
       'eval "_real_sample_unit() $(declare -f sample_unit | sed 1d)"' \
-      'sample_unit() { _real_sample_unit "$@" 1< /dev/null; }' \
+      'eval "_real_unit_snapshot() $(declare -f unit_snapshot | sed 1d)"' \
+      'sample_unit() { exec {SAMPLED}>&1; _real_sample_unit "$@" 1< /dev/null; }' \
+      'unit_snapshot() { if [ "${FUNCNAME[1]}" = _real_sample_unit ]; then _real_unit_snapshot "$@" >&"$SAMPLED"; else _real_unit_snapshot "$@"; fi; }' \
       '_shmutant_identity() { if [ "${FUNCNAME[1]}" = _real_sample_unit ]; then late_identity "$LATE_HOLD" "$1"; else _real_identity "$@"; fi; }' 'main "$@"'
   } > "$T/suite-nowrite/test/run.sh"
   for hold in 11 2; do
@@ -4453,6 +4460,50 @@ EOF
     command -p grep -qx released "$T/late_reparents.log" 2>/dev/null || fail_ "the unwritable-sampler read $hold, held for the test, never saw the unit end: [$out]"
     [ -z "$pid" ] || { kill -KILL "$pid" 2>/dev/null; wait_gone "$pid"; }
   done
+  # A snapshot that cannot be written (its output opened read-only) fails the unit from either
+  # caller, for a sample and for an `unverified` alike: the sampler stops abnormally, and the EXIT
+  # trap fails a unit that was leaving with status 0, still removing its directory.
+  mkdir -p "$T/suite-snapnowrite/test"
+  cp -- "$SHMUTANT" "$T/suite-snapnowrite/shmutant.sh"
+  { sed '$d' "$T/suite/test/run.sh"
+    printf '%s\n' 'eval "_real_unit_snapshot() $(declare -f unit_snapshot | sed 1d)"' \
+      'unit_snapshot() {' \
+      '  [ "${FUNCNAME[1]}" = "${NOWRITE_IN:-}" ] || { _real_unit_snapshot "$@"; return; }' \
+      '  if [ -n "${NOWRITE_UNVERIFIED:-}" ]; then ( _shmutant_descendants_started() { return 1; }; _real_unit_snapshot "$@" ) 1< /dev/null; else _real_unit_snapshot "$@" 1< /dev/null; fi' \
+      '}' 'main "$@"'
+  } > "$T/suite-snapnowrite/test/run.sh"
+  for unverified in '' 1; do
+    rm -f "$T/reparents.pid"
+    out="$(NOWRITE_IN=sample_unit NOWRITE_UNVERIFIED="$unverified" SHMUTANT_SELECT=t_zz_reparents bash "$T/suite-snapnowrite/test/run.sh" 2>&1)"; rc_is $? 1 "a sampler that cannot write its snapshot fails the unit (unverified=[$unverified])"
+    has "$out" 'FAIL: t_zz_reparents: the descendant sampler stopped abnormally (status 1)' "and says so (unverified=[$unverified])"
+    pid="$(cat "$T/reparents.pid" 2>/dev/null)"
+    [ -z "$pid" ] || { kill -KILL "$pid" 2>/dev/null; wait_gone "$pid"; }
+    rm -f "$T/leaks_then_exits.pid" "$T/leaks_then_exits.dir"
+    out="$(NOWRITE_IN=unit_finish NOWRITE_UNVERIFIED="$unverified" SHMUTANT_SELECT=t_zz_leaks_then_exits bash "$T/suite-snapnowrite/test/run.sh" 2>&1)"; rc_is $? 1 "a unit exiting 0 whose last snapshot cannot be written fails (unverified=[$unverified])"
+    has "$out" 'FAIL: t_zz_leaks_then_exits: its last snapshot could not be written to the sweep record' "and says so (unverified=[$unverified])"
+    dir="$(cat "$T/leaks_then_exits.dir" 2>/dev/null)"
+    if [ -z "$dir" ]; then fail_ "the unit never recorded its directory: [$out]"
+    elif [ -e "$dir" ]; then fail_ "a unit whose last snapshot could not be written left its directory behind (unverified=[$unverified])"; fi
+    pid="$(cat "$T/leaks_then_exits.pid" 2>/dev/null)"
+    [ -z "$pid" ] || { kill -KILL "$pid" 2>/dev/null; wait_gone "$pid"; }
+  done
+  # The record the trap reopens by name may not open at all (the unit points it at a directory that
+  # does not exist): that fails the unit too, with nothing left behind to name.
+  rm -f "$T/unrecordable.dir"
+  out="$(SHMUTANT_SELECT=t_zz_unrecordable bash "$T/suite/test/run.sh" 2>&1)"; rc_is $? 1 'a unit whose sweep record cannot be opened as it exits fails'
+  has "$out" 'FAIL: t_zz_unrecordable: its last snapshot could not be written to the sweep record' 'and says so'
+  dir="$(cat "$T/unrecordable.dir" 2>/dev/null)"
+  if [ -z "$dir" ]; then fail_ "the unrecordable unit never recorded its directory: [$out]"
+  elif [ -e "$dir" ]; then fail_ 'a unit whose sweep record could not be opened left its directory behind'; fi
+  # The trap runs under whatever the unit turned on. With errexit, nounset, noclobber, pipefail, its
+  # own IFS and case matching, and an output the failure cannot even be printed to, the unit still
+  # fails and its directory still goes.
+  rm -f "$T/unrecordable.dir"
+  out="$(STRICT=1 SHMUTANT_SELECT=t_zz_unrecordable bash "$T/suite/test/run.sh" 2>&1)"; rc_is $? 1 'a unit whose sweep record cannot be opened fails under the options it set'
+  has "$out" 'run.sh: 1 unit(s) ran, 1 failed,' 'and is counted as failed'
+  dir="$(cat "$T/unrecordable.dir" 2>/dev/null)"
+  if [ -z "$dir" ]; then fail_ "the strict unrecordable unit never recorded its directory: [$out]"
+  elif [ -e "$dir" ]; then fail_ 'under the options the unit set, a record that could not be opened left its directory behind'; fi
   # A unit that cannot read its own identity hands the sampler nothing to check; a sampler that
   # then starts only after the unit has ended records nothing either. The unit itself says so.
   mkdir -p "$T/suite-noid/test"
@@ -4591,6 +4642,28 @@ t_unit_snapshot_reads_ancestry_and_identity_together() {
   local me=$BASHPID out
   out="$( _shmutant_identity_table() { SHMUTANT_START=([1]=not-the-child); }; unit_snapshot "$me" )"
   printf '%s\n' "$out" | grep -q "^$child:" || fail_ "a child the identity table lacks was not recorded by the snapshot: [$out]"
+  kill -KILL "$child" 2>/dev/null; wait "$child" 2>/dev/null
+}
+
+t_unit_snapshot_reports_a_record_it_could_not_write() {
+  # The snapshot's output is the sweep record. A sample or an `unverified` that never reached it
+  # reads as nothing left behind, so a write that failed (here, an output opened read-only) is its
+  # status, in each of the two lines it owes; one written, or nothing owed, is not a failure.
+  sleep 30 > /dev/null 2>&1 & local child=$!
+  local me=$BASHPID rc
+  rc=0; unit_snapshot "$me" > "$T/rec" || rc=$?
+  rc_is "$rc" 0 'a sample that was written'
+  grep -q "^$child:" "$T/rec" || fail_ "the written sample does not name the child: [$(cat "$T/rec")]"
+  rc=0; unit_snapshot "$me" 1< /dev/null 2>/dev/null || rc=$?
+  rc_is "$rc" 1 'a sample that could not be written is reported'
+  rc=0; ( _shmutant_descendants_started() { return 1; }; unit_snapshot "$me" ) > "$T/unv" || rc=$?
+  rc_is "$rc" 0 'an unverified that was written'
+  eq "$(cat "$T/unv")" unverified 'the unverified is the line written'
+  rc=0; ( _shmutant_descendants_started() { return 1; }; unit_snapshot "$me" 1< /dev/null 2>/dev/null ) || rc=$?
+  rc_is "$rc" 1 'an unverified that could not be written is reported'
+  # a pid with no descendants owes the record nothing, so even an unwritable output is no failure
+  rc=0; unit_snapshot "$child" 1< /dev/null 2>/dev/null || rc=$?
+  rc_is "$rc" 0 'a snapshot that owes nothing writes nothing and does not fail'
   kill -KILL "$child" 2>/dev/null; wait "$child" 2>/dev/null
 }
 
@@ -4736,12 +4809,31 @@ t_wait_gone_takes_a_zombie_as_gone() {
 # unit_snapshot <pid> — print `pid:identity` for each live descendant of <pid>, taking ancestry and
 # start identity from the same process-table read, so a child forked between two reads is never
 # listed without its identity; or the line `unverified` when that read failed. Only the read's own
-# status says so: a second read would race whatever the unit forks in between.
+# status says so: a second read would race whatever the unit forks in between. Returns 1 when what
+# it owes the record could not be written: a sample or an `unverified` lost there would let a unit
+# that left a process behind pass, its leftover unswept.
 unit_snapshot() {
   local out
-  out="$(_shmutant_descendants_started "$1")" || { printf 'unverified\n'; return 0; }
-  [ -z "$out" ] || printf '%s\n' "$out" | command -p sed 's/ /:/'
-  return 0
+  out="$(_shmutant_descendants_started "$1")" || { printf 'unverified\n' || return 1; return 0; }
+  [ -n "$out" ] || return 0
+  # Rewritten before it is written, in one printf: a pipeline reports only its last command, and
+  # the write is the status that matters.
+  out="$(printf '%s\n' "$out" | command -p sed 's/ /:/')" || return 1
+  printf '%s\n' "$out"
+}
+
+# unit_finish — a unit's EXIT trap, run in the unit's own shell: record what is still attached to
+# the unit, then remove its directory. A record that could not be written fails the unit, whatever
+# status it was leaving with: what that record would have named is otherwise never swept. The
+# directory goes first, so a report that cannot be printed under the unit's own errexit still
+# leaves nothing behind, and still fails it.
+unit_finish() {
+  local recorded=1
+  unit_snapshot "$BASHPID" >> "$SWEEP_SEEN" 2>/dev/null || recorded=0
+  rm -rf -- "$T"
+  [ "$recorded" = 0 ] || return 0
+  printf 'FAIL: %s: its last snapshot could not be written to the sweep record, so what the unit left behind is unverified\n' "$_unit"
+  exit 1
 }
 
 # sample_unit <fd> — read the unit's `pid identity` from <fd>, then print `pid:identity` for its descendants
@@ -4752,7 +4844,7 @@ unit_snapshot() {
 # the mutated primitives; the outer pool's own cleanup still ends that row's leftovers.
 # Returns 3 when the unit is still running but its identity cannot be read, so nothing could be
 # sampled; a unit already gone by then has nothing to sample, and that is not a failure. Returns 1
-# when it cannot write an `unverified` its retries owe.
+# when it cannot write a sample, or an `unverified` its retries owe.
 sample_unit() {
   local up uid="" id="" now="" i
   # The unit sends its pid with the identity it read for itself: a number reused by the time this
@@ -4780,7 +4872,7 @@ sample_unit() {
     # Spent retries are all past the first pass: unverified, whether or not the unit has ended since.
     if [ -z "$now" ]; then printf 'unverified\n' || return 1; return 0; fi
     _shmutant_same_start "$now" "$id" || return 0
-    unit_snapshot "$up"
+    unit_snapshot "$up" || return 1
     IFS= read -t 0.5 -r _ <&"$1" && break
   done
   return 0
@@ -4864,7 +4956,7 @@ main() {
       printf '%s %s\n' "$_sweep_up" "$_sweep_id" >&"$pfd"; exec {pfd}>&-
       _unit="$u"; _failed=0
       T="$(mktemp -d "${TMPDIR:-/tmp}/shmutant-test.XXXXXX")" || exit 1
-      trap 'unit_snapshot "$BASHPID" >> "$SWEEP_SEEN" 2>/dev/null; rm -rf -- "$T"' EXIT
+      trap unit_finish EXIT
       cd "$T" || exit 1
       "$u"
       exit "$_failed"
