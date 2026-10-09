@@ -375,10 +375,19 @@ t_pool_refuses_a_literal_that_occurs_more_than_once() {
   # counting stops at the second start. Bounded by CPU time, which neither a loaded host nor a
   # clock step changes: on a line of 1,048,576 repeats the count takes milliseconds, where counting
   # every start runs past five CPU seconds and the CPU limit kills it
-  local got
+  local got step
   awk 'BEGIN { s = "a"; for (i = 0; i < 19; i++) s = s s; print s s }' > "$T/repeats"
-  got="$( ulimit -t 5; _shmutant_starts "$T/repeats" aa )"; rc_is $? 0 'a long line of repeats is counted within five CPU seconds'
-  eq "$got" 2 'and the count stops at the second start'
+  # and with the harness clock frozen, or stepped an hour forward or back at every reading (a file
+  # carries the clock between readings, each taken in a command substitution), the answer is the
+  # same: nothing here reads a clock
+  for step in 0 3600000000 -3600000000; do
+    printf '1000000000000000' > "$T/clock"
+    got="$(
+      _shmutant_now() { local c; c=$(( $(cat "$T/clock") + step )); printf '%s' "$c" > "$T/clock"; printf '%s' "$c"; }
+      ulimit -t 5; _shmutant_starts "$T/repeats" aa
+    )"; rc_is $? 0 "a long line of repeats is counted within five CPU seconds (clock step $step)"
+    eq "$got" 2 "and the count stops at the second start (clock step $step)"
+  done
   # byte for byte, whatever the caller's nocasematch: a copy that differs in case is another literal
   printf '# ECHO the sum\n' >> "$T/toy/lib.sh"
   shmutant_reset; shmutant_target lib.sh
