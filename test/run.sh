@@ -336,11 +336,16 @@ EOF
   has "$(cat "$T/e-doc")" 'witness [another unit] is not in unit [removal keeps operator edits]' 'naming both'
   eq "${#SHMUTANT_ROWS_NAME[@]}/$SHMUTANT_DECL_ERRORS" '1/1' 'the row is not appended, and the refusal is counted'
   mut_checked 'y' 'a' 'b' 'another unit' 2>/dev/null; rc_is $? 0 'a witness its own unit holds, past a nested and indented fi, is accepted'
+  # as a whole token, by the rule a verdict applies: inside a longer label it could never be carried
+  mut_checked 'y2' 'a' 'b' 'x is empty' 'another unit' 2>/dev/null; rc_is $? 0 'a witness the block holds as a whole token is accepted'
+  mut_checked 'p' 'a' 'b' 'another un' 'another unit' 2>"$T/e-doc"; rc_is $? 2 'a witness the block holds only inside a longer label is refused'
+  mut_checked 'q' 'a' 'b' 'is empt' 'another unit' 2>/dev/null; rc_is $? 2 'and so is one cut off before the label ends'
+  eq "${#SHMUTANT_ROWS_NAME[@]}/$SHMUTANT_DECL_ERRORS" '3/3' 'both are counted refusals'
   ( set -u; mut_checked 'short' 'a' 'b' 2>/dev/null; echo "rc=$? errors=$SHMUTANT_DECL_ERRORS" > "$T/o-short" )
-  eq "$(cat "$T/o-short" 2>/dev/null)" 'rc=2 errors=2' 'under set -u a row short of a witness is a counted refusal, not an unbound-variable abort'
+  eq "$(cat "$T/o-short" 2>/dev/null)" 'rc=2 errors=4' 'under set -u a row short of a witness is a counted refusal, not an unbound-variable abort'
   mv "$T/plan/run.sh" "$T/plan/moved.sh"
   mut_checked 'z' 'a' 'b' 'another unit' 2>/dev/null; rc_is $? 2 'a suite file that cannot be read refuses the row'
-  eq "${#SHMUTANT_ROWS_NAME[@]}/$SHMUTANT_DECL_ERRORS" '2/2' 'and counts it'
+  eq "${#SHMUTANT_ROWS_NAME[@]}/$SHMUTANT_DECL_ERRORS" '3/4' 'and counts it'
   shmutant_reset
 }
 
@@ -2213,6 +2218,24 @@ t_counts_refuse_a_malformed_line() {
   TOY_TWICE=1 TOY_LINE=$'add-works\t999999999' SHMUTANT_COUNTS=1 pool lbl "$T/wd" toy_prepare toy_run
   eq "$(baseline_of add-works)" incomplete 'a unit whose total passes nine digits is refused'
   has "$(baseline_of add-works 7)" 'unit [add-works] totals more than 999999999 assertions' 'says why'
+}
+
+t_counts_off_cost_a_run_no_descriptor() {
+  # the count channel exists only with the counts on: off, a run inherits no descriptor for it,
+  # so a run that fits the host's descriptor limit without the setting still fits with it unset
+  mk_counted_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'add subtracts' '$1 + $2' '$1 - $2' 'add-works'
+  local off on
+  : > "$T/fds"
+  fd_count_run() { printf '%s\n' "$(command -p ls /dev/fd | command -p wc -l | command -p tr -d ' ')" >> "$T/fds"; bash "$1/test.sh"; }
+  pool lbl "$T/wd" toy_prepare fd_count_run
+  off="$(sort -n "$T/fds" | head -n 1)"
+  : > "$T/fds"
+  SHMUTANT_COUNTS=1 pool lbl "$T/wd" toy_prepare fd_count_run
+  on="$(sort -n "$T/fds" | head -n 1)"
+  [ -n "$off" ] && [ -n "$on" ] || fail_ "fixture: no descriptor count was recorded (off [$off], on [$on])"
+  [ "${off:-0}" -lt "${on:-0}" ] || fail_ "a run holds as many descriptors with the counts off ($off) as on ($on)"
 }
 
 t_counts_reading_fails_closed() {

@@ -993,8 +993,8 @@ shmutant_mut 'a run callback prepare removed is not noticed' \
   '  :' \
   't_pool_reads_the_table_prepare_declared'
 shmutant_mut 'the capture keeps its name while run executes' \
-  'if ! command -p rm -f -- "$outf" "$counts" "$mark" "$left" "$seen" "$fifo" "$mark.hold" "$mark.hp" "$mark.go" 2>/dev/null; then' \
-  'if ! command -p rm -f -- "$counts" "$mark" "$left" "$seen" "$fifo" "$mark.hold" "$mark.hp" "$mark.go" 2>/dev/null; then' \
+  'if ! command -p rm -f -- "$outf" ${counts:+"$counts"} "$mark" "$left" "$seen" "$fifo" "$mark.hold" "$mark.hp" "$mark.go" 2>/dev/null; then' \
+  'if ! command -p rm -f -- ${counts:+"$counts"} "$mark" "$left" "$seen" "$fifo" "$mark.hold" "$mark.hp" "$mark.go" 2>/dev/null; then' \
   't_run_capture_has_no_name_while_run_executes'
 shmutant_mut 'a baseline-skipped row keeps an earlier pool directory' \
   '        _shmutant_fresh_dir "$wd/mut-$i" "$wd" || { _shmutant_err "$label: cannot recreate $wd/mut-$i"; _shmutant_pool_fail "$label" "$wd"; return 2; }' \
@@ -1784,3 +1784,7 @@ shmutant_mut 'the count comparison drops its first difference' \
   '!($1 in ref) || ref[$1] != $2 { if (!d) { fu = $1;' \
   '!($1 in ref) || ref[$1] != $2 { if (d) { fu = $1;' \
   't_counts_diff_names_the_first_difference'
+shmutant_mut 'the count channel is opened with the counts off' \
+  '[ "${SHMUTANT_COUNTS:-0}" != 1 ] || counts="$(command -p mktemp' \
+  'counts="$(command -p mktemp' \
+  't_counts_off_cost_a_run_no_descriptor'

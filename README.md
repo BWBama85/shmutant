@@ -142,7 +142,7 @@ shmutant  1  summary   <label>   <rows>  <killed>  <jobs>  <seconds>
 ```
 
 The second field is the stream format version. A baseline record's verdict is `green`, `red`,
-`aborted`, `timeout`, `unsettled`, `lost` or, with `SHMUTANT_COUNTS=1`, `incomplete`; that setting
+`aborted`, `timeout`, `unprepared`, `unsettled`, `lost` or, with `SHMUTANT_COUNTS=1`, `incomplete`; that setting
 adds one baseline record with an empty `<select>`, the unselected run. CI can consume it with
 `awk -F'\t'`. Keep the
 exit status of `shmutant` itself; behind a pipe it would be replaced by `awk`'s:

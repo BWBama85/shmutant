@@ -50,8 +50,8 @@
 #   shmutant  1  summary   <label>   <rows>  <killed>  <jobs>  <seconds>
 # Row verdicts: killed (the only pass), survived, accidental, aborted, unapplied, unprepared,
 # baseline, timeout, unsettled, lost. Baseline verdicts: green (the only pass), red, aborted,
-# timeout, unsettled, lost, and incomplete (SHMUTANT_COUNTS=1: green, but its counts do not show
-# the selection running what the unselected run runs for its units).
+# timeout, unprepared, unsettled, lost, and incomplete (SHMUTANT_COUNTS=1: green, but its counts
+# do not show the selection running what the unselected run runs for its units).
 #
 # Requires bash >= 5.3, the POSIX utilities (coreutils, find, awk). Nothing else; `ps` (POSIX)
 # is used when present to reach timed-out descendants that left the run's process group and,
@@ -1067,32 +1067,39 @@ _shmutant_run_bounded() {
   # and never reopened by path afterwards: the run's output (written and read back through
   # descriptors; the file takes the name `output` by rename at the end), the wrapper's leftover
   # record, the watchdog's sightings (which also carry the runner's own status and an unsettled
-  # freeze), the count lines (SHMUTANT_COUNTS; opened for every run, handed to the callback only
-  # with the counts on), and the timeout signal, which is a FIFO so that `read -t 0` can test it
-  # without consuming it. Each regular file is a mktemp name, each FIFO a fresh mkfifo (which
+  # freeze), the count lines (SHMUTANT_COUNTS=1 only: with the counts off a run costs no file and
+  # no descriptor for them), and the timeout signal, which is a FIFO so that `read -t 0` can test
+  # it without consuming it. Each regular file is a mktemp name, each FIFO a fresh mkfifo (which
   # refuses an existing entry); a callback that removes, locks or symlinks any name afterwards
   # changes nothing.
   mark="$(command -p mktemp "$dir/.run.XXXXXX")" || return 0
   left="$(command -p mktemp "$dir/.left.XXXXXX")" || { command -p rm -f -- "$mark"; return 0; }
   seen="$(command -p mktemp "$dir/.seen.XXXXXX")" || { command -p rm -f -- "$mark" "$left"; return 0; }
   outf="$(command -p mktemp "$dir/.output.XXXXXX")" || { command -p rm -f -- "$mark" "$left" "$seen"; return 0; }
-  counts="$(command -p mktemp "$dir/.counts.XXXXXX")" || { command -p rm -f -- "$mark" "$left" "$seen" "$outf"; return 0; }
+  counts=""; counts_w=""; counts_r=""; counts_r2=""
+  [ "${SHMUTANT_COUNTS:-0}" != 1 ] || counts="$(command -p mktemp "$dir/.counts.XXXXXX")" || { command -p rm -f -- "$mark" "$left" "$seen" "$outf"; return 0; }
   fifo="$mark.fired"
   { command -p mkfifo -- "$fifo" "$mark.hold" "$mark.hp" "$mark.go"; } 2>/dev/null \
-    || { command -p rm -f -- "$mark" "$left" "$seen" "$outf" "$counts" "$fifo" "$mark.hold" "$mark.hp" "$mark.go"; return 0; }
+    || { command -p rm -f -- "$mark" "$left" "$seen" "$outf" ${counts:+"$counts"} "$fifo" "$mark.hold" "$mark.hp" "$mark.go"; return 0; }
+  if ! exec {left_w}>|"$left" {left_r}<"$left" {seen_w}>|"$seen" {seen_r}<"$seen" {fired}<>"$fifo" {out_w}>|"$outf" {out_r}<"$outf" {out_r2}<"$outf" {hold}<>"$mark.hold" {hold_r}<"$mark.hold" {hp}<>"$mark.hp" {go}<>"$mark.go" {err_fd}>&2; then
+    # A partial open (a descriptor limit) is a setup failure, not a run: close what did open.
+    for fd in "${left_w:-}" "${left_r:-}" "${seen_w:-}" "${seen_r:-}" "${fired:-}" "${out_w:-}" "${out_r:-}" "${out_r2:-}" "${hold:-}" "${hold_r:-}" "${hp:-}" "${go:-}" "${err_fd:-}"; do [ -n "$fd" ] && exec {fd}>&-; done
+    command -p rm -f -- "$mark" "$left" "$seen" "$outf" ${counts:+"$counts"} "$fifo" "$mark.hold" "$mark.hp" "$mark.go"; return 0
+  fi
   # The count lines are appended (>>): each write lands at the end, so parallel writers never
   # overwrite one another. A line is whole only if one write carries it: lines interleaved from
-  # parallel writers are corrupt, and not always detectably.
-  if ! exec {left_w}>|"$left" {left_r}<"$left" {seen_w}>|"$seen" {seen_r}<"$seen" {fired}<>"$fifo" {out_w}>|"$outf" {out_r}<"$outf" {out_r2}<"$outf" {counts_w}>>"$counts" {counts_r}<"$counts" {counts_r2}<"$counts" {hold}<>"$mark.hold" {hold_r}<"$mark.hold" {hp}<>"$mark.hp" {go}<>"$mark.go" {err_fd}>&2; then
-    # A partial open (a descriptor limit) is a setup failure, not a run: close what did open.
+  # parallel writers are corrupt, and not always detectably. A failed open is the same setup
+  # failure as above.
+  if [ -n "$counts" ] && ! exec {counts_w}>>"$counts" {counts_r}<"$counts" {counts_r2}<"$counts"; then
     for fd in "${left_w:-}" "${left_r:-}" "${seen_w:-}" "${seen_r:-}" "${fired:-}" "${out_w:-}" "${out_r:-}" "${out_r2:-}" "${counts_w:-}" "${counts_r:-}" "${counts_r2:-}" "${hold:-}" "${hold_r:-}" "${hp:-}" "${go:-}" "${err_fd:-}"; do [ -n "$fd" ] && exec {fd}>&-; done
     command -p rm -f -- "$mark" "$left" "$seen" "$outf" "$counts" "$fifo" "$mark.hold" "$mark.hp" "$mark.go"; return 0
   fi
   # The capture too has no name while the run executes: it is read back through one descriptor
   # for the verdict and copied out through another for the artifact afterwards. A name that
   # cannot be removed is a setup failure: the callback could reopen the channel by it.
-  if ! command -p rm -f -- "$outf" "$counts" "$mark" "$left" "$seen" "$fifo" "$mark.hold" "$mark.hp" "$mark.go" 2>/dev/null; then
-    exec {left_w}>&- {left_r}<&- {seen_w}>&- {seen_r}<&- {fired}<&- {out_w}>&- {out_r}<&- {out_r2}<&- {counts_w}>&- {counts_r}<&- {counts_r2}<&- {hold}<&- {hold_r}<&- {hp}<&- {go}<&- {err_fd}>&-
+  if ! command -p rm -f -- "$outf" ${counts:+"$counts"} "$mark" "$left" "$seen" "$fifo" "$mark.hold" "$mark.hp" "$mark.go" 2>/dev/null; then
+    exec {left_w}>&- {left_r}<&- {seen_w}>&- {seen_r}<&- {fired}<&- {out_w}>&- {out_r}<&- {out_r2}<&- {hold}<&- {hold_r}<&- {hp}<&- {go}<&- {err_fd}>&-
+    [ -z "$counts_w" ] || exec {counts_w}>&- {counts_r}<&- {counts_r2}<&-
     return 0
   fi
   # An unsettled freeze, from this shell or the watchdog, is reported on the sightings channel.
@@ -1276,7 +1283,8 @@ _shmutant_run_bounded() {
       SHMUTANT_RUN_PUBLISHED=0
     fi
   fi
-  exec {left_w}>&- {left_r}<&- {seen_w}>&- {seen_r}<&- {fired}<&- {out_w}>&- {out_r}<&- {out_r2}<&- {counts_w}>&- {counts_r}<&- {counts_r2}<&- {hold}<&- {hold_r}<&- {hp}<&- {go}<&- {err_fd}>&-
+  exec {left_w}>&- {left_r}<&- {seen_w}>&- {seen_r}<&- {fired}<&- {out_w}>&- {out_r}<&- {out_r2}<&- {hold}<&- {hold_r}<&- {hp}<&- {go}<&- {err_fd}>&-
+  [ -z "$counts_w" ] || exec {counts_w}>&- {counts_r}<&- {counts_r2}<&-
 }
 
 # _shmutant_read_counts <fd> <fd2> — read a run's count lines through <fd>, once, streaming, after

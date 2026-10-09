@@ -377,12 +377,18 @@ run:
 ```sh
 # test/mutants.sh — rows go through mut_checked; the suite is test/run.sh
 suite="$SHMUTANT_PLAN_DIR/run.sh"
-# in_unit <unit> <witness> — <witness> appears in the source of <unit>'s block
+# in_unit <unit> <witness> — <witness> appears in the source of <unit>'s block as a whole token:
+# what borders it is ASCII whitespace or punctuation other than _ - and ., as a verdict requires
 in_unit() {
   SUITE_UNIT="if shmutant_selected '$1'; then" SUITE_WITNESS="$2" command awk '
+    function edge(c) { return c == "" || index(SEP, c) > 0 }
+    BEGIN { w = ENVIRON["SUITE_WITNESS"]; if (w == "") exit
+            SEP = " \t\r\f\v!\"#$%&()*+,/:;<=>?@[\\]^`{|}~" sprintf("%c", 39) }
     $0 == ENVIRON["SUITE_UNIT"] { on = 1; next }
     on && $0 == "fi" { on = 0 }
-    on && index($0, ENVIRON["SUITE_WITNESS"]) { found = 1 }
+    on { for (o = 1; (i = index(substr($0, o), w)) > 0; o = i + 1) {
+           i += o - 1
+           if (edge(i > 1 ? substr($0, i - 1, 1) : "") && edge(substr($0, i + length(w), 1))) found = 1 } }
     END { exit !found }' "$suite"
 }
 # mut_checked — shmutant_mut's arguments; the selector defaults to the witness, as there
@@ -400,10 +406,11 @@ mut_checked 'removal drops operator edits' 'keep=1' 'keep=0' 'removal keeps oper
 
 The block it reads opens with the exact line `if shmutant_selected '<unit>'; then` and ends at
 the first `fi` alone at the start of a line, so every `fi` nested inside it is indented. In a
-block of that shape the check never refuses a witness the unit writes out: it is a substring of
-the source, not the whole-token match a verdict makes, so a witness the block holds only inside
-a longer label passes and is scored at run time as before. A suite that builds its labels at run
-time (from a variable, say) needs a check of its own. So does one whose blocks are shaped
+block of that shape the check refuses a row only when the block's source holds its witness
+nowhere as a whole token, by the rule a verdict applies to a red line: a witness the block holds
+only inside a longer label (`parse-empty` in `parse-empty-list`) could never be carried by a
+line it prints. A suite that builds its labels at run time (from a variable, say) needs a check
+of its own. So does one whose blocks are shaped
 otherwise (other quoting, indentation or spacing, an unindented inner `fi`, a unit name holding
 an apostrophe): the check finds no block, or too short a one, and refuses the row. A suite file
 that cannot be read refuses every row.
