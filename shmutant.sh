@@ -138,7 +138,7 @@ for _shmutant_v in SHMUTANT_VERSION SHMUTANT_PROC SHMUTANT_SELECTED_N SHMUTANT_D
 done
 \builtin unset -v _shmutant_v
 
-SHMUTANT_VERSION=0.1.0
+SHMUTANT_VERSION=0.2.0
 # Process identity comes from the kernel's start time in /proc where there is one (Linux):
 # tick resolution, so a reused pid cannot pass for the process it replaced. Elsewhere it is the
 # start time ps recorded (`lstart`, fixed at the fork, which a clock step does not move), and
