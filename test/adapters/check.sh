@@ -8,7 +8,8 @@
 #
 # Needs the framework on PATH, at the version CI pins. Prints the verdict stream on stdout.
 # Exit 0 = every check held; 1 = a check failed, after printing the stream, the CLI's stderr and
-# every run's output to stderr; 2 = the check could not run (usage, no framework, no block).
+# every run's output to stderr; 2 = the check could not run (usage, no framework, no block, a
+# fixture copy that is not safe to write in, a step that failed to reduce or sort a stream).
 set -u
 unset CDPATH
 
@@ -57,14 +58,15 @@ tr '\n' ' ' < "$tmp/section" | grep -qwF -- "$version" \
   || bad "the doc's $heading section does not name the version run here: $version"
 
 cp -R -- "$root/test/adapters/$fw" "$tmp/fixture" || exit 2
-# The block goes beside the plan in the copy, through the physical path of the plan's
-# directory and never through a link already at its name: a symlink at either, carried over
-# from the working tree, would take the write outside the copy.
-dest="$(cd -P -- "$tmp/fixture/${plan%/*}" && pwd -P)" || exit 2
-case "$dest" in
-  "$tmp/fixture/"*) ;;
-  *) echo "check: $fw: ${plan%/*} in the fixture copy resolves outside it, to $dest" >&2; exit 2 ;;
-esac
+# The block goes beside the plan in the copy, never through a symlink carried over from the
+# working tree, which would take the write outside it. $tmp is physical and the plan's
+# directory is one component below the copy, so neither being a symlink keeps the directory in
+# the copy, with no resolved name for a substitution to strip a trailing newline from; a link
+# at adapter.sh itself is removed.
+dest="$tmp/fixture/${plan%/*}"
+if [ -L "$tmp/fixture" ] || [ -L "$dest" ] || [ ! -d "$dest" ]; then
+  echo "check: $fw: the fixture copy, or its ${plan%/*}, is a symlink or not a directory" >&2; exit 2
+fi
 rm -f -- "$dest/adapter.sh" || exit 2
 cp -- "$tmp/adapter.sh" "$dest/adapter.sh" || exit 2
 
@@ -76,38 +78,43 @@ pool() {
   (cd -- "$tmp/fixture" && exec bash "$root/shmutant.sh" run "$tmp/fixture/$plan" --workdir "$tmp/wd-$1" --keep) \
     > "$tmp/stream-$1" 2> "$tmp/stderr-$1"
 }
-# reduce <stream> — every record, reduced to what expected.tsv states of it and sorted; anything
-# else is a line of its own.
+# reduce <stream> <out> — every record, reduced to what expected.tsv states of it, sorted into
+# <out>; anything else is a line of its own. Fails when either step does: a reduction cut short
+# could still match what it was compared with.
 reduce() {
   awk -F'\t' -v OFS='\t' '
     $1 != "shmutant" || $2 != 1 { print "foreign", $0; next }
     $3 == "baseline"            { print "baseline", $4, $5; next }
     $3 == "row"                 { print "row", $5, $4; next }
     $3 == "summary"             { print "summary", $5, $6; next }
-                                { print "foreign", $0 }' "$1" | LC_ALL=C sort
+                                { print "foreign", $0 }' "$1" > "$2.unsorted" \
+    && LC_ALL=C sort -- "$2.unsorted" > "$2"
 }
 
 # --- the pool as the doc gives it.
 pool on; rc=$?
 cat -- "$tmp/stream-on"
 [ "$rc" -eq 1 ] || bad "shmutant exited $rc; expected 1 (rows not killed, no harness error)"
-reduce "$tmp/stream-on" > "$tmp/got"
-LC_ALL=C sort -- "$tmp/fixture/expected.tsv" > "$tmp/want"
+reduce "$tmp/stream-on" "$tmp/got" && LC_ALL=C sort -- "$tmp/fixture/expected.tsv" > "$tmp/want" \
+  || { echo "check: $fw: could not reduce the verdict stream or sort expected.tsv" >&2; exit 2; }
 diff -- "$tmp/want" "$tmp/got" >&2 || bad "the verdict stream is not test/adapters/$fw/expected.tsv (above: < expected, > got)"
 
 # --- with SHMUTANT_BASELINE=0, as the doc says of a selector that matches nothing: the row
 # expected.tsv scores `baseline` for it is `aborted`, no baseline record is written, and every
-# other record stands.
+# other record stands. The awk deriving that exits 1 when the row is not scored `baseline`
+# exactly once, and 2 when it fails.
 SHMUTANT_BASELINE=0 pool off; rc=$?
 [ "$rc" -eq 1 ] || bad "with SHMUTANT_BASELINE=0, shmutant exited $rc; expected 1"
-reduce "$tmp/stream-off" > "$tmp/got-off"
+reduce "$tmp/stream-off" "$tmp/got-off" \
+  || { echo "check: $fw: could not reduce the verdict stream with SHMUTANT_BASELINE=0" >&2; exit 2; }
 awk -F'\t' -v OFS='\t' -v nomatch="$nomatch" '
   $1 == "baseline" { next }
   $1 == "row" && $2 == nomatch && $3 == "baseline" { $3 = "aborted"; n++ }
   { print }
-  END { exit n != 1 }' "$tmp/want" > "$tmp/want-off.unsorted" \
-  || bad "test/adapters/$fw/expected.tsv does not score the row '$nomatch' baseline exactly once"
-LC_ALL=C sort -- "$tmp/want-off.unsorted" > "$tmp/want-off"
+  END { exit n != 1 }' "$tmp/want" > "$tmp/want-off.unsorted"; n=$?
+[ "$n" -le 1 ] && LC_ALL=C sort -- "$tmp/want-off.unsorted" > "$tmp/want-off" \
+  || { echo "check: $fw: could not derive the verdict stream expected with SHMUTANT_BASELINE=0" >&2; exit 2; }
+[ "$n" -eq 0 ] || bad "test/adapters/$fw/expected.tsv does not score the row '$nomatch' baseline exactly once"
 diff -- "$tmp/want-off" "$tmp/got-off" >&2 \
   || bad "with SHMUTANT_BASELINE=0, the verdict stream is not the one derived from expected.tsv (above: < expected, > got)"
 

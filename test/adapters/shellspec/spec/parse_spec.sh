@@ -54,7 +54,7 @@ Describe 'parse'
     The output should equal 'x'
   End
 
-  # Matched by the description `keeps a|b` with its | turned into ?, any one character.
+  # Matched by the description `keeps a|b` with its | turned into ?, any one byte.
   It 'keeps a-b'
     When call parse 'x'
     The output should equal 'x'

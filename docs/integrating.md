@@ -148,11 +148,12 @@ description it names and every example in a group whose description it names, a 
 holding `[`, `*`, `?` or `|` included, and never one only because its description starts with
 it. ShellSpec has no escape for a `|`, so the block turns each one into `?` after the
 bracketing: `keeps a|b` selects that example and never one described `b`, but it also selects
-one described `keeps a-b`, the `?` matching any one character. All of them run, and a failure
-in any whose full name holds the witness as a whole token scores the row `killed`:
-`twin parse prints its input`, an example of the same description under another group,
-carries the witness `parse prints its input`. Keep the descriptions a selector reaches
-distinct enough that only the intended example's full name holds its witness.
+one described `keeps a-b`, the `?` matching any one byte (ShellSpec matches in the C locale,
+so never a multibyte character such as `é`). All of them run, and a failure in any whose full
+name holds the witness as a whole token scores the row `killed`: `twin parse prints its input`,
+an example of the same description under another group, carries the witness
+`parse prints its input`. Keep the descriptions a selector reaches distinct enough that only
+the intended example's full name holds its witness.
 `--fail-no-examples` makes a selector that matches nothing exit 101 with no `not ok` line, so
 its row is scored `baseline` (`aborted` with `SHMUTANT_BASELINE=0`), never `survived`.
 
