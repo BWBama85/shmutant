@@ -30,14 +30,15 @@ what each precondition is, what it publishes and how it verifies.
 
    The `env -u` matters: shell options exported into the driver's environment can stop it from
    running anything while it still exits 0 (see the script's header). For the same reason, the dry
-   run passed only when it exits 0 **and** its last line is
+   run passed only when it exits 0 **and** its last line on stdout is
    `release: dry run: every precondition holds for v<X.Y.Z> …`.
 
    It prints `release: ok: …` for each precondition that holds and `release: refused: …` for each
    that does not. It creates no tag, release or file, and it does not fetch. Exit 1 means at least
    one refusal: report each line to the operator and stop, because every refusal names a state only
    the operator can change. Exit 2 means it could not run (a missing tool, an unreadable GitHub
-   API, or a bad argument). Report that and stop as well.
+   API, or a bad argument), or could not write its report to stdout, which it says on stderr.
+   Report that and stop as well.
 
 3. **The go-ahead.** A pushed tag and a published release are public, and this project never
    moves or deletes one once it is out. Show the
@@ -51,13 +52,14 @@ what each precondition is, what it publishes and how it verifies.
    ```
 
    It repeats every check, re-reads origin's main just before tagging, then tags, pushes,
-   publishes, and verifies. The cut succeeded only when it exits 0 **and** its last line is the
-   hand-off in step 5. When origin has the tag but the release could not be created, or the run
-   was interrupted once the tag may exist, it prints the commands that finish the release by
+   publishes, and verifies. The cut succeeded only when it exits 0 **and** its last line on stdout
+   is the hand-off in step 5. When origin has the tag but the release could not be created, or the
+   run was interrupted once the tag may exist, it prints the commands that finish the release by
    hand, from the commit it checked. When origin's tag names another commit, or the published
    release does not verify, it says to investigate before anything else. When it cannot read
-   something it needs, it stops with exit 2. Pass every one of these on as printed. Run a later
-   check the same protected way, and take it as passed only when its last line is
+   something it needs, it stops with exit 2, and when it cannot write its report it exits 2 saying
+   what it did, which may be a published release. Pass every one of these on as printed. Run a
+   later check the same protected way, and take it as passed only when its last line on stdout is
    `release: verified: the release v<X.Y.Z> carries shmutant.sh and CHECKSUMS as tagged`:
 
    ```sh
@@ -66,7 +68,7 @@ what each precondition is, what it publishes and how it verifies.
 
    Never delete or move a pushed tag.
 
-5. **The hand-off.** On success the driver's last line is
+5. **The hand-off.** On success the driver's last line on stdout is
    `release: next: baseline release roll --version v<X.Y.Z>`. Tell the operator to run that
    command, which moves the release milestone. This skill does not run it.
 
