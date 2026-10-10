@@ -12,6 +12,8 @@ shmutant_mut 'empty input exits 2' 'return 1' 'return 2' \
   'parse rejects empty input' 'rejects empty input'
 shmutant_mut 'empty input is accepted, pattern-character selector' 'return 1' 'return 0' \
   'parse refuses [empty] input *?' 'refuses [empty] input *?'
+shmutant_mut 'a|b is refused, | selector' '[ -z "$1" ]' '[ "$1" = "a|b" ] || [ -z "$1" ]' \
+  'parse keeps a|b' 'keeps a|b'
 shmutant_mut 'a selector no example carries' 'return 1' 'return 0' \
   'parse has no such example' 'has no such example'
 shmutant_mut 'twin input is refused, killed through the twin' '[ -z "$1" ]' '[ "$1" = twin ] || [ -z "$1" ]' \
