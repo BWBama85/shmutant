@@ -1540,7 +1540,13 @@ t_watchdog_deadline_survives_clock_steps() {
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
   shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
-  hanging_run() { : > "$T/started"; sleep 30; bash "$1/test.sh"; }
+  hanging_run() { local s; : > "$T/started"; sleep 30 & s=$!; printf '%s:%s\n' "$s" "$(_shmutant_identity "$s")" > "$T/hang"; wait "$s"; bash "$1/test.sh"; }
+  # The run's own sleep, by pid and identity: the deadline must have ended it, and nothing else is touched.
+  hang_gone() {
+    local h; h="$(cat "$T/hang" 2>/dev/null)"; rm -f "$T/hang"
+    [ -n "$h" ] || { fail_ 'fixture: the hanging run never recorded its sleep'; return; }
+    wait_gone "${h%%:*}" "${h#*:}" || { fail_ "$1"; _shmutant_kill_tree KILL "" "$h"; }
+  }
   set -m
   ( _shmutant_now() { [ "${FUNCNAME[1]}" = _shmutant_run_bounded ] || { _real_now; return; }; printf '%s' 1000000000000000; }
     SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=1 shmutant_pool lbl "$T/wd" toy_prepare hanging_run > "$T/out" 2>"$T/err"; echo "rc=$?" > "$T/rc" ) > /dev/null 2>&1 & local bg=$! i=0
@@ -1549,7 +1555,7 @@ t_watchdog_deadline_survives_clock_steps() {
   [ -e "$T/rc" ] || { kill -KILL -- -"$bg" 2>/dev/null; wait "$bg" 2>/dev/null; fail_ 'with the clock frozen the watchdog never fired: a clock set back extends the run'; return; }
   wait "$bg" 2>/dev/null
   has "$(cat "$T/out")" $'\trow\ttimeout\ta\t' 'the run timed out with the clock frozen'
-  pkill -f "sleep 30" 2>/dev/null
+  hang_gone 'the hanging run'"'"'s sleep outlived the timeout with the clock frozen'
   # a clock that jumps an hour forward at every read: each poll counts at most its cap, so a
   # thirty-second timeout is not reached before a one-second run returns
   rm -f "$T/out" "$T/err" "$T/rc"; : > "$T/calls"
@@ -1574,7 +1580,7 @@ t_watchdog_deadline_survives_clock_steps() {
   [ -e "$T/rc" ] || { kill -KILL -- -"$bg" 2>/dev/null; wait "$bg" 2>/dev/null; fail_ 'with the clock stepping back the watchdog never fired: a clock set back extends the run'; return; }
   wait "$bg" 2>/dev/null
   has "$(cat "$T/out")" $'\trow\ttimeout\ta\t' 'the run timed out with the clock stepping back'
-  pkill -f "sleep 30" 2>/dev/null
+  hang_gone 'the hanging run'"'"'s sleep outlived the timeout with the clock stepping back'
   true
 }
 
@@ -2597,8 +2603,9 @@ t_verdict_timeout_with_a_leading_zero() {
   # How long each poll sleeps is read from the watchdog's own code: no check that reads no clock
   # can tell a 0.4-second sleep from a half-second one under what a poll does besides sleeping.
   # And the run marks six seconds of its own sleep, which no sleep can cut short, as a check that
-  # the polls really wait their sleeps out. That first reading waits until the run's sleep is
-  # under way, so however late either is scheduled, the deadline starts no earlier than the sleep.
+  # the polls really wait their sleeps out. That first reading waits until the run has launched
+  # its sleep, so the deadline starts no earlier than the launch. Six seconds of sleep against at
+  # least eight of polls: a sound watchdog fails only if the sleep begins over two seconds late.
   : > "$T/reads"
   OUT="$( eval "_real_now() $(declare -f _shmutant_now | sed 1d)"
     _shmutant_now() {
@@ -2611,7 +2618,7 @@ t_verdict_timeout_with_a_leading_zero() {
   ERR="$(cat "$T/err")"
   eq "$(verdict_of 'hangs')" timeout 'a timeout of 08 is eight seconds, not an octal error that disarms the watchdog'
   eq "$(grep -cx read "$T/reads")" 17 'the deadline is sixteen polls, neither fewer nor more'
-  eq "$(declare -f _shmutant_run_bounded | grep -oE 'sleep [0-9.]+' | tr '\n' '|')" 'sleep 0.5|' 'each poll sleeps half a second, and nothing else in the watchdog sleeps'
+  eq "$(declare -f _shmutant_run_bounded | grep -E '(^|[^[:alnum:]_])sleep([^[:alnum:]_]|$)' | sed 's/^[[:space:]]*//' | tr '\n' '|')" 'command -p sleep 0.5 & s=$!;|' 'each poll sleeps half a second, the whole command, and nothing else in the watchdog sleeps'
   [ -e "$T/reached" ] || fail_ 'the deadline came before six seconds of the run'"'"'s own sleep: the polls did not wait their sleeps out'
   has "$ERR" 'within 8s' 'the bound is reported in its canonical form, not as 08'
   local runpid; runpid="$(cat "$T/run.pid" 2>/dev/null)"
@@ -4368,7 +4375,8 @@ t_suite_sweeps_what_a_unit_leaves_behind() {
   t_zz_leaks_then_exits() { sleep 30 > /dev/null 2>&1 & echo \$! > $qt/leaks_then_exits.pid; printf '%s\n' "\$T" > $qt/leaks_then_exits.dir; exit 0; }
   t_zz_unrecordable() {
     printf '%s\n' "\$T" > $qt/unrecordable.dir; SWEEP_SEEN=$qt/no-such-dir/seen
-    if [ -n "\${STRICT:-}" ]; then set -euC -o pipefail; IFS=:; shopt -s nocasematch extglob; exec 1< /dev/null; fi
+    if [ "\${STRICT:-}" = readonly ]; then readonly recorded=7 removed=1 rc=0
+    elif [ -n "\${STRICT:-}" ]; then set -euC -o pipefail; IFS=:; shopt -s nocasematch extglob; readonly recorded=7 removed=1 rc=0; exec 1< /dev/null; fi
   }
   t_zz_undeletable() { printf '%s\n' "\$T" > $qt/undeletable.dir; make_unremovable "\$T/held" && printf '%s\n' "\$UNREMOVABLE_HOW" > $qt/undeletable.how; true; }
   t_zz_reparents() { ( sleep 30 > /dev/null 2>&1 & echo \$! > $qt/reparents.pid; sleep 2 ); sleep 0.3; }
@@ -4563,15 +4571,17 @@ EOF
   dir="$(cat "$T/unrecordable.dir" 2>/dev/null)"
   if [ -z "$dir" ]; then fail_ "the unrecordable unit never recorded its directory: [$out]"
   elif [ -e "$dir" ]; then fail_ 'a unit whose sweep record could not be opened left its directory behind'; fi
-  # The trap runs under whatever the unit turned on. With errexit, nounset, noclobber, pipefail, its
-  # own IFS and case matching, and an output the failure cannot even be printed to, the unit still
-  # fails and its directory still goes.
-  rm -f "$T/unrecordable.dir"
-  out="$(STRICT=1 SHMUTANT_SELECT=t_zz_unrecordable bash "$T/suite/test/run.sh" 2>&1)"; rc_is $? 1 'a unit whose sweep record cannot be opened fails under the options it set'
-  has "$out" 'run.sh: 1 unit(s) ran, 1 failed,' 'and is counted as failed'
-  dir="$(cat "$T/unrecordable.dir" 2>/dev/null)"
-  if [ -z "$dir" ]; then fail_ "the strict unrecordable unit never recorded its directory: [$out]"
-  elif [ -e "$dir" ]; then fail_ 'under the options the unit set, a record that could not be opened left its directory behind'; fi
+  # The trap runs under whatever the unit turned on: names it made readonly, alone, and then with
+  # errexit, nounset, noclobber, pipefail, its own IFS and case matching, and an output the failure
+  # cannot even be printed to. Either way the unit still fails and its directory still goes.
+  for c in readonly 1; do
+    rm -f "$T/unrecordable.dir"
+    out="$(STRICT="$c" SHMUTANT_SELECT=t_zz_unrecordable bash "$T/suite/test/run.sh" 2>&1)"; rc_is $? 1 "a unit whose sweep record cannot be opened fails under the options it set ($c)"
+    has "$out" 'run.sh: 1 unit(s) ran, 1 failed,' "and is counted as failed ($c)"
+    dir="$(cat "$T/unrecordable.dir" 2>/dev/null)"
+    if [ -z "$dir" ]; then fail_ "the strict unrecordable unit never recorded its directory ($c): [$out]"
+    elif [ -e "$dir" ]; then fail_ "under the options the unit set ($c), a record that could not be opened left its directory behind"; fi
+  done
   # A directory the trap cannot remove (it holds one this user cannot delete) fails the unit too.
   rm -f "$T/undeletable.dir" "$T/undeletable.how"
   rc=0; out="$(SHMUTANT_SELECT=t_zz_undeletable bash "$T/suite/test/run.sh" 2>&1)" || rc=$?
@@ -4919,14 +4929,17 @@ unit_snapshot() {
 # the unit, then remove its directory. A record that could not be written fails the unit, whatever
 # status it was leaving with: what that record would have named is otherwise never swept. So does
 # a directory that could not be removed. Both are attempted before either is reported, and no
-# report can stop the exit, so the unit's own errexit cannot skip a step or pass the unit.
+# report can stop the exit, so the unit's own errexit cannot skip a step or pass the unit. It
+# keeps no variable of its own: one the unit had made readonly would refuse the assignment.
 unit_finish() {
-  local recorded=1 removed=1
-  unit_snapshot "$BASHPID" >> "$SWEEP_SEEN" 2>/dev/null || recorded=0
-  rm -rf -- "$T" || removed=0
-  [ "$recorded" = 0 ] || [ "$removed" = 0 ] || return 0
-  [ "$recorded" = 1 ] || printf 'FAIL: %s: its last snapshot could not be written to the sweep record, so what the unit left behind is unverified\n' "$_unit" || :
-  [ "$removed" = 1 ] || printf 'FAIL: %s: its directory %s could not be removed\n' "$_unit" "$T" || :
+  if unit_snapshot "$BASHPID" >> "$SWEEP_SEEN" 2>/dev/null; then
+    rm -rf -- "$T" && return 0
+  else
+    rm -rf -- "$T" || printf 'FAIL: %s: its directory %s could not be removed\n' "$_unit" "$T" || :
+    printf 'FAIL: %s: its last snapshot could not be written to the sweep record, so what the unit left behind is unverified\n' "$_unit" || :
+    exit 1
+  fi
+  printf 'FAIL: %s: its directory %s could not be removed\n' "$_unit" "$T" || :
   exit 1
 }
 
