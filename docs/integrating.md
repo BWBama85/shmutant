@@ -114,11 +114,11 @@ matches no test is scored `baseline` (`aborted` with `SHMUTANT_BASELINE=0`), nev
 ### ShellSpec
 
 ShellSpec selects with `--example <pattern>`: a shell pattern, in which `*`, `?` and `[` are
-pattern characters, matched against the whole description of each example and of each group,
-never against part of one (as 0.28.1 behaves; its `--help` says names that include the
-pattern). A group that matches selects every example in it. Its `tap` formatter prints an
-example's full name, its groups' descriptions and its own joined by spaces:
-`not ok <n> - <full name>`. So a row names both, the full name as its witness and the
+pattern characters and `|` separates alternatives, matched against the whole description of
+each example and of each group, never against part of one (as 0.28.1 behaves; its `--help`
+says names that include the pattern). A group that matches selects every example in it. Its
+`tap` formatter prints an example's full name, its groups' descriptions and its own joined by
+spaces: `not ok <n> - <full name>`. So a row names both, the full name as its witness and the
 example's own description as its selector, the fifth argument (a longer full name that holds
 the witness as a whole token carries it too, as the paragraph after the block says):
 
@@ -128,7 +128,7 @@ SHMUTANT_RED_STATUS=101
 prepare() { shmutant_copy_tree "$SHMUTANT_PLAN_DIR/.." "$1"; }
 run() {
   local pat
-  pat="$(printf '%s' "$2" | sed 's/[][*?]/[&]/g')"
+  pat="$(printf '%s' "$2" | sed 's/[][*?]/[&]/g; s/|/?/g')"
   (cd "$1" && shellspec --format tap --no-color --fail-no-examples --example "$pat")
 }
 shmutant_target lib/parse.sh
@@ -145,15 +145,16 @@ ShellSpec 0.28.1 on Linux (`test/adapters/check.sh`). A failing example exits 10
 keeps the TAP lines plain where the environment sets `FORCE_COLOR`, which would otherwise put
 a color code before every `not ok`. The bracketed pattern selects the examples whose own
 description it names and every example in a group whose description it names, a description
-holding `[`, `*` or `?` included, and never one only because its description starts with it.
-All of them run, and a failure in any whose full name holds the witness as a whole token scores
-the row `killed`: `twin parse prints its input`, an example of the same description under
-another group, carries the witness `parse prints its input`. Keep the descriptions a selector
-reaches distinct enough that only the intended example's full name holds its witness.
+holding `[`, `*`, `?` or `|` included, and never one only because its description starts with
+it. ShellSpec has no escape for a `|`, so the block turns each one into `?` after the
+bracketing: `keeps a|b` selects that example and never one described `b`, but it also selects
+one described `keeps a-b`, the `?` matching any one character. All of them run, and a failure
+in any whose full name holds the witness as a whole token scores the row `killed`:
+`twin parse prints its input`, an example of the same description under another group,
+carries the witness `parse prints its input`. Keep the descriptions a selector reaches
+distinct enough that only the intended example's full name holds its witness.
 `--fail-no-examples` makes a selector that matches nothing exit 101 with no `not ok` line, so
-its row is scored `baseline` (`aborted` with `SHMUTANT_BASELINE=0`), never `survived`. A
-description holding `|` cannot be selected by itself: ShellSpec reads the `|` as the
-pattern's alternation.
+its row is scored `baseline` (`aborted` with `SHMUTANT_BASELINE=0`), never `survived`.
 
 ### Proving a selection complete
 

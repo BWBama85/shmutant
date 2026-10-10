@@ -32,7 +32,8 @@ setup() {
   [ "$status" -eq 1 ]
 }
 
-# Each of the next three is matched by the name above with one of its . ( [ left unescaped.
+# The next three are matched by the name above with, in turn, its . left unescaped, its ( and )
+# both left unescaped (an unescaped ( alone is no valid regex), and its [ left unescaped.
 @test "parse-empty (status) [1]" {
   run parse 'x'
   [ "$status" -eq 0 ]
