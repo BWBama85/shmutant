@@ -46,18 +46,19 @@
 # SHELLOPTS, BASHOPTS and BASH_ENV removed, as the /release skill does, and take success from its
 # last line on stdout, not from its exit status alone.
 #
-# The report goes to stdout and every refusal and failure to stderr. A run whose report could not
-# all be written to stdout never exits 0: it says on stderr what it did and exits 2, and a cut that
-# lost a line before the tag stops there. An interrupt (INT or TERM) says on stderr what it left:
-# nothing, before the tag; what may be published and how to finish, once the tag may exist. Bash
-# runs it when the command running at the time returns, so a signal sent to the driver alone waits
-# for that command, a download included. A signal the driver was started with ignored (a shell
-# ignores INT in its background jobs) interrupts nothing: bash cannot trap it, and the run goes on
-# to its own outcome.
+# The report goes to stdout and every refusal and failure to stderr. A run that would exit 0 but
+# could not write all of its report to stdout exits 2 instead, saying on stderr what it did, and a
+# cut that lost a line before the tag stops there. A refusal or a failed step keeps its own exit
+# status, its report lost or not. An interrupt (INT or TERM) says on stderr what it left: nothing,
+# before the tag; what may be published and how to finish, once the tag may exist. Bash runs it
+# when the command running at the time returns, so a signal sent to the driver alone waits for that
+# command, a download included. A signal the driver was started with ignored (a shell with job
+# control off ignores INT in its background jobs) interrupts nothing: bash cannot trap it, and the
+# run goes on to its own outcome.
 #
 # Exit 0 = done, or (--dry-run) every precondition held; 1 = a precondition refused, or a publish
 # or verify step failed, saying so on stderr; 130/143 = interrupted; 2 = could not run (usage, a
-# missing tool, a failed read), or could not write its report.
+# missing tool, a failed read), or would have exited 0 but could not write its report.
 builtin set -u +a +e +k +v +x +C +o pipefail +o posix
 builtin shopt -u nocasematch expand_aliases
 while IFS=' ' builtin read -r _ _ _fn; do [[ -n $_fn ]] && builtin unset -f "$_fn"; done <<EOF

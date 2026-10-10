@@ -1657,6 +1657,22 @@ c_a_dry_run_whose_report_is_lost_does_not_pass() {
   done
 }
 
+c_a_refusal_or_failed_verify_keeps_exit_1_when_its_report_is_lost() {
+  : > "$S/published/$TAG"
+  relq --dry-run "$VER"
+  rc_is "$rc" 1 "a refusing dry run with its stdout closed"
+  has "$err" "refused: GitHub already has a release for $TAG" "the refusal is on stderr"
+  hasnt "$err" "could not be written to stdout" "and is not reported as a lost report"
+  fixture "${_case}_verify"
+  rel "$VER"
+  rc_is "$rc" 0 "the cut"
+  echo tamper > "$S/curl.mode"
+  relq --verify "$VER"
+  rc_is "$rc" 1 "a failing --verify with its stdout closed"
+  has "$err" "VERIFY FAILED: $URL has SHA-256" "the failure is on stderr"
+  hasnt "$err" "could not be written to stdout" "and is not reported as a lost report"
+}
+
 c_a_cut_whose_report_is_lost_stops_before_the_tag() {
   relq "$VER"
   rc_is "$rc" 2 "a cut with its stdout closed"
