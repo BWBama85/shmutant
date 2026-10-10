@@ -1563,6 +1563,18 @@ t_watchdog_deadline_survives_clock_steps() {
   wait "$bg" 2>/dev/null
   [ -e "$T/short-done" ] || fail_ 'a clock jumping forward cut a one-second run short of a thirty-second timeout'
   has "$(cat "$T/out")" $'\trow\tkilled\ta\t' 'the run completed and its verdict stands, with the clock jumping forward'
+  # and one stepped an hour back at every read: each poll still counts at least its sleep, so a
+  # one-second timeout fires as it does with the clock frozen
+  rm -f "$T/out" "$T/err" "$T/rc"; : > "$T/calls"
+  set -m
+  ( _shmutant_now() { local c; [ "${FUNCNAME[1]}" = _shmutant_run_bounded ] || { _real_now; return; }; c="$(cat "$T/calls")"; c="${c:-0}"; echo "$((c + 1))" > "$T/calls"; printf '%s' "$(( 1000000000000000 - c * 3600000000 ))"; }
+    SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=1 shmutant_pool lbl "$T/wd3" toy_prepare hanging_run > "$T/out" 2>"$T/err"; echo "rc=$?" > "$T/rc" ) > /dev/null 2>&1 & bg=$!; i=0
+  set +m
+  until [ -e "$T/rc" ] || [ "$i" -ge 300 ]; do i=$((i + 1)); sleep 0.1; done
+  [ -e "$T/rc" ] || { kill -KILL -- -"$bg" 2>/dev/null; wait "$bg" 2>/dev/null; fail_ 'with the clock stepping back the watchdog never fired: a clock set back extends the run'; return; }
+  wait "$bg" 2>/dev/null
+  has "$(cat "$T/out")" $'\trow\ttimeout\ta\t' 'the run timed out with the clock stepping back'
+  pkill -f "sleep 30" 2>/dev/null
   true
 }
 
@@ -2577,15 +2589,16 @@ t_verdict_timeout_with_a_leading_zero() {
   shmutant_reset; shmutant_target lib.sh
   shmutant_mut 'hangs' '$1 + $2' '$1 - $2' 'add-works'
   # 08: digits only, but not a valid octal constant, which is what bash arithmetic would read.
-  slow_run() { bash -c 'echo "$$" > "$1/run.pid"; sleep 8; : > "$1/reached"; sleep 30' _ "$T"; }
+  slow_run() { bash -c 'sleep 6 & echo "$$" > "$1/run.pid"; wait "$!"; : > "$1/reached"; sleep 30' _ "$T"; }
   # The watchdog reads a frozen clock, so each of its polls counts as its half-second sleep and
   # nothing else: eight seconds is sixteen polls, each reading the clock once after the reading the
   # deadline starts from. Only its own readings are frozen: an identity is the clock less ps's
-  # etime where there is no other form, and must keep the real clock. Those reads are counted, and
-  # the run marks eight seconds of its own sleep, which no sleep can cut short and which sixteen
-  # half-second polls outlast by what each poll does besides sleeping. That first reading waits
-  # for the run to have started, so the two begin together however late the run is scheduled.
-  # Between them the deadline's length is checked with no clock read, whatever a real clock does.
+  # etime where there is no other form, and must keep the real clock. Those reads are counted.
+  # How long each poll sleeps is read from the watchdog's own code: no check that reads no clock
+  # can tell a 0.4-second sleep from a half-second one under what a poll does besides sleeping.
+  # And the run marks six seconds of its own sleep, which no sleep can cut short, as a check that
+  # the polls really wait their sleeps out. That first reading waits until the run's sleep is
+  # under way, so however late either is scheduled, the deadline starts no earlier than the sleep.
   : > "$T/reads"
   OUT="$( eval "_real_now() $(declare -f _shmutant_now | sed 1d)"
     _shmutant_now() {
@@ -2598,7 +2611,8 @@ t_verdict_timeout_with_a_leading_zero() {
   ERR="$(cat "$T/err")"
   eq "$(verdict_of 'hangs')" timeout 'a timeout of 08 is eight seconds, not an octal error that disarms the watchdog'
   eq "$(grep -cx read "$T/reads")" 17 'the deadline is sixteen polls, neither fewer nor more'
-  [ -e "$T/reached" ] || fail_ 'the deadline came before eight seconds of the run'"'"'s own sleep: the sixteen polls were cut short'
+  eq "$(declare -f _shmutant_run_bounded | grep -oE 'sleep [0-9.]+' | tr '\n' '|')" 'sleep 0.5|' 'each poll sleeps half a second, and nothing else in the watchdog sleeps'
+  [ -e "$T/reached" ] || fail_ 'the deadline came before six seconds of the run'"'"'s own sleep: the polls did not wait their sleeps out'
   has "$ERR" 'within 8s' 'the bound is reported in its canonical form, not as 08'
   local runpid; runpid="$(cat "$T/run.pid" 2>/dev/null)"
   if [ -z "$runpid" ]; then fail_ 'fixture: the run never started'
