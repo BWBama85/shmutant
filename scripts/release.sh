@@ -51,7 +51,9 @@
 # lost a line before the tag stops there. An interrupt (INT or TERM) says on stderr what it left:
 # nothing, before the tag; what may be published and how to finish, once the tag may exist. Bash
 # runs it when the command running at the time returns, so a signal sent to the driver alone waits
-# for that command, a download included.
+# for that command, a download included. A signal the driver was started with ignored (a shell
+# ignores INT in its background jobs) interrupts nothing: bash cannot trap it, and the run goes on
+# to its own outcome.
 #
 # Exit 0 = done, or (--dry-run) every precondition held; 1 = a precondition refused, or a publish
 # or verify step failed, saying so on stderr; 130/143 = interrupted; 2 = could not run (usage, a

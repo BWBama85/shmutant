@@ -1749,6 +1749,17 @@ c_an_interrupt_before_the_tag_says_nothing_was_published() {
   done
 }
 
+c_a_signal_the_driver_starts_with_ignored_interrupts_nothing() {
+  echo TERM > "$S/gh.signal"
+  # relg, with TERM ignored in the job, as the driver's caller may leave it.
+  bash -c 'set -m; trap "" TERM; cd -- "$1" || exit 2; PATH="$2:$PATH" STUB="$3" SLUG="$4" bash scripts/release.sh --dry-run "$5" & wait $!' \
+    _ "$c" "$tmp/bin" "$S" "$SLUG" "$VER" > "$S/out" 2> "$S/err"
+  rc=$?; out="$(cat "$S/out")"; err="$(cat "$S/err")"
+  rc_is "$rc" 0 "a dry run started with TERM ignored, sent TERM during its checks"
+  has "$out" "dry run: every precondition holds for $TAG" "goes on to its verdict"
+  hasnt "$err" "interrupted" "and says no interrupt"
+}
+
 # --- run ---------------------------------------------------------------------------------------
 
 n=0
