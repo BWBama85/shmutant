@@ -9,7 +9,8 @@
 # Needs the framework on PATH, at the version CI pins. Prints the verdict stream on stdout.
 # Exit 0 = every check held; 1 = a check failed, after printing the stream, the CLI's stderr and
 # every run's output to stderr; 2 = the check could not run (usage, no framework, no block, a
-# fixture copy that is not safe to write in, a step that failed to reduce or sort a stream).
+# fixture copy that is not safe to write in, a step that failed to print, reduce or sort a
+# stream).
 set -u
 unset CDPATH
 
@@ -93,7 +94,7 @@ reduce() {
 
 # --- the pool as the doc gives it.
 pool on; rc=$?
-cat -- "$tmp/stream-on"
+cat -- "$tmp/stream-on" || { echo "check: $fw: could not print the verdict stream" >&2; exit 2; }
 [ "$rc" -eq 1 ] || bad "shmutant exited $rc; expected 1 (rows not killed, no harness error)"
 reduce "$tmp/stream-on" "$tmp/got" && LC_ALL=C sort -- "$tmp/fixture/expected.tsv" > "$tmp/want" \
   || { echo "check: $fw: could not reduce the verdict stream or sort expected.tsv" >&2; exit 2; }
