@@ -155,6 +155,12 @@ case "${a[0]:-} ${a[1]:-}" in
       '[inputs | {tag_name: ., draft: $d, assets: $as}]' | reply ;;
   "release create")
     [ ! -e "$STUB/create.fail" ] || fail "HTTP 500"
+    # $STUB/create.after names a file the create waits for, up to ten seconds, so a step of the test
+    # can finish first. The real sleep: the stub on PATH does not pause.
+    if [ -e "$STUB/create.after" ]; then
+      w="$(cat "$STUB/create.after")"; i=0
+      while [ ! -e "$w" ] && [ "$i" -lt 100 ]; do /bin/sleep 0.1; i=$((i + 1)); done
+    fi
     t="${a[2]}"; opts "${a[@]:3}"
     [ "$verify" -eq 1 ] || { echo "gh stub: release create without --verify-tag" >&2; exit 3; }
     git -C "$STUB/origin.git" rev-parse -q --verify "refs/tags/$t" > /dev/null || fail "tag $t doesn't exist in the repo"
@@ -341,13 +347,16 @@ relq() {
   rc=$?
   out=""; err="$(cat "$S/err")"
 }
-# relb <text> <arg>… — rel with the driver's stdout a pipe whose reader keeps the lines up to the
-# first holding <text>, then exits. SIGPIPE is ignored, as a caller may leave it, so each later
-# line's write fails rather than kill the driver.
+# relb default|ignored <text> <arg>… — rel with the driver's stdout a pipe whose reader keeps the
+# lines up to the first holding <text>, then closes the pipe and says so in $S/reader.gone, which the
+# release's creation waits for: each line written after it fails. SIGPIPE is left at its default, or
+# ignored as a caller may leave it.
 relb() {
-  local stop="$1"; shift
-  (cd -- "$c" && trap '' PIPE && PATH="$tmp/bin:$PATH" STUB="$S" SLUG="$SLUG" bash scripts/release.sh "$@") \
-    2> "$S/err" | awk -v s="$stop" '{ print } index($0, s) { exit }' > "$S/out"
+  local pipe="$1" stop="$2"; shift 2
+  echo "$S/reader.gone" > "$S/create.after" || exit 2
+  (cd -- "$c" && { [ "$pipe" = default ] || trap '' PIPE; } \
+     && PATH="$tmp/bin:$PATH" STUB="$S" SLUG="$SLUG" bash scripts/release.sh "$@") 2> "$S/err" \
+    | { awk -v s="$stop" '{ print } index($0, s) { exit }' > "$S/out"; exec 0<&-; : > "$S/reader.gone"; }
   rc="${PIPESTATUS[0]}"
   out="$(cat "$S/out")"; err="$(cat "$S/err")"
 }
@@ -1635,11 +1644,15 @@ c_a_cut_whose_report_is_lost_stops_before_the_tag() {
 }
 
 c_a_report_lost_after_the_tag_says_the_release_is_out() {
-  relb "pushed $TAG" "$VER"
-  rc_is "$rc" 2 "stdout lost once the tag is pushed"
-  has "$err" "could not be written to stdout: the release $TAG is published and verifies; next: baseline release roll --version $TAG" "says what was done"
-  has "$(events)" "gh release create" "the release was published"
-  hasnt "$err" "VERIFY FAILED" "and is not called a verify failure"
+  local pipe
+  for pipe in default ignored; do
+    fixture "${_case}_$pipe"
+    relb "$pipe" "pushed $TAG" "$VER"
+    rc_is "$rc" 2 "stdout lost once the tag is pushed, SIGPIPE $pipe"
+    has "$err" "could not be written to stdout: the release $TAG is published and verifies; next: baseline release roll --version $TAG" "says what was done"
+    has "$(events)" "gh release create" "the release was published"
+    hasnt "$err" "VERIFY FAILED" "and is not called a verify failure"
+  done
 }
 
 c_a_verify_whose_report_is_lost_does_not_pass() {

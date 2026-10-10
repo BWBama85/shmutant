@@ -114,7 +114,7 @@ ver="${version#v}"
 tag="v$ver"
 
 # Set once the tag may exist. Until then an interrupt has left nothing; from then on, it says what is
-# left to do. Handled from before the first read, in every mode.
+# left to do. Handled from before the repository or the network is read, in every mode.
 tagged=0
 interrupted() {
   if [ "$tagged" -eq 1 ]; then
