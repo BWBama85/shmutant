@@ -2,9 +2,9 @@
 # test/adapters/check.sh <bats|shellspec> — run the adapter block docs/integrating.md gives for
 # <framework>, byte for byte, on its fixture under test/adapters/<framework>, through
 # `shmutant.sh run`, and require what the doc says of it: the verdict stream the fixture's
-# expected.tsv lists, the same stream with SHMUTANT_BASELINE=0 save that the row whose selector
-# matches nothing is `aborted`, exact selection by the block's own `run`, and the framework
-# version the doc names.
+# expected.tsv lists, the same stream with SHMUTANT_BASELINE=0 save that it holds no baseline
+# record and the row whose selector matches nothing is `aborted`, exact selection by the
+# block's own `run`, and the framework version the doc names.
 #
 # Needs the framework on PATH, at the version CI pins. Prints the verdict stream on stdout.
 # Exit 0 = every check held; 1 = a check failed, after printing the stream, the CLI's stderr and
@@ -101,20 +101,20 @@ diff -- "$tmp/want" "$tmp/got" >&2 || bad "the verdict stream is not test/adapte
 
 # --- with SHMUTANT_BASELINE=0, as the doc says of a selector that matches nothing: the row
 # expected.tsv scores `baseline` for it is `aborted`, no baseline record is written, and every
-# other record stands. The awk deriving that exits 1 when the row is not scored `baseline`
-# exactly once, and 2 when it fails.
+# other record stands.
 SHMUTANT_BASELINE=0 pool off; rc=$?
 [ "$rc" -eq 1 ] || bad "with SHMUTANT_BASELINE=0, shmutant exited $rc; expected 1"
 reduce "$tmp/stream-off" "$tmp/got-off" \
   || { echo "check: $fw: could not reduce the verdict stream with SHMUTANT_BASELINE=0" >&2; exit 2; }
-awk -F'\t' -v OFS='\t' -v nomatch="$nomatch" '
-  $1 == "baseline" { next }
-  $1 == "row" && $2 == nomatch && $3 == "baseline" { $3 = "aborted"; n++ }
-  { print }
-  END { exit n != 1 }' "$tmp/want" > "$tmp/want-off.unsorted"; n=$?
-[ "$n" -le 1 ] && LC_ALL=C sort -- "$tmp/want-off.unsorted" > "$tmp/want-off" \
+n="$(awk -F'\t' -v nomatch="$nomatch" '$1 == "row" && $2 == nomatch && $3 == "baseline" { n++ }
+                                       END { print n + 0 }' "$tmp/want")" \
+  && awk -F'\t' -v OFS='\t' -v nomatch="$nomatch" '
+       $1 == "baseline" { next }
+       $1 == "row" && $2 == nomatch && $3 == "baseline" { $3 = "aborted" }
+       { print }' "$tmp/want" > "$tmp/want-off.unsorted" \
+  && LC_ALL=C sort -- "$tmp/want-off.unsorted" > "$tmp/want-off" \
   || { echo "check: $fw: could not derive the verdict stream expected with SHMUTANT_BASELINE=0" >&2; exit 2; }
-[ "$n" -eq 0 ] || bad "test/adapters/$fw/expected.tsv does not score the row '$nomatch' baseline exactly once"
+[ "$n" = 1 ] || bad "test/adapters/$fw/expected.tsv scores the row '$nomatch' baseline $n times, not once"
 diff -- "$tmp/want-off" "$tmp/got-off" >&2 \
   || bad "with SHMUTANT_BASELINE=0, the verdict stream is not the one derived from expected.tsv (above: < expected, > got)"
 
