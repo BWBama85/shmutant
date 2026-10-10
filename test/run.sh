@@ -1534,13 +1534,15 @@ t_unbounded_run_still_tracks_descendants() {
 t_watchdog_deadline_survives_clock_steps() {
   # the deadline is elapsed time as the watchdog sees it, each poll clamped: with the clock
   # frozen (a stubbed _shmutant_now, so every poll reads as zero and counts as its sleep), a
-  # one-second timeout still fires
+  # one-second timeout still fires. Only the watchdog's own readings are stubbed: an identity is
+  # the clock less ps's etime where there is no other form, and must keep the real clock.
+  eval "_real_now() $(declare -f _shmutant_now | sed 1d)"
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
   shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
   hanging_run() { : > "$T/started"; sleep 30; bash "$1/test.sh"; }
   set -m
-  ( _shmutant_now() { printf '%s' 1000000000000000; }
+  ( _shmutant_now() { [ "${FUNCNAME[1]}" = _shmutant_run_bounded ] || { _real_now; return; }; printf '%s' 1000000000000000; }
     SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=1 shmutant_pool lbl "$T/wd" toy_prepare hanging_run > "$T/out" 2>"$T/err"; echo "rc=$?" > "$T/rc" ) > /dev/null 2>&1 & local bg=$! i=0
   set +m
   until [ -e "$T/rc" ] || [ "$i" -ge 300 ]; do i=$((i + 1)); sleep 0.1; done
@@ -1553,7 +1555,7 @@ t_watchdog_deadline_survives_clock_steps() {
   rm -f "$T/out" "$T/err" "$T/rc"; : > "$T/calls"
   short_run() { sleep 1; : > "$T/short-done"; bash "$1/test.sh"; }
   set -m
-  ( _shmutant_now() { local c; c="$(cat "$T/calls")"; c="${c:-0}"; echo "$((c + 1))" > "$T/calls"; printf '%s' "$(( 1000000000000000 + c * 3600000000 ))"; }
+  ( _shmutant_now() { local c; [ "${FUNCNAME[1]}" = _shmutant_run_bounded ] || { _real_now; return; }; c="$(cat "$T/calls")"; c="${c:-0}"; echo "$((c + 1))" > "$T/calls"; printf '%s' "$(( 1000000000000000 + c * 3600000000 ))"; }
     SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=30 shmutant_pool lbl "$T/wd2" toy_prepare short_run > "$T/out" 2>"$T/err"; echo "rc=$?" > "$T/rc" ) > /dev/null 2>&1 & bg=$!; i=0
   set +m
   until [ -e "$T/rc" ] || [ "$i" -ge 600 ]; do i=$((i + 1)); sleep 0.1; done
@@ -1688,7 +1690,13 @@ t_identity_survives_a_clock_step_without_proc() {
   sleep 30 & local p=$!
   local id1 id2 rc
   id1="$(_shmutant_identity "$p")" || { kill -KILL "$p" 2>/dev/null; wait "$p" 2>/dev/null; fail_ 'fixture: no identity for a live process'; return; }
-  case "$id1" in *[!0-9]*) ;; *) echo "note: $_unit: ps has no lstart here; the elapsed-time identity is in use and this case is not exercised"; kill -KILL "$p" 2>/dev/null; wait "$p" 2>/dev/null; return ;; esac
+  # an elapsed-time identity (e<seconds>) is the clock less ps's etime, so it moves with the clock
+  # by design; only the lstart form is held to not moving
+  case "$id1" in
+    e[0-9]*) echo "note: $_unit: ps has no lstart here; the elapsed-time identity is in use and this case is not exercised"; kill -KILL "$p" 2>/dev/null; wait "$p" 2>/dev/null; return ;;
+    *[!0-9]*) ;;
+    *) echo "note: $_unit: a numeric identity without /proc; this case is not exercised"; kill -KILL "$p" 2>/dev/null; wait "$p" 2>/dev/null; return ;;
+  esac
   id2="$( _shmutant_now() { printf '%s' 9999999999000000; }; _shmutant_identity "$p" )"
   eq "$id2" "$id1" 'the identity does not move with a clock step of the harness clock'
   ( _shmutant_now() { printf '%s' 9999999999000000; }; _shmutant_alive_since "$p" "$id1" ); rc=$?
@@ -2569,26 +2577,28 @@ t_verdict_timeout_with_a_leading_zero() {
   shmutant_reset; shmutant_target lib.sh
   shmutant_mut 'hangs' '$1 + $2' '$1 - $2' 'add-works'
   # 08: digits only, but not a valid octal constant, which is what bash arithmetic would read.
-  slow_run() { bash -c 'echo "$$" > "$1/run.pid"; sleep 6; : > "$1/six"; sleep 30' _ "$T"; }
-  # The pool reads a frozen clock, so each of the watchdog's polls counts as its half-second sleep
-  # and nothing else: eight seconds is sixteen polls, each reading the clock once after the reading
-  # the deadline starts from. Those reads are counted, and the run marks six seconds of its own
-  # sleep, which sixteen polls that each slept their half second outlast. That first reading waits
+  slow_run() { bash -c 'echo "$$" > "$1/run.pid"; sleep 8; : > "$1/reached"; sleep 30' _ "$T"; }
+  # The watchdog reads a frozen clock, so each of its polls counts as its half-second sleep and
+  # nothing else: eight seconds is sixteen polls, each reading the clock once after the reading the
+  # deadline starts from. Only its own readings are frozen: an identity is the clock less ps's
+  # etime where there is no other form, and must keep the real clock. Those reads are counted, and
+  # the run marks eight seconds of its own sleep, which no sleep can cut short and which sixteen
+  # half-second polls outlast by what each poll does besides sleeping. That first reading waits
   # for the run to have started, so the two begin together however late the run is scheduled.
   # Between them the deadline's length is checked with no clock read, whatever a real clock does.
   : > "$T/reads"
-  OUT="$( _shmutant_now() {
+  OUT="$( eval "_real_now() $(declare -f _shmutant_now | sed 1d)"
+    _shmutant_now() {
       local i=0
-      if [ "${FUNCNAME[1]}" = _shmutant_run_bounded ]; then
-        [ -s "$T/reads" ] || until [ -e "$T/run.pid" ] || [ "$i" -ge 100 ]; do i=$((i + 1)); command -p sleep 0.1; done
-        printf 'read\n' >> "$T/reads"
-      fi
+      [ "${FUNCNAME[1]}" = _shmutant_run_bounded ] || { _real_now; return; }
+      [ -s "$T/reads" ] || until [ -e "$T/run.pid" ] || [ "$i" -ge 100 ]; do i=$((i + 1)); command -p sleep 0.1; done
+      printf 'read\n' >> "$T/reads"
       printf '%s' 1000000000000000; }
     SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=08 shmutant_pool lbl "$T/wd" toy_prepare slow_run 2> "$T/err" )"
   ERR="$(cat "$T/err")"
   eq "$(verdict_of 'hangs')" timeout 'a timeout of 08 is eight seconds, not an octal error that disarms the watchdog'
   eq "$(grep -cx read "$T/reads")" 17 'the deadline is sixteen polls, neither fewer nor more'
-  [ -e "$T/six" ] || fail_ 'the deadline came before six seconds of the run'"'"'s own sleep: its polls did not each sleep their half second'
+  [ -e "$T/reached" ] || fail_ 'the deadline came before eight seconds of the run'"'"'s own sleep: the sixteen polls were cut short'
   has "$ERR" 'within 8s' 'the bound is reported in its canonical form, not as 08'
   local runpid; runpid="$(cat "$T/run.pid" 2>/dev/null)"
   if [ -z "$runpid" ]; then fail_ 'fixture: the run never started'
@@ -4844,9 +4854,10 @@ t_wait_gone_takes_a_reused_pid_as_gone() {
     rc_is "$rc" 2 "a bound of [$bad] looks is refused"
   done
   # and the bound given is the one kept: a live process given three looks is looked at three times,
-  # two naps apart (counted by a stub for the nap), then given up on
+  # two naps apart (counted by a stub for the nap), then given up on. Its identity is stubbed to
+  # one that cannot move: on the elapsed-time form, real ones read a nap apart are two clock readings.
   : > "$T/naps"
-  rc=0; ( sleep() { printf 'nap\n' >> "$T/naps"; command sleep "$@"; }; wait_gone "$p" "$real" 3 ) || rc=$?
+  rc=0; ( sleep() { printf 'nap\n' >> "$T/naps"; command sleep "$@"; }; _shmutant_identity() { printf 'held'; }; wait_gone "$p" held 3 ) || rc=$?
   rc_is "$rc" 1 'a live process outlasts three looks'
   eq "$(grep -cx nap "$T/naps")" 2 'three looks are two naps apart'
   kill -KILL "$p" 2>/dev/null; wait "$p" 2>/dev/null
