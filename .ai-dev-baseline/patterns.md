@@ -457,4 +457,7 @@ One line per resolved review thread, newest last.
 - `privilege-dependent-check` `test/release.sh:1064` `0282f6a` `PRRT_kwDOUT7q9s6qAShp` PR #14 2026-10-07 — tests simulated read failures with chmod 000, which uid 0 reads through
 - `contract-not-honoured` `scripts/release.sh:341` `bb7e621` `PRRT_kwDOUT7q9s6qD3K1` PR #14 2026-10-07 — the version grep's failure status was ignored, so a failed search read as a missing assignment (exit 1) instead of exit 2
 - `clock-dependent-deadline` `test/run.sh:386` `a914e55` `PRRT_kwDOUT7q9s6qrdUI` PR #21 2026-10-09 — a performance guard timed a whole pool between two wall-clock readings; now a CPU-time bound on the counting call itself
+- `clock-dependent-deadline` `test/run.sh:2586` `c9b2918` `PRRT_kwDOUT7q9s6q_A6o` PR #28 2026-10-10 — a clock stub over the whole pool also fed elapsed-time identities; now only the watchdog readings are stubbed
+- `contract-not-honoured` `test/run.sh:2591` `c9b2918` `PRRT_kwDOUT7q9s6q_A6s` PR #28 2026-10-10 — the leading-zero mark passed a watchdog sleeping 0.4 s per poll; the run now marks eight seconds of its own sleep
+- `clock-dependent-deadline` `test/run.sh:4849` `c9b2918` `PRRT_kwDOUT7q9s6q_A6t` PR #28 2026-10-10 — the three-look wait_gone check read real identities a nap apart; it now stubs a stable identity
 <!-- adb:hits:end -->
