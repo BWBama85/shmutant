@@ -199,7 +199,9 @@ case "${a[0]:-} ${a[1]:-}" in
     if [ -e "$STUB/asset.merge" ]; then
       mv -- "$STUB/release/shmutant.sh" "$STUB/release/shmutant.sh CHECKSUMS" && rm -f -- "$STUB/release/CHECKSUMS" || exit 1
     fi
-    : > "$STUB/published/$t" ;;
+    : > "$STUB/published/$t"
+    # As gh does, the release's URL on stdout once it exists.
+    printf 'https://github.com/%s/releases/tag/%s\n' "$SLUG" "$t" ;;
   "release download")
     t="${a[2]}"; opts "${a[@]:3}"
     [ -e "$STUB/published/$t" ] || fail "Not Found (HTTP 404)"
@@ -359,6 +361,18 @@ relb() {
     | { awk -v s="$stop" '{ print } index($0, s) { exit }' > "$S/out"; exec 0<&-; : > "$S/reader.gone"; }
   rc="${PIPESTATUS[0]}"
   out="$(cat "$S/out")"; err="$(cat "$S/err")"
+}
+# relz default|ignored <arg>… — rel with the driver's stdout a pipe its reader closed before the
+# driver started, so the first line it writes fails. SIGPIPE as in relb.
+relz() {
+  local pipe="$1"; shift
+  rm -f -- "$S/reader.gone" || exit 2
+  (i=0; while [ ! -e "$S/reader.gone" ] && [ "$i" -lt 100 ]; do /bin/sleep 0.1; i=$((i + 1)); done
+   cd -- "$c" && { [ "$pipe" = default ] || trap '' PIPE; } \
+     && PATH="$tmp/bin:$PATH" STUB="$S" SLUG="$SLUG" bash scripts/release.sh "$@") 2> "$S/err" \
+    | { exec 0<&-; : > "$S/reader.gone"; }
+  rc="${PIPESTATUS[0]}"
+  out=""; err="$(cat "$S/err")"
 }
 # rele <var=value>… -- <arg>… — rel with these variables in the driver's environment, through env:
 # a shell's own SHELLOPTS and BASHOPTS are readonly, so a prefix assignment cannot set them.
@@ -859,7 +873,7 @@ c_the_printed_hand_finish_publishes_the_tagged_assets() {
   # The printed steps, run as printed: write the assets, then the "with no release" command.
   while IFS= read -r cmd; do
     (cd -- "$S/finish" && unset GH_HOST && PATH="$tmp/bin:$PATH" STUB="$S" SLUG="$SLUG" \
-       GH_PROMPT_DISABLED=1 GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=false eval "$cmd") 2>> "$S/finish.err" \
+       GH_PROMPT_DISABLED=1 GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=false eval "$cmd") >> "$S/finish.out" 2>> "$S/finish.err" \
       || fail_ "a printed step failed: $cmd ($(cat "$S/finish.err"))"
   done <<EOF
 $(printf '%s\n' "$err" | sed -n -e 's/^release:   \(git -C .*\)$/\1/p' -e 's/^release:   with no release:   //p')
@@ -1627,13 +1641,20 @@ c_an_interrupt_while_allocating_leaves_nothing() {
 }
 
 c_a_dry_run_whose_report_is_lost_does_not_pass() {
+  local how
   relq --dry-run "$VER"
   rc_is "$rc" 2 "a dry run with its stdout closed"
   has "$err" "line(s) of this run's report could not be written to stdout: every precondition holds for $TAG" "says so"
   # Under bash 3.2 a line it could not write would come back inside the next read, and refuse.
   eq "$(refusals)" 0 "and refuses nothing"
-  relq --help
-  rc_is "$rc" 2 "--help with its stdout closed"
+  relz default --dry-run "$VER"
+  rc_is "$rc" 2 "a dry run with its stdout a broken pipe"
+  has "$err" "could not be written to stdout: every precondition holds for $TAG" "says so"
+  for how in closed default ignored; do
+    if [ "$how" = closed ]; then relq --help; else relz "$how" --help; fi
+    rc_is "$rc" 2 "--help with its stdout $how"
+    has "$err" "could not write the usage to stdout" "says so"
+  done
 }
 
 c_a_cut_whose_report_is_lost_stops_before_the_tag() {

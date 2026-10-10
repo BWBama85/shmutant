@@ -101,7 +101,8 @@ while [ "$#" -gt 0 ]; do
     --dry-run|--verify)
       [ "$mode" = cut ] || { err "--dry-run and --verify exclude each other"; usage >&2; exit 2; }
       mode="${1#--}" ;;
-    -h|--help) usage || exit 2; exit 0 ;;
+    # From a subshell, as say writes: a broken pipe's SIGPIPE ends only the subshell.
+    -h|--help) (usage) || { err "could not write the usage to stdout"; exit 2; }; exit 0 ;;
     -*) err "unknown option: $1"; usage >&2; exit 2 ;;
     *)  nver=$((nver + 1)); version="$1" ;;
   esac
@@ -727,7 +728,9 @@ for a in shmutant.sh CHECKSUMS; do
   [ "$(g hash-object --no-filters -- "$made/assets/$a")" = "$want" ] \
     || { err "the release asset $a does not hold $a at $remote"; finish_by_hand; exit 2; }
 done
-(cd -- "$made/assets" && "${create[@]}") \
+# gh prints the release's URL once it has made the release. That goes to stderr, so a stdout that
+# fails cannot fail the create of a release that exists; the report names the URL itself.
+(cd -- "$made/assets" && "${create[@]}" >&2) \
   || { err "gh release create failed"; finish_by_hand; exit 1; }
 say "published the release $tag"
 
