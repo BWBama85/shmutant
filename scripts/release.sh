@@ -19,8 +19,10 @@
 #   - docs/integrating.md at HEAD names one raw.githubusercontent.com URL of shmutant.sh: this
 #     repository's, at the tag v<version>;
 #   - no tag v<version> exists in this checkout, on origin or on GitHub, and no GitHub release has it.
-# Just before tagging, origin's main is read again and must still be the commit checked. After the
-# push, origin's tag and GitHub's tag must both name it before anything is published.
+# shmutant.sh and docs/integrating.md are checked as text, which cannot hold a NUL byte, so either
+# one holding a NUL is refused. Just before tagging, origin's main is read again and must still be
+# the commit checked. After the push, origin's tag and GitHub's tag must both name it before
+# anything is published.
 #
 # --dry-run  checks every precondition and changes nothing: no fetch, no tag, no push, no release,
 #            and no file of its own. In a partial clone it needs git 2.45 or newer, which honours
@@ -29,7 +31,7 @@
 #            checkout's tag names, the URL docs/integrating.md documents there and the release's
 #            shmutant.sh must have the digest CHECKSUMS there gives, and the release's CHECKSUMS
 #            must be that file. A cut verifies against the commit it checked. Its last line on
-#            success is `release: verified: the release <tag> carries …`.
+#            stdout on success is `release: verified: the release <tag> carries …`.
 #
 # The repository is the one origin's single URL names, a github.com HTTPS or SSH URL; every push
 # URL origin has must name the same one. Every gh call names it, on github.com, and gh's account
@@ -42,11 +44,21 @@
 # named after a builtin the setup itself calls (builtin, read, unset, declare) cannot be, nor can
 # the options that stop commands from running at all (noexec, onecmd): run the driver with
 # SHELLOPTS, BASHOPTS and BASH_ENV removed, as the /release skill does, and take success from its
-# last line, not from its exit status alone.
+# last line on stdout, not from its exit status alone.
+#
+# The report goes to stdout and every refusal and failure to stderr. A run that would exit 0 but
+# could not write all of its report to stdout exits 2 instead, saying on stderr what it did, and a
+# cut that lost a line before the tag stops there. A refusal or a failed step keeps its own exit
+# status, its report lost or not. An interrupt (INT or TERM) says on stderr what it left: nothing,
+# before the tag; what may be published and how to finish, once the tag may exist. Bash runs it
+# when the command running at the time returns, so a signal sent to the driver alone waits for that
+# command, a download included. A signal the driver was started with ignored (a shell with job
+# control off ignores INT in its background jobs) interrupts nothing: bash cannot trap it, and the
+# run goes on to its own outcome.
 #
 # Exit 0 = done, or (--dry-run) every precondition held; 1 = a precondition refused, or a publish
-# or verify step failed, saying so on stderr; 130/143 = interrupted, saying what may already be
-# published; 2 = could not run (usage, a missing tool, a failed read).
+# or verify step failed, saying so on stderr; 130/143 = interrupted; 2 = could not run (usage, a
+# missing tool, a failed read), or would have exited 0 but could not write its report.
 builtin set -u +a +e +k +v +x +C +o pipefail +o posix
 builtin shopt -u nocasematch expand_aliases
 while IFS=' ' builtin read -r _ _ _fn; do [[ -n $_fn ]] && builtin unset -f "$_fn"; done <<EOF
@@ -68,9 +80,22 @@ pause=30
 ref_reads=3
 ref_pause=2
 
-say()   { printf 'release: %s\n' "$*"; }
+# A report line that cannot be written (a closed or full stdout) is counted rather than fatal, so a
+# cut past its tag still reaches its own outcome; reported then keeps the run from exiting 0. It is
+# written from a subshell: bash 3.2 keeps a line it could not write buffered, and the child of the
+# next command substitution would write it into the value that substitution reads.
+unwritten=0
+say()   { (printf 'release: %s\n' "$*") || unwritten=$((unwritten + 1)); }
 err()   { printf 'release: %s\n' "$*" >&2; }
 die()   { err "$*"; exit 2; }
+# reported <what was done> — returns when every report line so far reached stdout. Otherwise it says
+# on stderr how many did not, and <what was done>, and exits 2: the /release skill takes success from
+# the last line on stdout, and that line may be one of those lost.
+reported() {
+  [ "$unwritten" -eq 0 ] && return 0
+  err "$unwritten line(s) of this run's report could not be written to stdout: $1"
+  exit 2
+}
 usage() { printf 'usage: scripts/release.sh [--dry-run | --verify] <version>\n'; }
 
 mode="cut"; version=""; nver=0
@@ -79,7 +104,8 @@ while [ "$#" -gt 0 ]; do
     --dry-run|--verify)
       [ "$mode" = cut ] || { err "--dry-run and --verify exclude each other"; usage >&2; exit 2; }
       mode="${1#--}" ;;
-    -h|--help) usage; exit 0 ;;
+    # From a subshell, as say writes: a broken pipe's SIGPIPE ends only the subshell.
+    -h|--help) (usage) || { err "could not write the usage to stdout"; exit 2; }; exit 0 ;;
     -*) err "unknown option: $1"; usage >&2; exit 2 ;;
     *)  nver=$((nver + 1)); version="$1" ;;
   esac
@@ -90,6 +116,23 @@ re='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
 ver="${version#v}"
 [[ "$ver" =~ $re ]] || die "not a version: '$version' (want X.Y.Z or vX.Y.Z)"
 tag="v$ver"
+
+# Set once the tag may exist. Until then an interrupt has left nothing; from then on, it says what is
+# left to do. Handled from before the repository or the network is read, in every mode.
+tagged=0
+interrupted() {
+  if [ "$tagged" -eq 1 ]; then
+    err "interrupted once the tag $tag may exist. Ask origin (git ls-remote origin refs/tags/$tag): if it lacks the tag, delete it here (git tag -d $tag) and re-run; if its tag names $remote, finish by hand as below; if it names another commit, inspect it before anything else."
+    finish_by_hand
+  elif [ "$mode" = verify ]; then
+    err "interrupted; --verify changes nothing, so re-run it to check the release $tag"
+  else
+    err "interrupted; nothing was tagged, pushed or published"
+  fi
+  exit "$1"
+}
+trap 'interrupted 130' INT
+trap 'interrupted 143' TERM
 
 for t in git gh curl grep sort awk tr wc dirname mkdir rmdir rm sleep ls; do
   command -v "$t" > /dev/null 2>&1 || die "$t is not on PATH"
@@ -191,6 +234,15 @@ blob() {
 }
 # blob_why <status> <rev> <path> — sets why for a blob status of 1 or 2.
 blob_why() { if [ "$1" -eq 1 ]; then why="$2 has no $3"; else why="cannot read $3 at $2"; fi; }
+# whole <rev> <path> <text> — status 0 when <text>, <path> at <rev> as read through a command
+# substitution kept from trimming newlines, has every byte git counts in it; 1, with why set, when it
+# has fewer: command substitution drops NUL bytes, so the text a check would read is not the file.
+# 2 when git cannot give the size.
+whole() {
+  local size
+  size="$(g cat-file -s "$1:$2")" || { why="cannot read $2 at $1"; return 2; }
+  [ "${#3}" = "$size" ] || { why="$2 at $1 holds a NUL byte, so its text cannot be checked"; return 1; }
+}
 
 # checksums_digest <rev> — sets digest to what CHECKSUMS at <rev> gives shmutant.sh; status 1, with
 # why set, unless CHECKSUMS is exactly the one line `<sha256>  shmutant.sh`, newline-terminated;
@@ -214,8 +266,11 @@ checksums_digest() {
 doc_url() {
   local doc urls docslug ldocslug doctag rc re='^https://raw\.githubusercontent\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/([^/]+)/shmutant\.sh$'
   raw_url=""
-  doc="$(blob "$1" docs/integrating.md)"; rc=$?
+  doc="$(blob "$1" docs/integrating.md && printf x)"; rc=$?
   [ "$rc" -eq 0 ] || { blob_why "$rc" "$1" docs/integrating.md; return "$rc"; }
+  doc="${doc%x}"
+  # A NUL inside a URL would vanish here and leave a URL the doc does not hold.
+  whole "$1" docs/integrating.md "$doc" || return
   # Whole URLs, each to the end of its token, so that a longer one (shmutant.sh.sig, shmutant.sh?x=y,
   # shmutant.sh!) is never read as its shmutant.sh prefix.
   # Each stage on its own, so a failing tool is exit 2 and never a short list. grep's 1 is "none".
@@ -368,23 +423,29 @@ EOF
   else refuse "CI is not green on origin's main ($short): ${notgreen#, }"
   fi
 
-  src="$(blob "$head" shmutant.sh)"; rc=$?
+  src="$(blob "$head" shmutant.sh && printf x)"; rc=$?
   [ "$rc" -eq 0 ] || { blob_why "$rc" "$head" shmutant.sh; die "$why"; }
-  vl="$(printf '%s\n' "$src" | grep -e '^SHMUTANT_VERSION=')"; rc=$?
-  [ "$rc" -le 1 ] || die "cannot search shmutant.sh (grep exit $rc)"
-  case "$vl" in
-    "SHMUTANT_VERSION=\""*"\"") v="${vl#SHMUTANT_VERSION=\"}"; v="${v%\"}" ;;
-    "SHMUTANT_VERSION='"*"'")   v="${vl#SHMUTANT_VERSION=\'}"; v="${v%\'}" ;;
-    *)                          v="${vl#SHMUTANT_VERSION=}" ;;
-  esac
-  re='^[0-9A-Za-z.+-]+$'
-  case "$vl" in
-    ''|*$'\n'*) refuse "shmutant.sh at HEAD does not set SHMUTANT_VERSION on exactly one line" ;;
-    *) if ! [[ "$v" =~ $re ]]; then refuse "shmutant.sh at HEAD does not assign SHMUTANT_VERSION a plain version: $vl"
-       elif [ "$v" = "$ver" ]; then ok "shmutant.sh sets SHMUTANT_VERSION=$ver"
-       else refuse "version mismatch: shmutant.sh sets SHMUTANT_VERSION=$v, not $ver"
-       fi ;;
-  esac
+  src="${src%x}"
+  whole "$head" shmutant.sh "$src"; rc=$?
+  [ "$rc" -ne 2 ] || die "$why"
+  if [ "$rc" -eq 1 ]; then refuse "$why"
+  else
+    vl="$(printf '%s' "$src" | grep -e '^SHMUTANT_VERSION=')"; rc=$?
+    [ "$rc" -le 1 ] || die "cannot search shmutant.sh (grep exit $rc)"
+    case "$vl" in
+      "SHMUTANT_VERSION=\""*"\"") v="${vl#SHMUTANT_VERSION=\"}"; v="${v%\"}" ;;
+      "SHMUTANT_VERSION='"*"'")   v="${vl#SHMUTANT_VERSION=\'}"; v="${v%\'}" ;;
+      *)                          v="${vl#SHMUTANT_VERSION=}" ;;
+    esac
+    re='^[0-9A-Za-z.+-]+$'
+    case "$vl" in
+      ''|*$'\n'*) refuse "shmutant.sh at HEAD does not set SHMUTANT_VERSION on exactly one line" ;;
+      *) if ! [[ "$v" =~ $re ]]; then refuse "shmutant.sh at HEAD does not assign SHMUTANT_VERSION a plain version: $vl"
+         elif [ "$v" = "$ver" ]; then ok "shmutant.sh sets SHMUTANT_VERSION=$ver"
+         else refuse "version mismatch: shmutant.sh sets SHMUTANT_VERSION=$v, not $ver"
+         fi ;;
+    esac
+  fi
 
   checksums_digest "$head"; rc=$?
   if [ "$rc" -eq 2 ]; then die "$why"
@@ -497,15 +558,6 @@ EOF
   say "verified: the release $tag carries shmutant.sh and CHECKSUMS as tagged"
 }
 
-# Set once the tag may exist: from then on, an interrupt says what is left to do.
-tagged=0
-interrupted() {
-  [ "$tagged" -eq 0 ] || {
-    err "interrupted once the tag $tag may exist. Ask origin (git ls-remote origin refs/tags/$tag): if it lacks the tag, delete it here (git tag -d $tag) and re-run; if its tag names $remote, finish by hand as below; if it names another commit, inspect it before anything else."
-    finish_by_hand
-  }
-  exit "$1"
-}
 # The run's temporary directory holds only the two release assets, written from the checked commit.
 # Each directory and file's inode is recorded as it is made. Cleanup removes an asset only while it
 # is still that inode and still holds exactly that commit's blob (its git object id), never through a
@@ -575,6 +627,7 @@ if [ "$mode" = verify ]; then
   local_sha="$(g rev-parse --quiet --verify "refs/tags/$tag^{commit}")" \
     || die "this checkout has no tag $tag: git fetch origin tag $tag"
   verify "$local_sha" || exit 1
+  reported "the release $tag verifies"
   exit 0
 fi
 
@@ -585,8 +638,11 @@ if [ "$refused" -gt 0 ]; then
 fi
 if [ "$mode" = dry-run ]; then
   say "dry run: every precondition holds for $tag at $remote; nothing was tagged, pushed or published"
+  reported "every precondition holds for $tag at $remote; nothing was tagged, pushed or published"
   exit 0
 fi
+# A cut whose report is already going nowhere stops while nothing it did is permanent.
+reported "every precondition holds for $tag at $remote, but the cut stops here: nothing was tagged, pushed or published"
 
 notes="shmutant $ver
 
@@ -675,7 +731,9 @@ for a in shmutant.sh CHECKSUMS; do
   [ "$(g hash-object --no-filters -- "$made/assets/$a")" = "$want" ] \
     || { err "the release asset $a does not hold $a at $remote"; finish_by_hand; exit 2; }
 done
-(cd -- "$made/assets" && "${create[@]}") \
+# gh prints the release's URL once it has made the release. That goes to stderr, so a stdout that
+# fails cannot fail the create of a release that exists; the report names the URL itself.
+(cd -- "$made/assets" && "${create[@]}" >&2) \
   || { err "gh release create failed"; finish_by_hand; exit 1; }
 say "published the release $tag"
 
@@ -685,3 +743,4 @@ if ! verify "$remote"; then
 fi
 say "released shmutant $ver: https://github.com/$slug/releases/tag/$tag"
 say "next: baseline release roll --version $tag"
+reported "the release $tag is published and verifies; next: baseline release roll --version $tag"
