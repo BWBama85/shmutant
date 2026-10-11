@@ -61,6 +61,8 @@ cat > "$tmp/bin/gh" <<'EOF'
 # driver should not make, or one it made with prompts left on.
 unset -f git
 { printf 'gh'; printf ' %q' "$@"; printf '\n'; } >> "$STUB/events"
+# $STUB/gh.signal (TERM or INT): the call sends that signal to the caller's process group.
+[ ! -e "$STUB/gh.signal" ] || kill "-$(cat "$STUB/gh.signal")" 0
 [ "${GH_PROMPT_DISABLED:-}" = 1 ] && [ "${GIT_TERMINAL_PROMPT:-}" = 0 ] && [ "${GIT_ASKPASS:-}" = false ] \
   || { echo "gh stub: called with prompts or askpass enabled" >&2; exit 3; }
 jqx=""; paginate=0; a=()
@@ -153,6 +155,12 @@ case "${a[0]:-} ${a[1]:-}" in
       '[inputs | {tag_name: ., draft: $d, assets: $as}]' | reply ;;
   "release create")
     [ ! -e "$STUB/create.fail" ] || fail "HTTP 500"
+    # $STUB/create.after names a file the create waits for, up to ten seconds, so a step of the test
+    # can finish first. The real sleep: the stub on PATH does not pause.
+    if [ -e "$STUB/create.after" ]; then
+      w="$(cat "$STUB/create.after")"; i=0
+      while [ ! -e "$w" ] && [ "$i" -lt 100 ]; do /bin/sleep 0.1; i=$((i + 1)); done
+    fi
     t="${a[2]}"; opts "${a[@]:3}"
     [ "$verify" -eq 1 ] || { echo "gh stub: release create without --verify-tag" >&2; exit 3; }
     git -C "$STUB/origin.git" rev-parse -q --verify "refs/tags/$t" > /dev/null || fail "tag $t doesn't exist in the repo"
@@ -191,7 +199,9 @@ case "${a[0]:-} ${a[1]:-}" in
     if [ -e "$STUB/asset.merge" ]; then
       mv -- "$STUB/release/shmutant.sh" "$STUB/release/shmutant.sh CHECKSUMS" && rm -f -- "$STUB/release/CHECKSUMS" || exit 1
     fi
-    : > "$STUB/published/$t" ;;
+    : > "$STUB/published/$t"
+    # As gh does, the release's URL on stdout once it exists.
+    printf 'https://github.com/%s/releases/tag/%s\n' "$SLUG" "$t" ;;
   "release download")
     t="${a[2]}"; opts "${a[@]:3}"
     [ -e "$STUB/published/$t" ] || fail "Not Found (HTTP 404)"
@@ -332,6 +342,37 @@ relg() {
     _ "$c" "$tmp/bin" "$S" "$SLUG" "$@" > "$S/out" 2> "$S/err"
   rc=$?
   out="$(cat "$S/out")"; err="$(cat "$S/err")"
+}
+# relq <arg>… — rel with the driver's stdout closed, so every report line it writes fails.
+relq() {
+  (cd -- "$c" && PATH="$tmp/bin:$PATH" STUB="$S" SLUG="$SLUG" bash scripts/release.sh "$@" >&-) 2> "$S/err"
+  rc=$?
+  out=""; err="$(cat "$S/err")"
+}
+# relb default|ignored <text> <arg>… — rel with the driver's stdout a pipe whose reader keeps the
+# lines up to the first holding <text>, then closes the pipe and says so in $S/reader.gone, which the
+# release's creation waits for: each line written after it fails. SIGPIPE is left at its default, or
+# ignored as a caller may leave it.
+relb() {
+  local pipe="$1" stop="$2"; shift 2
+  echo "$S/reader.gone" > "$S/create.after" || exit 2
+  (cd -- "$c" && { [ "$pipe" = default ] || trap '' PIPE; } \
+     && PATH="$tmp/bin:$PATH" STUB="$S" SLUG="$SLUG" bash scripts/release.sh "$@") 2> "$S/err" \
+    | { awk -v s="$stop" '{ print } index($0, s) { exit }' > "$S/out"; exec 0<&-; : > "$S/reader.gone"; }
+  rc="${PIPESTATUS[0]}"
+  out="$(cat "$S/out")"; err="$(cat "$S/err")"
+}
+# relz default|ignored <arg>… — rel with the driver's stdout a pipe its reader closed before the
+# driver started, so the first line it writes fails. SIGPIPE as in relb.
+relz() {
+  local pipe="$1"; shift
+  rm -f -- "$S/reader.gone" || exit 2
+  (i=0; while [ ! -e "$S/reader.gone" ] && [ "$i" -lt 100 ]; do /bin/sleep 0.1; i=$((i + 1)); done
+   cd -- "$c" && { [ "$pipe" = default ] || trap '' PIPE; } \
+     && PATH="$tmp/bin:$PATH" STUB="$S" SLUG="$SLUG" bash scripts/release.sh "$@") 2> "$S/err" \
+    | { exec 0<&-; : > "$S/reader.gone"; }
+  rc="${PIPESTATUS[0]}"
+  out=""; err="$(cat "$S/err")"
 }
 # rele <var=value>… -- <arg>… — rel with these variables in the driver's environment, through env:
 # a shell's own SHELLOPTS and BASHOPTS are readonly, so a prefix assignment cannot set them.
@@ -832,7 +873,7 @@ c_the_printed_hand_finish_publishes_the_tagged_assets() {
   # The printed steps, run as printed: write the assets, then the "with no release" command.
   while IFS= read -r cmd; do
     (cd -- "$S/finish" && unset GH_HOST && PATH="$tmp/bin:$PATH" STUB="$S" SLUG="$SLUG" \
-       GH_PROMPT_DISABLED=1 GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=false eval "$cmd") 2>> "$S/finish.err" \
+       GH_PROMPT_DISABLED=1 GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=false eval "$cmd") >> "$S/finish.out" 2>> "$S/finish.err" \
       || fail_ "a printed step failed: $cmd ($(cat "$S/finish.err"))"
   done <<EOF
 $(printf '%s\n' "$err" | sed -n -e 's/^release:   \(git -C .*\)$/\1/p' -e 's/^release:   with no release:   //p')
@@ -1597,6 +1638,142 @@ c_an_interrupt_while_allocating_leaves_nothing() {
   rc=$?; err="$(cat "$S/err")"
   rc_is "$rc" 143 "TERM while the temporary directory is made"
   eq "$(ls -A "$S/tmp")" "" "and it is removed"
+}
+
+c_a_dry_run_whose_report_is_lost_does_not_pass() {
+  local how
+  relq --dry-run "$VER"
+  rc_is "$rc" 2 "a dry run with its stdout closed"
+  has "$err" "line(s) of this run's report could not be written to stdout: every precondition holds for $TAG" "says so"
+  # Under bash 3.2 a line it could not write would come back inside the next read, and refuse.
+  eq "$(refusals)" 0 "and refuses nothing"
+  relz default --dry-run "$VER"
+  rc_is "$rc" 2 "a dry run with its stdout a broken pipe"
+  has "$err" "could not be written to stdout: every precondition holds for $TAG" "says so"
+  for how in closed default ignored; do
+    if [ "$how" = closed ]; then relq --help; else relz "$how" --help; fi
+    rc_is "$rc" 2 "--help with its stdout $how"
+    has "$err" "could not write the usage to stdout" "says so"
+  done
+}
+
+c_a_refusal_or_failed_verify_keeps_exit_1_when_its_report_is_lost() {
+  : > "$S/published/$TAG"
+  relq --dry-run "$VER"
+  rc_is "$rc" 1 "a refusing dry run with its stdout closed"
+  has "$err" "refused: GitHub already has a release for $TAG" "the refusal is on stderr"
+  hasnt "$err" "could not be written to stdout" "and is not reported as a lost report"
+  fixture "${_case}_verify"
+  rel "$VER"
+  rc_is "$rc" 0 "the cut"
+  echo tamper > "$S/curl.mode"
+  relq --verify "$VER"
+  rc_is "$rc" 1 "a failing --verify with its stdout closed"
+  has "$err" "VERIFY FAILED: $URL has SHA-256" "the failure is on stderr"
+  hasnt "$err" "could not be written to stdout" "and is not reported as a lost report"
+}
+
+c_a_cut_whose_report_is_lost_stops_before_the_tag() {
+  relq "$VER"
+  rc_is "$rc" 2 "a cut with its stdout closed"
+  has "$err" "but the cut stops here: nothing was tagged, pushed or published" "says so"
+  published_nothing "a cut with its stdout closed"
+}
+
+c_a_report_lost_after_the_tag_says_the_release_is_out() {
+  local pipe
+  for pipe in default ignored; do
+    fixture "${_case}_$pipe"
+    relb "$pipe" "pushed $TAG" "$VER"
+    rc_is "$rc" 2 "stdout lost once the tag is pushed, SIGPIPE $pipe"
+    has "$err" "could not be written to stdout: the release $TAG is published and verifies; next: baseline release roll --version $TAG" "says what was done"
+    has "$(events)" "gh release create" "the release was published"
+    hasnt "$err" "VERIFY FAILED" "and is not called a verify failure"
+  done
+}
+
+c_a_verify_whose_report_is_lost_does_not_pass() {
+  rel "$VER"
+  rc_is "$rc" 0 "the cut"
+  relq --verify "$VER"
+  rc_is "$rc" 2 "--verify with its stdout closed"
+  has "$err" "could not be written to stdout: the release $TAG verifies" "says so"
+  hasnt "$err" "VERIFY FAILED" "and is not called a verify failure"
+}
+
+c_refuses_a_doc_holding_a_nul() {
+  printf 'curl -fsSL -o scripts/shmutant.sh %s\0.sh\n' "${URL%.sh}" > "$c/docs/integrating.md"
+  land "$c" nul-in-url
+  rel --dry-run "$VER"
+  refused_once "docs/integrating.md at $(git -C "$c" rev-parse HEAD) holds a NUL byte, so its text cannot be checked" "a NUL inside the URL"
+  printf '%s\n\0\n' "$URL" > "$c/docs/integrating.md"
+  land "$c" nul-after-url
+  rel --dry-run "$VER"
+  refused_once "docs/integrating.md at $(git -C "$c" rev-parse HEAD) holds a NUL byte" "a NUL on a line of its own"
+  # Counted in bytes: multibyte text, and either newline shape at the end, is no NUL.
+  printf 'Install it \342\200\224 %s' "$URL" > "$c/docs/integrating.md"
+  land "$c" no-final-newline
+  rel --dry-run "$VER"
+  rc_is "$rc" 0 "a UTF-8 doc with no final newline"
+  printf 'Install it \342\200\224\n\n%s\n\n\n' "$URL" > "$c/docs/integrating.md"
+  land "$c" blank-lines-at-end
+  rel --dry-run "$VER"
+  rc_is "$rc" 0 "a UTF-8 doc ending in blank lines"
+}
+
+c_refuses_a_version_line_holding_a_nul() {
+  printf '#!/usr/bin/env bash\nSHMUTANT_VERSION=1.2\0.3\n' > "$c/shmutant.sh"; checksum "$c"
+  land "$c" nul-in-version
+  rel --dry-run "$VER"
+  refused_once "shmutant.sh at $(git -C "$c" rev-parse HEAD) holds a NUL byte, so its text cannot be checked" "a NUL in the version"
+}
+
+c_verify_fails_on_a_tagged_doc_holding_a_nul() {
+  rel "$VER"
+  rc_is "$rc" 0 "the cut"
+  # The tag moved, here and on origin, to a commit whose doc holds a NUL in the install URL.
+  printf 'curl -fsSL -o scripts/shmutant.sh %s\0.sh\n' "${URL%.sh}" > "$c/docs/integrating.md"
+  commit "$c" nul-in-url
+  git -C "$c" tag -f -a "$TAG" -m moved HEAD > /dev/null && git -C "$c" push -q -f origin "refs/tags/$TAG" || exit 2
+  rel --verify "$VER"
+  rc_is "$rc" 1 "--verify at a tag whose doc holds a NUL"
+  has "$err" "VERIFY FAILED: at $TAG, docs/integrating.md at $(git -C "$c" rev-parse HEAD) holds a NUL byte" "says so"
+}
+
+c_an_interrupted_verify_says_it_changed_nothing() {
+  local sig
+  for sig in term:143 int:130; do
+    fixture "${_case}_${sig%%:*}"
+    rel "$VER"
+    rc_is "$rc" 0 "the cut"
+    echo "${sig%%:*}" > "$S/curl.mode"
+    relg --verify "$VER"
+    rc_is "$rc" "${sig#*:}" "${sig%%:*} during a standalone --verify"
+    has "$err" "interrupted; --verify changes nothing, so re-run it to check the release $TAG" "says so"
+  done
+}
+
+c_an_interrupt_before_the_tag_says_nothing_was_published() {
+  local mode
+  for mode in --dry-run --cut; do
+    fixture "${_case}${mode#-}"
+    echo TERM > "$S/gh.signal"
+    if [ "$mode" = --cut ]; then relg "$VER"; else relg "$mode" "$VER"; fi
+    rc_is "$rc" 143 "TERM during the checks of a ${mode#--}"
+    has "$err" "interrupted; nothing was tagged, pushed or published" "says so"
+    published_nothing "an interrupted ${mode#--}"
+  done
+}
+
+c_a_signal_the_driver_starts_with_ignored_interrupts_nothing() {
+  echo TERM > "$S/gh.signal"
+  # relg, with TERM ignored in the job, as the driver's caller may leave it.
+  bash -c 'set -m; trap "" TERM; cd -- "$1" || exit 2; PATH="$2:$PATH" STUB="$3" SLUG="$4" bash scripts/release.sh --dry-run "$5" & wait $!' \
+    _ "$c" "$tmp/bin" "$S" "$SLUG" "$VER" > "$S/out" 2> "$S/err"
+  rc=$?; out="$(cat "$S/out")"; err="$(cat "$S/err")"
+  rc_is "$rc" 0 "a dry run started with TERM ignored, sent TERM during its checks"
+  has "$out" "dry run: every precondition holds for $TAG" "goes on to its verdict"
+  hasnt "$err" "interrupted" "and says no interrupt"
 }
 
 # --- run ---------------------------------------------------------------------------------------
