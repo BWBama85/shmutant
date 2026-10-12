@@ -1986,6 +1986,27 @@ EOF
   true
 }
 
+t_cli_plan_subshell_drops_the_abort_trap() {
+  # What `trap -p` reports in the plan subshell is what the pool saves, restores and re-raises
+  # into on an abort: it names no INT or TERM handler of the CLI's, and a TERM ends the subshell.
+  # Seen from the plan itself while it loads, with no signal timed from outside: t_cli_run sees
+  # it only after its interrupts have waited out the CLI's grace for a child that ignores TERM.
+  # Compared with what a fresh shell started the same way reports: run as a background job (a
+  # pool worker), the suite starts with INT ignored, which `trap -p` names and nothing can reset.
+  mkdir -p "$T/plan" "$T/tmpd"
+  local inherited; inherited="$(bash -c 'trap -p INT TERM')"
+  cat > "$T/plan/plan-self-term.sh" <<'EOF'
+trap -p INT TERM > "$SHMUTANT_PLAN_DIR/traps" || exit 3
+kill -TERM "$BASHPID"
+: > "$SHMUTANT_PLAN_DIR/went-on"
+EOF
+  TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/plan/plan-self-term.sh" > /dev/null 2>"$T/e"; rc_is $? 2 'a plan ended by TERM while loading is a harness error'
+  [ -f "$T/plan/traps" ] || { fail_ 'fixture: the plan never recorded its traps'; return; }
+  eq "$(cat "$T/plan/traps")" "$inherited" 'the plan subshell carries no INT or TERM trap beyond what its environment gave it, for the pool to save and re-raise into'
+  [ -e "$T/plan/went-on" ] && fail_ 'the plan subshell went on past a TERM sent to it'
+  has "$(cat "$T/e")" '(status 143)' 'the subshell that TERM ended is reported with its status'
+}
+
 t_abs_refuses_a_physical_name_ending_in_a_newline() {
   # a newline-free symlink to a directory whose physical name ends in a newline: the resolver
   # refuses it, since the caller'"'"'s substitution would strip the newline and answer with the
