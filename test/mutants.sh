@@ -863,7 +863,7 @@ shmutant_mut 'the settled keep is only ever raised by the marker' \
 shmutant_mut 'the plan subshell keeps the phantom trap trap -p reports' \
   '    readonly SHMUTANT_CLI_WD="$wd" SHMUTANT_CLI_KEEP_FD="$keep_w"' \
   '    trap "_shmutant_cli_abort TERM" TERM; readonly SHMUTANT_CLI_WD="$wd" SHMUTANT_CLI_KEEP_FD="$keep_w"' \
-  't_cli_run'
+  't_cli_plan_subshell_drops_the_abort_trap'
 
 # --- guards added for the twenty-third review round ---
 shmutant_mut 'the scan literals go through -v and lose their backslashes' \
