@@ -687,6 +687,7 @@ t_pool_marker_is_the_whole_file_it_writes() {
     'shmutant workdir'                      'the marker without its newline'
     'shmutant workdir\r\n'                  'the marker ending in CRLF'
     'shmutant workdir\r'                    'seventeen bytes that are not the marker'
+    'shmutant workdir\0'                    'a NUL byte where the newline belongs'
     'shmutant workdir\n\0'                  'a NUL byte after the marker'
     'shmutant workdir\n\0foreign\n'         'a NUL byte, then a line, after the marker'
     'shmutant\0workdir\n'                   'a NUL byte inside the marker'
@@ -715,6 +716,17 @@ t_pool_marker_is_the_whole_file_it_writes() {
   ( set -euC -o pipefail; IFS=:; shopt -s nocasematch extglob; shmutant_pool lbl "$T/wd0" toy_prepare toy_run ) > /dev/null 2>&1
   rc_is $? 2 'and still refuses a .shmutant with a line after the marker'
   [ -e "$T/wd0/pristine/precious" ] || fail_ 'the strict caller'"'"'s refused workdir lost its pristine'
+  # A read that fails partway still assigns the bytes it got, with the status the end of the file
+  # gives: one that stopped after the marker's seventeen bytes of a longer file is stood in for
+  # here (the pool refuses a function named read; the check itself does not need one). The size
+  # is what refuses it, and a size that cannot be read refuses it too.
+  ( read() { line=$'shmutant workdir\n'; return 1; }
+    _shmutant_workdir_owned lbl "$T/wd0" 2>/dev/null; rc_is $? 2 'a read that failed after the marker'"'"'s bytes of a longer file is not the marker'
+    _shmutant_workdir_owned lbl "$T/ok" 2>/dev/null; rc_is $? 0 'fixture: the same read on the marker itself is the marker'
+    exit "$_failed" ) || _failed=1
+  ( command() { if [ "${1-}" = -p ] && [ "${2-}" = wc ]; then return 1; fi; builtin command "$@"; }
+    _shmutant_workdir_owned lbl "$T/ok" 2>/dev/null; rc_is $? 2 'a marker whose size cannot be read is not the marker'
+    exit "$_failed" ) || _failed=1
 }
 
 t_target_refuses_a_newline() {
@@ -1527,18 +1539,19 @@ t_checksum_takes_the_tool_status_and_one_digest() {
   # platform may have is stubbed in turn (as the only one _shmutant_std_bin finds), printing what
   # the real one prints and then what no digest is; every failure is status 2 with nothing on
   # stdout, so a caller comparing the line against CHECKSUMS never sees a near-digest
-  local which d=5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03 dd
+  local which line d=5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03 dd
   printf '#!/bin/sh\nprintf "%%s\\n" "$STUB_OUT"\nexit "$STUB_RC"\n' > "$T/stub"; chmod +x "$T/stub"
-  # ck <digest-field> <status> — the checksum through a stub that prints <digest-field> as the
-  # stubbed tool lays out its line and exits <status>; sets CK to stdout and CKRC to the status.
-  # The stubbed tool is named by `which`, never `tool`: that is a local of _shmutant_checksum's,
-  # and the stand-in _shmutant_std_bin would read that one through dynamic scope.
-  ck() {
-    local line
-    case "$which" in openssl) line="SHA2-256(stdin)= $1" ;; *) line="$1  -" ;; esac
+  # ckraw <output> <status> — the checksum through a stub that prints <output> and exits <status>;
+  # sets CK to stdout and CKRC to the status. The stubbed tool is named by `which`, never `tool`:
+  # that is a local of _shmutant_checksum's, and the stand-in _shmutant_std_bin would read that
+  # one through dynamic scope. lay <digest-field> prints the line the stubbed tool would, and
+  # ck <digest-field> <status> runs that line through the stub.
+  ckraw() {
     CK="$( _shmutant_std_bin() { [ "$1" = "$which" ] || return 1; printf '%s' "$T/stub"; }
-           export STUB_OUT="$line" STUB_RC="$2"; _shmutant_checksum "$T/stub" 2>/dev/null )"; CKRC=$?
+           export STUB_OUT="$1" STUB_RC="$2"; _shmutant_checksum "$T/stub" 2>/dev/null )"; CKRC=$?
   }
+  lay() { case "$which" in openssl) printf 'SHA2-256(stdin)= %s' "$1" ;; *) printf '%s  -' "$1" ;; esac; }
+  ck() { ckraw "$(lay "$1")" "$2"; }
   dd="$(printf '%s' "$d" | tr a-f A-F)"
   for which in sha256sum shasum openssl; do
     ck "$d" 0
@@ -1561,7 +1574,24 @@ t_checksum_takes_the_tool_status_and_one_digest() {
     ck "$dd" 0
     rc_is "$CKRC" 2 "$which: an uppercase digest is not the one CHECKSUMS carries"
     ( shopt -s nocasematch; ck "$dd" 0; rc_is "$CKRC" 2 "$which: nor is it under the caller's nocasematch"; exit "$_failed" ) || _failed=1
+    # the whole output is checked, not a field cut out of it
+    ckraw "$(lay "$d")"$'\n'"$(lay "$d")" 0
+    rc_is "$CKRC" 2 "$which: two records are not one digest"
+    eq "$CK" '' "$which: and print nothing"
+    ckraw "junk $(lay "$d")" 0
+    rc_is "$CKRC" 2 "$which: a record after other words is not a digest"
+    ckraw "$(lay "$d") junk" 0
+    rc_is "$CKRC" 2 "$which: a record followed by other words is not a digest"
   done
+  # every layout openssl has printed for stdin: 3.x, 1.1, 1.0, and LibreSSL's digest alone
+  which=openssl
+  for line in "SHA2-256(stdin)= $d" "SHA256(stdin)= $d" "(stdin)= $d" "$d"; do
+    ckraw "$line" 0
+    rc_is "$CKRC" 0 "openssl: [$line] is a digest"
+    eq "$CK" "$d" "openssl: [$line] gives its digest"
+  done
+  ckraw "MD5(stdin)= $d" 0
+  rc_is "$CKRC" 2 'openssl: another algorithm'"'"'s name is not the SHA-256 layout'
   # with the real tools: a file name holding a backslash and a newline (which sha256sum and shasum
   # escape on their own line) is hashed all the same, and a file that cannot be read is a failure
   local where="$T/a\\b

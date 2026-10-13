@@ -2069,7 +2069,7 @@ _shmutant_pool_locals_writable() {
     mode ms mutate_aliases n new nl now out out_r out_r2 out_w outf \
     p parent path pending phys pid pids pool_aliases pout pout_r pout_w prc \
     prep r rc red rel rest ret rjrc root root_ok rootid rootls \
-    roots rounds row_why run s sdir sec seen seen_r seen_w sel sent setup_failed sig starts nul counts_r2 \
+    roots rounds row_why run s sdir sec seen seen_r seen_w sel sent setup_failed sig size starts nul counts_r2 \
     spec st stat_bin state status stillours stillpids suffix swapped t t0 t1 \
     table target target_ck targets timeout tmp unpublished us v v_jobs v_red v_timeout \
     verdict vr vw wd who wit wrc wstatus \
@@ -2317,15 +2317,17 @@ _shmutant_no_shadows() {
 # mut-N) are removed only from a workdir shmutant marked as its own on first use; a caller's
 # directory that happens to carry those names is refused, not emptied.
 _shmutant_workdir_owned() {
-  local label="$1" wd="$2" line=""
+  local label="$1" wd="$2" line="" size=""
   if [ -f "$wd/.shmutant" ] && [ ! -L "$wd/.shmutant" ]; then
     # The marker is exactly the line shmutant writes, its newline included and nothing after it:
     # a caller's own .shmutant (a config, a sentinel, one that merely begins with that line) does
-    # not make the pristine, base-N and mut-N entries beside it disposable. Read to a NUL byte or
-    # the end of the file, within the bound: status 0 is a NUL or the bound reached, so more
-    # follows and it is not the marker; a read that failed assigns nothing.
-    IFS= read -r -d '' -n 64 line < "$wd/.shmutant" 2>/dev/null && line=""
-    [ "$line" = $'shmutant workdir\n' ] && return 0
+    # not make the pristine, base-N and mut-N entries beside it disposable. Its text and its size,
+    # each on its own: the read stops at a NUL byte (the delimiter, so none stands in for the
+    # newline) or the bound, and one that failed partway still assigns the bytes it got, with the
+    # status the end of the file gives; only the size says nothing follows them.
+    IFS= read -r -d '' -n 64 line < "$wd/.shmutant" 2>/dev/null || :
+    size="$(command -p wc -c < "$wd/.shmutant" 2>/dev/null)" || size=""
+    [ "$line" = $'shmutant workdir\n' ] && [ "$size" -eq 17 ] 2>/dev/null && return 0
     _shmutant_err "$label: $wd/.shmutant is not the marker shmutant writes — refusing to treat the workdir as shmutant's"; return 2
   fi
   if [ -e "$wd/.shmutant" ] || [ -L "$wd/.shmutant" ]; then _shmutant_err "$label: $wd/.shmutant is not the regular file shmutant writes — refusing to treat the workdir as shmutant's"; return 2; fi
@@ -2665,22 +2667,28 @@ _shmutant_flag_value() {
 # The digest tool's own status is the result: a tool that exits non-zero is a failure whatever
 # it printed, and so is output that is not one SHA-256. A failure prints nothing on stdout.
 _shmutant_checksum() {
-  local out="" st=0
+  local out="" st=0 re
+  # What each tool prints for stdin, whole: one line around one digest of sixty-four lowercase
+  # hex digits, the digest last. `<digest>  -` from sha256sum and shasum; from openssl,
+  # `<NAME>(stdin)= <digest>` (SHA2-256 from 3.x, SHA256 from 1.1, none from 1.0) or, from
+  # LibreSSL, the digest alone. Each digit spelled out: a range would follow the locale's collation.
+  local sum_re='^([0123456789abcdef]{64})  -$' ssl_re='^((SHA2-256|SHA256)?\(stdin\)= )?([0123456789abcdef]{64})$'
   # Each candidate an executable file on the standard path, run by that path: a function of
   # the name (inherited, or a caller's) would otherwise be taken for the tool. The file on stdin,
   # not by name: sha256sum and shasum mark a name holding a backslash or a newline by putting a
   # backslash before the digest.
   local tool
-  if tool="$(_shmutant_std_bin sha256sum)"; then out="$("$tool" 2>/dev/null < "$1")" || st=$?
-  elif tool="$(_shmutant_std_bin shasum)"; then out="$("$tool" -a 256 2>/dev/null < "$1")" || st=$?
-  elif tool="$(_shmutant_std_bin openssl)"; then out="$("$tool" dgst -sha256 2>/dev/null < "$1")" || st=$?; out="${out##* }"
+  if tool="$(_shmutant_std_bin sha256sum)"; then out="$("$tool" 2>/dev/null < "$1")" || st=$?; re="$sum_re"
+  elif tool="$(_shmutant_std_bin shasum)"; then out="$("$tool" -a 256 2>/dev/null < "$1")" || st=$?; re="$sum_re"
+  elif tool="$(_shmutant_std_bin openssl)"; then out="$("$tool" dgst -sha256 2>/dev/null < "$1")" || st=$?; re="$ssl_re"
   else _shmutant_err "no sha256sum, shasum or openssl on PATH"; return 2
   fi
   [ "$st" -eq 0 ] || { _shmutant_err "cannot compute the digest of $1 (status $st)"; return 2; }
-  out="${out%% *}"
-  # Sixty-four lowercase hex digits and nothing else, each one spelled out: a range would follow
-  # the locale's collation, and =~ the caller's nocasematch.
-  ( shopt -u nocasematch; [[ "$out" =~ ^[0123456789abcdef]{64}$ ]] ) || { _shmutant_err "$tool printed no SHA-256 for $1"; return 2; }
+  # The whole output against the layout, before any of it is taken: a field cut out first would
+  # let a second record, or anything else around the digest, through. =~ honours the caller's
+  # nocasematch, so it runs with that off.
+  out="$( shopt -u nocasematch; [[ "$out" =~ $re ]] && printf '%s' "${BASH_REMATCH[-1]}" )"
+  [ -n "$out" ] || { _shmutant_err "$tool printed no SHA-256 for $1"; return 2; }
   printf '%s\n' "$out"
 }
 

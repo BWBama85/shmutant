@@ -193,9 +193,9 @@ shmutant_mut 'version prints the wrong marker' \
   '"$SHMUTANT_VERSION"' \
   '"$SHMUTANT_VERSION-mutant"' \
   't_cli_run'
-shmutant_mut 'checksum prints the file name instead of the digest' \
-  '  out="${out%% *}"' \
-  '  out="${out#* }"' \
+shmutant_mut 'checksum prints the whole line instead of the digest' \
+  'printf '"'"'%s'"'"' "${BASH_REMATCH[-1]}"' \
+  'printf '"'"'%s'"'"' "${BASH_REMATCH[0]}"' \
   't_cli_run'
 
 # --- guards added for the first review round ---
@@ -768,7 +768,7 @@ shmutant_mut 'a flag where a value was expected is taken as the value' \
   '    -*) ;;' \
   't_cli_run'
 shmutant_mut 'a digest tool that prints no digest yields success' \
-  '  ( shopt -u nocasematch; [[ "$out" =~ ^[0123456789abcdef]{64}$ ]] ) || { _shmutant_err "$tool printed no SHA-256 for $1"; return 2; }' \
+  '  [ -n "$out" ] || { _shmutant_err "$tool printed no SHA-256 for $1"; return 2; }' \
   '  :' \
   't_checksum_takes_the_tool_status_and_one_digest'
 shmutant_mut 'rows prepare declared are not read' \
@@ -1444,7 +1444,7 @@ shmutant_mut 'a relative run callback is looked up again after prepare' \
   '  :' \
   't_pool_pins_relative_executable_callbacks'
 shmutant_mut 'a caller file named .shmutant marks the workdir' \
-  '    [ "$line" = $'"'"'shmutant workdir\n'"'"' ] && return 0' \
+  '    [ "$line" = $'"'"'shmutant workdir\n'"'"' ] && [ "$size" -eq 17 ] 2>/dev/null && return 0' \
   '    return 0' \
   't_pool_refuses_a_workdir_it_did_not_create_entries_in'
 shmutant_mut 'the marker shmutant writes is empty' \
@@ -1797,12 +1797,16 @@ shmutant_mut 'an awk that failed after printing its pair is a clean scan' \
 
 # --- the workdir marker is the whole file shmutant writes (#27) ---
 shmutant_mut 'only the first line of the marker is read' \
-  "    IFS= read -r -d '' -n 64 line < \"\$wd/.shmutant\" 2>/dev/null && line=\"\"" \
+  "    IFS= read -r -d '' -n 64 line < \"\$wd/.shmutant\" 2>/dev/null || :" \
   "    IFS= read -r -n 64 line < \"\$wd/.shmutant\" 2>/dev/null; line+=\$'\\n'" \
   't_pool_marker_is_the_whole_file_it_writes'
-shmutant_mut 'a NUL byte hides what follows the marker' \
-  "    IFS= read -r -d '' -n 64 line < \"\$wd/.shmutant\" 2>/dev/null && line=\"\"" \
-  "    IFS= read -r -d '' -n 64 line < \"\$wd/.shmutant\" 2>/dev/null || :" \
+shmutant_mut 'the marker'"'"'s size is not checked' \
+  '&& [ "$size" -eq 17 ] 2>/dev/null && return 0' \
+  '&& return 0' \
+  't_pool_marker_is_the_whole_file_it_writes'
+shmutant_mut 'a marker size that cannot be read passes' \
+  '    size="$(command -p wc -c < "$wd/.shmutant" 2>/dev/null)" || size=""' \
+  '    size="$(command -p wc -c < "$wd/.shmutant" 2>/dev/null)" || size=17' \
   't_pool_marker_is_the_whole_file_it_writes'
 
 # --- a digest tool's status and output are both checked (#30) ---
@@ -1823,18 +1827,34 @@ shmutant_mut 'the status of openssl is dropped' \
   'dgst -sha256 2>/dev/null < "$1")";' \
   't_checksum_takes_the_tool_status_and_one_digest'
 shmutant_mut 'a digest of any length is accepted' \
-  '{64}$ ]]' \
-  '{1,}$ ]]' \
+  '{64})  -$'"'"'' \
+  '{1,})  -$'"'"'' \
   't_checksum_takes_the_tool_status_and_one_digest'
-shmutant_mut 'a digest followed by junk is accepted' \
-  '{64}$ ]]' \
-  '{64} ]]' \
+shmutant_mut 'a record followed by more is accepted' \
+  '{64})  -$'"'"'' \
+  '{64})  -'"'"'' \
   't_checksum_takes_the_tool_status_and_one_digest'
-shmutant_mut 'a digest after junk is accepted' \
-  '=~ ^[0123456789abcdef]' \
-  '=~ [0123456789abcdef]' \
+shmutant_mut 'a record after other text is accepted' \
+  'sum_re='"'"'^(' \
+  'sum_re='"'"'(' \
+  't_checksum_takes_the_tool_status_and_one_digest'
+shmutant_mut 'an openssl digest of any length is accepted' \
+  '{64})$'"'"'' \
+  '{1,})$'"'"'' \
+  't_checksum_takes_the_tool_status_and_one_digest'
+shmutant_mut 'an openssl record followed by more is accepted' \
+  '{64})$'"'"'' \
+  '{64})'"'"'' \
+  't_checksum_takes_the_tool_status_and_one_digest'
+shmutant_mut 'an openssl record after other text is accepted' \
+  'ssl_re='"'"'^(' \
+  'ssl_re='"'"'(' \
+  't_checksum_takes_the_tool_status_and_one_digest'
+shmutant_mut 'any algorithm name passes for openssl'"'"'s' \
+  '(SHA2-256|SHA256)?\(stdin\)' \
+  '(.*)?\(stdin\)' \
   't_checksum_takes_the_tool_status_and_one_digest'
 shmutant_mut 'the caller'"'"'s nocasematch lets an uppercase digest through' \
-  '( shopt -u nocasematch; [[ "$out"' \
-  '( [[ "$out"' \
+  '$( shopt -u nocasematch; [[' \
+  '$( [[' \
   't_checksum_takes_the_tool_status_and_one_digest'
