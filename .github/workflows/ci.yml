@@ -69,8 +69,13 @@ jobs:
       - run: bash --version
       - name: the floor guard re-executes from an old bash
         run: /bin/bash shmutant.sh version
-      - name: suite
-        run: bash test/run.sh
+      # Under a TMPDIR whose name holds an apostrophe: a unit that pastes its directory into the
+      # code it generates breaks on it (#25). The macos job keeps an ordinary one.
+      - name: suite, under a TMPDIR with an apostrophe in its name
+        run: |
+          d="$RUNNER_TEMP/it's tmp"
+          mkdir -p "$d"
+          TMPDIR="$d" bash test/run.sh
       - name: self-mutation
         run: bash shmutant.sh run test/mutants.sh --workdir "$RUNNER_TEMP/mutants" --keep > mutants.tsv
       - name: verdicts
