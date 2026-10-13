@@ -1870,3 +1870,11 @@ shmutant_mut 'the caller'"'"'s nocasematch lets an uppercase digest through' \
   'shopt -u nocasematch; [[ "$out" =~ $re ]]' \
   '[[ "$out" =~ $re ]]' \
   't_checksum_takes_the_tool_status_and_one_digest'
+shmutant_mut 'a rejected digest prints an empty line' \
+  '  [ -n "$out" ] || { _shmutant_err "$tool printed no SHA-256 for $1"; return 2; }' \
+  '  [ -n "$out" ] || { echo; _shmutant_err "$tool printed no SHA-256 for $1"; return 2; }' \
+  't_checksum_takes_the_tool_status_and_one_digest'
+shmutant_mut 'a failed digest tool prints an empty line' \
+  '  [ "$st" = 0 ] || { _shmutant_err "cannot compute the digest of $1 (status ${st:-unknown})"; return 2; }' \
+  '  [ "$st" = 0 ] || { echo; _shmutant_err "cannot compute the digest of $1 (status ${st:-unknown})"; return 2; }' \
+  't_checksum_takes_the_tool_status_and_one_digest'

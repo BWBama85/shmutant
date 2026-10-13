@@ -2684,9 +2684,9 @@ _shmutant_checksum() {
   elif tool="$(_shmutant_std_bin openssl)"; then cmd=("$tool" dgst -sha256); re="$ssl_re"
   else _shmutant_err "no sha256sum, shasum or openssl on PATH"; return 2
   fi
-  # The output as the tool wrote it, then its status, each ended by a NUL: $(…) would strip the
-  # trailing newlines and drop NUL bytes before anything could look at them. A NUL of the tool's
-  # own makes a third field; the status is always the last. The tool is a condition, so that a
+  # The output as the tool wrote it, a NUL, then its status: $(…) would strip the trailing
+  # newlines and drop NUL bytes before anything could look at them. A NUL of the tool's own makes
+  # a third field; the status is always the field after the last NUL. The tool is a condition, so that a
   # caller's errexit cannot end the writer before it reports.
   mapfile -d '' got < <(if "${cmd[@]}" 2>/dev/null < "$1"; then printf '\0%s' 0; else printf '\0%s' "$?"; fi)
   [ "${#got[@]}" -eq 0 ] || st="${got[-1]}"

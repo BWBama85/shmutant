@@ -1542,14 +1542,16 @@ t_checksum_takes_the_tool_status_and_one_digest() {
   local which line d=5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03 dd
   printf '#!/bin/sh\ncat "$STUB_FILE"\nexit "$STUB_RC"\n' > "$T/stub"; chmod +x "$T/stub"
   # ckout <status> — the checksum through a stub that prints the bytes of $T/out and exits
-  # <status>; sets CK to stdout and CKRC to the status. The stubbed tool is named by `which`, never
+  # <status>; sets CK to stdout, CKBYTES to its size (a newline alone is not nothing, and $(…)
+  # would take it off) and CKRC to the status. The stubbed tool is named by `which`, never
   # `tool`: that is a local of _shmutant_checksum's, and the stand-in _shmutant_std_bin would read
   # that one through dynamic scope. ckraw <line> <status> does the same with <line> and its
   # newline as the output; lay <digest-field> prints the line the stubbed tool would, and
   # ck <digest-field> <status> runs that line through the stub.
   ckout() {
-    CK="$( _shmutant_std_bin() { [ "$1" = "$which" ] || return 1; printf '%s' "$T/stub"; }
-           export STUB_FILE="$T/out" STUB_RC="$1"; _shmutant_checksum "$T/stub" 2>/dev/null )"; CKRC=$?
+    ( _shmutant_std_bin() { [ "$1" = "$which" ] || return 1; printf '%s' "$T/stub"; }
+      export STUB_FILE="$T/out" STUB_RC="$1"; _shmutant_checksum "$T/stub" > "$T/ckstdout" 2>/dev/null ); CKRC=$?
+    CK="$(cat "$T/ckstdout")"; CKBYTES="$(wc -c < "$T/ckstdout" | tr -d ' ')"
   }
   ckraw() { printf '%s\n' "$1" > "$T/out"; ckout "$2"; }
   lay() { case "$which" in openssl) printf 'SHA2-256(stdin)= %s' "$1" ;; *) printf '%s  -' "$1" ;; esac; }
@@ -1561,7 +1563,7 @@ t_checksum_takes_the_tool_status_and_one_digest() {
     eq "$CK" "$d" "$which: the digest is its own line"
     ck "$d" 5
     rc_is "$CKRC" 2 "$which: a digest printed by a tool that exited 5 is a failure"
-    eq "$CK" '' "$which: and prints nothing"
+    eq "$CKBYTES" 0 "$which: and prints nothing"
     ck '' 0
     rc_is "$CKRC" 2 "$which: no digest is a failure"
     ck "${d%?}" 0
@@ -1570,7 +1572,7 @@ t_checksum_takes_the_tool_status_and_one_digest() {
     rc_is "$CKRC" 2 "$which: sixty-five hex digits are not a digest"
     ck "${d}x" 0
     rc_is "$CKRC" 2 "$which: a digest with junk after it is not a digest"
-    eq "$CK" '' "$which: and prints nothing"
+    eq "$CKBYTES" 0 "$which: and prints nothing"
     ck "\\$d" 0
     rc_is "$CKRC" 2 "$which: a digest with a backslash before it (an escaped file name) is not a digest"
     ck "$dd" 0
@@ -1579,7 +1581,7 @@ t_checksum_takes_the_tool_status_and_one_digest() {
     # the whole output is checked, not a field cut out of it
     ckraw "$(lay "$d")"$'\n'"$(lay "$d")" 0
     rc_is "$CKRC" 2 "$which: two records are not one digest"
-    eq "$CK" '' "$which: and print nothing"
+    eq "$CKBYTES" 0 "$which: and print nothing"
     ckraw "junk $(lay "$d")" 0
     rc_is "$CKRC" 2 "$which: a record after other words is not a digest"
     ckraw "$(lay "$d") junk" 0
@@ -1590,7 +1592,7 @@ t_checksum_takes_the_tool_status_and_one_digest() {
     rc_is "$CKRC" 2 "$which: a blank line after the record is not one line"
     printf '%s\0\n' "$(lay "$d")" > "$T/out"; ckout 0
     rc_is "$CKRC" 2 "$which: a NUL byte in the record is not one line"
-    eq "$CK" '' "$which: and prints nothing"
+    eq "$CKBYTES" 0 "$which: and prints nothing"
     printf '%s\n\0' "$(lay "$d")" > "$T/out"; ckout 0
     rc_is "$CKRC" 2 "$which: a NUL byte after the record's newline is not one line"
     printf '%s' "$(lay "$d")" > "$T/out"; ckout 0
@@ -1620,8 +1622,8 @@ t_checksum_takes_the_tool_status_and_one_digest() {
 c"
   mkdir -p "$where"; cp -- "$SHMUTANT" "$where/shmutant.sh"
   eq "$(bash "$where/shmutant.sh" checksum 2>/dev/null)" "$(_shmutant_checksum "$SHMUTANT")" 'a copy under a name holding a backslash and a newline has the same digest'
-  CK="$(_shmutant_checksum "$T/does-not-exist" 2>/dev/null)"; rc_is $? 2 'a file that cannot be read is a failure'
-  eq "$CK" '' 'and prints nothing'
+  _shmutant_checksum "$T/does-not-exist" > "$T/ckstdout" 2>/dev/null; rc_is $? 2 'a file that cannot be read is a failure'
+  eq "$(wc -c < "$T/ckstdout" | tr -d ' ')" 0 'and prints nothing'
 }
 
 t_cli_removes_shadows_planted_before_it_ran() {
