@@ -129,7 +129,8 @@ note_started() { printf '%s:%s\n' "$!" "$(_shmutant_identity "$!" 2>/dev/null)" 
 # match. Returns 1 when <file> records nothing: an absence check would then pass vacuously.
 left_running() {
   local line pid n=0
-  while IFS= read -r line; do
+  # A last line without its newline is still a record: one cut short must not hide a survivor.
+  while IFS= read -r line || [ -n "$line" ]; do
     [ -n "$line" ] || continue
     n=$((n + 1)); pid="${line%%:*}"
     kill -0 "$pid" 2>/dev/null || continue
@@ -3584,9 +3585,10 @@ t_pool_aborts_running_workers_when_a_dir_cannot_be_recreated() {
   [ "${#SHMUTANT_VERDICT_R[@]}" -eq 0 ] || fail_ 'the ended workers'"'"' channels were left open in the caller shell'
   sleep 1
   [ -e "$T/finished" ] && fail_ 'the running worker survived the abort'
-  # with a TERM-ignoring escaped descendant, the abort must not return before it is gone; the run
-  # marks itself started only once that descendant runs and is recorded, so the abort meets it
-  stubborn_hanging_run() { set -m; bash -c 'trap "" TERM; sleep 30; touch "$1/finished2"' _ "$T" & note_started "$T/finished2.id"; : > "$T/started2"; wait; }
+  # with a TERM-ignoring escaped descendant, the abort must not return before it is gone. The run
+  # marks itself started only once that descendant is recorded and has said its TERM trap is set,
+  # so the abort meets one that TERM cannot end, and the check after it has a process to look for
+  stubborn_hanging_run() { set -m; bash -c 'trap "" TERM; : > "$1/ignoring2"; sleep 30; touch "$1/finished2"' _ "$T" & note_started "$T/finished2.id"; wait_for "$T/ignoring2" && : > "$T/started2"; wait; }
   make_unremovable "$T/wd2/mut-1/held" || { eval "$(declare -f _shmutant_fresh_dir_real | sed '1s/_shmutant_fresh_dir_real/_shmutant_fresh_dir/')"; unset -f _shmutant_fresh_dir_real; return; }
   printf 'shmutant workdir\n' > "$T/wd2/.shmutant"
   WAIT_FOR=started2 SHMUTANT_JOBS=2 SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=0 pool lbl "$T/wd2" toy_prepare stubborn_hanging_run
@@ -5002,6 +5004,33 @@ t_wait_gone_takes_a_zombie_as_gone() {
   esac
   wait_gone "$child" '' 1 || fail_ 'a zombie was waited on as if it were still running'
   kill -KILL "$parent" 2>/dev/null; wait "$parent" 2>/dev/null
+}
+
+t_left_running_names_only_a_recorded_process_still_running() {
+  # The checks that a unit's processes are gone read their records through left_running. It names
+  # a recorded process while it runs, frozen or not, and clears one that exited or whose pid now
+  # carries another identity. A record that names nothing fails it: a check would then pass
+  # vacuously.
+  local p d out
+  left_running "$T/missing" > /dev/null; rc_is $? 1 'a record that does not exist names nothing'
+  : > "$T/empty"; left_running "$T/empty" > /dev/null; rc_is $? 1 'an empty record names nothing'
+  ( exit 0 ) & d=$!; wait "$d"
+  sleep 30 & p=$!; note_started "$T/live.id"
+  case "$(cat "$T/live.id")" in "$p:"?*) ;; *) fail_ "note_started recorded [$(cat "$T/live.id")], not $p with an identity" ;; esac
+  out="$(left_running "$T/live.id")"; rc_is $? 0 'a recorded process is read'
+  eq "$out" "$p" 'and named while it runs'
+  kill -STOP "$p"
+  eq "$(left_running "$T/live.id")" "$p" 'and while it is frozen'
+  kill -CONT "$p"
+  printf '%s:%s\n' "$p" 'not its start' > "$T/reused.id"
+  eq "$(left_running "$T/reused.id")" '' 'a pid that now carries another identity was reused, and is not named'
+  printf '%s\n' "$p" > "$T/bare.pids"
+  eq "$(left_running "$T/bare.pids")" "$p" 'a pid recorded without an identity is named while it runs'
+  printf '%s\n%s' "$d" "$p" > "$T/cut.pids"
+  eq "$(left_running "$T/cut.pids")" "$p" 'a last record without its newline is still read'
+  kill -KILL "$p"; wait "$p" 2>/dev/null
+  out="$(left_running "$T/live.id")"; rc_is $? 0 'a record of a process that has exited is still read'
+  eq "$out" '' 'and names nothing'
 }
 
 # --- runner -----------------------------------------------------------------------------------------------
