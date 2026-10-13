@@ -672,6 +672,63 @@ t_pool_refuses_a_workdir_it_did_not_create_entries_in() {
   eq "$(cat "$T/wd3/.shmutant")" 'shmutant workdir' 'the marker shmutant writes is the recognisable line'
 }
 
+t_pool_marker_is_the_whole_file_it_writes() {
+  # the marker is the whole file shmutant writes, the line `shmutant workdir` and its newline: a
+  # caller's .shmutant that begins with that line, or holds it beside anything else, is refused,
+  # and the pristine, base-N and mut-N entries beside it stay
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  local i=0 e fmt
+  # format, then what it is: printf turns each \n, \r and \0 into its byte
+  local -a marks=(
+    'shmutant workdir\nforeign contents\n'  'a line after the marker'
+    'shmutant workdir\n\n'                  'a blank line after the marker'
+    'shmutant workdir'                      'the marker without its newline'
+    'shmutant workdir\r\n'                  'the marker ending in CRLF'
+    'shmutant workdir\r'                    'seventeen bytes that are not the marker'
+    'shmutant workdir\0'                    'a NUL byte where the newline belongs'
+    'shmutant workdir\n\0'                  'a NUL byte after the marker'
+    'shmutant workdir\n\0foreign\n'         'a NUL byte, then a line, after the marker'
+    'shmutant\0workdir\n'                   'a NUL byte inside the marker'
+    "shmutant workdir\\n$(printf '%080d' 0)\\n" 'a line past the read bound after the marker'
+  )
+  while [ "$i" -lt "${#marks[@]}" ]; do
+    fmt="${marks[i]}"; e="$T/wd$i"
+    mkdir -p "$e/pristine" "$e/base-1" "$e/mut-1"
+    printf 'mine\n' > "$e/pristine/precious"; printf 'mine\n' > "$e/base-1/precious"; printf 'mine\n' > "$e/mut-1/precious"
+    # shellcheck disable=SC2059 # the format is the fixture
+    printf "$fmt" > "$e/.shmutant"
+    pool lbl "$e" toy_prepare toy_run
+    rc_is "$RC" 2 "${marks[i + 1]} is not the marker"
+    has "$ERR" 'not the marker shmutant writes' "${marks[i + 1]}: says why"
+    eq "$(cat "$e/pristine/precious" "$e/base-1/precious" "$e/mut-1/precious")" $'mine\nmine\nmine' "${marks[i + 1]}: the caller's pristine, base-1 and mut-1 stayed"
+    i=$((i + 2))
+  done
+  # the file shmutant writes is accepted, and is still those seventeen bytes after the run
+  mkdir -p "$T/ok"; printf 'shmutant workdir\n' > "$T/ok/.shmutant"
+  pool lbl "$T/ok" toy_prepare toy_run
+  rc_is "$RC" 0 'the exact marker marks the workdir'
+  eq "$(wc -c < "$T/ok/.shmutant" | tr -d ' ')" 17 'the marker is the one line, newline included'
+  # and whatever the caller's shell options: the check runs in the caller's shell
+  ( set -euC -o pipefail; IFS=:; shopt -s nocasematch extglob; shmutant_pool lbl "$T/ok" toy_prepare toy_run ) > /dev/null 2>&1
+  rc_is $? 0 'a strict caller with an odd IFS still reuses a marked workdir'
+  ( set -euC -o pipefail; IFS=:; shopt -s nocasematch extglob; shmutant_pool lbl "$T/wd0" toy_prepare toy_run ) > /dev/null 2>&1
+  rc_is $? 2 'and still refuses a .shmutant with a line after the marker'
+  [ -e "$T/wd0/pristine/precious" ] || fail_ 'the strict caller'"'"'s refused workdir lost its pristine'
+  # A read that fails partway still assigns the bytes it got, with the status the end of the file
+  # gives: one that stopped after the marker's seventeen bytes of a longer file is stood in for
+  # here (the pool refuses a function named read; the check itself does not need one). The size
+  # is what refuses it, and a size that cannot be read refuses it too.
+  ( read() { line=$'shmutant workdir\n'; return 1; }
+    _shmutant_workdir_owned lbl "$T/wd0" 2>/dev/null; rc_is $? 2 'a read that failed after the marker'"'"'s bytes of a longer file is not the marker'
+    _shmutant_workdir_owned lbl "$T/ok" 2>/dev/null; rc_is $? 0 'fixture: the same read on the marker itself is the marker'
+    exit "$_failed" ) || _failed=1
+  ( command() { if [ "${1-}" = -p ] && [ "${2-}" = wc ]; then return 1; fi; builtin command "$@"; }
+    _shmutant_workdir_owned lbl "$T/ok" 2>/dev/null; rc_is $? 2 'a marker whose size cannot be read is not the marker'
+    exit "$_failed" ) || _failed=1
+}
+
 t_target_refuses_a_newline() {
   shmutant_reset; SHMUTANT_DECL_ERRORS=0
   shmutant_target "d
@@ -862,6 +919,33 @@ t_witness_matches_a_whole_token() {
     SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd" toy_prepare toy_run > "$T/out" 2> "$T/err" ); rc_is $? 2 'a run whose output could not be scanned is a harness error'
   has "$(cat "$T/err")" 'could not be scanned' 'says why'
   case "$(cat "$T/out")" in *survived*) fail_ 'an unscanned run was scored a survivor' ;; esac
+}
+
+t_scan_fails_when_awk_fails() {
+  # awk's status is part of the scan's result: an awk that printed a pair and then exited non-zero
+  # (a read that failed partway, or before its first line: some awks still reach END) scanned
+  # nothing it can vouch for, whichever pair it printed. The awk is stubbed so that every host
+  # sees the same failure.
+  local fd pair
+  for pair in '0 0' '1 0' '1 1'; do
+    ( command() { if [ "${1-}" = -p ] && [ "${2-}" = awk ]; then printf '%s\n' "$pair"; return 2; fi; builtin command "$@"; }
+      exec {fd}< <(printf 'FAIL: t_x: foo\n'); _shmutant_scan_output "$fd" 'FAIL: ' foo; exec {fd}<&-
+      eq "$SHMUTANT_RUN_SCAN_FAILED$SHMUTANT_RUN_RED$SHMUTANT_RUN_WITNESSED" 100 "an awk that printed [$pair] and exited 2 is a failed scan that asserts nothing"
+      exit "$_failed" ) || _failed=1
+  done
+  ( command() { if [ "${1-}" = -p ] && [ "${2-}" = awk ]; then printf '1 1\n'; return 0; fi; builtin command "$@"; }
+    exec {fd}< <(printf 'FAIL: t_x: foo\n'); _shmutant_scan_output "$fd" 'FAIL: ' foo; exec {fd}<&-
+    eq "$SHMUTANT_RUN_SCAN_FAILED$SHMUTANT_RUN_RED$SHMUTANT_RUN_WITNESSED" 011 'fixture: the same stub exiting 0 is a clean scan'
+    exit "$_failed" ) || _failed=1
+  # The issue's own case, with this host's awk: a descriptor on a directory, whose read fails.
+  # Where the awk reports that failure (one-true-awk prints `0 0` and exits 2), the scan does too.
+  mkdir -p "$T/scandir"
+  # A main rule, so that the awk reads its input: one with only an END may never read.
+  if ! command -p awk '{ }' < "$T/scandir" > /dev/null 2>&1; then
+    exec {fd}< "$T/scandir"; _shmutant_scan_output "$fd" 'FAIL: ' foo; exec {fd}<&-
+    eq "$SHMUTANT_RUN_SCAN_FAILED$SHMUTANT_RUN_RED$SHMUTANT_RUN_WITNESSED" 100 'a scan of a descriptor whose read failed is a failure, not a clean scan'
+  else echo "note: $_unit: this host's awk reads a directory without failing; the stubbed cases above stand in"
+  fi
 }
 
 t_pool_refuses_a_modified_pristine_tree() {
@@ -1448,6 +1532,98 @@ t_checksum_uses_the_digest_file_not_a_function() {
   got="$( sha256sum() { :; }; shasum() { :; }; openssl() { :; }; export -f sha256sum shasum openssl; bash "$SHMUTANT" checksum 2>/dev/null )"
   eq "$got" "$want" 'the checksum is the same with functions named after every digest tool exported'
   [ -n "$want" ] || fail_ 'fixture: no digest at all'
+}
+
+t_checksum_takes_the_tool_status_and_one_digest() {
+  # the digest tool's status is the result, and only one SHA-256 is a digest. Each tool the
+  # platform may have is stubbed in turn (as the only one _shmutant_std_bin finds), printing what
+  # the real one prints and then what no digest is; every failure is status 2 with nothing on
+  # stdout, so a caller comparing the line against CHECKSUMS never sees a near-digest
+  local which line d=5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03 dd
+  printf '#!/bin/sh\ncat "$STUB_FILE"\nexit "$STUB_RC"\n' > "$T/stub"; chmod +x "$T/stub"
+  # ckout <status> — the checksum through a stub that prints the bytes of $T/out and exits
+  # <status>; sets CK to stdout, CKBYTES to its size (a newline alone is not nothing, and $(…)
+  # would take it off) and CKRC to the status. The stubbed tool is named by `which`, never
+  # `tool`: that is a local of _shmutant_checksum's, and the stand-in _shmutant_std_bin would read
+  # that one through dynamic scope. ckraw <line> <status> does the same with <line> and its
+  # newline as the output; lay <digest-field> prints the line the stubbed tool would, and
+  # ck <digest-field> <status> runs that line through the stub.
+  ckout() {
+    ( _shmutant_std_bin() { [ "$1" = "$which" ] || return 1; printf '%s' "$T/stub"; }
+      export STUB_FILE="$T/out" STUB_RC="$1"; _shmutant_checksum "$T/stub" > "$T/ckstdout" 2>/dev/null ); CKRC=$?
+    CK="$(cat "$T/ckstdout")"; CKBYTES="$(wc -c < "$T/ckstdout" | tr -d ' ')"
+  }
+  ckraw() { printf '%s\n' "$1" > "$T/out"; ckout "$2"; }
+  lay() { case "$which" in openssl) printf 'SHA2-256(stdin)= %s' "$1" ;; *) printf '%s  -' "$1" ;; esac; }
+  ck() { ckraw "$(lay "$1")" "$2"; }
+  dd="$(printf '%s' "$d" | tr a-f A-F)"
+  for which in sha256sum shasum openssl; do
+    ck "$d" 0
+    rc_is "$CKRC" 0 "$which: a digest and status 0 is the result"
+    eq "$CK" "$d" "$which: the digest is its own line"
+    ck "$d" 5
+    rc_is "$CKRC" 2 "$which: a digest printed by a tool that exited 5 is a failure"
+    eq "$CKBYTES" 0 "$which: and prints nothing"
+    ck '' 0
+    rc_is "$CKRC" 2 "$which: no digest is a failure"
+    ck "${d%?}" 0
+    rc_is "$CKRC" 2 "$which: sixty-three hex digits are not a digest"
+    ck "${d}0" 0
+    rc_is "$CKRC" 2 "$which: sixty-five hex digits are not a digest"
+    ck "${d}x" 0
+    rc_is "$CKRC" 2 "$which: a digest with junk after it is not a digest"
+    eq "$CKBYTES" 0 "$which: and prints nothing"
+    ck "\\$d" 0
+    rc_is "$CKRC" 2 "$which: a digest with a backslash before it (an escaped file name) is not a digest"
+    ck "$dd" 0
+    rc_is "$CKRC" 2 "$which: an uppercase digest is not the one CHECKSUMS carries"
+    ( shopt -s nocasematch; ck "$dd" 0; rc_is "$CKRC" 2 "$which: nor is it under the caller's nocasematch"; exit "$_failed" ) || _failed=1
+    # the whole output is checked, not a field cut out of it
+    ckraw "$(lay "$d")"$'\n'"$(lay "$d")" 0
+    rc_is "$CKRC" 2 "$which: two records are not one digest"
+    eq "$CKBYTES" 0 "$which: and print nothing"
+    ckraw "junk $(lay "$d")" 0
+    rc_is "$CKRC" 2 "$which: a record after other words is not a digest"
+    ckraw "$(lay "$d") junk" 0
+    rc_is "$CKRC" 2 "$which: a record followed by other words is not a digest"
+    # as the tool wrote it: $(…) would strip trailing newlines and drop a NUL byte, turning each
+    # of these into the one line the tool prints
+    printf '%s\n\n' "$(lay "$d")" > "$T/out"; ckout 0
+    rc_is "$CKRC" 2 "$which: a blank line after the record is not one line"
+    printf '%s\0\n' "$(lay "$d")" > "$T/out"; ckout 0
+    rc_is "$CKRC" 2 "$which: a NUL byte in the record is not one line"
+    eq "$CKBYTES" 0 "$which: and prints nothing"
+    printf '%s\n\0' "$(lay "$d")" > "$T/out"; ckout 0
+    rc_is "$CKRC" 2 "$which: a NUL byte after the record's newline is not one line"
+    printf '%s' "$(lay "$d")" > "$T/out"; ckout 0
+    rc_is "$CKRC" 2 "$which: a record without its newline is not the line the tool prints"
+    # and a rejection is reported under a caller's errexit, not ended by it. A shell of its own:
+    # every unit runs on the left of an ||, where errexit is off for all it calls.
+    printf '%s\n' "$(lay "${d%?}")" > "$T/out"
+    STUB_FILE="$T/out" STUB_RC=0 W="$which" S="$T/stub" bash -c '. "$1" || exit 9; set -e; _shmutant_std_bin() { [ "$1" = "$W" ] || return 1; printf "%s" "$S"; }; _shmutant_checksum "$S"' \
+      _ "$SHMUTANT" > /dev/null 2> "$T/ckerr"; rc_is $? 2 "$which: a malformed digest under errexit is status 2"
+    has "$(cat "$T/ckerr")" 'printed no SHA-256' "$which: and says why"
+    STUB_FILE="$T/out" STUB_RC=5 W="$which" S="$T/stub" bash -c '. "$1" || exit 9; set -e; _shmutant_std_bin() { [ "$1" = "$W" ] || return 1; printf "%s" "$S"; }; _shmutant_checksum "$S"' \
+      _ "$SHMUTANT" > /dev/null 2> "$T/ckerr"; rc_is $? 2 "$which: a failed tool under errexit is status 2"
+    has "$(cat "$T/ckerr")" '(status 5)' "$which: and names the tool's own status"
+  done
+  # every layout openssl has printed for stdin: 3.x, 1.1, 1.0, and LibreSSL's digest alone
+  which=openssl
+  for line in "SHA2-256(stdin)= $d" "SHA256(stdin)= $d" "(stdin)= $d" "$d"; do
+    ckraw "$line" 0
+    rc_is "$CKRC" 0 "openssl: [$line] is a digest"
+    eq "$CK" "$d" "openssl: [$line] gives its digest"
+  done
+  ckraw "MD5(stdin)= $d" 0
+  rc_is "$CKRC" 2 'openssl: another algorithm'"'"'s name is not the SHA-256 layout'
+  # with the real tools: a file name holding a backslash and a newline (which sha256sum and shasum
+  # escape on their own line) is hashed all the same, and a file that cannot be read is a failure
+  local where="$T/a\\b
+c"
+  mkdir -p "$where"; cp -- "$SHMUTANT" "$where/shmutant.sh"
+  eq "$(bash "$where/shmutant.sh" checksum 2>/dev/null)" "$(_shmutant_checksum "$SHMUTANT")" 'a copy under a name holding a backslash and a newline has the same digest'
+  _shmutant_checksum "$T/does-not-exist" > "$T/ckstdout" 2>/dev/null; rc_is $? 2 'a file that cannot be read is a failure'
+  eq "$(wc -c < "$T/ckstdout" | tr -d ' ')" 0 'and prints nothing'
 }
 
 t_cli_removes_shadows_planted_before_it_ran() {
