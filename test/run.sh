@@ -120,21 +120,27 @@ wait_gone() {
 # note_started <file> — record the calling shell's last background job ($!) in <file> as
 # `pid:identity`, the identity read at once: a later check or kill then reaches that process, and
 # no other that comes to hold its number. One whose identity could not be read is left as `pid:`.
-note_started() { printf '%s:%s\n' "$!" "$(_shmutant_identity "$!" 2>/dev/null)" > "$1"; }
+# The record is written whole or not at all: a cut identity would read as a pid reused since, and
+# hide the process it names. With none written, left_running fails the check instead.
+note_started() {
+  printf '%s:%s\n' "$!" "$(_shmutant_identity "$!" 2>/dev/null)" > "$1.part" && mv -f -- "$1.part" "$1"
+}
 
 # left_running <file> — print the pid of each process recorded in <file> (a `pid` or `pid:identity`
 # per line, written when it was started) that is still running: a zombie has exited, and a pid now
 # carrying another identity was reused; one recorded without an identity counts while its pid runs.
 # Only pids are read, never argument lists, so no name a directory holds can make another process
-# match. Returns 1 when <file> records nothing: an absence check would then pass vacuously.
+# match. Returns 1 when <file> records nothing, holds a line that is not a record, or a survivor
+# could not be written out: an absence check would then pass vacuously.
 left_running() {
   local line pid n=0
   # A last line without its newline is still a record: one cut short must not hide a survivor.
   while IFS= read -r line || [ -n "$line" ]; do
     [ -n "$line" ] || continue
     n=$((n + 1)); pid="${line%%:*}"
+    case "$pid" in ''|0*|*[!0-9]*) return 1 ;; esac
     kill -0 "$pid" 2>/dev/null || continue
-    case "$line" in *:*) wait_gone "$pid" "${line#*:}" 1 ;; *) wait_gone "$pid" '' 1 ;; esac || printf '%s\n' "$pid"
+    case "$line" in *:*) wait_gone "$pid" "${line#*:}" 1 ;; *) wait_gone "$pid" '' 1 ;; esac || printf '%s\n' "$pid" || return 1
   done 2>/dev/null < "$1"
   [ "$n" -gt 0 ]
 }
@@ -2461,11 +2467,13 @@ t_verdict_timeout_kills_a_term_ignoring_descendant() {
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
   shmutant_mut 'hangs' '$1 + $2' '$1 - $2' 'add-works'
-  stubborn_run() { bash -c 'trap "" TERM; sleep 4; touch "$1/finished"' _ "$T" & note_started "$T/stubborn.id"; wait "$!"; }
+  stubborn_run() { bash -c 'trap "" TERM; : > "$1/ignoring"; sleep 4; touch "$1/finished"' _ "$T" & note_started "$T/stubborn.id"; wait "$!"; }
   SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=1 pool lbl "$T/wd" toy_prepare stubborn_run
   eq "$(verdict_of 'hangs')" timeout 'verdict is timeout'
   sleep 4
   [ -e "$T/finished" ] && fail_ 'a descendant that ignores TERM outlived the timeout — the watchdog never reached KILL'
+  # written once its trap is set: one ended before that never ignored TERM, and tested nothing
+  [ -e "$T/ignoring" ] || fail_ 'fixture: the descendant was ended before it set its TERM trap'
   local alive; alive="$(left_running "$T/stubborn.id")" || fail_ 'fixture: the run never recorded its descendant'
   [ -z "$alive" ] || fail_ 'a process of the run is still there (frozen or alive) after the timeout was scored'
 }
@@ -3362,12 +3370,13 @@ t_verdict_timeout_stops_a_run_that_keeps_forking() {
   shmutant_mut 'hangs' '$1 + $2' '$1 - $2' 'add-works'
   # a new escaped child every few milliseconds: one forked between a snapshot and the kill
   # survives unless the tree was frozen first
-  forking_run() { set -m; while :; do bash -c 'sleep 4; touch "$1/leak.$2"' _ "$T" "$RANDOM" & echo "$!" >> "$T/leaks.pids"; sleep 0.02; done; }
+  forking_run() { set -m; while :; do bash -c 'sleep 4; touch "$1/leak.$2"' _ "$T" "$RANDOM" & { echo "$!" >> "$T/leaks.pids"; } 2>/dev/null || : > "$T/leaks.lost"; sleep 0.02; done; }
   SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=1 pool lbl "$T/wd" toy_prepare forking_run
   eq "$(verdict_of 'hangs')" timeout 'verdict is timeout'
   sleep 5
   [ -z "$(find "$T" -maxdepth 1 -name 'leak.*' -print -quit)" ] || fail_ 'a child forked while the tree was being killed outlived the timeout'
   local alive; alive="$(left_running "$T/leaks.pids")" || fail_ 'fixture: the run never recorded a child'
+  [ ! -e "$T/leaks.lost" ] || fail_ 'fixture: a child of the run could not be recorded, so it was not checked'
   [ -z "$alive" ] || fail_ 'children of the run are still there after the timeout'
 }
 
@@ -3595,6 +3604,7 @@ t_pool_aborts_running_workers_when_a_dir_cannot_be_recreated() {
   unmake_unremovable "$T/wd2/mut-1/held"
   eval "$(declare -f _shmutant_fresh_dir_real | sed '1s/_shmutant_fresh_dir_real/_shmutant_fresh_dir/')"; unset -f _shmutant_fresh_dir_real
   rc_is "$RC" 2 'harness error'
+  [ -e "$T/ignoring2" ] || fail_ 'fixture: the stubborn descendant never set its TERM trap, so the abort met none'
   local alive; alive="$(left_running "$T/finished2.id")" || fail_ 'fixture: the stubborn run never recorded its descendant'
   [ -z "$alive" ] || fail_ 'the abort returned while a TERM-ignoring descendant was still alive'
 }
@@ -5014,6 +5024,7 @@ t_left_running_names_only_a_recorded_process_still_running() {
   local p d out
   left_running "$T/missing" > /dev/null; rc_is $? 1 'a record that does not exist names nothing'
   : > "$T/empty"; left_running "$T/empty" > /dev/null; rc_is $? 1 'an empty record names nothing'
+  printf 'not-a-pid\n' > "$T/malformed"; left_running "$T/malformed" > /dev/null; rc_is $? 1 'a line that is not a record is refused'
   ( exit 0 ) & d=$!; wait "$d"
   sleep 30 & p=$!; note_started "$T/live.id"
   case "$(cat "$T/live.id")" in "$p:"?*) ;; *) fail_ "note_started recorded [$(cat "$T/live.id")], not $p with an identity" ;; esac
@@ -5026,6 +5037,11 @@ t_left_running_names_only_a_recorded_process_still_running() {
   eq "$(left_running "$T/reused.id")" '' 'a pid that now carries another identity was reused, and is not named'
   printf '%s\n' "$p" > "$T/bare.pids"
   eq "$(left_running "$T/bare.pids")" "$p" 'a pid recorded without an identity is named while it runs'
+  printf '%s:\n' "$p" > "$T/noid.id"
+  eq "$(left_running "$T/noid.id")" "$p" 'so is one whose identity could not be read when it started'
+  left_running "$T/live.id" 1< /dev/null; rc_is $? 1 'a survivor that cannot be written out fails the check'
+  note_started "$T/no-such-dir/x.id" 2>/dev/null && fail_ 'a record that could not be written was reported written'
+  left_running "$T/no-such-dir/x.id" > /dev/null; rc_is $? 1 'and it leaves nothing a check could pass on'
   printf '%s\n%s' "$d" "$p" > "$T/cut.pids"
   eq "$(left_running "$T/cut.pids")" "$p" 'a last record without its newline is still read'
   kill -KILL "$p"; wait "$p" 2>/dev/null
