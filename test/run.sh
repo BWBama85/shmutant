@@ -117,6 +117,27 @@ wait_gone() {
   done
 }
 
+# note_started <file> — record the calling shell's last background job ($!) in <file> as
+# `pid:identity`, the identity read at once: a later check or kill then reaches that process, and
+# no other that comes to hold its number. One whose identity could not be read is left as `pid:`.
+note_started() { printf '%s:%s\n' "$!" "$(_shmutant_identity "$!" 2>/dev/null)" > "$1"; }
+
+# left_running <file> — print the pid of each process recorded in <file> (a `pid` or `pid:identity`
+# per line, written when it was started) that is still running: a zombie has exited, and a pid now
+# carrying another identity was reused; one recorded without an identity counts while its pid runs.
+# Only pids are read, never argument lists, so no name a directory holds can make another process
+# match. Returns 1 when <file> records nothing: an absence check would then pass vacuously.
+left_running() {
+  local line pid n=0
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    n=$((n + 1)); pid="${line%%:*}"
+    kill -0 "$pid" 2>/dev/null || continue
+    case "$line" in *:*) wait_gone "$pid" "${line#*:}" 1 ;; *) wait_gone "$pid" '' 1 ;; esac || printf '%s\n' "$pid"
+  done 2>/dev/null < "$1"
+  [ "$n" -gt 0 ]
+}
+
 # make_unremovable <dir> — make <dir> (with a file inside) something this user cannot delete:
 # the immutable flag where the platform has one, else root ownership through a non-interactive
 # sudo (the CI runners allow it). False when neither is available; undo with unmake_unremovable.
@@ -1525,13 +1546,13 @@ t_unbounded_run_still_tracks_descendants() {
   shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
   # the helper forks the escapee into its own group, then lives on for a second: the escapee is
   # a descendant of the run only while the helper lives, and that is when the watchdog sees it
-  escaping_run() { ( set -m; bash -c 'sleep 4; touch "$1/escaped"' _ "$T" & sleep 1 ) & sleep 2; bash "$1/test.sh"; }
+  escaping_run() { ( set -m; bash -c 'sleep 4; touch "$1/escaped"' _ "$T" & note_started "$T/escaped.id"; sleep 1 ) & sleep 2; bash "$1/test.sh"; }
   SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=0 pool lbl "$T/wd" toy_prepare escaping_run
   rc_is "$RC" 0 'the row is killed'
   sleep 4
   [ -e "$T/escaped" ] && fail_ 'with the timeout disabled, a grandchild that left the group before the return outlived the pool'
-  # found by its arguments as a fixed string: a pattern would read the directory as syntax
-  ps -A -o pid= -o args= | grep -F "touch \"\$1/escaped\" _ $T" | grep -v grep | while read -r p _; do kill "$p" 2>/dev/null; done; true
+  # what the pool missed is ended by the identity it was started with, never by its number alone
+  [ ! -s "$T/escaped.id" ] || _shmutant_kill_tree_twice 0: "$(cat "$T/escaped.id")" 2>/dev/null; true
 }
 
 t_watchdog_deadline_survives_clock_steps() {
@@ -2439,12 +2460,13 @@ t_verdict_timeout_kills_a_term_ignoring_descendant() {
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
   shmutant_mut 'hangs' '$1 + $2' '$1 - $2' 'add-works'
-  stubborn_run() { bash -c 'trap "" TERM; sleep 4; touch "$1/finished"' _ "$T"; }
+  stubborn_run() { bash -c 'trap "" TERM; sleep 4; touch "$1/finished"' _ "$T" & note_started "$T/stubborn.id"; wait "$!"; }
   SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=1 pool lbl "$T/wd" toy_prepare stubborn_run
   eq "$(verdict_of 'hangs')" timeout 'verdict is timeout'
   sleep 4
   [ -e "$T/finished" ] && fail_ 'a descendant that ignores TERM outlived the timeout — the watchdog never reached KILL'
-  [ -z "$(ps -A -o args= | grep -F "touch \"\$1/finished\" _ $T" | grep -v grep)" ] || fail_ 'a process of the run is still there (frozen or alive) after the timeout was scored'
+  local alive; alive="$(left_running "$T/stubborn.id")" || fail_ 'fixture: the run never recorded its descendant'
+  [ -z "$alive" ] || fail_ 'a process of the run is still there (frozen or alive) after the timeout was scored'
 }
 
 t_verdict_timeout_kills_an_escaped_process_group() {
@@ -3253,12 +3275,13 @@ t_verdict_timeout_kills_a_descendant_seen_then_reparented() {
   # at the deadline A is reachable only through what the watchdog retained.
   # I lives through two watchdog polls and dies well before the deadline: one poll is a
   # coin-flip on a loaded host.
-  orphaning_run() { set -m; bash -c 'bash -c "sleep 7; touch \"\$1/orphan\"" _ "$1" & sleep 1.3' _ "$T" & sleep 4; }
+  orphaning_run() { set -m; bash -c 'bash -c "sleep 7; touch \"\$1/orphan\"" _ "$1" & echo "$!" > "$1/orphan.pid"; sleep 1.3' _ "$T" & sleep 4; }
   SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=2 pool lbl "$T/wd" toy_prepare orphaning_run
   eq "$(verdict_of 'hangs')" timeout 'verdict is timeout'
   sleep 6
   [ -e "$T/orphan" ] && fail_ 'a descendant seen by the watchdog and then reparented outlived the timeout'
-  [ -z "$(ps -A -o args= | grep -F "touch \"\$1/orphan\" _ $T" | grep -v grep)" ] || fail_ 'the reparented descendant is still there'
+  local alive; alive="$(left_running "$T/orphan.pid")" || fail_ 'fixture: the run never recorded the descendant'
+  [ -z "$alive" ] || fail_ 'the reparented descendant is still there'
   rm -f "$T/orphan"
   ( IFS=''; SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=2 shmutant_pool lbl "$T/wd2" toy_prepare orphaning_run > /dev/null 2>&1 )
   sleep 6
@@ -3338,12 +3361,13 @@ t_verdict_timeout_stops_a_run_that_keeps_forking() {
   shmutant_mut 'hangs' '$1 + $2' '$1 - $2' 'add-works'
   # a new escaped child every few milliseconds: one forked between a snapshot and the kill
   # survives unless the tree was frozen first
-  forking_run() { set -m; while :; do bash -c 'sleep 4; touch "$1/leak.$2"' _ "$T" "$RANDOM" & sleep 0.02; done; }
+  forking_run() { set -m; while :; do bash -c 'sleep 4; touch "$1/leak.$2"' _ "$T" "$RANDOM" & echo "$!" >> "$T/leaks.pids"; sleep 0.02; done; }
   SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=1 pool lbl "$T/wd" toy_prepare forking_run
   eq "$(verdict_of 'hangs')" timeout 'verdict is timeout'
   sleep 5
   [ -z "$(find "$T" -maxdepth 1 -name 'leak.*' -print -quit)" ] || fail_ 'a child forked while the tree was being killed outlived the timeout'
-  [ -z "$(ps -A -o args= | grep -F "touch \"\$1/leak.\$2\" _ $T " | grep -v grep)" ] || fail_ 'children of the run are still there after the timeout'
+  local alive; alive="$(left_running "$T/leaks.pids")" || fail_ 'fixture: the run never recorded a child'
+  [ -z "$alive" ] || fail_ 'children of the run are still there after the timeout'
 }
 
 t_verdict_timeout_marker_cannot_be_forged() {
@@ -3560,15 +3584,17 @@ t_pool_aborts_running_workers_when_a_dir_cannot_be_recreated() {
   [ "${#SHMUTANT_VERDICT_R[@]}" -eq 0 ] || fail_ 'the ended workers'"'"' channels were left open in the caller shell'
   sleep 1
   [ -e "$T/finished" ] && fail_ 'the running worker survived the abort'
-  # with a TERM-ignoring escaped descendant, the abort must not return before it is gone
-  stubborn_hanging_run() { : > "$T/started2"; set -m; bash -c 'trap "" TERM; sleep 30; touch "$1/finished2"' _ "$T" & wait; }
+  # with a TERM-ignoring escaped descendant, the abort must not return before it is gone; the run
+  # marks itself started only once that descendant runs and is recorded, so the abort meets it
+  stubborn_hanging_run() { set -m; bash -c 'trap "" TERM; sleep 30; touch "$1/finished2"' _ "$T" & note_started "$T/finished2.id"; : > "$T/started2"; wait; }
   make_unremovable "$T/wd2/mut-1/held" || { eval "$(declare -f _shmutant_fresh_dir_real | sed '1s/_shmutant_fresh_dir_real/_shmutant_fresh_dir/')"; unset -f _shmutant_fresh_dir_real; return; }
   printf 'shmutant workdir\n' > "$T/wd2/.shmutant"
   WAIT_FOR=started2 SHMUTANT_JOBS=2 SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=0 pool lbl "$T/wd2" toy_prepare stubborn_hanging_run
   unmake_unremovable "$T/wd2/mut-1/held"
   eval "$(declare -f _shmutant_fresh_dir_real | sed '1s/_shmutant_fresh_dir_real/_shmutant_fresh_dir/')"; unset -f _shmutant_fresh_dir_real
   rc_is "$RC" 2 'harness error'
-  [ -z "$(ps -A -o args= | grep -F "touch \"\$1/finished2\" _ $T" | grep -v grep)" ] || fail_ 'the abort returned while a TERM-ignoring descendant was still alive'
+  local alive; alive="$(left_running "$T/finished2.id")" || fail_ 'fixture: the stubborn run never recorded its descendant'
+  [ -z "$alive" ] || fail_ 'the abort returned while a TERM-ignoring descendant was still alive'
 }
 
 t_pool_refuses_unremovable_pristine() {
