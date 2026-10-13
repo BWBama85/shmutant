@@ -1540,16 +1540,18 @@ t_checksum_takes_the_tool_status_and_one_digest() {
   # the real one prints and then what no digest is; every failure is status 2 with nothing on
   # stdout, so a caller comparing the line against CHECKSUMS never sees a near-digest
   local which line d=5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03 dd
-  printf '#!/bin/sh\nprintf "%%s\\n" "$STUB_OUT"\nexit "$STUB_RC"\n' > "$T/stub"; chmod +x "$T/stub"
-  # ckraw <output> <status> — the checksum through a stub that prints <output> and exits <status>;
-  # sets CK to stdout and CKRC to the status. The stubbed tool is named by `which`, never `tool`:
-  # that is a local of _shmutant_checksum's, and the stand-in _shmutant_std_bin would read that
-  # one through dynamic scope. lay <digest-field> prints the line the stubbed tool would, and
+  printf '#!/bin/sh\ncat "$STUB_FILE"\nexit "$STUB_RC"\n' > "$T/stub"; chmod +x "$T/stub"
+  # ckout <status> — the checksum through a stub that prints the bytes of $T/out and exits
+  # <status>; sets CK to stdout and CKRC to the status. The stubbed tool is named by `which`, never
+  # `tool`: that is a local of _shmutant_checksum's, and the stand-in _shmutant_std_bin would read
+  # that one through dynamic scope. ckraw <line> <status> does the same with <line> and its
+  # newline as the output; lay <digest-field> prints the line the stubbed tool would, and
   # ck <digest-field> <status> runs that line through the stub.
-  ckraw() {
+  ckout() {
     CK="$( _shmutant_std_bin() { [ "$1" = "$which" ] || return 1; printf '%s' "$T/stub"; }
-           export STUB_OUT="$1" STUB_RC="$2"; _shmutant_checksum "$T/stub" 2>/dev/null )"; CKRC=$?
+           export STUB_FILE="$T/out" STUB_RC="$1"; _shmutant_checksum "$T/stub" 2>/dev/null )"; CKRC=$?
   }
+  ckraw() { printf '%s\n' "$1" > "$T/out"; ckout "$2"; }
   lay() { case "$which" in openssl) printf 'SHA2-256(stdin)= %s' "$1" ;; *) printf '%s  -' "$1" ;; esac; }
   ck() { ckraw "$(lay "$1")" "$2"; }
   dd="$(printf '%s' "$d" | tr a-f A-F)"
@@ -1582,6 +1584,26 @@ t_checksum_takes_the_tool_status_and_one_digest() {
     rc_is "$CKRC" 2 "$which: a record after other words is not a digest"
     ckraw "$(lay "$d") junk" 0
     rc_is "$CKRC" 2 "$which: a record followed by other words is not a digest"
+    # as the tool wrote it: $(…) would strip trailing newlines and drop a NUL byte, turning each
+    # of these into the one line the tool prints
+    printf '%s\n\n' "$(lay "$d")" > "$T/out"; ckout 0
+    rc_is "$CKRC" 2 "$which: a blank line after the record is not one line"
+    printf '%s\0\n' "$(lay "$d")" > "$T/out"; ckout 0
+    rc_is "$CKRC" 2 "$which: a NUL byte in the record is not one line"
+    eq "$CK" '' "$which: and prints nothing"
+    printf '%s\n\0' "$(lay "$d")" > "$T/out"; ckout 0
+    rc_is "$CKRC" 2 "$which: a NUL byte after the record's newline is not one line"
+    printf '%s' "$(lay "$d")" > "$T/out"; ckout 0
+    rc_is "$CKRC" 2 "$which: a record without its newline is not the line the tool prints"
+    # and a rejection is reported under a caller's errexit, not ended by it. A shell of its own:
+    # every unit runs on the left of an ||, where errexit is off for all it calls.
+    printf '%s\n' "$(lay "${d%?}")" > "$T/out"
+    STUB_FILE="$T/out" STUB_RC=0 W="$which" S="$T/stub" bash -c '. "$1" || exit 9; set -e; _shmutant_std_bin() { [ "$1" = "$W" ] || return 1; printf "%s" "$S"; }; _shmutant_checksum "$S"' \
+      _ "$SHMUTANT" > /dev/null 2> "$T/ckerr"; rc_is $? 2 "$which: a malformed digest under errexit is status 2"
+    has "$(cat "$T/ckerr")" 'printed no SHA-256' "$which: and says why"
+    STUB_FILE="$T/out" STUB_RC=5 W="$which" S="$T/stub" bash -c '. "$1" || exit 9; set -e; _shmutant_std_bin() { [ "$1" = "$W" ] || return 1; printf "%s" "$S"; }; _shmutant_checksum "$S"' \
+      _ "$SHMUTANT" > /dev/null 2> "$T/ckerr"; rc_is $? 2 "$which: a failed tool under errexit is status 2"
+    has "$(cat "$T/ckerr")" '(status 5)' "$which: and names the tool's own status"
   done
   # every layout openssl has printed for stdin: 3.x, 1.1, 1.0, and LibreSSL's digest alone
   which=openssl

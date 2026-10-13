@@ -1261,8 +1261,8 @@ shmutant_mut 'a builtin passes as a callback' \
   '  case "$(builtin type -t -- "$1" 2>/dev/null)" in function|builtin|file) return 0 ;; esac' \
   't_pool_refuses_alias_only_callbacks'
 shmutant_mut 'the digest tool is taken by name' \
-  '  if tool="$(_shmutant_std_bin sha256sum)"; then out="$("$tool" 2>/dev/null < "$1")" || st=$?' \
-  '  if command -pv sha256sum > /dev/null 2>&1; then out="$(sha256sum 2>/dev/null < "$1")" || st=$?' \
+  '  if tool="$(_shmutant_std_bin sha256sum)"; then cmd=("$tool"); re="$sum_re"' \
+  '  if command -pv sha256sum > /dev/null 2>&1; then cmd=(sha256sum); re="$sum_re"' \
   't_checksum_uses_the_digest_file_not_a_function'
 shmutant_mut 'the CLI trusts the names it inherited' \
   '  builtin unset -f kill wait read trap printf mapfile exec command cd pwd exit return declare local unset set shopt eval readonly export shift true false '"'"'['"'"' : . type test 2>/dev/null' \
@@ -1811,20 +1811,32 @@ shmutant_mut 'a marker size that cannot be read passes' \
 
 # --- a digest tool's status and output are both checked (#30) ---
 shmutant_mut 'a digest tool that exits non-zero is believed' \
-  '  [ "$st" -eq 0 ] || { _shmutant_err "cannot compute the digest of $1 (status $st)"; return 2; }' \
+  '  [ "$st" = 0 ] || { _shmutant_err "cannot compute the digest of $1 (status ${st:-unknown})"; return 2; }' \
   '  :' \
   't_checksum_takes_the_tool_status_and_one_digest'
-shmutant_mut 'the status of sha256sum is dropped' \
-  'then out="$("$tool" 2>/dev/null < "$1")" || st=$?' \
-  'then out="$("$tool" 2>/dev/null < "$1")"' \
+shmutant_mut 'the digest tool'"'"'s status is not passed on' \
+  'else printf '"'"'\0%s'"'"' "$?"; fi)' \
+  'else printf '"'"'\0%s'"'"' 0; fi)' \
   't_checksum_takes_the_tool_status_and_one_digest'
-shmutant_mut 'the status of shasum is dropped' \
-  '-a 256 2>/dev/null < "$1")" || st=$?' \
-  '-a 256 2>/dev/null < "$1")"' \
+shmutant_mut 'a caller'"'"'s errexit ends the digest tool'"'"'s writer before it reports' \
+  '<(if "${cmd[@]}" 2>/dev/null < "$1"; then printf '"'"'\0%s'"'"' 0; else printf '"'"'\0%s'"'"' "$?"; fi)' \
+  '<("${cmd[@]}" 2>/dev/null < "$1"; printf '"'"'\0%s'"'"' "$?")' \
   't_checksum_takes_the_tool_status_and_one_digest'
-shmutant_mut 'the status of openssl is dropped' \
-  'dgst -sha256 2>/dev/null < "$1")" || st=$?;' \
-  'dgst -sha256 2>/dev/null < "$1")";' \
+shmutant_mut 'a NUL byte in the digest output is dropped' \
+  'if [ "${#got[@]}" -ne 2 ] || [' \
+  'if [ "${#got[@]}" -lt 2 ] || [' \
+  't_checksum_takes_the_tool_status_and_one_digest'
+shmutant_mut 'the digest line'"'"'s newline is not required' \
+  '|| [ "${out%$'"'"'\n'"'"'}" = "$out" ]; then' \
+  '|| false; then' \
+  't_checksum_takes_the_tool_status_and_one_digest'
+shmutant_mut 'everything after the first newline of the digest output is dropped' \
+  'out="${out%$'"'"'\n'"'"'}"; shopt' \
+  'out="${out%%$'"'"'\n'"'"'*}"; shopt' \
+  't_checksum_takes_the_tool_status_and_one_digest'
+shmutant_mut 'a rejected digest layout ends an errexit caller' \
+  'printf '"'"'%s'"'"' "${BASH_REMATCH[-1]}" )" || out=""' \
+  'printf '"'"'%s'"'"' "${BASH_REMATCH[-1]}" )"' \
   't_checksum_takes_the_tool_status_and_one_digest'
 shmutant_mut 'a digest of any length is accepted' \
   '{64})  -$'"'"'' \
@@ -1855,6 +1867,6 @@ shmutant_mut 'any algorithm name passes for openssl'"'"'s' \
   '(.*)?\(stdin\)' \
   't_checksum_takes_the_tool_status_and_one_digest'
 shmutant_mut 'the caller'"'"'s nocasematch lets an uppercase digest through' \
-  '$( shopt -u nocasematch; [[' \
-  '$( [[' \
+  'shopt -u nocasematch; [[ "$out" =~ $re ]]' \
+  '[[ "$out" =~ $re ]]' \
   't_checksum_takes_the_tool_status_and_one_digest'

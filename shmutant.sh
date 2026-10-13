@@ -2667,7 +2667,8 @@ _shmutant_flag_value() {
 # The digest tool's own status is the result: a tool that exits non-zero is a failure whatever
 # it printed, and so is output that is not one SHA-256. A failure prints nothing on stdout.
 _shmutant_checksum() {
-  local out="" st=0 re
+  local out="" st="" re
+  local -a cmd=() got=()
   # What each tool prints for stdin, whole: one line around one digest of sixty-four lowercase
   # hex digits, the digest last. `<digest>  -` from sha256sum and shasum; from openssl,
   # `<NAME>(stdin)= <digest>` (SHA2-256 from 3.x, SHA256 from 1.1, none from 1.0) or, from
@@ -2678,16 +2679,26 @@ _shmutant_checksum() {
   # not by name: sha256sum and shasum mark a name holding a backslash or a newline by putting a
   # backslash before the digest.
   local tool
-  if tool="$(_shmutant_std_bin sha256sum)"; then out="$("$tool" 2>/dev/null < "$1")" || st=$?; re="$sum_re"
-  elif tool="$(_shmutant_std_bin shasum)"; then out="$("$tool" -a 256 2>/dev/null < "$1")" || st=$?; re="$sum_re"
-  elif tool="$(_shmutant_std_bin openssl)"; then out="$("$tool" dgst -sha256 2>/dev/null < "$1")" || st=$?; re="$ssl_re"
+  if tool="$(_shmutant_std_bin sha256sum)"; then cmd=("$tool"); re="$sum_re"
+  elif tool="$(_shmutant_std_bin shasum)"; then cmd=("$tool" -a 256); re="$sum_re"
+  elif tool="$(_shmutant_std_bin openssl)"; then cmd=("$tool" dgst -sha256); re="$ssl_re"
   else _shmutant_err "no sha256sum, shasum or openssl on PATH"; return 2
   fi
-  [ "$st" -eq 0 ] || { _shmutant_err "cannot compute the digest of $1 (status $st)"; return 2; }
-  # The whole output against the layout, before any of it is taken: a field cut out first would
-  # let a second record, or anything else around the digest, through. =~ honours the caller's
-  # nocasematch, so it runs with that off.
-  out="$( shopt -u nocasematch; [[ "$out" =~ $re ]] && printf '%s' "${BASH_REMATCH[-1]}" )"
+  # The output as the tool wrote it, then its status, each ended by a NUL: $(…) would strip the
+  # trailing newlines and drop NUL bytes before anything could look at them. A NUL of the tool's
+  # own makes a third field; the status is always the last. The tool is a condition, so that a
+  # caller's errexit cannot end the writer before it reports.
+  mapfile -d '' got < <(if "${cmd[@]}" 2>/dev/null < "$1"; then printf '\0%s' 0; else printf '\0%s' "$?"; fi)
+  [ "${#got[@]}" -eq 0 ] || st="${got[-1]}"
+  [ "$st" = 0 ] || { _shmutant_err "cannot compute the digest of $1 (status ${st:-unknown})"; return 2; }
+  # One line and its newline, nothing else: the newline is required and taken off, then the rest
+  # is matched against the layout before any of it is taken, so a field cut out first cannot let
+  # a second record, or anything else around the digest, through. =~ honours the caller's
+  # nocasematch, so it runs with that off. Every failure is handled here, never left to errexit.
+  out="${got[0]-}"
+  if [ "${#got[@]}" -ne 2 ] || [ "${out%$'\n'}" = "$out" ]; then out=""
+  else out="$( out="${out%$'\n'}"; shopt -u nocasematch; [[ "$out" =~ $re ]] && printf '%s' "${BASH_REMATCH[-1]}" )" || out=""
+  fi
   [ -n "$out" ] || { _shmutant_err "$tool printed no SHA-256 for $1"; return 2; }
   printf '%s\n' "$out"
 }
