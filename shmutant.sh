@@ -599,8 +599,9 @@ shmutant_reset() {
 # _shmutant_scan_output <fd> <prefix> <witness> — read the run's captured output once through
 # <fd>, streaming, and set SHMUTANT_RUN_RED (some line starts with <prefix>) and
 # SHMUTANT_RUN_WITNESSED (some such line also carries <witness> as a whole token; never with an
-# empty witness). SHMUTANT_RUN_SCAN_FAILED=1 when the scan produced no result: that run is not
-# green, it is unassessed.
+# empty witness). SHMUTANT_RUN_SCAN_FAILED=1 when the scan produced no result, or awk exited
+# non-zero whatever it printed (a failed read can still reach END): that run is not green, it is
+# unassessed, and asserts nothing.
 # Per line, so a witness cannot match across a passing assertion's echo; literal matches, not
 # patterns. A token: the character before and after the witness, where there is one, is ASCII
 # whitespace or punctuation other than `_`, `-` and `.`; letters, digits and every non-ASCII
@@ -625,7 +626,8 @@ _shmutant_scan_output() {
     BEGIN { p = ENVIRON["SHMUTANT_SCAN_P"]; w = ENVIRON["SHMUTANT_SCAN_W"] }
     BEGIN { SEP = " \t\r\f\v!\"#$%&" sprintf("%c", 39) "()*+,/:;<=>?@[\\]^`{|}~" }
     index($0, p) == 1 { red = 1; if (w != "" && witnessed(substr($0, length(p) + 1), w)) { wit = 1; exit } }
-    END { print red + 0, wit + 0 }' <&"$1" 2>/dev/null)"
+    END { print red + 0, wit + 0 }' <&"$1" 2>/dev/null || printf 'failed')"
+  # A failed awk's pair, if it printed one, is followed by `failed` and so matches no result.
   case "$got" in
     "1 1") SHMUTANT_RUN_RED=1; SHMUTANT_RUN_WITNESSED=1 ;;
     "1 0") SHMUTANT_RUN_RED=1 ;;
@@ -2317,10 +2319,13 @@ _shmutant_no_shadows() {
 _shmutant_workdir_owned() {
   local label="$1" wd="$2" line=""
   if [ -f "$wd/.shmutant" ] && [ ! -L "$wd/.shmutant" ]; then
-    # The marker carries a recognisable line: a caller's own .shmutant (a config, a sentinel)
-    # does not make the pristine, base-N and mut-N entries beside it disposable.
-    IFS= read -r -n 64 line < "$wd/.shmutant" 2>/dev/null || :
-    [ "$line" = "shmutant workdir" ] && return 0
+    # The marker is exactly the line shmutant writes, its newline included and nothing after it:
+    # a caller's own .shmutant (a config, a sentinel, one that merely begins with that line) does
+    # not make the pristine, base-N and mut-N entries beside it disposable. Read to a NUL byte or
+    # the end of the file, within the bound: status 0 is a NUL or the bound reached, so more
+    # follows and it is not the marker; a read that failed assigns nothing.
+    IFS= read -r -d '' -n 64 line < "$wd/.shmutant" 2>/dev/null && line=""
+    [ "$line" = $'shmutant workdir\n' ] && return 0
     _shmutant_err "$label: $wd/.shmutant is not the marker shmutant writes — refusing to treat the workdir as shmutant's"; return 2
   fi
   if [ -e "$wd/.shmutant" ] || [ -L "$wd/.shmutant" ]; then _shmutant_err "$label: $wd/.shmutant is not the regular file shmutant writes — refusing to treat the workdir as shmutant's"; return 2; fi
@@ -2657,21 +2662,26 @@ _shmutant_flag_value() {
 }
 
 # _shmutant_checksum <file> — the SHA-256 of <file>, from whichever tool the platform has.
-# The digest tool's own status is the result: a tool that could not read the file is a
-# failure, never an empty digest reported as success.
+# The digest tool's own status is the result: a tool that exits non-zero is a failure whatever
+# it printed, and so is output that is not one SHA-256. A failure prints nothing on stdout.
 _shmutant_checksum() {
-  local out=""
+  local out="" st=0
   # Each candidate an executable file on the standard path, run by that path: a function of
-  # the name (inherited, or a caller's) would otherwise be taken for the tool.
+  # the name (inherited, or a caller's) would otherwise be taken for the tool. The file on stdin,
+  # not by name: sha256sum and shasum mark a name holding a backslash or a newline by putting a
+  # backslash before the digest.
   local tool
-  if tool="$(_shmutant_std_bin sha256sum)"; then out="$("$tool" -- "$1" 2>/dev/null)"
-  elif tool="$(_shmutant_std_bin shasum)"; then out="$("$tool" -a 256 -- "$1" 2>/dev/null)"
-  elif tool="$(_shmutant_std_bin openssl)"; then out="$("$tool" dgst -sha256 -- "$1" 2>/dev/null)"; out="${out##* }"
+  if tool="$(_shmutant_std_bin sha256sum)"; then out="$("$tool" 2>/dev/null < "$1")" || st=$?
+  elif tool="$(_shmutant_std_bin shasum)"; then out="$("$tool" -a 256 2>/dev/null < "$1")" || st=$?
+  elif tool="$(_shmutant_std_bin openssl)"; then out="$("$tool" dgst -sha256 2>/dev/null < "$1")" || st=$?; out="${out##* }"
   else _shmutant_err "no sha256sum, shasum or openssl on PATH"; return 2
   fi
-  # A tool that could not read the file prints nothing: that is a failure, never an empty digest.
-  [ -n "$out" ] || { _shmutant_err "cannot compute the digest of $1"; return 2; }
-  printf '%s\n' "${out%% *}"
+  [ "$st" -eq 0 ] || { _shmutant_err "cannot compute the digest of $1 (status $st)"; return 2; }
+  out="${out%% *}"
+  # Sixty-four lowercase hex digits and nothing else, each one spelled out: a range would follow
+  # the locale's collation, and =~ the caller's nocasematch.
+  ( shopt -u nocasematch; [[ "$out" =~ ^[0123456789abcdef]{64}$ ]] ) || { _shmutant_err "$tool printed no SHA-256 for $1"; return 2; }
+  printf '%s\n' "$out"
 }
 
 # _shmutant_cli_load <plan-path> — runs in the CLI's plan subshell: load the plan, check its

@@ -15,7 +15,9 @@ bash scripts/shmutant.sh checksum     # compare against CHECKSUMS at that tag
 
 `CHECKSUMS` in this repository carries the SHA-256 of `shmutant.sh` at every tag. Record the
 digest you vendored beside the file (a comment in the plan, a line in your own CHECKSUMS) so an
-upgrade or a local edit is visible in review.
+upgrade or a local edit is visible in review. `checksum` prints the digest alone and exits 0; when
+the platform's digest tool fails or prints anything but one SHA-256, it prints nothing on stdout
+and exits 2.
 
 Upgrading is copying a newer file and re-checking the digest.
 
@@ -458,9 +460,9 @@ Keep `SHMUTANT_KEEP=1` and `--workdir` on a CI failure to upload `mut-<n>/output
 artifact: it is the full output of the run that produced the verdict. A `--workdir` you supply
 is never removed; the pool's `base-<n>`, `mut-<n>` and `pristine` entries inside it are recreated
 on every run. Those entries are only ever removed from a workdir shmutant marked as its own on
-first use (a `.shmutant` file holding the line `shmutant workdir`): a directory that already
-holds entries by those names and no marker, or a `.shmutant` of the caller's own with anything
-else in it, is refused, not emptied. Each worker reports its verdict on a descriptor the pool opened
+first use (a `.shmutant` file holding exactly the line `shmutant workdir`, its newline included,
+and nothing else): a directory that already holds entries by those names and no marker, or a
+`.shmutant` of the caller's own with anything else in it, is refused, not emptied. Each worker reports its verdict on a descriptor the pool opened
 before the worker forked, on a file with no name; nothing planted in a worker directory, by that
 worker or by a sibling, can stand in for it, and a worker that did not exit normally is `lost`. A relative `TMPDIR` is resolved where the CLI was invoked, before the plan runs (a plan or
 `prepare` may change directory). A workdir the CLI created for itself is removed unless `--keep`, read-only trees
