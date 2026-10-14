@@ -5067,8 +5067,8 @@ t_suite_runs_each_unit_in_a_process_group_of_its_own() {
   # each target alone, a pause between, the first of two frozen leftovers ending while the second is
   # still stopped. A TERM, INT or HUP to the suite ends the unit it is running before the suite ends by
   # it, a second one included: a unit handling it gets three seconds, one ignoring it is then killed,
-  # with what it started in a group of its own, and its directory is removed; one that has already
-  # ended is still swept. A unit sees none of the suite's handlers, reads end-of-file on stdin whatever
+  # with what it started in a group of its own, and its directory is removed; one whose identity could
+  # not be read is reached all the same, and one that has already ended is still swept. A unit sees none of the suite's handlers, reads end-of-file on stdin whatever
   # the suite was given, and still has its own errexit ignored.
   [ "$(tail -n 1 "$here/run.sh")" = 'main "$@"' ] || { fail_ 'run.sh no longer ends with main "$@"'; return; }
   mkdir -p "$T/suite/test"
@@ -5096,6 +5096,8 @@ EOF
       '_shmutant_kill_tree() { [ "${FUNCNAME[2]:-}" = sweep_unit ] || { _real_kill_tree "$@"; return; }; kill() { if [ "$1" = -KILL ] && [ "$2" = -- ]; then shift 2; local t; for t; do builtin kill -KILL -- "$t"; sleep 0.3; done; else builtin kill "$@"; fi; }; _real_kill_tree "$@"; unset -f kill; }' \
       'eval "_real_leftovers() $(declare -f unit_leftovers | sed 1d)"' \
       'unit_leftovers() { if [ -n "${LATE_TERM:-}" ] && [ ! -e "$SWEEP_DIR/late" ]; then : > "$SWEEP_DIR/late"; kill -TERM "$$"; fi; _real_leftovers "$@"; }' \
+      'eval "_real_identity() $(declare -f _shmutant_identity | sed 1d)"' \
+      '_shmutant_identity() { if [ -n "${NOID:-}" ] && [ "${FUNCNAME[1]}" = main ]; then return 1; fi; _real_identity "$@"; }' \
       'main "$@"'
   } > "$T/suite/test/run.sh"
   local out c pid dir suite rc
@@ -5129,6 +5131,7 @@ EOF
     elif ! wait_gone "$pid"; then fail_ "the unit the suite was running outlived the $c sent to the suite"; kill -KILL "$pid" 2>/dev/null; fi
     [ -e "$T/slow.finished" ] && fail_ "the unit ran on after the suite was sent $c"
     hasnt "$(cat "$T/slow.out")" 'could not be written' "the unit's last snapshot found its sweep record ($c)"
+    hasnt "$(cat "$T/slow.out")" '_sweep_up' "no job notice printing the unit's source reached the suite's output ($c)"
   done
   # A second TERM while the suite is ending the unit does not cut that short.
   SHMUTANT_SELECT=t_zz_stubborn bash "$T/suite/test/run.sh" > "$T/stubborn.out" 2>&1 & suite=$!
@@ -5149,6 +5152,16 @@ EOF
   dir="$(cat "$T/stubborn.dir" 2>/dev/null)"
   if [ -z "$dir" ]; then fail_ 'fixture: t_zz_stubborn never recorded its directory'
   elif [ -e "$dir" ]; then fail_ 'the directory of a unit killed when the suite was sent TERM was left behind'; fi
+  # A unit whose own identity could not be read is ended all the same: the suite reaches it through its
+  # wrapper, a job of its own, never through anything the unit records.
+  rm -f "$T/slow.pid" "$T/slow.started" "$T/slow.finished"
+  NOID=1 SHMUTANT_SELECT=t_zz_slow bash "$T/suite/test/run.sh" > /dev/null 2>&1 & suite=$!
+  if wait_for "$T/slow.started"; then kill -TERM "$suite"; else fail_ 'fixture: t_zz_slow never started without its identity'; kill -KILL "$suite" 2>/dev/null; fi
+  rc=0; wait "$suite" 2>/dev/null || rc=$?
+  rc_is "$rc" 143 'the suite sent TERM while running a unit it could not identify ends by TERM'
+  pid="$(cat "$T/slow.pid" 2>/dev/null)"
+  if [ -z "$pid" ]; then fail_ 'fixture: t_zz_slow never recorded its pid without its identity'
+  elif ! wait_gone "$pid"; then fail_ 'a unit whose identity could not be read outlived the TERM sent to the suite'; kill -KILL "$pid" 2>/dev/null; fi
   # TERM after a unit has ended and before it is swept: the interrupted suite still sweeps it.
   rc=0; { LATE_TERM=1 SHMUTANT_SELECT=t_zz_leaves bash "$T/suite/test/run.sh" > "$T/leaves.out" 2>&1; } 2>/dev/null || rc=$?
   rc_is "$rc" 143 'the suite sent TERM before a unit is swept ends by TERM'
@@ -5712,42 +5725,43 @@ sweep_unit() {
   fi
 }
 
+# suite_job_runs <pid> — true while <pid> is a job of this shell that bash has not seen end. That is
+# bash's own table: a number it lists is this shell's unreaped child, so it cannot have been given to
+# another process, and a zombie bash has reaped is no longer listed.
+suite_job_runs() {
+  local p
+  for p in $(jobs -rp); do [ "$p" = "$1" ] && return 0; done
+  return 1
+}
+
 # suite_signalled <signal> — the suite was sent INT, TERM or HUP. A unit runs in a process group of its
 # own, which a signal sent to the suite's group (a ^C at the terminal) no longer reaches, so the suite
-# ends the unit before itself, ignoring further INT, TERM and HUP meanwhile. The group is signalled
-# only while the unit's subshell is still the process it recorded: a live member, so the group number
-# cannot be someone else's. It is sent the signal, then KILL if that subshell still runs three seconds
-# later; a unit spawned but not yet recorded is given a second to record itself. The sampler is then
-# stopped as the runner stops it, the unit is swept as any ended unit is (sweep_unit), and its
-# directory is removed, unless a unit that could not be verified may still be in it. Only then does
-# the suite end by the signal, so nothing of the unit outlives it unreported.
+# ends the unit before itself, ignoring further INT, TERM and HUP meanwhile. The group is led by the
+# unit's wrapper, which ignores those three signals and so ends exactly when the unit does; while the
+# wrapper is a running job of this shell the group is ours. It is sent the signal, then KILL if the
+# wrapper still runs three seconds later. Caught between the spawn and the record of its pid, the
+# wrapper is the last background job, unless that is still the sampler. The sampler is then stopped as
+# the runner stops it, the unit is swept as any ended unit is (sweep_unit), and its directory is
+# removed. Only then does the suite end by the signal, so nothing of the unit outlives it unreported.
 suite_signalled() {
-  local self="" g="" i running=0
+  local g="" i
   trap '' INT TERM HUP
-  if [ -n "${SWEEP_UNIT:-}" ] && { [ "$SWEEP_UNIT" != spawning ] || [ "$!" != "${sampler:-}" ]; }; then
-    for (( i = 0; i < 20; i++ )); do [ -s "$SWEEP_SEEN.self" ] && break; sleep 0.05; done
-  fi
-  [ -z "${SWEEP_SEEN:-}" ] || self="$(command -p cat -- "$SWEEP_SEEN.self" 2>/dev/null)" || self=""
-  case "$self" in
-    [1-9]*:?*) if _shmutant_alive_since "${self%%:*}" "${self#*:}"; then
-                 g="$(command -p ps -o pgid= -p "${self%%:*}" 2>/dev/null)"; g="${g//[[:space:]]/}"
-               fi ;;
+  case "${SWEEP_UNIT:-}" in
+    '')       ;;
+    spawning) [ "$!" = "${sampler:-}" ] || g=$! ;;
+    *)        g=$SWEEP_UNIT ;;
   esac
-  if [ -n "$g" ]; then
+  if [ -n "$g" ] && suite_job_runs "$g"; then
     kill "-$1" -- "-$g" 2>/dev/null
-    for (( i = 0; i < 30; i++ )); do _shmutant_alive_since "${self%%:*}" "${self#*:}" || break; sleep 0.1; done
-    ! _shmutant_alive_since "${self%%:*}" "${self#*:}" || kill -KILL -- "-$g" 2>/dev/null
-    for (( i = 0; i < 30; i++ )); do _shmutant_alive_since "${self%%:*}" "${self#*:}" || break; sleep 0.1; done
-    ! _shmutant_alive_since "${self%%:*}" "${self#*:}" || running=1
-  elif [ -n "${SWEEP_UNIT:-}" ] && [ "$SWEEP_UNIT" != spawning ] && ! wait_gone "$SWEEP_UNIT" '' 1; then
-    running=1
+    for (( i = 0; i < 30; i++ )); do suite_job_runs "$g" || break; sleep 0.1; done
+    ! suite_job_runs "$g" || kill -KILL -- "-$g" 2>/dev/null
   fi
+  [ -z "$g" ] || wait "$g" 2>/dev/null
+  # The sampler's channel is open while `pfd` names it; a sampler already reaped is not waited on.
   [ -z "${pfd:-}" ] || { printf 'none\n' >&"$pfd"; } 2>/dev/null
   [ -z "${sampler:-}" ] || wait "$sampler" 2>/dev/null
-  if [ -n "${SWEEP_SEEN:-}" ] && [ -e "$SWEEP_SEEN" ]; then sweep_unit "$u"; rm -f -- "$SWEEP_SEEN" "$SWEEP_SEEN.self"; fi
-  if [ "$running" = 1 ]; then
-    printf 'run.sh: %s: could not be verified as ended, so its directory %s is left\n' "$u" "${T:-}" >&2
-  elif [ -n "${T:-}" ] && [ -e "$T" ]; then
+  if [ -n "${SWEEP_SEEN:-}" ] && [ -e "$SWEEP_SEEN" ]; then sweep_unit "$u"; rm -f -- "$SWEEP_SEEN"; fi
+  if [ -n "${T:-}" ] && [ -e "$T" ]; then
     rm -rf -- "$T" || printf 'run.sh: %s: its directory %s could not be removed\n' "$u" "$T" >&2
   fi
   trap - "$1"
@@ -5786,15 +5800,19 @@ main() {
     # The unit runs in a process group of its own (job control, for this spawn only): nothing it leaves
     # behind shares the suite's group, which the sweep's freeze could otherwise hang up (D8 in
     # .ai-dev-baseline/decisions.md). Stdin from /dev/null: a background group reading the terminal
-    # would be stopped. A signal sent to the suite reaches the unit through suite_signalled.
+    # would be stopped. A signal sent to the suite reaches the unit through suite_signalled. The
+    # wrapper leading the group ignores INT, TERM and HUP, so it ends exactly when the unit does; its
+    # own stderr goes nowhere (bash would print each signalled unit's source there), the unit's to
+    # the suite's.
     # The unit's subshell is tested by `||`, never `; urc=$?`: errexit a unit turns on stays ignored
     # inside it, so its assertions still print instead of the unit dying at the first failing command.
     urc=0
     SWEEP_UNIT=spawning
     set -m
-    { (
-      # `trap -p` in a subshell reports the suite's handlers although none is active: a unit that saves
-      # and restores traps, as the pool does, would install them for real.
+    { trap '' INT TERM HUP; (
+      # The wrapper's ignore would pass to the unit, and `trap -p` in a subshell reports the suite's
+      # handlers although none is active: a unit that saves and restores traps, as the pool does,
+      # would install them for real.
       trap - INT TERM HUP
       _sweep_up=$BASHPID; _sweep_id=""
       for _ in 1 2 3 4 5 6 7 8 9 10; do
@@ -5809,16 +5827,12 @@ main() {
       printf '%s %s\n' "$_sweep_up" "$_sweep_id" >&"$pfd" \
         || { printf 'FAIL: %s: its pid could not be handed to the descendant sampler, so it was not run\n' "$u"; rm -rf -- "$T"; exit 1; }
       exec {pfd}>&-
-      # And for an interrupt: suite_signalled signals the unit's group only through a process it can
-      # verify is still this unit.
-      printf '%s:%s\n' "$_sweep_up" "$_sweep_id" > "$SWEEP_SEEN.self" \
-        || { printf 'FAIL: %s: its pid could not be recorded for an interrupt, so it was not run\n' "$u"; rm -rf -- "$T"; exit 1; }
       _unit="$u"; _failed=0
       trap unit_finish EXIT
       cd "$T" || exit 1
       "$u"
       exit "$_failed"
-    ) || exit "$?"; } < /dev/null & SWEEP_UNIT=$!
+    ) 2>&3 3>&- || exit "$?"; } 3>&2 2>/dev/null < /dev/null & SWEEP_UNIT=$!
     set +m
     wait "$SWEEP_UNIT" || urc=$?
     SWEEP_UNIT=""
@@ -5833,7 +5847,7 @@ main() {
       urc=1
     fi
     sweep_unit "$u"
-    rm -f -- "$SWEEP_SEEN" "$SWEEP_SEEN.self"
+    rm -f -- "$SWEEP_SEEN"
     [ "$urc" -eq 0 ] || failed=$((failed + 1))
   done
   if [ "$ran" -eq 0 ]; then
