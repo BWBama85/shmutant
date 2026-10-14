@@ -188,15 +188,15 @@ shmutant_mut 'SHMUTANT_STREAM is ignored' \
 shmutant_mut 'the label is not the plan name' \
   'shmutant_pool "$(command -p basename -- "$plan")"' \
   'shmutant_pool "plan"' \
-  't_cli_run'
+  't_cli_labels_its_stream_and_refuses_bad_arguments'
 shmutant_mut 'version prints the wrong marker' \
   '"$SHMUTANT_VERSION"' \
   '"$SHMUTANT_VERSION-mutant"' \
-  't_cli_run'
+  't_cli_prints_usage_version_and_checksum'
 shmutant_mut 'checksum prints the whole line instead of the digest' \
   'printf '"'"'%s'"'"' "${BASH_REMATCH[-1]}"' \
   'printf '"'"'%s'"'"' "${BASH_REMATCH[0]}"' \
-  't_cli_run'
+  't_cli_prints_usage_version_and_checksum'
 
 # --- guards added for the first review round ---
 shmutant_mut 'a refused declaration is not counted' \
@@ -376,35 +376,35 @@ shmutant_mut 'copy_tree drops metadata' \
 shmutant_mut '--keep deletes the workdir' \
   'if [ "$keep" = 1 ]; then _shmutant_err "workdir kept: $wd"' \
   'if [ "$keep" = 0 ]; then _shmutant_err "workdir kept: $wd"' \
-  't_cli_run'
+  't_cli_removes_only_the_workdir_it_made_unless_kept'
 shmutant_mut 'a caller-supplied workdir is removed' \
   '  elif [ "$made" = 1 ]; then _shmutant_remove "$wd" "${SHMUTANT_CLI_WD_PARENT:-}" || {' \
   '  elif true; then _shmutant_remove "$wd" "${SHMUTANT_CLI_WD_PARENT:-}" || {' \
-  't_cli_run'
+  't_cli_removes_only_the_workdir_it_made_unless_kept'
 shmutant_mut 'the plan is sourced by its bare name' \
   '_shmutant_cli_load "$SHMUTANT_PLAN_DIR/$(command -p basename -- "$plan")"' \
   '_shmutant_cli_load "$plan"' \
-  't_cli_run'
+  't_cli_loads_the_plan_by_its_path_in_a_shell_of_its_own'
 shmutant_mut 'a relative --workdir is resolved after the plan may have moved' \
   '  wd="$(_shmutant_abs "$wd")" || { _shmutant_err "run: cannot resolve workdir"; return 2; }' \
   '  :' \
-  't_cli_run'
+  't_cli_loads_the_plan_by_its_path_in_a_shell_of_its_own'
 shmutant_mut 'inherited prepare/run functions are accepted' \
   '  unset -f prepare run' \
   '  :' \
-  't_cli_run'
+  't_cli_loads_the_plan_by_its_path_in_a_shell_of_its_own'
 shmutant_mut 'the plan errexit is left on across the pool call' \
   '  set +o errexit' \
   '  :' \
-  't_cli_run'
+  't_cli_loads_the_plan_by_its_path_in_a_shell_of_its_own'
 shmutant_mut 'a relative SHMUTANT_STREAM is resolved after the plan may have moved' \
   '    _shmutant_canon "$label" SHMUTANT_STREAM "$sdir/$(command -p basename -- "$SHMUTANT_STREAM")" || return 2' \
   '    :' \
-  't_cli_run'
+  't_cli_keeps_plan_output_off_the_stream_and_paths_where_invoked'
 shmutant_mut 'the subshell status is trusted without the completion marker' \
   '  if [ -n "$marker" ] && [ "${marker%% *}" = "$rc" ]; then' \
   '  if true; then' \
-  't_cli_run'
+  't_cli_counts_a_plan_that_ends_early_as_a_load_failure'
 
 # --- guards added for the ninth review round ---
 shmutant_mut 'settings are not revalidated after prepare' \
@@ -466,7 +466,7 @@ shmutant_mut 'no-trap is restored as ignore, so the caller cannot be interrupted
 shmutant_mut 'the CLI has no signal handler around its plan subshell' \
   "  trap '_shmutant_cli_abort TERM' TERM" \
   '  :' \
-  't_cli_run'
+  't_cli_interrupted_ends_its_workers_and_removes_its_workdir'
 shmutant_mut 'a saved trap declaration is re-spelled instead of restored verbatim' \
   'if [ -n "${SHMUTANT_TRAP_TERM:-}" ]; then eval "$SHMUTANT_TRAP_TERM"; else trap - TERM; fi' \
   'if [ -n "${SHMUTANT_TRAP_TERM:-}" ]; then trap -- "${SHMUTANT_TRAP_TERM#trap -- }" TERM; else trap - TERM; fi' \
@@ -478,7 +478,7 @@ shmutant_mut 'a target with surplus arguments is accepted' \
 shmutant_mut 'KEEP set inside the plan is not carried back to the CLI' \
   '    if [ "${marker#* }" = 1 ]; then keep=1; else keep=0; fi' \
   '    :' \
-  't_cli_run'
+  't_cli_removes_only_the_workdir_it_made_unless_kept'
 shmutant_mut 'containment honours the caller nocasematch' \
   '  ( shopt -u nocasematch; if [ "$1" = / ]' \
   '  ( :; if [ "$1" = / ]' \
@@ -512,7 +512,7 @@ shmutant_mut 'rc and killed are not reset after prepare' \
 shmutant_mut 'the settled KEEP is not recorded for the CLI abort path' \
   '  _shmutant_report_keep after-prepare' \
   '  :' \
-  't_cli_run'
+  't_cli_interrupted_honours_the_keep_prepare_settled'
 shmutant_mut 'the row pool runs as a condition, muting callback errexit' \
   '  set +e; _shmutant_run_jobs mut "$n" "$wd" "$run" "$suffix" "$jobs"; rjrc=$?' \
   '  set +e; rjrc=0; _shmutant_run_jobs mut "$n" "$wd" "$run" "$suffix" "$jobs" || rjrc=$?' \
@@ -534,7 +534,7 @@ shmutant_mut 'the abort handler waits for every job, the caller included' \
 shmutant_mut 'plan-load output reaches the verdict stream' \
   '  . "$plan" >&2' \
   '  . "$plan"' \
-  't_cli_run'
+  't_cli_keeps_plan_output_off_the_stream_and_paths_where_invoked'
 
 # --- guards added for the fourteenth review round ---
 shmutant_mut 'the root pid is signalled by number even after it was reaped' \
@@ -638,7 +638,7 @@ shmutant_mut 'the stream cache is set before the open succeeds' \
 shmutant_mut 'the completion marker keeps its path while the plan loads' \
   '  command -p rm -f -- "$SHMUTANT_CLI_DONE_PATH"' \
   '  :' \
-  't_cli_run'
+  't_cli_counts_a_plan_that_ends_early_as_a_load_failure'
 shmutant_mut 'the snapshot on return is dropped, leaving only the trap' \
   '      _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; trap - EXIT; builtin exit "$rrc" )' \
   '      trap - EXIT; builtin exit "$rrc" )' \
@@ -680,11 +680,11 @@ shmutant_mut 'the .git prune takes the source name as a pattern' \
 shmutant_mut 'a relative stream in a missing directory is re-based onto the root' \
   '    if ! sdir="$(_shmutant_abs "$(command -p dirname -- "$SHMUTANT_STREAM")")"; then' \
   '    if ! sdir="$(command -p dirname -- "$SHMUTANT_STREAM")"; then' \
-  't_cli_run'
+  't_cli_keeps_plan_output_off_the_stream_and_paths_where_invoked'
 shmutant_mut 'the automatic workdir is removed raw after an incomplete run' \
   '  elif [ "$made" = 1 ]; then _shmutant_remove "$wd" "${SHMUTANT_CLI_WD_PARENT:-}" || { _shmutant_err "run: could not remove the workdir $wd"; rc=2; }' \
   '  elif [ "$made" = 1 ]; then command -p rm -rf -- "$wd" 2>/dev/null' \
-  't_cli_run'
+  't_cli_counts_a_plan_that_ends_early_as_a_load_failure'
 
 # --- guards added for the twenty-first review round ---
 shmutant_mut 'a pid listed but gone before the stop is recorded as frozen' \
@@ -766,7 +766,7 @@ shmutant_mut 'opening the stream silences stderr for the rest of the run' \
 shmutant_mut 'a flag where a value was expected is taken as the value' \
   '    -*) _shmutant_err "$1 needs a value, got the option $2"; return 2 ;;' \
   '    -*) ;;' \
-  't_cli_run'
+  't_cli_labels_its_stream_and_refuses_bad_arguments'
 shmutant_mut 'a digest tool that prints no digest yields success' \
   '  [ -n "$out" ] || { _shmutant_err "$tool printed no SHA-256 for $1"; return 2; }' \
   '  :' \
@@ -859,7 +859,7 @@ shmutant_mut 'the runner status is trusted without the channel' \
 shmutant_mut 'the settled keep is only ever raised by the marker' \
   '    if [ "${marker#* }" = 1 ]; then keep=1; else keep=0; fi' \
   '    [ "${marker#* }" = 1 ] && keep=1' \
-  't_cli_run'
+  't_cli_removes_only_the_workdir_it_made_unless_kept'
 shmutant_mut 'the plan subshell keeps the phantom trap trap -p reports' \
   '    readonly SHMUTANT_CLI_WD="$wd" SHMUTANT_CLI_KEEP_FD="$keep_w"' \
   '    trap "_shmutant_cli_abort TERM" TERM; readonly SHMUTANT_CLI_WD="$wd" SHMUTANT_CLI_KEEP_FD="$keep_w"' \
@@ -885,7 +885,7 @@ shmutant_mut 'a copy path with a newline is accepted' \
 shmutant_mut 'a plan path with a newline is accepted' \
   '  case "$plan$wd" in *$'"'"'\n'"'"'*) _shmutant_err "run: a path containing a newline is refused"; return 2 ;; esac' \
   '  :' \
-  't_cli_run'
+  't_cli_labels_its_stream_and_refuses_bad_arguments'
 shmutant_mut 'mutate reads its positionals before checking their count' \
   '  if [ "$#" -ne 3 ]; then _shmutant_err "mutate: usage: shmutant_mutate <file> <old> <new>"; return 1; fi' \
   '  :' \
@@ -957,7 +957,7 @@ shmutant_mut 'the alias setting is not put back when an old bash is refused' \
 shmutant_mut 'a workdir created under an initial keep is never tracked for removal' \
   '  [ "$made" = 1 ] && SHMUTANT_CLI_WD_TO_RM="$wd"' \
   '  [ "$made" = 1 ] && [ "$keep" != 1 ] && SHMUTANT_CLI_WD_TO_RM="$wd"' \
-  't_cli_run'
+  't_cli_interrupted_honours_the_keep_prepare_settled'
 shmutant_mut 'a function named exit is not a refused shadow' \
   "  for n in kill wait read trap printf mapfile exec builtin command cd pwd exit return declare local unset set shopt eval readonly export shift true false '[' : . type test; do" \
   '  for n in kill wait read trap printf mapfile exec builtin command cd pwd; do' \
@@ -1878,3 +1878,9 @@ shmutant_mut 'a failed digest tool prints an empty line' \
   '  [ "$st" = 0 ] || { _shmutant_err "cannot compute the digest of $1 (status ${st:-unknown})"; return 2; }' \
   '  [ "$st" = 0 ] || { echo; _shmutant_err "cannot compute the digest of $1 (status ${st:-unknown})"; return 2; }' \
   't_checksum_takes_the_tool_status_and_one_digest'
+
+# --- the CLI checks its settings before the plan loads (#36) ---
+shmutant_mut 'the CLI loads the plan before checking its settings' \
+  '  if ! _shmutant_validate_settings run "$wd"; then' \
+  '  if false; then' \
+  't_cli_labels_its_stream_and_refuses_bad_arguments'
