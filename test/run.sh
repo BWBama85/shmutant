@@ -2197,8 +2197,9 @@ EOF
 t_cli_plan_subshell_drops_the_abort_trap() {
   # What `trap -p` reports in the plan subshell is what the pool saves, restores and re-raises
   # into on an abort: it names no INT or TERM handler of the CLI's, and a TERM ends the subshell.
-  # Seen from the plan itself while it loads, with no signal timed from outside: t_cli_run sees
-  # it only after its interrupts have waited out the CLI's grace for a child that ignores TERM.
+  # Seen from the plan itself while it loads, with no signal timed from outside: the
+  # t_cli_interrupted_* units see it only after their interrupts have waited out the CLI's grace
+  # for a child that ignores TERM.
   # Compared with what a fresh shell started the same way reports: run as a background job (a
   # pool worker), the suite starts with INT ignored, which `trap -p` names and nothing can reset.
   mkdir -p "$T/plan" "$T/tmpd"
@@ -4358,14 +4359,40 @@ t_bash_floor() {
 
 # --- units: the CLI -------------------------------------------------------------------------------------------
 
-t_cli_run() {
-  mk_toy "$T/toy"; TOY="$T/toy"
+# mk_cli_toy — mk_toy at $T/toy with the plans the CLI units start from: plan.sh, one row its test
+# kills; plan-base.sh, that row, a survivor (no test covers it, so a run exits 1) and a second row
+# that is killed; plan-hang.sh, one row whose run marks `started` in the plan directory, sleeps 4 s,
+# then marks `finished`.
+mk_cli_toy() {
+  mk_toy "$T/toy"
   cat > "$T/toy/plan.sh" <<'EOF'
 prepare() { shmutant_copy_tree "$SHMUTANT_PLAN_DIR" "$1"; }
 run() { bash "$1/test.sh"; }
 shmutant_target lib.sh
 shmutant_mut 'add subtracts' '$1 + $2' '$1 - $2' 'add-works'
 EOF
+  { cat "$T/toy/plan.sh"; printf "shmutant_mut 'survivor' '%%' '+' 'uncovered'\nshmutant_mut 'fine' '+' '-' 'add-works'\n"; } > "$T/toy/plan-base.sh"
+  cat > "$T/toy/plan-hang.sh" <<'EOF'
+prepare() { shmutant_copy_tree "$SHMUTANT_PLAN_DIR" "$1"; }
+run() { : > "$SHMUTANT_PLAN_DIR/started"; bash -c 'sleep 4; touch "$1/finished"' _ "$SHMUTANT_PLAN_DIR"; }
+shmutant_target lib.sh
+shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+EOF
+}
+
+# Each CLI unit below holds the assertions behind one decision the CLI makes, and builds what they
+# need from mk_cli_toy. run.sh runs a selected unit to its end, so a row goes red only as fast as its
+# witness finishes: a single unit for all of them made every CLI row wait out every interrupt.
+
+t_cli_labels_its_stream_and_refuses_bad_arguments() {
+  # A plan run from the command line: its stream on stdout, labelled with the plan file's name; and
+  # every argument the CLI refuses (exit 2) before any of the plan's code runs.
+  mk_cli_toy
+  # The TMPDIR the refusals below are given exists: with none, the run would fail creating its
+  # workdir, and a refusal that was meant to come first would pass without having been reached.
+  # For the same reason each refusal is known by its own message: a run let past one goes on to
+  # meet later guards, and one of those refuses a name holding a newline too.
+  mkdir -p "$T/tmpd"
   local out
   out="$(bash "$SHMUTANT" run "$T/toy/plan.sh" 2> "$T/err")"; rc_is $? 0 'a plan whose rows are all killed exits 0'
   has "$out" $'shmutant\t1\trow\tkilled' 'the stream reaches stdout'
@@ -4376,17 +4403,29 @@ EOF
 "
   TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan.sh
 " > /dev/null 2>"$T/e"; rc_is $? 2 'a plan path ending in a newline is refused, not resolved to its sibling'
-  has "$(cat "$T/e")" 'newline' 'says why'
+  has "$(cat "$T/e")" 'run: a path containing a newline is refused' 'says why'
   rm -f "$T/toy/plan.sh
 "
   TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan.sh" --workdir --keep > /dev/null 2>"$T/e"
   has "$(cat "$T/e")" 'needs a value' 'says so'
   [ -e "./--keep" ] && fail_ 'a directory named --keep was created'
   printf 'touch "$SHMUTANT_PLAN_DIR/loaded"\n' >> "$T/toy/plan.sh"
-  TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan.sh" --jobs abc > /dev/null 2>&1; rc_is $? 2 'a bad --jobs is refused'
+  TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan.sh" --jobs abc > /dev/null 2>"$T/e"; rc_is $? 2 'a bad --jobs is refused'
+  has "$(cat "$T/e")" 'SHMUTANT_JOBS must be' 'by the --jobs check, not by a workdir that could not be made'
   [ -e "$T/toy/loaded" ] && fail_ 'the plan ran before its settings were checked'
   sed -i.bak '/loaded/d' "$T/toy/plan.sh"; rm -f "$T/toy/plan.sh.bak"
-  ( _shmutant_checksum "$T/does-not-exist" 2>/dev/null ); rc_is $? 2 'a digest that could not be computed is a failure, not an empty line'
+  bash "$SHMUTANT" run "$T/toy/plan.sh" --jobs 0 > /dev/null 2>&1; rc_is $? 2 '--jobs 0 is refused'
+  bash "$SHMUTANT" run "$T/toy/plan.sh" --bogus > /dev/null 2>&1; rc_is $? 2 'an unknown option is refused'
+  bash "$SHMUTANT" run > /dev/null 2>&1; rc_is $? 2 'run without a plan is usage'
+  bash "$SHMUTANT" run "$T/nope.sh" > /dev/null 2>&1; rc_is $? 2 'a missing plan is refused'
+}
+
+t_cli_removes_only_the_workdir_it_made_unless_kept() {
+  # The workdir once a run has ended uninterrupted: one the run created is removed unless the
+  # SHMUTANT_KEEP the run settled (from the command line, the environment, the plan or prepare,
+  # whichever spoke last) is 1; one the caller supplied is never removed, whatever the plan assigns.
+  mk_cli_toy
+  local kept
   # --keep on the command line, and a prepare that settles SHMUTANT_KEEP=0: the settled value
   # is what the workers honoured and what decides the workdir
   sed 's/^prepare() {/prepare() { SHMUTANT_KEEP=0;/' "$T/toy/plan.sh" > "$T/toy/plan-unkeep.sh"
@@ -4397,23 +4436,16 @@ EOF
   bash "$SHMUTANT" run "$T/toy/plan.sh" > /dev/null 2>&1; rc_is $? 1 'a survivor exits 1'
   bash "$SHMUTANT" run "$T/toy/plan.sh" --jobs 1 --no-baseline --timeout 30 --workdir "$T/w" --keep > /dev/null 2>&1; rc_is $? 1 'options are accepted'
   [ -d "$T/w/mut-1/tree" ] || fail_ '--keep --workdir left the clone in place'
-  bash "$SHMUTANT" run "$T/toy/plan.sh" --jobs 0 > /dev/null 2>&1; rc_is $? 2 '--jobs 0 is refused'
   mkdir -p "$T/mine"; printf 'keep\n' > "$T/mine/precious"
   bash "$SHMUTANT" run "$T/toy/plan.sh" --workdir "$T/mine" > /dev/null 2>&1; rc_is $? 1 'runs in a caller-supplied workdir'
   eq "$(cat "$T/mine/precious" 2>/dev/null)" keep 'a caller-supplied --workdir is never removed'
   [ -f "$T/mine/mut-0/output" ] || fail_ 'the pool artifacts landed in the supplied workdir'
-  local kept
   kept="$(bash "$SHMUTANT" run "$T/toy/plan.sh" --keep 2>&1 >/dev/null | sed -n 's/^shmutant: workdir kept: //p')"
   [ -n "$kept" ] && [ -f "$kept/mut-0/tree/lib.sh" ] || fail_ '--keep did not keep a workdir the run created'
   [ -n "$kept" ] && rm -rf -- "$kept"
   kept="$(SHMUTANT_KEEP=1 bash "$SHMUTANT" run "$T/toy/plan.sh" 2>&1 >/dev/null | sed -n 's/^shmutant: workdir kept: //p')"
   [ -n "$kept" ] && [ -f "$kept/mut-0/tree/lib.sh" ] || fail_ 'SHMUTANT_KEEP=1 without --keep did not keep the created workdir'
   [ -n "$kept" ] && rm -rf -- "$kept"
-  mkdir -p "$T/decoy"; printf 'exit 3\n' > "$T/decoy/plan.sh"
-  ( cd "$T/toy" && PATH="$T/decoy:$PATH" bash "$SHMUTANT" run plan.sh > /dev/null 2>&1 ); rc_is $? 1 'a bare plan name is sourced from its own directory, not from PATH (1: the survivor row, not the decoy'"'"'s 3)'
-  { printf 'set -e\nfalse\n'; cat "$T/toy/plan.sh"; } > "$T/toy/plan-ef.sh"
-  bash "$SHMUTANT" run "$T/toy/plan-ef.sh" > /dev/null 2>"$T/err-ef"; rc_is $? 2 'a plan whose own set -e fires while loading is a load failure'
-  has "$(cat "$T/err-ef")" 'before the pool completed' 'says so'
   { cat "$T/toy/plan.sh"; printf 'made=1\nkeep=0\n'; } > "$T/toy/plan-clobber.sh"
   mkdir -p "$T/theirs"; printf 'keep\n' > "$T/theirs/precious"
   bash "$SHMUTANT" run "$T/toy/plan-clobber.sh" --workdir "$T/theirs" > /dev/null 2>&1; rc_is $? 1 'the clobbering plan still loads and runs'
@@ -4421,6 +4453,26 @@ EOF
   { cat "$T/toy/plan.sh"; printf 'SHMUTANT_CLI_MADE=1\n'; } > "$T/toy/plan-ro.sh"
   bash "$SHMUTANT" run "$T/toy/plan-ro.sh" --workdir "$T/theirs" > /dev/null 2>&1; rc_is $? 1 'a plan assigning the CLI state names changes nothing outside its subshell'
   eq "$(cat "$T/theirs/precious" 2>/dev/null)" keep 'and the supplied workdir is still there'
+  { printf 'SHMUTANT_KEEP=1\n'; cat "$T/toy/plan-base.sh"; } > "$T/toy/plan-keep.sh"
+  kept="$(TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-keep.sh" 2>&1 >/dev/null | sed -n 's/^shmutant: workdir kept: //p')"
+  [ -n "$kept" ] && [ -f "$kept/mut-0/tree/lib.sh" ] || fail_ 'SHMUTANT_KEEP=1 set inside the plan did not keep the workdir the CLI created'
+  [ -n "$kept" ] && rm -rf -- "$kept"
+}
+
+t_cli_loads_the_plan_by_its_path_in_a_shell_of_its_own() {
+  # The plan is sourced by its own path, in a subshell of its own, and judged by what it does there:
+  # a decoy plan on PATH is never sourced, an errexit that fires while it loads is a load failure, a
+  # relative --workdir means what it meant before the plan's cd, prepare and run functions inherited
+  # from the environment do not stand in for the plan's, and its own set -e does not stop the CLI
+  # before its cleanup and report.
+  mk_cli_toy
+  local kept
+  printf "shmutant_mut 'survivor' '%%' '+' 'uncovered'\n" >> "$T/toy/plan.sh"
+  mkdir -p "$T/decoy"; printf 'exit 3\n' > "$T/decoy/plan.sh"
+  ( cd "$T/toy" && PATH="$T/decoy:$PATH" bash "$SHMUTANT" run plan.sh > /dev/null 2>&1 ); rc_is $? 1 'a bare plan name is sourced from its own directory, not from PATH (1: the survivor row, not the decoy'"'"'s 3)'
+  { printf 'set -e\nfalse\n'; cat "$T/toy/plan.sh"; } > "$T/toy/plan-ef.sh"
+  bash "$SHMUTANT" run "$T/toy/plan-ef.sh" > /dev/null 2>"$T/err-ef"; rc_is $? 2 'a plan whose own set -e fires while loading is a load failure'
+  has "$(cat "$T/err-ef")" 'before the pool completed' 'says so'
   { printf 'cd "$SHMUTANT_PLAN_DIR"\n'; cat "$T/toy/plan.sh"; } > "$T/toy/plan-cd.sh"
   mkdir -p "$T/from"
   ( cd "$T/from" && bash "$SHMUTANT" run "$T/toy/plan-cd.sh" --workdir rel --keep > /dev/null 2>&1 )
@@ -4435,11 +4487,19 @@ EOF
   kept="$(bash "$SHMUTANT" run "$T/toy/plan-e.sh" --keep 2>&1 >/dev/null | sed -n 's/^shmutant: workdir kept: //p')"
   [ -n "$kept" ] || fail_ 'a plan with set -e made the CLI exit at the pool call before its cleanup and report'
   [ -n "$kept" ] && rm -rf -- "$kept"
+}
+
+t_cli_counts_a_plan_that_ends_early_as_a_load_failure() {
+  # Only a pool that completed can pass: a table holding a refused row, a plan that fails to load,
+  # has no callbacks, exits (whatever trap it set first), execs or forges the completion marker, and
+  # a prepare that exits, each fail the run (exit 2). Those run under the unit's own TMPDIR leave no
+  # automatic workdir behind. A plan that only uses set -e, subshells or a trap on another signal
+  # still loads and runs.
+  mk_cli_toy
+  printf "shmutant_mut 'survivor' '%%' '+' 'uncovered'\n" >> "$T/toy/plan.sh"
+  { printf 'set -e\nfalse\n'; cat "$T/toy/plan.sh"; } > "$T/toy/plan-ef.sh"
   printf "shmutant_mut 'broken' '' 'x' 'add-works'\nshmutant_mut 'fine' '+' '-' 'add-works'\n" >> "$T/toy/plan.sh"
   bash "$SHMUTANT" run "$T/toy/plan.sh" > /dev/null 2>&1; rc_is $? 2 'a refused row followed by a valid one fails the plan'
-  bash "$SHMUTANT" run "$T/toy/plan.sh" --bogus > /dev/null 2>&1; rc_is $? 2 'an unknown option is refused'
-  bash "$SHMUTANT" run > /dev/null 2>&1; rc_is $? 2 'run without a plan is usage'
-  bash "$SHMUTANT" run "$T/nope.sh" > /dev/null 2>&1; rc_is $? 2 'a missing plan is refused'
   printf 'shmutant_target lib.sh\nshmutant_mut a b c d\n' > "$T/norun.sh"
   bash "$SHMUTANT" run "$T/norun.sh" > /dev/null 2>&1; rc_is $? 2 'a plan without callbacks is refused'
   printf 'if\n' > "$T/broken.sh"
@@ -4449,7 +4509,6 @@ EOF
   TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/norun.sh" > /dev/null 2>&1; rc_is $? 2 'a plan without callbacks is a load failure'
   TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-ef.sh" > /dev/null 2>&1; rc_is $? 2 'a plan whose errexit fires is a load failure'
   eq "$(find "$T/tmpd" -mindepth 1 | wc -l | tr -d ' ')" 0 'no automatic workdir survives a load failure'
-  grep -v "'broken'" "$T/toy/plan.sh" > "$T/toy/plan-base.sh"
   { cat "$T/toy/plan-base.sh"; printf 'trap "echo bye" EXIT\nexit 0\n'; } > "$T/toy/plan-trap.sh"
   TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-trap.sh" > /dev/null 2>"$T/err-trap"; rc_is $? 2 'a plan that installs its own EXIT trap and exits is still a load failure'
   has "$(cat "$T/err-trap")" 'before the pool completed' 'the exit is reported as an incomplete run'
@@ -4461,28 +4520,42 @@ EOF
   TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-ftrap.sh" > /dev/null 2>&1; rc_is $? 2 'nor a trap set inside a helper function'
   { cat "$T/toy/plan-base.sh"; printf 'exit 0\n'; } > "$T/toy/plan-exit.sh"
   TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-exit.sh" > /dev/null 2>&1; rc_is $? 2 'a plan that exits 0 is a load failure, not a pass'
-  { printf 'SHMUTANT_KEEP=1\n'; cat "$T/toy/plan-base.sh"; } > "$T/toy/plan-keep.sh"
-  kept="$(TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-keep.sh" 2>&1 >/dev/null | sed -n 's/^shmutant: workdir kept: //p')"
-  [ -n "$kept" ] && [ -f "$kept/mut-0/tree/lib.sh" ] || fail_ 'SHMUTANT_KEEP=1 set inside the plan did not keep the workdir the CLI created'
-  [ -n "$kept" ] && rm -rf -- "$kept"
-  cat > "$T/toy/plan-hang.sh" <<'EOF'
-prepare() { shmutant_copy_tree "$SHMUTANT_PLAN_DIR" "$1"; }
-run() { : > "$SHMUTANT_PLAN_DIR/started"; bash -c 'sleep 4; touch "$1/finished"' _ "$SHMUTANT_PLAN_DIR"; }
-shmutant_target lib.sh
-shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
-EOF
+  # A plan forging the marker while loading, by every name the workdir could give it.
+  { cat "$T/toy/plan-base.sh"; printf 'for f in "${SHMUTANT_CLI_DONE_PATH:-}" "$SHMUTANT_CLI_WD"/.done.*; do [ -n "$f" ] && [ -e "$f" ] && printf "0 0\\n" > "$f"; done; exit 0\n'; } > "$T/toy/plan-forge.sh"
+  TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-forge.sh" > /dev/null 2>&1; rc_is $? 2 'a plan that writes a completion marker while loading and exits 0 is still a load failure'
+  { cat "$T/toy/plan-base.sh"; printf 'exec true\n'; } > "$T/toy/plan-exec.sh"
+  TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-exec.sh" > /dev/null 2>&1; rc_is $? 2 'a plan that execs cannot become a passing run'
+  { printf 'set -e\nroot="$(pwd)"\n( true )\n'; cat "$T/toy/plan-base.sh"; } > "$T/toy/plan-subs.sh"
+  TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-subs.sh" > /dev/null 2>&1; rc_is $? 1 'a plan with set -e, a command substitution and a subshell loads and runs normally'
+  { cat "$T/toy/plan-base.sh"; printf 'trap "echo usr" USR1\n'; } > "$T/toy/plan-usr.sh"
+  TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-usr.sh" > /dev/null 2>&1; rc_is $? 1 'a plan may still trap other signals'
+  eq "$(find "$T/tmpd" -mindepth 1 | wc -l | tr -d ' ')" 0 'no automatic workdir survives those load failures'
+  # prepare leaves a read-only tree in the workdir and ends the subshell before the pool could
+  # clean up: the automatic workdir is still removed.
+  { cat "$T/toy/plan-base.sh"; printf 'prepare() { mkdir -p "$1/ro"; : > "$1/ro/f"; chmod 555 "$1/ro"; exit 0; }\n'; } > "$T/toy/plan-roexit.sh"
+  TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-roexit.sh" > /dev/null 2>&1; rc_is $? 2 'a prepare that exits is a harness error'
+  eq "$(find "$T/tmpd" -mindepth 1 | wc -l | tr -d ' ')" 0 'the automatic workdir holding a read-only tree was removed after the early exit'
+}
+
+t_cli_interrupted_ends_its_workers_and_removes_its_workdir() {
+  # TERM to the CLI while a row runs: the workers end with it, and the workdir it created is removed.
+  mk_cli_toy
+  mkdir -p "$T/tmpd"
   TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-hang.sh" --timeout 0 --no-baseline > /dev/null 2>&1 & local cli=$!
   wait_for "$T/toy/started" || fail_ 'the run never started'; rm -f "$T/toy/started"
   kill -TERM "$cli"; wait "$cli" 2>/dev/null
   sleep 4
   [ -e "$T/toy/finished" ] && fail_ 'a worker outlived the CLI that was sent TERM'
   eq "$(find "$T/tmpd" -mindepth 1 | wc -l | tr -d ' ')" 0 'the interrupted CLI removed the workdir it created'
-  sed 's/^prepare() {/prepare() { : > "$SHMUTANT_PLAN_DIR\/preparing"; sleep 3;/' "$T/toy/plan-hang.sh" > "$T/toy/plan-slow-prepare.sh"
-  SHMUTANT_KEEP=1 TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-slow-prepare.sh" --timeout 0 --no-baseline > /dev/null 2>&1 & cli=$!
-  wait_for "$T/toy/preparing" || fail_ 'prepare never started'; rm -f "$T/toy/preparing"
-  kill -TERM "$cli"; wait "$cli" 2>/dev/null
-  [ "$(find "$T/tmpd" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" -ge 1 ] || fail_ 'SHMUTANT_KEEP=1 in the environment was not honoured by an interrupt during prepare'
-  rm -rf "$T/tmpd"/*
+}
+
+t_cli_interrupted_honours_the_keep_prepare_settled() {
+  # TERM to the CLI while a row runs, after prepare settled SHMUTANT_KEEP: the workdir it created is
+  # kept when prepare settled 1, and removed when prepare settled 0 under --keep, as an
+  # uninterrupted run with that settled value would.
+  mk_cli_toy
+  mkdir -p "$T/tmpd"
+  local cli
   sed 's/^prepare() {/prepare() { SHMUTANT_KEEP=1;/' "$T/toy/plan-hang.sh" > "$T/toy/plan-hang-keep.sh"
   TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-hang-keep.sh" --timeout 0 --no-baseline > /dev/null 2>&1 & cli=$!
   wait_for "$T/toy/started" || fail_ 'the keep run never started'; rm -f "$T/toy/started"
@@ -4499,21 +4572,22 @@ EOF
   kill -TERM "$cli"; wait "$cli" 2>/dev/null
   sleep 4; rm -f "$T/toy/finished"
   eq "$(find "$T/tmpd" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" 0 'a workdir created under --keep that prepare settled to 0 is removed on an interrupt'
-  # the workdir's parent swapped for a link to a caller tree holding a directory of the same
-  # name: neither the final cleanup nor an interrupt may remove through it
-  # (the swap is two levels up: the workdir's own parent stays a real directory, reached
-  # through the link, so only the pinned physical parent can tell)
-  mkdir -p "$T/tmp2/nest/deeper" "$T/toy/theirs"
-  cat > "$T/toy/plan-swap-parent.sh" <<'EOF'
-prepare() { shmutant_copy_tree "$SHMUTANT_PLAN_DIR" "$1"; }
-run() { local w; w="$(cd "$1/../.." && pwd -P)"; local up; up="$(dirname "$(dirname "$w")")"; mkdir -p "$SHMUTANT_PLAN_DIR/theirs/deeper/$(basename "$w")/keep"; mv "$up" "$up.moved"; ln -s "$SHMUTANT_PLAN_DIR/theirs" "$up"; bash "$1/test.sh"; }
-shmutant_target lib.sh
-shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
-EOF
-  TMPDIR="$T/tmp2/nest/deeper" bash "$SHMUTANT" run "$T/toy/plan-swap-parent.sh" --no-baseline > /dev/null 2>"$T/e"
-  [ "$(find "$T/toy/theirs" -name keep | wc -l | tr -d ' ')" -ge 1 ] || fail_ 'the caller tree behind a swapped workdir ancestor was removed by the CLI cleanup'
-  has "$(cat "$T/e")" 'no longer the workdir this run created' 'the swap is reported'
-  rm -f "$T/tmp2/nest"; mv "$T/tmp2/nest.moved" "$T/tmp2/nest" 2>/dev/null; rm -rf "$T/tmp2" "$T/toy/theirs"
+}
+
+t_cli_interrupted_keeps_the_workdir_the_operator_or_plan_asked_for() {
+  # TERM to the CLI with nothing settled to 0: SHMUTANT_KEEP=1 from the environment keeps the
+  # workdir the CLI created whether the run was loading the plan, preparing or running a row, and so
+  # does SHMUTANT_KEEP=1 assigned by the plan, interrupted during prepare. In a caller's workdir, an
+  # interrupt leaves no marker file behind.
+  mk_cli_toy
+  mkdir -p "$T/tmpd"
+  local cli
+  sed 's/^prepare() {/prepare() { : > "$SHMUTANT_PLAN_DIR\/preparing"; sleep 3;/' "$T/toy/plan-hang.sh" > "$T/toy/plan-slow-prepare.sh"
+  SHMUTANT_KEEP=1 TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-slow-prepare.sh" --timeout 0 --no-baseline > /dev/null 2>&1 & cli=$!
+  wait_for "$T/toy/preparing" || fail_ 'prepare never started'; rm -f "$T/toy/preparing"
+  kill -TERM "$cli"; wait "$cli" 2>/dev/null
+  [ "$(find "$T/tmpd" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" -ge 1 ] || fail_ 'SHMUTANT_KEEP=1 in the environment was not honoured by an interrupt during prepare'
+  rm -rf "$T/tmpd"/*
   # SHMUTANT_KEEP=1 in the environment, interrupted while the plan is still loading (before
   # anything could be reported): the decision was the operator's, and the workdir stays
   { printf ': > "$SHMUTANT_PLAN_DIR/loading"; sleep 3\n'; cat "$T/toy/plan-hang.sh"; } > "$T/toy/plan-slow-load.sh"
@@ -4543,11 +4617,33 @@ EOF
   rm -f "$T/toy/finished"
   [ "$(find "$T/tmpd" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" -ge 1 ] || fail_ 'with SHMUTANT_KEEP=1 the interrupted CLI still removed its workdir'
   rm -rf "$T/tmpd"/*
-  { cat "$T/toy/plan-base.sh"; printf 'echo plan-says-hello\n'; } > "$T/toy/plan-chatty.sh"
-  TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-chatty.sh" > "$T/chatty.out" 2>"$T/chatty.err"
-  hasnt "$(cat "$T/chatty.out")" 'plan-says-hello' 'what a plan prints while loading stays out of the verdict stream'
-  has "$(cat "$T/chatty.err")" 'plan-says-hello' 'and reaches stderr instead'
-  eq "$(grep -vc '^shmutant	1	' "$T/chatty.out")" 0 'every stdout line is a record'
+}
+
+t_cli_never_removes_through_a_swapped_workdir_parent() {
+  # the workdir's parent swapped for a link to a caller tree holding a directory of the same
+  # name: neither the final cleanup nor an interrupt may remove through it
+  # (the swap is two levels up: the workdir's own parent stays a real directory, reached
+  # through the link, so only the pinned physical parent can tell)
+  mk_cli_toy
+  mkdir -p "$T/tmp2/nest/deeper" "$T/toy/theirs"
+  cat > "$T/toy/plan-swap-parent.sh" <<'EOF'
+prepare() { shmutant_copy_tree "$SHMUTANT_PLAN_DIR" "$1"; }
+run() { local w; w="$(cd "$1/../.." && pwd -P)"; local up; up="$(dirname "$(dirname "$w")")"; mkdir -p "$SHMUTANT_PLAN_DIR/theirs/deeper/$(basename "$w")/keep"; mv "$up" "$up.moved"; ln -s "$SHMUTANT_PLAN_DIR/theirs" "$up"; bash "$1/test.sh"; }
+shmutant_target lib.sh
+shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+EOF
+  TMPDIR="$T/tmp2/nest/deeper" bash "$SHMUTANT" run "$T/toy/plan-swap-parent.sh" --no-baseline > /dev/null 2>"$T/e"
+  [ "$(find "$T/toy/theirs" -name keep | wc -l | tr -d ' ')" -ge 1 ] || fail_ 'the caller tree behind a swapped workdir ancestor was removed by the CLI cleanup'
+  has "$(cat "$T/e")" 'no longer the workdir this run created' 'the swap is reported'
+  rm -f "$T/tmp2/nest"; mv "$T/tmp2/nest.moved" "$T/tmp2/nest" 2>/dev/null; rm -rf "$T/tmp2" "$T/toy/theirs"
+}
+
+t_cli_interrupted_ends_the_command_its_plan_execd_into() {
+  # TERM to the CLI while its plan subshell has exec'd into a command: the CLI kills that command
+  # instead of waiting for it to end, and the command does not outlive the run.
+  mk_cli_toy
+  mkdir -p "$T/tmpd"
+  local cli
   { cat "$T/toy/plan-base.sh"; printf 'exec bash -c %q _ %q\n' 'sleep 4; touch "$1/execd"' "$T/toy"; } > "$T/toy/plan-exec-hang.sh"
   TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-exec-hang.sh" --timeout 0 > /dev/null 2>&1 & cli=$!
   sleep 1
@@ -4557,29 +4653,35 @@ EOF
   [ -e "$T/toy/execd" ] && fail_ 'interrupting a CLI whose plan execd a command blocked instead of killing it'
   sleep 4
   [ -e "$T/toy/execd" ] && fail_ 'the command the plan execd into outlived the interrupted CLI'
-  # A plan forging the marker while loading, by every name the workdir could give it.
-  { cat "$T/toy/plan-base.sh"; printf 'for f in "${SHMUTANT_CLI_DONE_PATH:-}" "$SHMUTANT_CLI_WD"/.done.*; do [ -n "$f" ] && [ -e "$f" ] && printf "0 0\\n" > "$f"; done; exit 0\n'; } > "$T/toy/plan-forge.sh"
-  TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-forge.sh" > /dev/null 2>&1; rc_is $? 2 'a plan that writes a completion marker while loading and exits 0 is still a load failure'
-  { cat "$T/toy/plan-base.sh"; printf 'exec true\n'; } > "$T/toy/plan-exec.sh"
-  TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-exec.sh" > /dev/null 2>&1; rc_is $? 2 'a plan that execs cannot become a passing run'
-  { printf 'set -e\nroot="$(pwd)"\n( true )\n'; cat "$T/toy/plan-base.sh"; } > "$T/toy/plan-subs.sh"
-  TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-subs.sh" > /dev/null 2>&1; rc_is $? 1 'a plan with set -e, a command substitution and a subshell loads and runs normally'
-  { cat "$T/toy/plan-base.sh"; printf 'trap "echo usr" USR1\n'; } > "$T/toy/plan-usr.sh"
-  TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-usr.sh" > /dev/null 2>&1; rc_is $? 1 'a plan may still trap other signals'
-  eq "$(find "$T/tmpd" -mindepth 1 | wc -l | tr -d ' ')" 0 'no automatic workdir survives those load failures'
+}
+
+t_cli_keeps_plan_output_off_the_stream_and_paths_where_invoked() {
+  # What a plan prints while it loads goes to stderr, never into the verdict stream; a relative
+  # SHMUTANT_STREAM or TMPDIR means what it meant where the CLI was invoked, wherever the plan cds,
+  # and a relative SHMUTANT_STREAM in a directory that does not exist there is refused.
+  mk_cli_toy
+  mkdir -p "$T/tmpd"
+  { cat "$T/toy/plan-base.sh"; printf 'echo plan-says-hello\n'; } > "$T/toy/plan-chatty.sh"
+  TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-chatty.sh" > "$T/chatty.out" 2>"$T/chatty.err"
+  hasnt "$(cat "$T/chatty.out")" 'plan-says-hello' 'what a plan prints while loading stays out of the verdict stream'
+  has "$(cat "$T/chatty.err")" 'plan-says-hello' 'and reaches stderr instead'
+  eq "$(grep -vc '^shmutant	1	' "$T/chatty.out")" 0 'every stdout line is a record'
   ( cd "$T" && TMPDIR="$T/tmpd" SHMUTANT_STREAM=missing/out.tsv bash "$SHMUTANT" run "$T/toy/plan-base.sh" > /dev/null 2>"$T/e" ); rc_is $? 2 'a relative SHMUTANT_STREAM in a missing directory is refused'
   has "$(cat "$T/e")" 'does not exist' 'says why'
   [ -e "$T/out.tsv" ] && fail_ 'the stream was re-based onto the wrong directory'
-  # prepare leaves a read-only tree in the workdir and ends the subshell before the pool could
-  # clean up: the automatic workdir is still removed.
-  { cat "$T/toy/plan-base.sh"; printf 'prepare() { mkdir -p "$1/ro"; : > "$1/ro/f"; chmod 555 "$1/ro"; exit 0; }\n'; } > "$T/toy/plan-roexit.sh"
-  TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-roexit.sh" > /dev/null 2>&1; rc_is $? 2 'a prepare that exits is a harness error'
-  eq "$(find "$T/tmpd" -mindepth 1 | wc -l | tr -d ' ')" 0 'the automatic workdir holding a read-only tree was removed after the early exit'
+  printf "shmutant_mut 'survivor' '%%' '+' 'uncovered'\n" >> "$T/toy/plan.sh"
+  { printf 'cd "$SHMUTANT_PLAN_DIR"\n'; cat "$T/toy/plan.sh"; } > "$T/toy/plan-cd.sh"
   ( cd "$T" && TMPDIR=tmpd SHMUTANT_STREAM=out.tsv bash "$SHMUTANT" run "$T/toy/plan-cd.sh" > /dev/null 2>&1 )
   [ -f "$T/out.tsv" ] || fail_ 'a relative SHMUTANT_STREAM was resolved after the plan changed directory'
   [ -e "$T/toy/out.tsv" ] && fail_ 'the stream landed relative to the plan directory'
   eq "$(find "$T/tmpd" -mindepth 1 | wc -l | tr -d ' ')" 0 'a relative TMPDIR workdir is resolved before the plan cds, and removed'
   [ -e "$T/toy/tmpd" ] && fail_ 'a second workdir was created relative to the plan directory'
+}
+
+t_cli_prints_usage_version_and_checksum() {
+  # The commands besides run: usage for none and for an unknown one, help, the version marker, and
+  # the digest of the file the CLI runs from, as the platform's own tool computes it.
+  ( _shmutant_checksum "$T/does-not-exist" 2>/dev/null ); rc_is $? 2 'a digest that could not be computed is a failure, not an empty line'
   bash "$SHMUTANT" > /dev/null 2>&1; rc_is $? 2 'no command is usage'
   bash "$SHMUTANT" bogus > /dev/null 2>&1; rc_is $? 2 'an unknown command is usage'
   has "$(bash "$SHMUTANT" help)" 'usage:' 'help prints usage'
