@@ -217,7 +217,7 @@ The maintainer cuts a release with the project's `/release` skill
 `scripts/release.sh`. To check a cut without making it:
 
 ```sh
-env -u SHELLOPTS -u BASHOPTS -u BASH_ENV bash scripts/release.sh --dry-run 0.2.1
+env -u SHELLOPTS -u BASHOPTS -u BASH_ENV bash scripts/release.sh --dry-run 0.2.2
 ```
 
 The `env -u` keeps shell options exported by the caller (such as `noexec`, which makes any bash
