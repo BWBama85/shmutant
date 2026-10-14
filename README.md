@@ -190,6 +190,14 @@ read instead of passing it. So
 `test/run.sh` first checks that `ps` runs; where it cannot, it runs no unit, prints one
 `run.sh: ps cannot run here …` line and exits 2.
 
+Each unit runs in a process group of its own, with stdin from `/dev/null`, so nothing a unit leaves
+behind shares the suite's group. The leak check freezes a leftover before it kills it. On macOS, in a
+session launchd started (as on the CI runner), the exit of a member launchd adopted can leave the kernel
+treating its group as newly orphaned, and an orphaned group with a member stopped is hung up whole: in
+the suite's group, that ended the suite with status 129. An INT, TERM or HUP sent to the suite is
+passed on to the unit it is running, which is killed if it has not ended three seconds later and then
+swept as any unit is, so a `^C` at the terminal still ends both.
+
 An agent sandbox is the usual cause: on macOS `/bin/ps` is setuid root, and Claude Code's sandbox
 refuses to execute it. This repository's `.claude/settings.json` lists `bash test/run.sh` in
 `sandbox.excludedCommands`, which runs that command outside the sandbox. The entry has no wildcard,
