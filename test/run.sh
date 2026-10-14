@@ -4382,7 +4382,7 @@ EOF
 
 # Each CLI unit below holds the assertions behind one decision the CLI makes, and builds what they
 # need from mk_cli_toy. run.sh runs a selected unit to its end, so a row goes red only as fast as its
-# witness finishes: a single unit for all of them made every CLI row wait out every interrupt.
+# whole witness runs: an assertion belongs in the unit of its own decision, not in a slower one.
 
 t_cli_labels_its_stream_and_refuses_bad_arguments() {
   # A plan run from the command line: its stream on stdout, labelled with the plan file's name; and
