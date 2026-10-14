@@ -1878,3 +1878,9 @@ shmutant_mut 'a failed digest tool prints an empty line' \
   '  [ "$st" = 0 ] || { _shmutant_err "cannot compute the digest of $1 (status ${st:-unknown})"; return 2; }' \
   '  [ "$st" = 0 ] || { echo; _shmutant_err "cannot compute the digest of $1 (status ${st:-unknown})"; return 2; }' \
   't_checksum_takes_the_tool_status_and_one_digest'
+
+# --- the CLI checks its settings before the plan loads (#36) ---
+shmutant_mut 'the CLI loads the plan before checking its settings' \
+  '  if ! _shmutant_validate_settings run "$wd"; then' \
+  '  if false; then' \
+  't_cli_labels_its_stream_and_refuses_bad_arguments'

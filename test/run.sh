@@ -4390,13 +4390,14 @@ t_cli_labels_its_stream_and_refuses_bad_arguments() {
   mk_cli_toy
   # The TMPDIR the refusals below are given exists: with none, the run would fail creating its
   # workdir, and a refusal that was meant to come first would pass without having been reached.
-  # For the same reason each refusal is known by its own message: a run let past one goes on to
-  # meet later guards, and one of those refuses a name holding a newline too.
+  # For the same reason the newline refusal is known by its own message: a run let past it goes on
+  # to meet a later guard that refuses a name holding a newline too.
   mkdir -p "$T/tmpd"
-  local out
-  out="$(bash "$SHMUTANT" run "$T/toy/plan.sh" 2> "$T/err")"; rc_is $? 0 'a plan whose rows are all killed exits 0'
-  has "$out" $'shmutant\t1\trow\tkilled' 'the stream reaches stdout'
-  has "$(cat "$T/err")" 'plan.sh: 1/1' 'the label is the plan file name'
+  OUT="$(bash "$SHMUTANT" run "$T/toy/plan.sh" 2> "$T/err")"; rc_is $? 0 'a plan whose rows are all killed exits 0'
+  has "$OUT" $'shmutant\t1\trow\tkilled' 'the stream reaches stdout'
+  # The whole label: plan.sh is also the end of a longer name.
+  eq "$(field summary 4)" plan.sh 'the label is the plan file name'
+  has "$(cat "$T/err")" 'shmutant: plan.sh: 1/1' 'and so is the label of the summary line'
   TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan.sh" --workdir --keep > /dev/null 2>"$T/e"; rc_is $? 2 'a flag where a value was expected is refused'
   cp "$T/toy/plan.sh" "$T/toy/plan.sh
 "; printf 'exit 7\n' > "$T/toy/plan.sh
@@ -4621,7 +4622,7 @@ t_cli_interrupted_keeps_the_workdir_the_operator_or_plan_asked_for() {
 
 t_cli_never_removes_through_a_swapped_workdir_parent() {
   # the workdir's parent swapped for a link to a caller tree holding a directory of the same
-  # name: neither the final cleanup nor an interrupt may remove through it
+  # name: the final cleanup may not remove through it
   # (the swap is two levels up: the workdir's own parent stays a real directory, reached
   # through the link, so only the pinned physical parent can tell)
   mk_cli_toy
