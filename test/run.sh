@@ -117,6 +117,30 @@ wait_gone() {
   done
 }
 
+# stopped_among <pid>… — print each of <pid>… that is stopped now (state T), one per line.
+stopped_among() {
+  local p
+  for p in "$@"; do
+    case "$(command -p ps -o stat= -p "$p" 2>/dev/null)" in *T*) printf '%s\n' "$p" ;; esac
+  done
+}
+
+# none_stopped <looks> <pid>… — wait until none of <pid>… is stopped, looking at most <looks> times a
+# tenth of a second apart; on expiry print those still stopped and return 1. The bound counts looks.
+none_stopped() {
+  local looks="$1" i left; shift
+  for (( i = 1; ; i++ )); do
+    left="$(stopped_among "$@")"; [ -n "$left" ] || return 0
+    [ "$i" -lt "$looks" ] || { printf '%s\n' "$left"; return 1; }
+    sleep 0.1
+  done
+}
+
+# group_members <pgid> — print the pid of every process in process group <pgid>, one per line.
+group_members() {
+  command -p ps -A -o pid= -o pgid= 2>/dev/null | command -p awk -v g="$1" '$2 == g { print $1 }'
+}
+
 # note_started <file> — record the calling shell's last background job ($!) in <file> as
 # `pid:identity`, the identity read at once: a later check or kill then reaches that process, and
 # no other that comes to hold its number. One whose identity could not be read is left as `pid:`.
@@ -1573,6 +1597,72 @@ t_a_target_rewritten_during_the_run_is_not_trusted() {
   SHMUTANT_JOBS=1 SHMUTANT_BASELINE=0 pool lbl "$T/wd3" toy_prepare chmod_run
   rc_is "$RC" 2 'a target whose mode changed during its run is a harness error'
   has "$ERR" 'content or metadata' 'says why'
+}
+
+# shellcheck disable=SC2034
+t_target_ck_fails_when_any_stage_fails() {
+  # #29: a target's fingerprint is its mode, owner and size (ls, then awk), its exact mtime (stat,
+  # where a form was found) and its content (cksum). A stage that fails fails the fingerprint, even
+  # after printing all it would have printed: one missing a stage matches another missing it, and
+  # a change to what that stage reads would pass unseen.
+  mkdir -p "$T/w/tree" "$T/bin"; printf 'x\n' > "$T/w/tree/f"
+  declare -gA SHMUTANT_DIR_IDS; SHMUTANT_DIR_IDS[k]="$(_shmutant_dir_id "$T/w")"
+  _shmutant_stat_style
+  local whole rc tool real out lines=3
+  [ "$SHMUTANT_STAT_STYLE" != none ] || lines=2
+  whole="$(_shmutant_target_ck "$T/w" tree/f k)"; rc_is $? 0 'a target read whole'
+  eq "$(printf '%s\n' "$whole" | grep -c .)" "$lines" 'one line per stage'
+  # ls and stat are found through _shmutant_std_bin: stand-ins that run the real tool, then fail
+  eval "$(declare -f _shmutant_std_bin | sed '1s/^_shmutant_std_bin /_shmutant_std_bin_real /')"
+  for tool in ls stat; do
+    [ "$tool" = ls ] || [ "$SHMUTANT_STAT_STYLE" != none ] || continue
+    real="$(_shmutant_std_bin_real "$tool")" || { fail_ "fixture: no $tool on the standard path"; continue; }
+    printf '#!/bin/sh\n"%s" "$@"; exit 1\n' "$real" > "$T/bin/$tool" && chmod +x "$T/bin/$tool"
+    out="$( _shmutant_std_bin() { if [ "$1" = "$tool" ]; then printf '%s' "$T/bin/$tool"; else _shmutant_std_bin_real "$@"; fi; }
+            _shmutant_target_ck "$T/w" tree/f k )"; rc=$?
+    [ "$rc" -ne 0 ] || fail_ "a failed $tool still gave a fingerprint: [$out]"
+    # what it printed is what the real tool prints, up to its own stage: the chain stops there
+    [ -n "$out" ] && case "$whole" in "$out"*) true ;; *) false ;; esac || fail_ "fixture: the failing $tool did not print what the real one does: [$out]"
+  done
+  # awk and cksum run through `command -p`: a shadow that runs the real tool, then fails
+  for tool in awk cksum; do
+    out="$( command() { if [ "$1" = -p ] && [ "$2" = "$tool" ]; then shift 2; builtin command -p "$tool" "$@"; return 1; fi; builtin command "$@"; }
+            _shmutant_target_ck "$T/w" tree/f k )"; rc=$?
+    [ "$rc" -ne 0 ] || fail_ "a failed $tool still gave a fingerprint: [$out]"
+    # what it printed is what the real tool prints, up to its own stage: the chain stops there
+    [ -n "$out" ] && case "$whole" in "$out"*) true ;; *) false ;; esac || fail_ "fixture: the failing $tool did not print what the real one does: [$out]"
+  done
+  # A platform with no stat form has no stat stage: the read is still whole without one.
+  out="$( SHMUTANT_STAT_STYLE=none; _shmutant_target_ck "$T/w" tree/f k )"; rc_is $? 0 'a read with no stat form available'
+  eq "$(printf '%s\n' "$out" | grep -c .)" 2 'and has no stat line'
+}
+
+# shellcheck disable=SC2034
+t_target_sample_that_could_not_be_read_is_not_a_match() {
+  # #29: the watchdog's sample of the target and the read after the run are matches only when the
+  # read succeeded. A read that printed the very fingerprint the pool recorded and then failed is
+  # not one: the row is a harness error, never a verdict on a target nobody could read.
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  eval "$(declare -f _shmutant_target_ck | sed '1s/^_shmutant_target_ck /_shmutant_target_ck_real /')"
+  # The read runs whole and prints what it printed; it then fails while `$T/failing` exists (the
+  # callback holds it for a few of the watchdog's half-second samples) or, for the read after the
+  # run, once the run's output has been published, which happens only after the watchdog is gone.
+  _shmutant_target_ck() {
+    local o rc; o="$(_shmutant_target_ck_real "$@")"; rc=$?; printf '%s\n' "$o"
+    [ ! -e "$T/failing" ] || return 1
+    [ -z "${FAIL_AFTER_RUN:-}" ] || [ ! -e "$1/output" ] || return 1
+    return "$rc"
+  }
+  failing_sample_run() { : > "$T/failing"; sleep 2; rm -f "$T/failing"; bash "$1/test.sh"; }
+  SHMUTANT_BASELINE=0 pool lbl "$T/wd" toy_prepare failing_sample_run
+  rc_is "$RC" 2 'a target sample that printed the fingerprint and failed is a harness error'
+  has "$ERR" 'not as the pool wrote it' 'says why'
+  [ "$(verdict_of a)" != killed ] || fail_ 'the row was scored on a sample that could not be read'
+  FAIL_AFTER_RUN=1 SHMUTANT_BASELINE=0 pool lbl "$T/wd2" toy_prepare toy_run
+  rc_is "$RC" 2 'a read after the run that printed the fingerprint and failed is a harness error'
+  has "$ERR" 'not as the pool wrote it' 'says why, after the run too'
 }
 
 t_checksum_uses_the_digest_file_not_a_function() {
@@ -3323,6 +3413,7 @@ t_interrupted_freeze_does_not_leave_the_holder_stopped() {
   # process doing it is killed in between (an outer timeout reaching an inner run), the holder must
   # not be left stopped: no tree walk reaches it, and a stopped process never sees end-of-file. The
   # killer is killed at the first identity query after the stop, and again at the freeze itself.
+  # Its guard, which would end the group, does nothing here: the holder's own CONT is what is tested.
   local point outer grp holder holderid
   for point in _shmutant_identity _shmutant_freeze_from; do
     mkdir -p "$T/$point"; rm -f "$T/started"
@@ -3332,7 +3423,8 @@ t_interrupted_freeze_does_not_leave_the_holder_stopped() {
     wait_for "$T/started" || { fail_ "$point: the callback never started"; _shmutant_kill_tree KILL "$outer" "$outer:"; wait "$outer" 2>/dev/null; continue; }
     read -r _ grp holder holderid < <(awk '$1 == "group" { print; exit }' "$T/$point/chan")
     if [ -z "$holder" ] || ! kill -0 "$holder" 2>/dev/null; then fail_ "$point: no live holder was published"; _shmutant_kill_tree KILL "$outer" "$outer:"; wait "$outer" 2>/dev/null; continue; fi
-    { ( eval "$point() { kill -KILL \"\$BASHPID\"; }"; _shmutant_kill_tree_twice -g "$grp" "$grp:" ); } > /dev/null 2>&1
+    { ( _shmutant_guard() { printf 'ready\n'; command -p cat > /dev/null; }
+        eval "$point() { kill -KILL \"\$BASHPID\"; }"; _shmutant_kill_tree_twice -g "$grp" "$grp:" ); } > /dev/null 2>&1
     # Read now, before the run is ended: once its group is orphaned the kernel may continue or hang up a
     # stopped holder by itself, which would hide one this freeze left stopped.
     case "$(command -p ps -o stat= -p "$holder" 2>/dev/null)" in
@@ -3341,6 +3433,266 @@ t_interrupted_freeze_does_not_leave_the_holder_stopped() {
     _shmutant_kill_tree KILL "$outer" "$outer:"; wait "$outer" 2>/dev/null
     wait_gone "$holder" || { fail_ "$point: the holder was left behind (state $(ps -o stat= -p "$holder" 2>/dev/null | tr -d ' '))"; kill -KILL "$holder" 2>/dev/null; }
   done
+}
+
+# shellcheck disable=SC2034
+t_freeze_killed_before_its_kill_leaves_nothing_stopped() {
+  # #47: the shell freezing a tree is killed after it has stopped something and before its KILL, as a
+  # supervisor's KILL to the tree that started it lands there. What it stopped must not stay stopped:
+  # its guard KILLs every process it was told of that is still the one recorded (the root, its
+  # children, a victim outside the root's tree), and nothing is left stopped. Each kill point is a
+  # function only the freezing shell calls (the guard shares the rest): before the children are
+  # stopped, after, and at the KILL itself, by when everything was. The tree ignores HUP, as a
+  # nohup'd child does: a group orphaned with members stopped (its leader killed by the guard) is
+  # hung up and continued by the kernel, which would otherwise end a child the guard missed.
+  local point root vic vid i k left
+  local -a kids=() gone=()
+  for point in _shmutant_freeze_from _shmutant_frozen_only _shmutant_kill_tree; do
+    set -m
+    sh -c 'trap "" HUP; sleep 60 & sleep 60 & wait' < /dev/null > /dev/null 2>&1 & root=$!
+    sleep 60 > /dev/null 2>&1 & vic=$!
+    set +m
+    # not this shell's jobs: bash would report each one killed on stderr; still reaped as they end
+    disown "$root" "$vic"
+    for (( i = 0; i < 50; i++ )); do mapfile -t kids < <(_shmutant_descendants "$root"); [ "${#kids[@]}" -lt 2 ] || break; sleep 0.1; done
+    [ "${#kids[@]}" -ge 2 ] || fail_ "$point: fixture: the root never started its children"
+    vid="$(_shmutant_identity "$vic")"
+    ( eval "$point() { kill -KILL \"\$BASHPID\"; }"; _shmutant_kill_tree_twice "$root" "$vic:$vid" ) > /dev/null 2>&1
+    case "$point" in
+      _shmutant_freeze_from) gone=("$root") ;;
+      _shmutant_frozen_only) gone=("$root" "${kids[@]}") ;;
+      *)                     gone=("$root" "${kids[@]}" "$vic") ;;
+    esac
+    left="$(none_stopped 50 "$root" "${kids[@]}" "$vic")" || fail_ "$point: the freezing shell's death left [$left] stopped"
+    for k in "${gone[@]}"; do wait_gone "$k" "" 30 || fail_ "$point: $k, stopped before the freezing shell died, was not killed"; done
+    kill -KILL -- -"$root" -"$vic" 2>/dev/null
+    for k in "$root" "${kids[@]}" "$vic"; do wait_gone "$k" "" 30; done
+  done
+}
+
+# shellcheck disable=SC2034
+t_freeze_of_a_run_group_killed_partway_ends_the_group() {
+  # #47 with the run's group held: the freezing shell is killed after its group stop and before its
+  # KILL (before it has even continued the holder, at the freeze, and at the KILL). A process the run
+  # reparented out of every tree walk is reached only through the group, and the holder waits on it
+  # until it ends: the guard must KILL the group, holder included, so neither is left behind.
+  local point outer grp holder holderid orphan oid left
+  for point in kill _shmutant_freeze_from _shmutant_kill_tree; do
+    mkdir -p "$T/$point"; rm -f "$T/started" "$T/orphan.pid"
+    ( exec {vf}>|"$T/$point/chan"; SHMUTANT_VERDICT_FD="$vf"
+      cb() { ( sleep 60 & echo "$!" > "$T/orphan.pid" ); : > "$T/started"; sleep 60; }
+      SHMUTANT_TIMEOUT=0 _shmutant_run_bounded "$T/$point" cb "$T/$point" sel ) > /dev/null 2>&1 & outer=$!
+    if ! wait_for "$T/started" || ! wait_for "$T/orphan.pid"; then
+      fail_ "$point: the callback never started"; _shmutant_kill_tree KILL "$outer" "$outer:"; wait "$outer" 2>/dev/null; continue
+    fi
+    orphan="$(cat "$T/orphan.pid")"; oid="$(_shmutant_identity "$orphan")"
+    read -r _ grp holder holderid < <(awk '$1 == "group" { print; exit }' "$T/$point/chan")
+    if [ -z "$holder" ] || ! kill -0 "$holder" 2>/dev/null; then
+      fail_ "$point: no live holder was published"; _shmutant_kill_tree KILL "$outer" "$outer:"; wait "$outer" 2>/dev/null
+      _shmutant_kill_tree KILL "" "$orphan:$oid"; continue
+    fi
+    if [ "$point" = kill ]; then
+      # between the group stop and the holder's CONT: the holder itself is still stopped
+      { ( kill() { if [ "${1:-}" = -CONT ] && [ "${2:-}" = "$holder" ]; then builtin kill -KILL "$BASHPID"; fi; builtin kill "$@"; }
+          _shmutant_kill_tree_twice -g "$grp" "$grp:" ); } > /dev/null 2>&1
+    else
+      { ( eval "$point() { kill -KILL \"\$BASHPID\"; }"; _shmutant_kill_tree_twice -g "$grp" "$grp:" ); } > /dev/null 2>&1
+    fi
+    left="$(none_stopped 50 "$holder" "$orphan")" || fail_ "$point: the freezing shell's death left [$left] stopped"
+    wait_gone "$orphan" "$oid" 30 || fail_ "$point: the run's process outside every tree walk outlived the freeze"
+    wait_gone "$holder" "$holderid" 30 || fail_ "$point: the run's holder was left behind"
+    _shmutant_kill_tree KILL "$outer" "$outer:"; wait "$outer" 2>/dev/null
+    _shmutant_kill_tree KILL "" "$orphan:$oid" "$holder:$holderid"
+    wait_gone "$orphan" "$oid"; wait_gone "$holder" "$holderid"
+  done
+}
+
+# shellcheck disable=SC2034
+t_pool_killed_while_its_abort_freezes_leaves_nothing_stopped() {
+  # #47's field path: a caller TERMs a running pool, and while the pool's abort is freezing its runs
+  # (two at once, each through a guard of its own) it KILLs the process tree it started, and its
+  # group. A process each run reparented out of that tree (still in the run's group) and each run's
+  # holder are out of the caller's reach: the guards of the interrupted freezes must end them, rather
+  # than leave the one stopped and the other waiting on it.
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  shmutant_mut 'b' '$1 + $2' '$1 * $2' 'add-works'
+  orphan_run() { ( sleep 60 & echo "$!" >> "$T/orphans" ); echo x >> "$T/started"; sleep 60; }
+  local pp o g i members="" ok=0
+  local -a orphans=() grps=()
+  # Each abort freeze blocks once it has stopped its worker and its run's group (no other freeze runs
+  # here: there is no deadline, and no run returns), so the KILL lands mid-freeze.
+  set -m
+  ( _shmutant_freeze_from() { echo x >> "$T/freezing"; sleep 60; }
+    SHMUTANT_JOBS=2 SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=0 shmutant_pool lbl "$T/wd" toy_prepare orphan_run ) < /dev/null > /dev/null 2>&1 & pp=$!
+  set +m
+  for (( i = 0; i < 100; i++ )); do [ "$(wc -l < "$T/started" 2>/dev/null)" -ge 2 ] 2>/dev/null && { ok=1; break; }; sleep 0.1; done
+  mapfile -t orphans < "$T/orphans" 2>/dev/null
+  if [ "$ok" = 0 ] || [ "${#orphans[@]}" -lt 2 ]; then
+    fail_ 'the two runs never started'; _shmutant_kill_tree KILL "$pp" "$pp:"; kill -KILL -- -"$pp" 2>/dev/null; wait "$pp" 2>/dev/null
+    for o in "${orphans[@]}"; do kill -KILL "$o" 2>/dev/null; done; return
+  fi
+  for o in "${orphans[@]}"; do grps+=("$(command -p ps -o pgid= -p "$o" 2>/dev/null | tr -d ' ')"); done
+  kill -TERM "$pp"
+  ok=0; for (( i = 0; i < 100; i++ )); do [ "$(wc -l < "$T/freezing" 2>/dev/null)" -ge 2 ] 2>/dev/null && { ok=1; break; }; sleep 0.1; done
+  [ "$ok" = 1 ] || fail_ 'the abort never reached both freezes'
+  # the caller's KILL: every process of the tree it started, and its group
+  _shmutant_kill_tree KILL "$pp" "$pp:"; kill -KILL -- -"$pp" 2>/dev/null; wait "$pp" 2>/dev/null
+  for g in "${grps[@]}"; do
+    for (( i = 0; i < 50; i++ )); do members="$(group_members "$g")"; [ -n "$members" ] || break; sleep 0.1; done
+    if [ -n "$members" ]; then
+      fail_ "a run's group outlived the caller's KILL: $(command -p ps -o pid= -o ppid= -o stat= -o args= -p "$(printf '%s' "$members" | paste -sd, -)" 2>/dev/null | tr '\n' ';' | cut -c1-300)"
+      # still members, so the number is still that group's
+      kill -KILL -- -"$g" 2>/dev/null
+    fi
+  done
+  for o in "${orphans[@]}"; do wait_gone "$o"; done
+}
+
+# shellcheck disable=SC2034
+t_freeze_without_a_guard_stops_nothing() {
+  # #47: with no guard running, nothing may be stopped (a shell killed partway would leave it stopped
+  # for good): the tree is KILLed as it stands, and the end is reported unsettled.
+  local root i k u
+  local -a kids=()
+  set -m; sh -c 'sleep 60 & sleep 60 & wait' < /dev/null > /dev/null 2>&1 & root=$!; set +m
+  disown "$root"
+  for (( i = 0; i < 50; i++ )); do mapfile -t kids < <(_shmutant_descendants "$root"); [ "${#kids[@]}" -lt 2 ] || break; sleep 0.1; done
+  [ "${#kids[@]}" -ge 2 ] || fail_ 'fixture: the root never started its children'
+  : > "$T/unsettled"; exec {u}>>"$T/unsettled"
+  ( _shmutant_guard_open() { return 1; }
+    kill() { case " $* " in *' -STOP '*) printf '%s\n' "$*" >> "$T/stops" ;; esac; builtin kill "$@"; }
+    SHMUTANT_UNSETTLED_FD="$u" _shmutant_kill_tree_twice "$root" ) 2>/dev/null
+  exec {u}>&-
+  [ ! -s "$T/stops" ] || fail_ "a freeze with no guard stopped [$(tr '\n' ';' < "$T/stops")]"
+  grep -qx unsettled "$T/unsettled" || fail_ 'a tree killed without a freeze was not reported unsettled'
+  for k in "$root" "${kids[@]}"; do wait_gone "$k" "" 30 || fail_ "$k was not killed"; done
+  kill -KILL -- -"$root" 2>/dev/null
+}
+
+# shellcheck disable=SC2034
+t_freeze_whose_guard_went_stops_nothing_more() {
+  # #47: a guard that goes partway (killed here once the root is stopped) can be told nothing more,
+  # so no stop is sent after it, the freeze is reported unsettled, and the KILL still reaches the
+  # tree and the victim it could not freeze.
+  local root vic vid i k u g
+  local -a kids=()
+  set -m
+  sh -c 'sleep 60 & sleep 60 & wait' < /dev/null > /dev/null 2>&1 & root=$!
+  sleep 60 > /dev/null 2>&1 & vic=$!
+  set +m
+  disown "$root" "$vic"
+  for (( i = 0; i < 50; i++ )); do mapfile -t kids < <(_shmutant_descendants "$root"); [ "${#kids[@]}" -lt 2 ] || break; sleep 0.1; done
+  [ "${#kids[@]}" -ge 2 ] || fail_ 'fixture: the root never started its children'
+  vid="$(_shmutant_identity "$vic")"
+  : > "$T/unsettled"; exec {u}>>"$T/unsettled"
+  ( eval "$(declare -f _shmutant_guard | sed '1s/^_shmutant_guard /_shmutant_guard_real /')"
+    eval "$(declare -f _shmutant_freeze_from | sed '1s/^_shmutant_freeze_from /_shmutant_freeze_from_real /')"
+    _shmutant_guard() { printf '%s\n' "$BASHPID" > "$T/guard.pid"; _shmutant_guard_real; }
+    _shmutant_freeze_from() {
+      if [ ! -e "$T/guard.gone" ]; then
+        g="$(cat "$T/guard.pid")"; builtin kill -KILL "$g"; wait_gone "$g" "" 30; : > "$T/guard.gone"
+      fi
+      _shmutant_freeze_from_real
+    }
+    kill() { [ ! -e "$T/guard.gone" ] || case " $* " in *' -STOP '*) printf '%s\n' "$*" >> "$T/stops" ;; esac; builtin kill "$@"; }
+    SHMUTANT_UNSETTLED_FD="$u" _shmutant_kill_tree_twice "$root" "$vic:$vid" ) 2>/dev/null
+  exec {u}>&-
+  [ -e "$T/guard.gone" ] || fail_ 'fixture: the guard was never killed'
+  [ ! -s "$T/stops" ] || fail_ "a stop was sent after the guard had gone: [$(tr '\n' ';' < "$T/stops")]"
+  grep -qx unsettled "$T/unsettled" || fail_ 'a freeze whose guard went was not reported unsettled'
+  for k in "$root" "${kids[@]}" "$vic"; do wait_gone "$k" "" 30 || fail_ "$k was not killed"; done
+  kill -KILL -- -"$root" -"$vic" 2>/dev/null
+}
+
+# shellcheck disable=SC2034
+t_freeze_guard_is_out_of_reach_and_gone_at_the_end() {
+  # #47: the guard is running before the first stop, in a process group of its own and outside the
+  # tree of every shell above it, so neither a group kill nor a tree walk aimed at them reaches it; it
+  # ignores INT, TERM and HUP; and it has gone by the time the freeze returns (it lingers here, after
+  # standing down, so a freeze that did not wait for it would return with it still running). The
+  # caller has errexit and nounset on.
+  local root i me=$BASHPID g st
+  local -a kids=()
+  set -m; sh -c 'sleep 60 & sleep 60 & wait' < /dev/null > /dev/null 2>&1 & root=$!; set +m
+  disown "$root"
+  for (( i = 0; i < 50; i++ )); do mapfile -t kids < <(_shmutant_descendants "$root"); [ "${#kids[@]}" -lt 2 ] || break; sleep 0.1; done
+  ( eval "$(declare -f _shmutant_guard | sed '1s/^_shmutant_guard /_shmutant_guard_real /')"
+    eval "$(declare -f _shmutant_freeze_from | sed '1s/^_shmutant_freeze_from /_shmutant_freeze_from_real /')"
+    _shmutant_guard() { printf '%s\n' "$BASHPID" > "$T/guard.pid"; _shmutant_guard_real; sleep 0.5; }
+    _shmutant_freeze_from() {
+      local g; g="$(cat "$T/guard.pid")"
+      { printf 'pgid %s\n' "$(command -p ps -o pgid= -p "$g" | tr -d ' ')"
+        if _shmutant_descendants "$me" | grep -x "$g" > /dev/null; then echo reachable; fi
+        builtin kill -INT "$g"; builtin kill -TERM "$g"; builtin kill -HUP "$g"; sleep 0.3
+        if kill -0 "$g" 2>/dev/null; then echo alive; fi
+      } > "$T/guard.state"
+      _shmutant_freeze_from_real
+    }
+    # called with the caller's errexit and nounset on: the freeze must still run to its end
+    set -eu
+    _shmutant_kill_tree_twice "$root"
+    : > "$T/returned" ) > /dev/null 2>&1
+  [ -e "$T/returned" ] || fail_ 'a caller with errexit and nounset on did not get past the freeze'
+  g="$(cat "$T/guard.pid" 2>/dev/null)"
+  [ -n "$g" ] || { fail_ 'fixture: the guard never recorded itself'; kill -KILL -- -"$root" 2>/dev/null; return; }
+  st="$(command -p ps -o stat= -p "$g" 2>/dev/null)"
+  case "$st" in ''|*Z*) ;; *) fail_ "the guard was still running when the freeze returned ($st)"; kill -KILL "$g" 2>/dev/null ;; esac
+  eq "$(sed -n 's/^pgid //p' "$T/guard.state")" "$g" 'the guard leads a process group of its own'
+  if grep -qx reachable "$T/guard.state"; then fail_ 'the guard was within the tree of the shell above the freeze'; fi
+  grep -qx alive "$T/guard.state" || fail_ 'INT, TERM or HUP ended the guard'
+  for i in "$root" "${kids[@]}"; do wait_gone "$i" "" 30 || fail_ "$i was not killed"; done
+  kill -KILL -- -"$root" 2>/dev/null
+}
+
+# shellcheck disable=SC2034
+t_guard_verifies_with_its_top_shell_gone() {
+  # #47: a guard acts once the shells above it are killed, the top-level one ($$) often among them,
+  # so what it reads a process's identity by must not hang on that shell: with $$ gone, a pid that
+  # is still the process recorded is killed, not let go as a stranger in another identity form.
+  sleep 60 > /dev/null 2>&1 & local a=$!
+  local aid g=""
+  aid="$(_shmutant_identity "$a")"
+  SHMUTANT="$SHMUTANT" A="$a" AID="$aid" D="$T" bash -c '
+    . "$SHMUTANT" || exit 9
+    ( printf "%s\n" "$BASHPID" > "$D/guard.pid"
+      while kill -0 "$$" 2>/dev/null; do sleep 0.05; done
+      kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf "kill %s\n" "$*" >> "$D/kills"; fi; }
+      printf "p %s %s\n" "$A" "$AID" | _shmutant_guard > /dev/null ) > /dev/null 2>&1 &
+    until [ -s "$D/guard.pid" ]; do sleep 0.05; done' < /dev/null
+  wait_for "$T/guard.pid" && g="$(cat "$T/guard.pid")"
+  [ -z "$g" ] || wait_gone "$g" "" 100 || fail_ 'the guard never finished'
+  grep -qx -- "kill -KILL -- $a" "$T/kills" 2>/dev/null || fail_ "a recorded pid still the process recorded was not killed with \$\$ gone: [$(cat "$T/kills" 2>/dev/null)]"
+  kill -KILL "$a" 2>/dev/null; wait "$a" 2>/dev/null
+}
+
+# shellcheck disable=SC2034
+t_guard_ends_only_what_it_can_verify() {
+  # #47: the guard of a freeze whose shell went partway KILLs a recorded pid only while it carries the
+  # start it was recorded with, and the group only while its holder is still the holder; every other
+  # recorded pid is continued, never left stopped and never killed. `done` stands it down, and an
+  # end with nothing recorded does nothing. Driven with its records on stdin and every `kill` but
+  # the liveness probe stubbed.
+  sleep 60 > /dev/null 2>&1 & local a=$!
+  sleep 60 > /dev/null 2>&1 & local b=$!
+  local aid bid out
+  aid="$(_shmutant_identity "$a")"; bid="$(_shmutant_identity "$b")"
+  out="$( kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*"; fi; }
+          { printf 'p %s %s\n' "$a" "$aid"; printf 'p %s not-%s\n' "$b" "$bid"; printf 'p %s \n' "$b"
+            printf 'g 99999 %s %s\n' "$a" "$aid"; } | _shmutant_guard )"
+  printf '%s\n' "$out" | grep -qx -- "kill -KILL -- -99999 $a" || fail_ "a verified pid and a group whose holder is verified are not killed in one kill: [$out]"
+  printf '%s\n' "$out" | grep -qx -- "kill -CONT -- $b $b" || fail_ "a pid recorded with another start, or with none, is not continued: [$out]"
+  if printf '%s\n' "$out" | grep -e '-KILL' | grep -qw -- "$b"; then fail_ "a pid it could not verify was killed: [$out]"; fi
+  out="$( kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*"; fi; }; printf 'g 99999 %s not-%s\n' "$a" "$aid" | _shmutant_guard )"
+  case "$out" in *-99999*) fail_ "the group was signalled for a holder whose identity no longer matches: [$out]" ;; esac
+  out="$( kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*"; fi; }; printf 'g 99999 %s %s\n' "$((a + 1000000))" "$aid" | _shmutant_guard )"
+  case "$out" in *-99999*) fail_ "the group was signalled with its holder gone: [$out]" ;; esac
+  out="$( kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*"; fi; }; printf 'p %s %s\ng 99999 %s %s\ndone\n' "$a" "$aid" "$a" "$aid" | _shmutant_guard )"
+  eq "$out" ready '`done` stands the guard down with nothing signalled'
+  out="$( kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*"; fi; }; _shmutant_guard < /dev/null )"
+  eq "$out" ready 'an end with nothing recorded signals nothing'
+  kill -KILL "$a" "$b" 2>/dev/null; wait "$a" "$b" 2>/dev/null
 }
 
 t_run_output_is_published_over_a_planted_directory() {

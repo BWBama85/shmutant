@@ -1275,8 +1275,8 @@ shmutant_mut 'leaving posix mode leaves the shell options as it reset them' \
 
 # --- guards added for the thirty-seventh review round ---
 shmutant_mut 'a transient rewrite of the target is not sampled while the run is alive' \
-  '            [ "$(_shmutant_target_ck "$dir" "$SHMUTANT_TARGET_REL" "$SHMUTANT_TARGET_KEY")" = "$SHMUTANT_TARGET_CK" ] || { tampered=1; printf '"'"'tampered\n'"'"' >&"$seen_w"; }' \
-  '            :' \
+  '            { seen_ck="$(_shmutant_target_ck "$dir" "$SHMUTANT_TARGET_REL" "$SHMUTANT_TARGET_KEY")" && [ "$seen_ck" = "$SHMUTANT_TARGET_CK" ]; } \' \
+  '            { :; } \' \
   't_a_target_rewritten_during_the_run_is_not_trusted'
 shmutant_mut 'the target check covers content alone' \
   '    { "$ls_bin" -ldn -- "$2" | command -p awk '"'"'{ sub(/[@+.]$/, "", $1); $2 = "-"; print $1, $3, $4, $5 }'"'"'' \
@@ -1884,3 +1884,123 @@ shmutant_mut 'the CLI loads the plan before checking its settings' \
   '  if ! _shmutant_validate_settings run "$wd"; then' \
   '  if false; then' \
   't_cli_labels_its_stream_and_refuses_bad_arguments'
+
+# --- a failed stage of the target read is never a fingerprint (#29) ---
+shmutant_mut 'the target read does not fail on a failed pipeline stage' \
+  '  ( set -o pipefail' \
+  '  ( :' \
+  't_target_ck_fails_when_any_stage_fails'
+shmutant_mut 'a failed ls or awk does not fail the target read' \
+  '        && { [ -z "$stat_bin" ] || "$stat_bin" "$fmt" "$2"; } \' \
+  '        ; { [ -z "$stat_bin" ] || "$stat_bin" "$fmt" "$2"; } \' \
+  't_target_ck_fails_when_any_stage_fails'
+shmutant_mut 'a failed stat does not fail the target read' \
+  '        && command -p cksum < "$2"; } 2>/dev/null )' \
+  '        ; command -p cksum < "$2"; } 2>/dev/null )' \
+  't_target_ck_fails_when_any_stage_fails'
+shmutant_mut 'a watchdog sample whose read failed counts as a match' \
+  '"$SHMUTANT_TARGET_KEY")" && [ "$seen_ck" =' \
+  '"$SHMUTANT_TARGET_KEY")"; [ "$seen_ck" =' \
+  't_target_sample_that_could_not_be_read_is_not_a_match'
+shmutant_mut 'a read after the run that failed counts as a match' \
+  '"$kind-$i")" || after_ck=""' \
+  '"$kind-$i")" || :' \
+  't_target_sample_that_could_not_be_read_is_not_a_match'
+
+# --- a freezing shell killed before its KILL leaves nothing stopped (#47) ---
+shmutant_mut 'a freeze pass does not tell the guard what it stops' \
+  '      _shmutant_guard_tell "${recs[@]}" || return 0' \
+  '      :' \
+  't_freeze_killed_before_its_kill_leaves_nothing_stopped'
+shmutant_mut 'a freeze pass stops what it could not tell a guard that went' \
+  '_shmutant_guard_tell "${recs[@]}" || return 0' \
+  '_shmutant_guard_tell "${recs[@]}" || :' \
+  't_freeze_whose_guard_went_stops_nothing_more'
+shmutant_mut 'the guard is not told of the root' \
+  '    _shmutant_guard_tell "p $pid $rid" && \' \
+  '    : && \' \
+  't_freeze_killed_before_its_kill_leaves_nothing_stopped'
+shmutant_mut 'the guard is not told of the held group' \
+  '    _shmutant_guard_tell "g $held ${holder:--} ${holderid:-}" && \' \
+  '    : && \' \
+  't_freeze_of_a_run_group_killed_partway_ends_the_group'
+shmutant_mut 'the guard is not told of the victims' \
+  '&& _shmutant_guard_tell "${stillours[@]/#/p }"; then' \
+  '&& :; then' \
+  't_freeze_killed_before_its_kill_leaves_nothing_stopped'
+shmutant_mut 'a freeze runs with no guard' \
+  '  if ! _shmutant_guard_open; then' \
+  '  if false; then' \
+  't_freeze_without_a_guard_stops_nothing'
+shmutant_mut 'a tree killed with no guard is not reported unsettled' \
+  '    [ -z "${SHMUTANT_UNSETTLED_FD:-}" ] || printf '"'"'unsettled\n'"'"' >&"$SHMUTANT_UNSETTLED_FD"' \
+  '    :' \
+  't_freeze_without_a_guard_stops_nothing'
+shmutant_mut 'a tree with no guard is not killed' \
+  '    if [ "$root_ok" = 1 ]; then _shmutant_kill_tree KILL "$pid" "$pid:${rootid:-}" "$@"' \
+  '    if false; then :' \
+  't_freeze_without_a_guard_stops_nothing'
+shmutant_mut 'a guard that went partway leaves the freeze settled' \
+  '  [ "$guard_lost" = 0 ] || SHMUTANT_FREEZE_UNSETTLED=1' \
+  '  :' \
+  't_freeze_whose_guard_went_stops_nothing_more'
+shmutant_mut 'a guard that went partway leaves the victims it was never told of running' \
+  '  [ "$guard_lost" = 0 ] || unfrozen=("$@")' \
+  '  :' \
+  't_freeze_whose_guard_went_stops_nothing_more'
+shmutant_mut 'a write to a guard that went ends the freezing shell' \
+  '  trap '"'"''"'"' PIPE' \
+  '  :' \
+  't_freeze_whose_guard_went_stops_nothing_more'
+shmutant_mut 'the guard does nothing when its freezing shell is killed' \
+  '  [ "${#recs[@]}" -gt 0 ] || [ -n "$pg" ] || return 0' \
+  '  return 0' \
+  't_freeze_killed_before_its_kill_leaves_nothing_stopped'
+shmutant_mut 'the guard continues the processes it verified' \
+  'then kills+=("$pid")' \
+  'then conts+=("$pid")' \
+  't_guard_ends_only_what_it_can_verify'
+shmutant_mut 'the guard kills a pid whose start no longer matches' \
+  '&& _shmutant_same_start "${SHMUTANT_START[$pid]}" "$st"; then' \
+  '; then' \
+  't_guard_ends_only_what_it_can_verify'
+shmutant_mut 'the guard kills the group without checking its holder' \
+  '    if [ -z "$ph" ] || [ -z "$phid" ] || ! _shmutant_identity "$ph" > /dev/null || _shmutant_alive_since "$ph" "$phid"; then' \
+  '    if :; then' \
+  't_guard_ends_only_what_it_can_verify'
+shmutant_mut 'the guard kills the group of a holder that has gone' \
+  '  if [ -n "$pg" ] && { [ -z "$ph" ] || kill -0 "$ph" 2>/dev/null; }; then' \
+  '  if [ -n "$pg" ]; then' \
+  't_guard_ends_only_what_it_can_verify'
+shmutant_mut 'the guard does not kill the group' \
+  '      kills=(-"$pg" "${kills[@]}")' \
+  '      :' \
+  't_guard_ends_only_what_it_can_verify'
+shmutant_mut 'the guard leaves what it could not verify stopped' \
+  '  [ "${#conts[@]}" -eq 0 ] || kill -CONT -- "${conts[@]}" 2>/dev/null' \
+  '  :' \
+  't_guard_ends_only_what_it_can_verify'
+shmutant_mut 'done does not stand the guard down' \
+  '      done) return 0 ;;' \
+  '      done) ;;' \
+  't_guard_ends_only_what_it_can_verify'
+shmutant_mut 'the freeze returns before its guard has gone' \
+  '  IFS= read -t 30 -r _ <&"$guard_r" || :' \
+  '  :' \
+  't_freeze_guard_is_out_of_reach_and_gone_at_the_end'
+shmutant_mut 'the guard shares the process group of the shell that froze' \
+  '( set -m; trap '"'"''"'"' INT TERM HUP; _shmutant_guard' \
+  '( trap '"'"''"'"' INT TERM HUP; _shmutant_guard' \
+  't_freeze_guard_is_out_of_reach_and_gone_at_the_end'
+shmutant_mut 'the guard is ended by INT, TERM or HUP' \
+  'trap '"'"''"'"' INT TERM HUP; _shmutant_guard' \
+  '_shmutant_guard' \
+  't_freeze_guard_is_out_of_reach_and_gone_at_the_end'
+# (no row on the guard's handshake words: a guard that never says `ready` is found gone at the first
+# record, before any stop, with the same kill and report, so the row would pass whichever way it ran)
+# (no row on the guard reparented before `up`: the subshell that started it ends a moment after, and
+# a row would be killed only if a check fell inside that moment)
+# (no row on the errexit resets in the freeze's subshell and its guard: no command a witness runs
+# through them fails while errexit is on, so a row would pass or fail by chance)
+# (no row on the identity probe asking about $BASHPID rather than $$: its witness can fail only where
+# /proc is absent, and a row that survives on Linux would read as a defect endured)
