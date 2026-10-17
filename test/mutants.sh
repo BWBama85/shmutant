@@ -2033,8 +2033,8 @@ shmutant_mut 'the guard takes a reused pid for its freezer' \
   '  kill -0 "$guard_of" 2>/dev/null' \
   't_guard_takes_neither_a_reused_pid_nor_a_zombie_for_its_freezer'
 shmutant_mut 'the guard is not told the members of the stopped group' \
-  '    if _shmutant_guard_members "$held"; then' \
-  '    if :; then' \
+  '    elif _shmutant_guard_members "$held"; then' \
+  '    elif :; then' \
   't_guard_ends_a_group_member_whose_holder_went_first'
 shmutant_mut 'the holder is let go when the members could not be told' \
   '    [ -n "${SHMUTANT_START[$p]:-}" ] || return 1' \
@@ -2133,27 +2133,27 @@ shmutant_mut 'the guard does not stop the holder before checking it' \
   '  for p in "${recs[@]}"; do' \
   't_guard_ends_only_what_it_can_verify'
 shmutant_mut 'a holder the guard stopped and did not take for the holder is left stopped' \
-  '      [ -z "$want" ] || conts+=("$ph")' \
-  '      :' \
+  '    [ "$hs" = 0 ] || [ -z "$ph" ] || conts+=("$ph")' \
+  '    :' \
   't_guard_ends_only_what_it_can_verify'
-shmutant_mut 'a holder the guard kills as a recorded pid is continued after' \
-  '      want=1; for p in "${kills[@]}"; do [ "$p" != "$ph" ] || want=""; done' \
+shmutant_mut 'a pid the guard kills is continued after, when another record named it' \
+  '      want=1; for pid in "${kills[@]}"; do [ "$pid" != "$p" ] || want=""; done' \
   '      want=1' \
   't_guard_ends_only_what_it_can_verify'
-shmutant_mut 'the end of a freeze checks its guard before stopping it' \
-  '    kill -STOP "$guard_pid" 2>/dev/null' \
-  '    :' \
-  't_freeze_guard_not_seen_to_end_is_killed'
-shmutant_mut 'a guard the end of a freeze could not identify is left stopped' \
-  '      kill -CONT "$guard_pid" 2>/dev/null' \
-  '      :' \
-  't_freeze_guard_not_seen_to_end_is_killed'
+shmutant_mut 'a root stopped is checked against no start when none was read before the guard' \
+  '    if [ -n "$rid" ] && [ -n "${have[$pid]:-}" ]' \
+  '    if [ -n "${rootid:-}" ] && [ -n "${have[$pid]:-}" ]' \
+  't_freeze_checks_its_root_and_holder_after_its_guard_starts'
+shmutant_mut 'a holder shown gone once the group is stopped still lets its members be taken' \
+  '    if [ -n "${holder:-}" ] && { _shmutant_holder_state "$holder" "${holderid:-}"; [ "$?" = 1 ]; }; then' \
+  '    if false; then' \
+  't_freeze_checks_its_root_and_holder_after_its_guard_starts'
 # (no row on the second read of a group's members keeping awk's status: `command -p awk` over a table
 # already read cannot be made to fail from a unit)
 # (no row on confirming a killed guard has ended: a KILL of the guard's own group cannot be made to
 # fail from a unit, so the report of one that did is never reached)
 shmutant_mut 'a root shown changed once stopped is still taken as frozen' \
-  '    if [ -n "${rootid:-}" ] && [ -n "${have[$pid]:-}" ] && { _shmutant_holder_state "$pid" "$rootid"; [ "$?" = 1 ]; }; then' \
+  '    if [ -n "$rid" ] && [ -n "${have[$pid]:-}" ] && { _shmutant_holder_state "$pid" "$rid"; [ "$?" = 1 ]; }; then' \
   '    if false; then' \
   't_freeze_checks_its_root_and_holder_after_its_guard_starts'
 shmutant_mut 'a holder the freeze kept stopped does not let the guard end its group' \

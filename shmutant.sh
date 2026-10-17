@@ -1012,9 +1012,10 @@ _shmutant_kill_tree_guarded() {
     rid="${rootid:-}"; [ -n "$rid" ] || rid="$(_shmutant_identity "$pid")" || rid=""
     _shmutant_guard_tell "p $pid $rid" && \
     kill -STOP "$pid" 2>/dev/null && { frozen+=("$pid:"); have["$pid"]=1; }
-    # Shown to be the root again once stopped, where a start can tell it: a number given away between
+    # Shown to be the root again once stopped, by the start it was told to the guard with (one read
+    # just now, for a bare root whose start could not be read before): a number given away between
     # the check and the stop is let go, and neither searched from nor killed by number.
-    if [ -n "${rootid:-}" ] && [ -n "${have[$pid]:-}" ] && { _shmutant_holder_state "$pid" "$rootid"; [ "$?" = 1 ]; }; then
+    if [ -n "$rid" ] && [ -n "${have[$pid]:-}" ] && { _shmutant_holder_state "$pid" "$rid"; [ "$?" = 1 ]; }; then
       kill -CONT "$pid" 2>/dev/null
       frozen=(); roots=(); unset 'have[$pid]'; root_ok=0
     fi
@@ -1037,7 +1038,13 @@ _shmutant_kill_tree_guarded() {
     # itself relies on; a KILL landing before this leaves it stopped only until the guard ends the
     # group, holder and all. When the members cannot all be told, the holder stays stopped: it
     # cannot end then, and goes on showing the group is the run's, to the guard and to the KILL.
-    if _shmutant_guard_members "$held"; then
+    # But first the holder is shown to be the holder again, now that it is stopped, as the root is:
+    # one that went between its check and the stop may have given the number away, and the stop
+    # reached another group. That stop is undone, and nothing found in that group is taken as the run's.
+    if [ -n "${holder:-}" ] && { _shmutant_holder_state "$holder" "${holderid:-}"; [ "$?" = 1 ]; }; then
+      kill -CONT -- -"$held" 2>/dev/null
+      held=""
+    elif _shmutant_guard_members "$held"; then
       [ -z "${holder:-}" ] || kill -CONT "$holder" 2>/dev/null
     else
       # Kept stopped, and the guard is told so: a holder this freeze keeps stopped cannot end, so its
@@ -1201,9 +1208,8 @@ _shmutant_guard_close() {
   # time proves nothing: whatever the read said, a guard still the process started is killed (one
   # that has exited and waits to be reaped is unchanged by it), and a wait that ran out is reported.
   if [ -n "${guard_pid:-}" ] && kill -0 "$guard_pid" 2>/dev/null; then
-    # Stopped before it is identified: a guard still running could end, and give its numbers away,
-    # between that check and the KILL. One not shown to be the guard is let go at once.
-    kill -STOP "$guard_pid" 2>/dev/null
+    # Not stopped before it is identified, as what it guards is: nothing would be left to end or let
+    # go a guard stopped here should this shell be killed before the KILL.
     if _shmutant_alive_since "$guard_pid" "${guard_id:-}"; then
       # With whatever it is waiting on (a process listing that stalled), through the process group it
       # leads, which its being there keeps its own: a child it forks meanwhile is in it too, where a
@@ -1216,7 +1222,6 @@ _shmutant_guard_close() {
     else
       # Still there, and nothing to tell it by: never killed by number alone. A guard that has ended
       # is reaped at once, so one still there a moment later is reported.
-      kill -CONT "$guard_pid" 2>/dev/null
       for (( i = 0; i < 20; i++ )); do kill -0 "$guard_pid" 2>/dev/null || break; command -p sleep 0.1; done
       if kill -0 "$guard_pid" 2>/dev/null; then _shmutant_freeze_err "the guard of a freeze (pid $guard_pid) could not be confirmed ended, and could not be identified to be killed"; fi
     fi
@@ -1271,7 +1276,7 @@ _shmutant_guard_freezer_there() {
 # half-done.
 _shmutant_guard() {
   local line chunk part="" pg="" ph="" phid="" p pid st gcont="" hs kept="" want
-  local -a recs=() kills=() conts=() stops=()
+  local -a recs=() kills=() conts=() stops=() left=()
   local -A SHMUTANT_START=()
   # Its own process: the caller's errexit would end it at the first refused signal or failed write.
   set +e
@@ -1337,12 +1342,18 @@ _shmutant_guard() {
     if [ "$hs" = 0 ]; then kills=(-"$pg" "${kills[@]}")
     elif [ "$hs" = 2 ] || _shmutant_group_has "$pg" "${kills[@]}"; then gcont="$pg"
     fi
-    # A holder not taken for the holder was stopped above all the same, and is let go, unless it is a
-    # recorded pid this guard kills.
-    if [ "$hs" != 0 ] && [ -n "$ph" ]; then
-      want=1; for p in "${kills[@]}"; do [ "$p" != "$ph" ] || want=""; done
-      [ -z "$want" ] || conts+=("$ph")
-    fi
+    # A holder not taken for the holder was stopped above all the same, and is let go.
+    [ "$hs" = 0 ] || [ -z "$ph" ] || conts+=("$ph")
+  fi
+  # ...unless it is a pid this guard kills: one is never continued after its KILL, whatever other
+  # record named it (told twice, once with a start a clock step has moved; the holder, recorded).
+  if [ "${#conts[@]}" -gt 0 ] && [ "${#kills[@]}" -gt 0 ]; then
+    left=()
+    for p in "${conts[@]}"; do
+      want=1; for pid in "${kills[@]}"; do [ "$pid" != "$p" ] || want=""; done
+      [ -z "$want" ] || left+=("$p")
+    done
+    conts=("${left[@]}")
   fi
   # The group first, while what showed its number to be the run's is still there: the KILL below may
   # take the last of it.
