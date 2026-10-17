@@ -1080,8 +1080,9 @@ _shmutant_kill_tree_guarded() {
 
 # _shmutant_guard_members <pgid> — tell the guard of each member of the stopped group <pgid>, with
 # the start it carries, and take each as frozen (it is stopped, so its number is its own) and as a
-# root of the walk, whose descendants may sit in other groups: read from one table of groups and one
-# of starts. The caller's holder is told but never taken as frozen: it is let go next, and may end.
+# root of the walk, whose descendants may sit in other groups, once _shmutant_frozen_only shows it
+# stopped and still itself: read from one table of groups and one of starts. The caller's holder is
+# told but never taken as frozen: it is let go next, and may end.
 # Fails when not every member could be told (a table, a start or the guard could not be had), and the
 # caller then keeps the holder stopped. Shares its caller's `frozen`, `have` and `roots`.
 _shmutant_guard_members() {
@@ -1100,11 +1101,19 @@ _shmutant_guard_members() {
   done
   [ "${#recs[@]}" -gt 0 ] || return 0
   _shmutant_guard_tell "${recs[@]}" || return 1
+  # Taken as frozen only once shown to be: a group stop succeeds when it reaches any member, so one
+  # that refused it (a set-uid process) is still running, and one reaped since the table was read may
+  # have given its number away. Stopped again and checked against a fresh table, as a walk's finds
+  # are; what fails that is let go and left to the group signal.
+  local -a pairs=()
   for p in "${recs[@]}"; do
-    p="${p#p }"; p="${p%% *}"
-    [ "$p" != "${holder:-}" ] || continue
-    roots+=("$p"); have["$p"]=1; frozen+=("$p:")
+    p="${p#p }"
+    [ "${p%% *}" != "${holder:-}" ] || continue
+    pairs+=("$p")
   done
+  [ "${#pairs[@]}" -gt 0 ] || return 0
+  _shmutant_frozen_only "${pairs[@]}"
+  for p in "${SHMUTANT_FROZEN_NOW[@]}"; do roots+=("$p"); have["$p"]=1; frozen+=("$p:"); done
   return 0
 }
 
@@ -1302,12 +1311,6 @@ _shmutant_kill_tree() {
     else _shmutant_alive_since "${p%%:*}" "${p#*:}" && targets+=("${p%%:*}")
     fi
   done
-  # No root (a rejected `pid:identity`, or one already reaped) means no walk: the number and
-  # whatever now sits beneath it belong to someone else.
-  if [ -n "$pid" ]; then
-    mapfile -t now < <(_shmutant_descendants "$pid")
-    for p in "${now[@]}"; do [ -n "$p" ] && targets+=("$p"); done
-  fi
   # The group is the run's only while its holder lives. Checked again here: a holder continued after
   # the group stop may have read its end-of-file and gone, and a group number nothing reserves may
   # belong to someone else by now. A zombie holder still reserves it. A live pid at that number is
@@ -1323,6 +1326,14 @@ _shmutant_kill_tree() {
       # With none, it may be anyone's by now, and nothing is sent to it.
       _shmutant_group_has "$SHMUTANT_KILL_GROUP" "${targets[@]}" && gone_group="$SHMUTANT_KILL_GROUP"
     fi
+  fi
+  # The walk last, after every process-table read the group needed: the descendants it lists are
+  # signalled the moment after, while each is still the process listed.
+  # No root (a rejected `pid:identity`, or one already reaped) means no walk: the number and
+  # whatever now sits beneath it belong to someone else.
+  if [ -n "$pid" ]; then
+    mapfile -t now < <(_shmutant_descendants "$pid")
+    for p in "${now[@]}"; do [ -n "$p" ] && targets+=("$p"); done
   fi
   # The group first, while the target that showed its number to be the run's is still there: the
   # signal below may take the last of it.
@@ -2410,7 +2421,7 @@ _shmutant_pool_locals_writable() {
     SHMUTANT_TARGET SHMUTANT_DECL_ERRORS SHMUTANT_SELECTED_N \
     _shmutant_bo _shmutant_so _shmutant_o _shmutant_n _shmutant_pc _shmutant_wrap_left \
     a budget dog e elapsed last leftovers linked lstart old rrc s tampered tmpd tnow victims wroot \
-    b chunk conts g gcont gone_group guard_id guard_lost guard_of guard_of_id guard_pid guard_r guard_up guard_w hs kills members out part pg ph phid recs rid seen_ck unfrozen w want \
+    b chunk conts g gcont gone_group guard_id guard_lost guard_of guard_of_id guard_pid guard_r guard_up guard_w hs kills members out pairs part pg ph phid recs rid seen_ck unfrozen w want \
     SHMUTANT_GUARD SHMUTANT_GUARD_PID SHMUTANT_PS_LSTART
 }
 

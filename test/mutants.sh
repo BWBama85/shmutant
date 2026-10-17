@@ -2033,12 +2033,16 @@ shmutant_mut 'the holder is let go when the members could not be told' \
   '    [ -n "${SHMUTANT_START[$p]:-}" ] || continue' \
   't_freeze_keeps_the_holder_stopped_when_its_members_cannot_be_told'
 shmutant_mut 'the members of a stopped group are not searched from' \
-  '    roots+=("$p"); have["$p"]=1; frozen+=("$p:")' \
-  '    have["$p"]=1; frozen+=("$p:")' \
+  'do roots+=("$p"); have["$p"]=1; frozen+=("$p:"); done' \
+  'do have["$p"]=1; frozen+=("$p:"); done' \
   't_freeze_takes_group_members_as_roots_but_not_the_holder'
 shmutant_mut 'the holder is taken as frozen with the members' \
-  '    [ "$p" != "${holder:-}" ] || continue' \
+  '    [ "${p%% *}" != "${holder:-}" ] || continue' \
   '    :' \
+  't_freeze_takes_group_members_as_roots_but_not_the_holder'
+shmutant_mut 'a member whose stop did not take is taken as frozen' \
+  '  _shmutant_frozen_only "${pairs[@]}"' \
+  '  SHMUTANT_FROZEN_NOW=(); for p in "${pairs[@]}"; do SHMUTANT_FROZEN_NOW+=("${p%% *}"); done' \
   't_freeze_takes_group_members_as_roots_but_not_the_holder'
 shmutant_mut 'the guard is given the start of the substitution that read it' \
   '  guard_of_id="$(_shmutant_identity "$guard_of")" || guard_of_id=""' \
@@ -2110,6 +2114,8 @@ shmutant_mut 'the guard is ended by INT, TERM or HUP' \
 # through them fails while errexit is on, so a row would pass or fail by chance)
 # (no row on the guard keeping a read cut short by its one-second look: every record is one short
 # write, so no witness can split one across that second, and a row would pass)
+# (no row on _shmutant_kill_tree walking the root's descendants after the group's reads rather than
+# before: the fix is the order of two blocks, and the window it closes is one no unit can time)
 # (no row on confirming a killed guard has ended: a KILL of the guard's own group cannot be made to
 # fail from a unit, so the report of one that did is never reached)
 # (no row on the root being checked after the guard starts rather than before: the fix is the order of

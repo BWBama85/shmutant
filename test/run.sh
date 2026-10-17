@@ -3918,6 +3918,12 @@ t_freeze_takes_group_members_as_roots_but_not_the_holder() {
   out="$( declare -a frozen=() roots=(); declare -A have=(); holder="$h"; guard_w=""
           _shmutant_guard_members "$h"; printf 'rc=%s frozen=%s roots=%s\n' "$?" "${frozen[*]}" "${roots[*]}" )"
   eq "$out" "rc=0 frozen=$kid: roots=$kid" 'a member is taken as frozen and searched from, the holder is neither'
+  # A member whose stop does not take (a set-uid process refuses it) is not taken as frozen: the group
+  # stop succeeds when it reaches any member, so only a stop sent to it alone shows it took.
+  out="$( declare -a frozen=() roots=(); declare -A have=(); holder="$h"; guard_w=""
+          kill() { if [ "${1:-}" = -STOP ] && [ "${2:-}" = "$kid" ]; then return 1; fi; builtin kill "$@"; }
+          _shmutant_guard_members "$h"; printf 'rc=%s frozen=%s roots=%s\n' "$?" "${frozen[*]}" "${roots[*]}" )"
+  eq "$out" "rc=0 frozen= roots=" 'a member whose stop did not take is neither frozen nor searched from'
   kill -KILL -- -"$h" 2>/dev/null; wait_gone "$h" "" 30; wait_gone "$kid" "" 30
 }
 
