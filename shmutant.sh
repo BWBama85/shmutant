@@ -1168,10 +1168,14 @@ _shmutant_guard_close() {
   # that has exited and waits to be reaped is unchanged by it), and a wait that ran out is reported.
   if [ -n "${guard_pid:-}" ] && kill -0 "$guard_pid" 2>/dev/null; then
     if _shmutant_alive_since "$guard_pid" "${guard_id:-}"; then
-      # With whatever it is waiting on (a process listing that stalled), in one kill; the run's group
-      # is not this kill's to signal.
-      SHMUTANT_KILL_GROUP="" _shmutant_kill_tree KILL "$guard_pid" "$guard_pid:$guard_id"
-      if [ "$rc" -gt 128 ]; then _shmutant_freeze_err "the guard of a freeze did not end within 30 seconds of its KILL, and was killed"; fi
+      # With whatever it is waiting on (a process listing that stalled), through the process group it
+      # leads, which its being there keeps its own: a child it forks meanwhile is in it too, where a
+      # snapshot of its descendants taken first would miss one. Then seen to go, within a bound.
+      kill -KILL -- -"$guard_pid" "$guard_pid" 2>/dev/null
+      for (( i = 0; i < 20; i++ )); do kill -0 "$guard_pid" 2>/dev/null || break; command -p sleep 0.1; done
+      if kill -0 "$guard_pid" 2>/dev/null && ! _shmutant_guard_reaped "$guard_pid"; then
+        _shmutant_freeze_err "the guard of a freeze (pid $guard_pid) was killed but could not be confirmed ended"
+      elif [ "$rc" -gt 128 ]; then _shmutant_freeze_err "the guard of a freeze did not end within 30 seconds of its KILL, and was killed"; fi
     else
       # Still there, and nothing to tell it by: never killed by number alone. A guard that has ended
       # is reaped at once, so one still there a moment later is reported.
@@ -1182,6 +1186,12 @@ _shmutant_guard_close() {
   exec {guard_r}<&-
   guard_w=""; guard_r=""
   return 0
+}
+
+# _shmutant_guard_reaped <pid> — true when <pid> is a zombie: ended, and only waiting to be reaped.
+_shmutant_guard_reaped() {
+  case "$(command -p ps -o stat= -p "$1" 2>/dev/null)" in *Z*) return 0 ;; esac
+  return 1
 }
 
 # _shmutant_freeze_err <message> — a freeze's report: through the runner's descriptor where there is

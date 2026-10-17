@@ -3673,17 +3673,19 @@ t_freeze_guard_not_seen_to_end_is_killed() {
   # standing down; the report descriptor is closed first, then the wait is made to run out, then also
   # the guard's identity cannot be read.
   local how root i g gh st e
-  local -a kids=()
+  local -a kids=() helpers=()
   for how in closed timeout unidentified; do
-    rm -f "$T/guard.pid" "$T/guard.helper" "$T/err"
+    rm -f "$T/guard.pid" "$T/guard.helper" "$T/err"; helpers=()
     set -m; sh -c 'sleep 60 & sleep 60 & wait' < /dev/null > /dev/null 2>&1 & root=$!; set +m
     disown "$root"
     for (( i = 0; i < 50; i++ )); do mapfile -t kids < <(_shmutant_descendants "$root"); [ "${#kids[@]}" -lt 2 ] || break; sleep 0.1; done
     ( exec {err_fd}>"$T/err"
       eval "$(declare -f _shmutant_guard | sed '1s/^_shmutant_guard /_shmutant_guard_real /')"
       eval "$(declare -f _shmutant_guard_close | sed '1s/^_shmutant_guard_close /_shmutant_guard_close_real /')"
-      # It lingers waiting on a child of its own, as one stalled in a process listing would.
-      _shmutant_guard() { printf '%s\n' "$BASHPID" > "$T/guard.pid"; _shmutant_guard_real; sleep 5 & printf '%s\n' "$!" > "$T/guard.helper"; wait "$!"; }
+      # It lingers starting child after child, as one stalled in process listings would: a child it
+      # starts while it is being killed must not outlive it either.
+      _shmutant_guard() { printf '%s\n' "$BASHPID" > "$T/guard.pid"; _shmutant_guard_real
+        local n; for (( n = 0; n < 100; n++ )); do sleep 5 & printf '%s\n' "$!" >> "$T/guard.helper"; sleep 0.05; done; }
       if [ "$how" = closed ]; then
         # shellcheck disable=SC2154  # guard_r is the freeze's own, by dynamic scope
         _shmutant_guard_close() { exec {guard_r}<&-; _shmutant_guard_close_real; }
@@ -3694,20 +3696,23 @@ t_freeze_guard_not_seen_to_end_is_killed() {
         [ "$how" != unidentified ] || _shmutant_alive_since() { [ -z "${RUN_OUT:-}" ] || return 1; _shmutant_same_start "$(_shmutant_identity "$1")" "$2"; }
       fi
       _shmutant_kill_tree_twice "$root" ) < /dev/null > /dev/null 2>&1
-    g="$(cat "$T/guard.pid" 2>/dev/null)"; gh="$(cat "$T/guard.helper" 2>/dev/null)"
+    g="$(cat "$T/guard.pid" 2>/dev/null)"; gh=""; [ ! -s "$T/guard.helper" ] || mapfile -t helpers < "$T/guard.helper"
     e="$(cat "$T/err" 2>/dev/null)"
     if [ -z "$g" ]; then fail_ "$how: fixture: the guard never recorded itself"
     elif [ "$how" = unidentified ]; then
       has "$e" "pid $g) could not be confirmed ended" "$how: a guard that could not be identified is reported"
       kill -0 "$g" 2>/dev/null || fail_ "$how: a guard that could not be identified was killed by number"
-      kill -KILL "$g" ${gh:+"$gh"} 2>/dev/null; wait_gone "$g"
+      kill -KILL -- -"$g" "$g" 2>/dev/null; wait_gone "$g"
+      for gh in "${helpers[@]}"; do kill -KILL "$gh" 2>/dev/null; done
     else
       st="$(command -p ps -o stat= -p "$g" 2>/dev/null)"
       case "$st" in ''|*Z*) ;; *) fail_ "$how: the guard was still running when the freeze returned ($st)"; kill -KILL "$g" 2>/dev/null ;; esac
-      if [ -z "$gh" ]; then fail_ "$how: fixture: the guard's child was never started"
+      if [ "${#helpers[@]}" -eq 0 ]; then fail_ "$how: fixture: the guard started no child"
       else
-        st="$(command -p ps -o stat= -p "$gh" 2>/dev/null)"
-        case "$st" in ''|*Z*) ;; *) fail_ "$how: the child the guard waited on outlived it ($st)"; kill -KILL "$gh" 2>/dev/null ;; esac
+        for gh in "${helpers[@]}"; do
+          st="$(command -p ps -o stat= -p "$gh" 2>/dev/null)"
+          case "$st" in ''|*Z*) ;; *) fail_ "$how: a child the guard started outlived it ($st)"; kill -KILL "$gh" 2>/dev/null ;; esac
+        done
       fi
     fi
     if [ "$how" = timeout ]; then has "$e" 'did not end within 30 seconds' "$how: says so"; fi

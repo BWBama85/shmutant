@@ -2065,20 +2065,20 @@ shmutant_mut 'done does not stand the guard down' \
   '      done) ;;' \
   't_guard_ends_only_what_it_can_verify'
 shmutant_mut 'the freeze returns with its guard still running' \
-  '      SHMUTANT_KILL_GROUP="" _shmutant_kill_tree KILL "$guard_pid" "$guard_pid:$guard_id"' \
+  '      kill -KILL -- -"$guard_pid" "$guard_pid" 2>/dev/null' \
   '      :' \
   't_freeze_guard_not_seen_to_end_is_killed'
 shmutant_mut 'a guard is killed without what it waits on' \
-  '      SHMUTANT_KILL_GROUP="" _shmutant_kill_tree KILL "$guard_pid" "$guard_pid:$guard_id"' \
-  '      SHMUTANT_KILL_GROUP="" _shmutant_kill_tree KILL "" "$guard_pid:$guard_id"' \
+  '      kill -KILL -- -"$guard_pid" "$guard_pid" 2>/dev/null' \
+  '      kill -KILL -- "$guard_pid" 2>/dev/null' \
   't_freeze_guard_not_seen_to_end_is_killed'
 shmutant_mut 'the guard'"'"'s identity is not kept for the end of the freeze' \
   '      guard_id="$(_shmutant_identity "$guard_pid")" || guard_id=""' \
   '      guard_id=""' \
   't_freeze_guard_not_seen_to_end_is_killed'
 shmutant_mut 'a wait for the guard that ran out is not reported' \
-  '      if [ "$rc" -gt 128 ]; then _shmutant_freeze_err' \
-  '      if false; then _shmutant_freeze_err' \
+  'elif [ "$rc" -gt 128 ]; then _shmutant_freeze_err' \
+  'elif false; then _shmutant_freeze_err' \
   't_freeze_guard_not_seen_to_end_is_killed'
 shmutant_mut 'a guard that cannot be identified is killed by number' \
   '    if _shmutant_alive_since "$guard_pid" "${guard_id:-}"; then' \
@@ -2110,6 +2110,8 @@ shmutant_mut 'the guard is ended by INT, TERM or HUP' \
 # through them fails while errexit is on, so a row would pass or fail by chance)
 # (no row on the guard keeping a read cut short by its one-second look: every record is one short
 # write, so no witness can split one across that second, and a row would pass)
+# (no row on confirming a killed guard has ended: a KILL of the guard's own group cannot be made to
+# fail from a unit, so the report of one that did is never reached)
 # (no row on the root being checked after the guard starts rather than before: the fix is the order of
 # two blocks, which a row cannot move; t_freeze_checks_its_root_and_holder_after_its_guard_starts goes
 # red on the commit before it)
