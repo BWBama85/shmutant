@@ -463,4 +463,5 @@ One line per resolved review thread, newest last.
 - `contract-not-honoured` `test/run.sh:5741` `65ebfe9` `PRRT_kwDOUT7q9s6sO17Y` PR #44 2026-10-14 — the interrupt counted a zombie unit shell as running; it now judges the unit by its wrapper, a job of its own
 - `timeout-escalation-cancelled` `test/run.sh:5743` `65ebfe9` `PRRT_kwDOUT7q9s6sO17e` PR #44 2026-10-14 — an interrupt never reached a unit with no usable identity record; it now signals the group through the wrapper
 - `stale-artifact-reuse` `shmutant.sh:1180` `ea24416` `PRRT_kwDOUT7q9s6tduDB` PR #50 2026-10-17 — the guard continued a group whose holder it could not verify, a number that may be reused by now
+- `stale-artifact-reuse` `shmutant.sh:996` `da9a0fd` `PRRT_kwDOUT7q9s6texFx` PR #50 2026-10-17 — the root checked before the guard started was stopped and taken as frozen though its pid may have been reused during the handshake
 <!-- adb:hits:end -->
