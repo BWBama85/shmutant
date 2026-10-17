@@ -4201,6 +4201,12 @@ t_guard_ends_only_what_it_can_verify() {
           printf 'p %s not-%s\ng %s %s %s\n' "$m" "$mid" "$m" "$m" "$mid" | _shmutant_guard )"
   printf '%s\n' "$out" | grep -qx -- "kill -KILL -- -$m" || fail_ "a group whose holder is verified was not killed: [$out]"
   if printf '%s\n' "$out" | grep -e '-CONT' | grep -qw -- "$m"; then fail_ "a member the group KILL took was continued after it: [$out]"; fi
+  # ...but only by a listing that succeeded: a table read cut short (ps failing after a line) keeps
+  # every CONT.
+  out="$( kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*"; fi; }
+          command() { if [ "$*" = "-p ps -A -o pid= -o pgid=" ]; then printf '%s %s\n' "$m" "$m"; return 1; fi; builtin command "$@"; }
+          printf 'p %s not-%s\ng %s %s %s\n' "$m" "$mid" "$m" "$m" "$mid" | _shmutant_guard )"
+  printf '%s\n' "$out" | grep -qx -- "kill -CONT -- $m" || fail_ "a group listing that failed kept a pid from its CONT: [$out]"
   # A pid told twice, once with a start that no longer shows (a clock step between two listings), is
   # killed by the record that verifies, and never continued after.
   out="$( kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*"; fi; }

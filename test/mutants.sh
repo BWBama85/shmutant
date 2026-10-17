@@ -2160,6 +2160,12 @@ shmutant_mut 'a ps that failed is read as a zombie' \
   '" && case "$st" in *Z*) return 0 ;; esac' \
   '"; case "$st" in *Z*) return 0 ;; esac' \
   't_process_state_reads_take_a_failed_ps_as_no_state'
+shmutant_mut 'a group listing that failed keeps the guard from continuing a pid' \
+  '     members=" $(set -o pipefail; command -p ps -A -o pid= -o pgid=' \
+  '     members=" $(command -p ps -A -o pid= -o pgid=' \
+  't_guard_ends_only_what_it_can_verify'
+# (no row on the end of a freeze looking, for a moment, for a guard that stood down to be gone or a
+# zombie before deciding to kill it: that moment is the guard's own exit, which no unit can time)
 # (no row on the second read of a group's members keeping awk's status: `command -p awk` over a table
 # already read cannot be made to fail from a unit)
 # (no row on confirming a killed guard has ended: a KILL of the guard's own group cannot be made to

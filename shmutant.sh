@@ -1204,10 +1204,18 @@ _shmutant_guard_close() {
   { printf 'done\n' >&"$guard_w"; } 2>/dev/null
   exec {guard_w}>&-
   IFS= read -t 30 -r _ <&"$guard_r" || rc=$?
+  # A guard that has stood down is gone, or a zombie for its reaper, a moment after its end-of-file:
+  # looked for, briefly, so one seen to end is never signalled.
+  if [ "$rc" = 1 ] && [ -n "${guard_pid:-}" ]; then
+    for (( i = 0; i < 10; i++ )); do
+      { kill -0 "$guard_pid" 2>/dev/null && ! _shmutant_guard_reaped "$guard_pid"; } || break
+      command -p sleep 0.1
+    done
+  fi
   # End-of-file is the guard gone, but a read that failed looks the same, and one that ran out of
-  # time proves nothing: whatever the read said, a guard still the process started is killed (one
-  # that has exited and waits to be reaped is unchanged by it), and a wait that ran out is reported.
-  if [ -n "${guard_pid:-}" ] && kill -0 "$guard_pid" 2>/dev/null; then
+  # time proves nothing: whatever the read said, a guard still the process started, and not a zombie
+  # waiting for its reaper, is killed, and a wait that ran out is reported.
+  if [ -n "${guard_pid:-}" ] && kill -0 "$guard_pid" 2>/dev/null && ! _shmutant_guard_reaped "$guard_pid"; then
     # Not stopped before it is identified, as what it guards is: nothing would be left to end or let
     # go a guard stopped here should this shell be killed before the KILL.
     if _shmutant_alive_since "$guard_pid" "${guard_id:-}"; then
@@ -1359,9 +1367,9 @@ _shmutant_guard() {
     conts=("${left[@]}")
   fi
   # Nor one the group KILL takes: a member of that group, which the stop above keeps in it. Read in
-  # one table; with none readable, every one is continued, as before.
-  if [ "$hs" = 0 ] && [ "${#conts[@]}" -gt 0 ]; then
-    members=" $(command -p ps -A -o pid= -o pgid= 2>/dev/null | command -p awk -v g="$pg" '$2 == g { printf "%s ", $1 }')"
+  # one table, whole; with none read, every one is continued, as before.
+  if [ "$hs" = 0 ] && [ "${#conts[@]}" -gt 0 ] && \
+     members=" $(set -o pipefail; command -p ps -A -o pid= -o pgid= 2>/dev/null | command -p awk -v g="$pg" '$2 == g { printf "%s ", $1 }')"; then
     left=()
     for p in "${conts[@]}"; do case "$members" in *" $p "*) ;; *) left+=("$p") ;; esac; done
     conts=("${left[@]}")
