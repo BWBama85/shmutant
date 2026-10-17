@@ -1976,14 +1976,30 @@ shmutant_mut 'the guard does not kill the group' \
   'then kills=(-"$pg" "${kills[@]}")' \
   'then :' \
   't_guard_ends_only_what_it_can_verify'
-shmutant_mut 'the guard leaves a group it cannot verify stopped' \
-  '    else conts=(-"$pg" "${conts[@]}")' \
-  '    else :' \
+shmutant_mut 'the guard leaves a group shown to be the run'"'"'s stopped' \
+  'then conts=(-"$pg" "${conts[@]}")' \
+  'then :' \
+  't_guard_ends_only_what_it_can_verify'
+shmutant_mut 'the guard continues a group with no verified pid in it' \
+  '    elif _shmutant_group_has "$pg" "${kills[@]}"; then' \
+  '    elif :; then' \
+  't_guard_ends_only_what_it_can_verify'
+shmutant_mut 'a group is taken for the run'"'"'s whatever pid is in it' \
+  '$2 == g && index(want, " " $1 " ") { f = 1 }' \
+  'index(want, " " $1 " ") { f = 1 }' \
+  't_guard_ends_only_what_it_can_verify'
+shmutant_mut 'the guard continues a recorded pid that has gone' \
+  '    elif [ -n "$st" ] && [ "${#SHMUTANT_START[@]}" -gt 0 ]; then continue' \
+  '    elif false; then continue' \
   't_guard_ends_only_what_it_can_verify'
 shmutant_mut 'a group whose holder went is left stopped' \
   '  [ -z "$gone_group" ] || kill -CONT -- -"$gone_group" 2>/dev/null' \
   '  :' \
-  't_group_kill_skips_a_group_its_holder_no_longer_holds'
+  't_group_kill_checks_the_holder_identity'
+shmutant_mut 'a group whose holder went is continued with no target in it' \
+  '      _shmutant_group_has "$SHMUTANT_KILL_GROUP" "${targets[@]}" && gone_group=' \
+  '      : && gone_group=' \
+  't_group_kill_checks_the_holder_identity'
 shmutant_mut 'the guard leaves what it could not verify stopped' \
   '  [ "${#conts[@]}" -eq 0 ] || kill -CONT -- "${conts[@]}" 2>/dev/null' \
   '  :' \

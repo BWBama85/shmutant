@@ -1141,10 +1141,12 @@ _shmutant_freeze_err() {
 # (the KILL has been sent) ends it with nothing done. End-of-file without `done` means the freezing
 # shell has gone partway, killed: the guard then KILLs, in one kill, every recorded pid that still
 # carries the start it was recorded with, and the group while its holder is shown to be the process
-# it was (_shmutant_holder_state 0), and continues every other recorded pid, and the group when its
-# holder has gone or cannot be checked. What it cannot tell from a stranger's is never killed, and
-# never left stopped either: it goes on as an ordinary orphan. It uses no freeze step and no
-# _shmutant_kill_tree, which a freezing shell killed in them may have left half-done.
+# it was (_shmutant_holder_state 0). A recorded pid that now carries another start, or none, has gone
+# and is left alone; one recorded with no start to check by is continued, never killed and never left
+# stopped. The group is continued when its holder is not shown, but only while a pid it verified is
+# still in it (_shmutant_group_has); otherwise nothing is sent to a number that may be anyone's. It
+# uses no freeze step and no _shmutant_kill_tree, which a freezing shell killed in them may have left
+# half-done.
 _shmutant_guard() {
   local line pg="" ph="" phid="" p pid st
   local -a recs=() kills=() conts=()
@@ -1169,15 +1171,19 @@ _shmutant_guard() {
     case "$p" in *' '?*) st="${p#* }" ;; esac
     case "$pid" in ''|*[!0-9]*) continue ;; esac
     if [ -n "$st" ] && [ -n "${SHMUTANT_START[$pid]:-}" ] && _shmutant_same_start "${SHMUTANT_START[$pid]}" "$st"; then kills+=("$pid")
+    # Recorded with a start, and checked against a table that could be read: the process has gone,
+    # and whoever holds its number now was not stopped by this freeze. Left alone.
+    elif [ -n "$st" ] && [ "${#SHMUTANT_START[@]}" -gt 0 ]; then continue
+    # Nothing to check it by: stopped by number, and let go rather than left stopped.
     else conts+=("$pid")
     fi
   done
-  # The group is killed only while its holder is shown to be the holder; one whose holder has gone,
-  # or cannot be checked now, is continued: a member stopped there is let go, and a stranger that
-  # has the number since is not killed.
+  # The group is killed only while its holder is shown to be the holder. Otherwise its number is the
+  # run's only while a process verified above is still in it, and it is then continued, which lets go
+  # a member stopped there; with no such process it may be anyone's by now, and nothing is sent to it.
   if [ -n "$pg" ]; then
     if [ -n "$ph" ] && _shmutant_holder_state "$ph" "$phid"; then kills=(-"$pg" "${kills[@]}")
-    else conts=(-"$pg" "${conts[@]}")
+    elif _shmutant_group_has "$pg" "${kills[@]}"; then conts=(-"$pg" "${conts[@]}")
     fi
   fi
   [ "${#kills[@]}" -eq 0 ] || kill -KILL -- "${kills[@]}" 2>/dev/null
@@ -1189,7 +1195,8 @@ _shmutant_guard() {
 # now, to each of <pids…> (the descendants found before an earlier signal, which a leader's
 # death may have reparented out of reach of a fresh walk), and to the process group named by
 # SHMUTANT_KILL_GROUP when set, while its holder is still the holder; a group whose holder has gone
-# is continued instead. An empty <pid> means no walk.
+# is continued instead while a target is shown to be in it, and otherwise left alone. An empty <pid>
+# means no walk.
 # <pids…> are `pid:identity` pairs recorded when each was seen (see _shmutant_identity); one that
 # no longer matches is a reused pid and is left alone. `pid:` with no identity is a frozen pid.
 # Every target is decided first and signalled in ONE kill: a parent signalled after its child
@@ -1221,9 +1228,10 @@ _shmutant_kill_tree() {
     if [ -z "${holder:-}" ] || _shmutant_holder_state "$holder" "${holderid:-}" || [ "$?" = 2 ]; then
       targets=(-"$SHMUTANT_KILL_GROUP" "${targets[@]}")
     else
-      # The holder has gone: a member the freeze stopped may still be in the group (and then keeps its
-      # number from being anyone else's), and is continued rather than left stopped or killed blind.
-      gone_group="$SHMUTANT_KILL_GROUP"
+      # The holder has gone. The number is the run's only while a process this kill targets is still
+      # in the group; the group is then continued, which lets go a member the freeze stopped there.
+      # With none, it may be anyone's by now, and nothing is sent to it.
+      _shmutant_group_has "$SHMUTANT_KILL_GROUP" "${targets[@]}" && gone_group="$SHMUTANT_KILL_GROUP"
     fi
   fi
   [ "${#targets[@]}" -eq 0 ] || kill "-$sig" -- "${targets[@]}" 2>/dev/null
@@ -1556,6 +1564,17 @@ _shmutant_count_diff() {
       if (fr == "") printf " and is absent from the unselected run"; else printf " and %s in the unselected run", fr
       if (d > 1) printf "; %d more unit(s) differ", d - 1
     }' <<< "$1"$'\n\n'"$2"
+}
+
+# _shmutant_group_has <pgid> <pid>… — true when one of <pid>… is a member of process group <pgid>
+# now, from one process table: a group a process of the run's is still in keeps its number, so a
+# signal sent to it reaches nobody else's. False with no <pid>, and when no table can be read.
+_shmutant_group_has() {
+  local g="$1" table
+  shift
+  [ "$#" -gt 0 ] || return 1
+  table="$(command -p ps -A -o pid= -o pgid= 2>/dev/null)" && [ -n "$table" ] || return 1
+  printf '%s\n' "$table" | command -p awk -v g="$g" -v want=" $* " '$2 == g && index(want, " " $1 " ") { f = 1 } END { exit !f }'
 }
 
 # _shmutant_holder_state <pid> <identity> — whether a run's holder, started as <pid> with
@@ -2297,7 +2316,7 @@ _shmutant_pool_locals_writable() {
     SHMUTANT_TARGET SHMUTANT_DECL_ERRORS SHMUTANT_SELECTED_N \
     _shmutant_bo _shmutant_so _shmutant_o _shmutant_n _shmutant_pc _shmutant_wrap_left \
     a budget dog e elapsed last leftovers linked lstart old rrc s tampered tmpd tnow victims wroot \
-    b conts gone_group guard_id guard_lost guard_pid guard_r guard_w kills pg ph phid recs rid seen_ck unfrozen w \
+    b conts g gone_group guard_id guard_lost guard_pid guard_r guard_w kills pg ph phid recs rid seen_ck unfrozen w want \
     SHMUTANT_GUARD SHMUTANT_GUARD_PID SHMUTANT_PS_LSTART
 }
 

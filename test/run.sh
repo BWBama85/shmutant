@@ -2419,8 +2419,8 @@ t_readonly_preflight_covers_every_name_the_pool_assigns() {
   ' "$SHMUTANT" | grep -oE '(^|[^A-Za-z0-9_$])[A-Za-z_][A-Za-z0-9_]*\+?=' | grep -oE '[A-Za-z_][A-Za-z0-9_]*' | sort -u)"
   for n in $names; do
     # settings the caller owns, shell state, and what only looks like an assignment: dd and ps
-    # operands (if= bs= count= pid= ppid= etime= stat= args=)
-    case "$n" in SHMUTANT_KEEP|SHMUTANT_TIMEOUT|SHMUTANT_JOBS|SHMUTANT_RED_STATUS|SHMUTANT_RED_PREFIX|SHMUTANT_STREAM|SHMUTANT_BASELINE|SHMUTANT_COUNTS|SHMUTANT_SELECT|LC_ALL|POSIXLY_CORRECT|GLOBIGNORE|IFS|PATH|PWD|OLDPWD|_|prepare|run|exit|if|bs|count|of|seek|conv|pid|ppid|etime|stat|args) continue ;; esac
+    # operands (if= bs= count= pid= ppid= pgid= etime= stat= args=)
+    case "$n" in SHMUTANT_KEEP|SHMUTANT_TIMEOUT|SHMUTANT_JOBS|SHMUTANT_RED_STATUS|SHMUTANT_RED_PREFIX|SHMUTANT_STREAM|SHMUTANT_BASELINE|SHMUTANT_COUNTS|SHMUTANT_SELECT|LC_ALL|POSIXLY_CORRECT|GLOBIGNORE|IFS|PATH|PWD|OLDPWD|_|prepare|run|exit|if|bs|count|of|seek|conv|pid|ppid|pgid|etime|stat|args) continue ;; esac
     count=$((count + 1))
     printf '%s\n' "$listed" | grep -qx -- "$n" || unlisted="$unlisted $n"
   done
@@ -3766,39 +3766,48 @@ t_guard_verifies_with_its_top_shell_gone() {
 # shellcheck disable=SC2034
 t_guard_ends_only_what_it_can_verify() {
   # #47: the guard of a freeze whose shell went partway KILLs a recorded pid only while it carries the
-  # start it was recorded with, and the group only while its holder is shown to be the holder; every
-  # other recorded pid is continued, never left stopped and never killed, and so is a group whose
-  # holder has gone, carries another identity, cannot be checked now, or was never named. `done`
-  # stands it down, and an end with nothing recorded does nothing. Driven with its records on stdin
-  # and every `kill` but the liveness probe stubbed.
+  # start it was recorded with, and the group only while its holder is shown to be the holder. A pid
+  # that now carries another start has gone and is left alone; one recorded with no start to check by
+  # is continued, never killed. A group whose holder is not shown (gone, another identity, unreadable,
+  # never named) is continued only while a pid it verified is still a member, and otherwise sent
+  # nothing: its number may be anyone's. `done` stands it down, and an end with nothing recorded does
+  # nothing. Driven with its records on stdin and every `kill` but the liveness probe stubbed.
   sleep 60 > /dev/null 2>&1 & local a=$!
   sleep 60 > /dev/null 2>&1 & local b=$!
-  local aid bid out how
-  aid="$(_shmutant_identity "$a")"; bid="$(_shmutant_identity "$b")"
+  set -m; sleep 60 > /dev/null 2>&1 & local m=$!; set +m
+  local aid bid mid out how
+  aid="$(_shmutant_identity "$a")"; bid="$(_shmutant_identity "$b")"; mid="$(_shmutant_identity "$m")"
   out="$( kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*"; fi; }
           { printf 'p %s %s\n' "$a" "$aid"; printf 'p %s not-%s\n' "$b" "$bid"; printf 'p %s \n' "$b"
             printf 'g 99999 %s %s\n' "$a" "$aid"; } | _shmutant_guard )"
   printf '%s\n' "$out" | grep -qx -- "kill -KILL -- -99999 $a" || fail_ "a verified pid and a group whose holder is verified are not killed in one kill: [$out]"
-  printf '%s\n' "$out" | grep -qx -- "kill -CONT -- $b $b" || fail_ "a pid recorded with another start, or with none, is not continued: [$out]"
+  printf '%s\n' "$out" | grep -qx -- "kill -CONT -- $b" || fail_ "a pid recorded with no start is not continued, or one with another start is: [$out]"
   if printf '%s\n' "$out" | grep -e '-KILL' | grep -qw -- "$b"; then fail_ "a pid it could not verify was killed: [$out]"; fi
-  # A group whose holder is not shown to be the holder is continued, never killed.
+  # A group whose holder is not shown to be the holder, and that no verified pid is in (a is not):
+  # nothing is sent to it.
   for how in mismatch gone unreadable unnamed; do
     out="$( kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*"; fi; }
             [ "$how" != unreadable ] || _shmutant_identity() { return 1; }
             case "$how" in
-              mismatch)   printf 'g 99999 %s not-%s\n' "$a" "$aid" ;;
+              mismatch)   printf 'p %s %s\ng 99999 %s not-%s\n' "$a" "$aid" "$a" "$aid" ;;
               gone)       printf 'g 99999 %s %s\n' "$((a + 1000000))" "$aid" ;;
               unreadable) printf 'g 99999 %s %s\n' "$a" "$aid" ;;
               unnamed)    printf 'g 99999 - \n' ;;
             esac | _shmutant_guard )"
-    case "$out" in *KILL*-99999*) fail_ "$how: the group was killed with its holder not shown to be the holder: [$out]" ;; esac
-    printf '%s\n' "$out" | grep -qx -- "kill -CONT -- -99999" || fail_ "$how: the group was not continued: [$out]"
+    case "$out" in *-99999*) fail_ "$how: a group not shown to be the run's was signalled: [$out]" ;; esac
   done
+  # One a verified pid is still in (m leads a group of its own) is continued, and never killed.
+  out="$( kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*"; fi; }
+          printf 'p %s %s\ng %s %s %s\n' "$m" "$mid" "$m" "$((a + 1000000))" "$aid" | _shmutant_guard )"
+  printf '%s\n' "$out" | grep -qx -- "kill -CONT -- -$m" || fail_ "a group a verified pid is still in was not continued when its holder had gone: [$out]"
+  if printf '%s\n' "$out" | awk -v g="-$m" '$2 == "-KILL" { for (i = 3; i <= NF; i++) if ($i == g) f = 1 } END { exit !f }'; then
+    fail_ "a group whose holder had gone was killed: [$out]"
+  fi
   out="$( kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*"; fi; }; printf 'p %s %s\ng 99999 %s %s\ndone\n' "$a" "$aid" "$a" "$aid" | _shmutant_guard )"
   [[ "$out" =~ ^ready\ [0-9]+$ ]] || fail_ "\`done\` did not stand the guard down with nothing signalled: [$out]"
   out="$( kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*"; fi; }; _shmutant_guard < /dev/null )"
   [[ "$out" =~ ^ready\ [0-9]+$ ]] || fail_ "an end with nothing recorded signalled something: [$out]"
-  kill -KILL "$a" "$b" 2>/dev/null; wait "$a" "$b" 2>/dev/null
+  kill -KILL "$a" "$b" "$m" 2>/dev/null; wait "$a" "$b" "$m" 2>/dev/null
 }
 
 t_run_output_is_published_over_a_planted_directory() {
@@ -5855,8 +5864,8 @@ t_group_kill_skips_a_group_its_holder_no_longer_holds() {
     kill() { case " $* " in *" -KILL "*" -$grp "*) printf 'x\n' >> "$T/group-killed" ;; *" -CONT -- -$grp "*) printf 'x\n' >> "$T/group-continued" ;; esac; builtin kill "$@"; }
     _shmutant_kill_tree_twice -g "$grp" "$grp:" ) 2>/dev/null
   if [ -e "$T/group-killed" ]; then fail_ 'the group was signalled by number after its holder had gone'; fi
-  # A member the freeze stopped may still be in it: the group is continued, never left stopped.
-  [ -e "$T/group-continued" ] || fail_ 'a group whose holder had gone was not continued'
+  # Nothing of the run is left in it to show the number is still the run's: not continued either.
+  if [ -e "$T/group-continued" ]; then fail_ 'a group with nothing of the run left in it was continued after its holder had gone'; fi
   kill -KILL "$holder" 2>/dev/null; wait_gone "$holder"
 }
 
@@ -5903,13 +5912,21 @@ t_sampler_never_samples_a_pid_that_is_not_the_unit() {
 t_group_kill_checks_the_holder_identity() {
   # A live pid at the holder's number that no longer carries the holder's identity is not the
   # holder: the group it once reserved may have been reused, so it must not be killed. It is
-  # continued instead (#47): a member a freeze stopped there would otherwise stay stopped.
+  # continued (#47), letting go a member a freeze stopped there, only while a process the kill
+  # targets is still in it; with none, nothing is sent to it.
   sleep 30 > /dev/null 2>&1 & local stranger=$!
+  set -m; sleep 30 > /dev/null 2>&1 & local m=$!; set +m
   ( holder="$stranger"; holderid="not-the-holders-start"; SHMUTANT_KILL_GROUP=99999
     kill() { case " $* " in *" -KILL "*" -99999 "*) printf 'x\n' >> "$T/group-killed" ;; *" -CONT -- -99999 "*) printf 'x\n' >> "$T/group-continued" ;; esac; }
     _shmutant_kill_tree KILL "" )
   if [ -e "$T/group-killed" ]; then fail_ 'the group was killed for a holder whose identity no longer matches'; fi
-  [ -e "$T/group-continued" ] || fail_ 'the group of a holder whose identity no longer matches was not continued'
+  if [ -e "$T/group-continued" ]; then fail_ 'a group with no target of the kill in it was continued'; fi
+  ( holder="$stranger"; holderid="not-the-holders-start"; SHMUTANT_KILL_GROUP="$m"
+    kill() { case " $* " in *" -KILL "*" -$m "*) printf 'x\n' >> "$T/m-killed" ;; *" -CONT -- -$m "*) printf 'x\n' >> "$T/m-continued" ;; esac; }
+    _shmutant_kill_tree KILL "" "$m:" )
+  if [ -e "$T/m-killed" ]; then fail_ 'the group of a holder whose identity no longer matches was killed'; fi
+  [ -e "$T/m-continued" ] || fail_ 'a group a target of the kill is still in was not continued when its holder no longer matched'
+  kill -KILL "$m" 2>/dev/null; wait "$m" 2>/dev/null
   kill -KILL "$stranger" 2>/dev/null; wait "$stranger" 2>/dev/null
 }
 
