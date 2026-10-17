@@ -2065,8 +2065,12 @@ shmutant_mut 'done does not stand the guard down' \
   '      done) ;;' \
   't_guard_ends_only_what_it_can_verify'
 shmutant_mut 'the freeze returns with its guard still running' \
-  '    kill -KILL "$guard_pid" 2>/dev/null' \
-  '    :' \
+  '      SHMUTANT_KILL_GROUP="" _shmutant_kill_tree KILL "$guard_pid" "$guard_pid:$guard_id"' \
+  '      :' \
+  't_freeze_guard_not_seen_to_end_is_killed'
+shmutant_mut 'a guard is killed without what it waits on' \
+  '      SHMUTANT_KILL_GROUP="" _shmutant_kill_tree KILL "$guard_pid" "$guard_pid:$guard_id"' \
+  '      SHMUTANT_KILL_GROUP="" _shmutant_kill_tree KILL "" "$guard_pid:$guard_id"' \
   't_freeze_guard_not_seen_to_end_is_killed'
 shmutant_mut 'the guard'"'"'s identity is not kept for the end of the freeze' \
   '      guard_id="$(_shmutant_identity "$guard_pid")" || guard_id=""' \

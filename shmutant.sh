@@ -1168,7 +1168,9 @@ _shmutant_guard_close() {
   # that has exited and waits to be reaped is unchanged by it), and a wait that ran out is reported.
   if [ -n "${guard_pid:-}" ] && kill -0 "$guard_pid" 2>/dev/null; then
     if _shmutant_alive_since "$guard_pid" "${guard_id:-}"; then
-      kill -KILL "$guard_pid" 2>/dev/null
+      # With whatever it is waiting on (a process listing that stalled), in one kill; the run's group
+      # is not this kill's to signal.
+      SHMUTANT_KILL_GROUP="" _shmutant_kill_tree KILL "$guard_pid" "$guard_pid:$guard_id"
       if [ "$rc" -gt 128 ]; then _shmutant_freeze_err "the guard of a freeze did not end within 30 seconds of its KILL, and was killed"; fi
     else
       # Still there, and nothing to tell it by: never killed by number alone. A guard that has ended
