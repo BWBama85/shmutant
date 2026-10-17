@@ -959,7 +959,8 @@ _shmutant_kill_tree_guarded() {
   # The guard's way to tell this shell is gone while a helper of it still holds the records open:
   # its pid, and the start it carries, so a number reused since is not taken for it.
   local guard_of="$BASHPID" guard_of_id
-  guard_of_id="$(_shmutant_identity "$BASHPID")" || guard_of_id=""
+  # Read by number: inside the substitution, $BASHPID would be the substitution's own.
+  guard_of_id="$(_shmutant_identity "$guard_of")" || guard_of_id=""
   local -a frozen=() roots=()
   local -A have=()
   local SHMUTANT_KILL_GROUP="" SHMUTANT_FREEZE_UNSETTLED=0
@@ -1002,15 +1003,19 @@ _shmutant_kill_tree_guarded() {
     _shmutant_guard_tell "g $held ${holder:--} ${holderid:-}" && \
     kill -STOP -- -"$held" 2>/dev/null
     # Then every member of the stopped group, with its start, while the holder is still stopped too
-    # and so cannot end: told to the guard and taken as frozen. A member no walk reaches, and that
-    # holds none of the run's descriptors (a child that closed them all), would otherwise be reached
-    # only through a group whose holder may have ended by the time the guard acts.
-    _shmutant_guard_members "$held"
-    # The caller's holder is in that group and only blocks on a read: continued next, so a freeze cut
-    # short before its KILL leaves it running to its end-of-file rather than stopped. The caller
-    # verified it just before (_shmutant_held_group), the check the group stop itself relies on; a
-    # KILL landing before this leaves it stopped only until the guard ends the group, holder and all.
-    [ -z "${holder:-}" ] || kill -CONT "$holder" 2>/dev/null
+    # and so cannot end: told to the guard, taken as frozen and searched from. A member no walk
+    # reaches, and that holds none of the run's descriptors (a child that closed them all), would
+    # otherwise be reached only through a group whose holder may have ended by the time the guard
+    # acts.
+    # The caller's holder is in that group and only blocks on a read: continued once its members are
+    # known, so a freeze cut short before its KILL leaves it running to its end-of-file rather than
+    # stopped. The caller verified it just before (_shmutant_held_group), the check the group stop
+    # itself relies on; a KILL landing before this leaves it stopped only until the guard ends the
+    # group, holder and all. When the members cannot all be told, the holder stays stopped: it
+    # cannot end then, and goes on showing the group is the run's, to the guard and to the KILL.
+    if _shmutant_guard_members "$held"; then
+      [ -z "${holder:-}" ] || kill -CONT "$holder" 2>/dev/null
+    fi
     SHMUTANT_KILL_GROUP="$held"
   fi
   # The root's tree first, before any identity work: every pass is one ps and one bulk stop.
@@ -1064,24 +1069,33 @@ _shmutant_kill_tree_guarded() {
 }
 
 # _shmutant_guard_members <pgid> — tell the guard of each member of the stopped group <pgid>, with
-# the start it carries, and add each to `frozen` (it is stopped, so its number is its own): read from
-# one table of groups and one of starts. A member whose start cannot be read is not told, and is left
-# to the group signal. Shares its caller's `frozen` and `have`.
+# the start it carries, and take each as frozen (it is stopped, so its number is its own) and as a
+# root of the walk, whose descendants may sit in other groups: read from one table of groups and one
+# of starts. The caller's holder is told but never taken as frozen: it is let go next, and may end.
+# Fails when not every member could be told (a table, a start or the guard could not be had), and the
+# caller then keeps the holder stopped. Shares its caller's `frozen`, `have` and `roots`.
 _shmutant_guard_members() {
-  local table p
+  local table out p
   local -a members=() recs=()
   local -A SHMUTANT_START=()
-  table="$(command -p ps -A -o pid= -o pgid= 2>/dev/null)" && [ -n "$table" ] || return 0
-  mapfile -t members < <(printf '%s\n' "$table" | command -p awk -v g="$1" '$2 == g { print $1 }')
-  [ "${#members[@]}" -gt 0 ] || return 0
+  table="$(command -p ps -A -o pid= -o pgid= 2>/dev/null)" && [ -n "$table" ] || return 1
+  out="$(printf '%s\n' "$table" | command -p awk -v g="$1" '$2 == g { print $1 }')" || return 1
+  [ -n "$out" ] || return 0
+  mapfile -t members <<< "$out"
   _shmutant_identity_table
   for p in "${members[@]}"; do
-    [ -n "$p" ] && [ -n "${SHMUTANT_START[$p]:-}" ] && [ -z "${have[$p]:-}" ] || continue
+    [ -n "$p" ] && [ -z "${have[$p]:-}" ] || continue
+    [ -n "${SHMUTANT_START[$p]:-}" ] || return 1
     recs+=("p $p ${SHMUTANT_START[$p]}")
   done
   [ "${#recs[@]}" -gt 0 ] || return 0
-  if ! _shmutant_guard_tell "${recs[@]}"; then return 0; fi
-  for p in "${recs[@]}"; do p="${p#p }"; p="${p%% *}"; have["$p"]=1; frozen+=("$p:"); done
+  _shmutant_guard_tell "${recs[@]}" || return 1
+  for p in "${recs[@]}"; do
+    p="${p#p }"; p="${p%% *}"
+    [ "$p" != "${holder:-}" ] || continue
+    roots+=("$p"); have["$p"]=1; frozen+=("$p:")
+  done
+  return 0
 }
 
 # _shmutant_guard_open — start the guard of one freeze (_shmutant_guard) and wait, at most 30
@@ -2374,7 +2388,7 @@ _shmutant_pool_locals_writable() {
     SHMUTANT_TARGET SHMUTANT_DECL_ERRORS SHMUTANT_SELECTED_N \
     _shmutant_bo _shmutant_so _shmutant_o _shmutant_n _shmutant_pc _shmutant_wrap_left \
     a budget dog e elapsed last leftovers linked lstart old rrc s tampered tmpd tnow victims wroot \
-    b chunk conts g gcont gone_group guard_id guard_lost guard_of guard_of_id guard_pid guard_r guard_w hs kills members part pg ph phid recs rid seen_ck unfrozen w want \
+    b chunk conts g gcont gone_group guard_id guard_lost guard_of guard_of_id guard_pid guard_r guard_w hs kills members out part pg ph phid recs rid seen_ck unfrozen w want \
     SHMUTANT_GUARD SHMUTANT_GUARD_PID SHMUTANT_PS_LSTART
 }
 

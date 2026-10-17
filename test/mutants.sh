@@ -2021,9 +2021,25 @@ shmutant_mut 'the guard takes a reused pid for its freezer' \
   '  kill -0 "$guard_of" 2>/dev/null' \
   't_guard_takes_neither_a_reused_pid_nor_a_zombie_for_its_freezer'
 shmutant_mut 'the guard is not told the members of the stopped group' \
-  '    _shmutant_guard_members "$held"' \
-  '    :' \
+  '    if _shmutant_guard_members "$held"; then' \
+  '    if :; then' \
   't_guard_ends_a_group_member_whose_holder_went_first'
+shmutant_mut 'the holder is let go when the members could not be told' \
+  '    [ -n "${SHMUTANT_START[$p]:-}" ] || return 1' \
+  '    [ -n "${SHMUTANT_START[$p]:-}" ] || continue' \
+  't_freeze_keeps_the_holder_stopped_when_its_members_cannot_be_told'
+shmutant_mut 'the members of a stopped group are not searched from' \
+  '    roots+=("$p"); have["$p"]=1; frozen+=("$p:")' \
+  '    have["$p"]=1; frozen+=("$p:")' \
+  't_freeze_takes_group_members_as_roots_but_not_the_holder'
+shmutant_mut 'the holder is taken as frozen with the members' \
+  '    [ "$p" != "${holder:-}" ] || continue' \
+  '    :' \
+  't_freeze_takes_group_members_as_roots_but_not_the_holder'
+shmutant_mut 'the guard is given the start of the substitution that read it' \
+  '  guard_of_id="$(_shmutant_identity "$guard_of")" || guard_of_id=""' \
+  '  guard_of_id="$(_shmutant_identity "$BASHPID")" || guard_of_id=""' \
+  't_freeze_tells_its_guard_its_own_start'
 shmutant_mut 'a group whose holder went is left stopped' \
   '  [ -z "$gone_group" ] || kill -CONT -- -"$gone_group" 2>/dev/null' \
   '  :' \
