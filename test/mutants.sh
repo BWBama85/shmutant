@@ -1996,9 +1996,9 @@ shmutant_mut 'the guard leaves a group shown to be the run'"'"'s stopped' \
   '  [ -z "$gcont" ] || kill -CONT -- -"$gcont" 2>/dev/null' \
   '  :' \
   't_guard_ends_only_what_it_can_verify'
-shmutant_mut 'the guard continues the group after killing what showed it the run'"'"'s' \
-  '  [ -z "$gcont" ] || kill -CONT -- -"$gcont" 2>/dev/null' \
-  '  [ -z "$gcont" ] || { kill -KILL -- "${kills[@]}" 2>/dev/null; kill -CONT -- -"$gcont" 2>/dev/null; }' \
+shmutant_mut 'the guard continues the group before killing what it verified' \
+  '  [ "${#kills[@]}" -eq 0 ] || kill -KILL -- "${kills[@]}" 2>/dev/null' \
+  '  [ -z "$gcont" ] || kill -CONT -- -"$gcont" 2>/dev/null; [ "${#kills[@]}" -eq 0 ] || kill -KILL -- "${kills[@]}" 2>/dev/null' \
   't_guard_ends_only_what_it_can_verify'
 shmutant_mut 'the guard continues a group with no verified pid in it' \
   '|| _shmutant_group_has "$pg" "${kills[@]}"; then gcont=' \
@@ -2060,9 +2060,9 @@ shmutant_mut 'a group whose holder went is left stopped' \
   '  [ -z "$gone_group" ] || kill -CONT -- -"$gone_group" 2>/dev/null' \
   '  :' \
   't_group_kill_checks_the_holder_identity'
-shmutant_mut 'a group whose holder went is continued after its target is killed' \
-  '  [ -z "$gone_group" ] || kill -CONT -- -"$gone_group" 2>/dev/null' \
-  '  [ -z "$gone_group" ] || { kill "-$sig" -- "${targets[@]}" 2>/dev/null; kill -CONT -- -"$gone_group" 2>/dev/null; }' \
+shmutant_mut 'a group whose holder went is continued before its target is signalled' \
+  '  [ "${#targets[@]}" -eq 0 ] || kill "-$sig" -- "${targets[@]}" 2>/dev/null' \
+  '  [ -z "$gone_group" ] || kill -CONT -- -"$gone_group" 2>/dev/null; [ "${#targets[@]}" -eq 0 ] || kill "-$sig" -- "${targets[@]}" 2>/dev/null' \
   't_group_kill_checks_the_holder_identity'
 shmutant_mut 'a group whose holder went is continued with no target in it' \
   '      _shmutant_group_has "$SHMUTANT_KILL_GROUP" "${targets[@]}" && gone_group=' \

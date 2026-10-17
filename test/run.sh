@@ -4179,7 +4179,7 @@ t_guard_ends_only_what_it_can_verify() {
   # #47: the guard of a freeze whose shell went partway KILLs a recorded pid only while it carries the
   # start it was recorded with, and the group only while its holder is shown to be the holder. A pid
   # recorded with another start, or with none, is continued, never killed. A group whose holder is not
-  # shown is continued, before anything is
+  # shown is continued, after what it kills is
   # killed, only while its number is still the run's (a pid it verified is a member, or the holder is
   # there but cannot be checked), and otherwise sent nothing. `done` stands it down, and an end with
   # nothing recorded does nothing. Driven with its records on stdin and every `kill` but the liveness
@@ -4239,10 +4239,10 @@ t_guard_ends_only_what_it_can_verify() {
   out="$( kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*"; fi; }
           printf 'p %s %s\ng %s %s %s\n' "$m" "$mid" "$m" "$((a + 1000000))" "$aid" | _shmutant_guard )"
   printf '%s\n' "$out" | grep -qx -- "kill -CONT -- -$m" || fail_ "a group a verified pid is still in was not continued when its holder had gone: [$out]"
-  # ...and continued before that pid is killed: the KILL may take the last of what showed the number
-  # to be the run's.
-  printf '%s\n' "$out" | awk -v c="kill -CONT -- -$m" -v k="kill -KILL -- $m" '$0 == c && !ci { ci = NR } $0 == k && !ki { ki = NR } END { exit !(ci && ki && ci < ki) }' \
-    || fail_ "the group was not continued before its verified member was killed: [$out]"
+  # ...and only after that pid is killed, while it is still stopped: continued first, it could end
+  # and its number go to another before its KILL.
+  printf '%s\n' "$out" | awk -v c="kill -CONT -- -$m" -v k="kill -KILL -- $m" '$0 == c && !ci { ci = NR } $0 == k && !ki { ki = NR } END { exit !(ci && ki && ki < ci) }' \
+    || fail_ "the group was continued before its verified member was killed: [$out]"
   if printf '%s\n' "$out" | awk -v g="-$m" '$2 == "-KILL" { for (i = 3; i <= NF; i++) if ($i == g) f = 1 } END { exit !f }'; then
     fail_ "a group whose holder had gone was killed: [$out]"
   fi
@@ -6406,8 +6406,8 @@ t_group_kill_checks_the_holder_identity() {
     _shmutant_kill_tree KILL "" "$m:" )
   if [ -e "$T/m-killed" ]; then fail_ 'the group of a holder whose identity no longer matches was killed'; fi
   [ -e "$T/m-continued" ] || fail_ 'a group a target of the kill is still in was not continued when its holder no longer matched'
-  # continued before the target that showed it to be the run's is killed
-  eq "$(tr '\n' ' ' < "$T/m-order" 2>/dev/null)" 'cont kill ' 'the group is continued before its member is killed'
+  # continued only after the target that showed it to be the run's is killed, while still stopped
+  eq "$(tr '\n' ' ' < "$T/m-order" 2>/dev/null)" 'kill cont ' 'the group is continued after its member is killed'
   kill -KILL "$m" 2>/dev/null; wait "$m" 2>/dev/null
   kill -KILL "$stranger" 2>/dev/null; wait "$stranger" 2>/dev/null
 }

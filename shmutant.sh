@@ -1281,7 +1281,7 @@ _shmutant_guard_freezer_there() {
 # stopped (`k`) and it is still stopped and in the group. Every other recorded pid is continued, never
 # killed and never left stopped. The group is continued when its holder is not shown, but only while
 # its number is shown to be the run's: a holder still there, stopped and in the group that cannot be
-# checked, or a pid it verified still in it (_shmutant_group_has), and before that pid is killed;
+# checked, or a pid it verified still in it (_shmutant_group_has), and only after that pid is killed;
 # otherwise nothing is sent to it. It
 # uses no freeze step and no _shmutant_kill_tree, which a freezing shell killed in them may have left
 # half-done.
@@ -1374,10 +1374,11 @@ _shmutant_guard() {
     for p in "${conts[@]}"; do case "$members" in *" $p "*) ;; *) left+=("$p") ;; esac; done
     conts=("${left[@]}")
   fi
-  # The group first, while what showed its number to be the run's is still there: the KILL below may
-  # take the last of it.
-  [ -z "$gcont" ] || kill -CONT -- -"$gcont" 2>/dev/null
+  # The KILL first, while what it names is still stopped: continued first, a process could end and its
+  # number go to another before its KILL. The group's CONT comes after, which at worst reaches a group
+  # its number has passed to since, where a KILL reaching another's process ends it.
   [ "${#kills[@]}" -eq 0 ] || kill -KILL -- "${kills[@]}" 2>/dev/null
+  [ -z "$gcont" ] || kill -CONT -- -"$gcont" 2>/dev/null
   [ "${#conts[@]}" -eq 0 ] || kill -CONT -- "${conts[@]}" 2>/dev/null
   return 0
 }
@@ -1427,10 +1428,11 @@ _shmutant_kill_tree() {
     mapfile -t now < <(_shmutant_descendants "$pid")
     for p in "${now[@]}"; do [ -n "$p" ] && targets+=("$p"); done
   fi
-  # The group first, while the target that showed its number to be the run's is still there: the
-  # signal below may take the last of it.
-  [ -z "$gone_group" ] || kill -CONT -- -"$gone_group" 2>/dev/null
+  # The targets first, while a frozen one is still stopped: continued first, it could end and its
+  # number go to another before the signal. The group's CONT comes after, which at worst reaches a
+  # group its number has passed to since, where a signal reaching another's process ends it.
   [ "${#targets[@]}" -eq 0 ] || kill "-$sig" -- "${targets[@]}" 2>/dev/null
+  [ -z "$gone_group" ] || kill -CONT -- -"$gone_group" 2>/dev/null
   return 0
 }
 
