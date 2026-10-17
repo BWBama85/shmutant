@@ -2001,9 +2001,21 @@ shmutant_mut 'the guard'"'"'s identity is not kept for the end of the freeze' \
   '      guard_id=""' \
   't_freeze_guard_not_seen_to_end_is_killed'
 shmutant_mut 'a wait for the guard that ran out is not reported' \
-  '    if [ "$rc" -gt 128 ] && [ -n "${err_fd:-}" ]; then _shmutant_err' \
-  '    if false; then _shmutant_err' \
+  '      if [ "$rc" -gt 128 ]; then _shmutant_freeze_err' \
+  '      if false; then _shmutant_freeze_err' \
   't_freeze_guard_not_seen_to_end_is_killed'
+shmutant_mut 'a guard that cannot be identified is killed by number' \
+  '    if _shmutant_alive_since "$guard_pid" "${guard_id:-}"; then' \
+  '    if :; then' \
+  't_freeze_guard_not_seen_to_end_is_killed'
+shmutant_mut 'a guard that could not be confirmed ended is not reported' \
+  '      if kill -0 "$guard_pid" 2>/dev/null; then _shmutant_freeze_err' \
+  '      if false; then _shmutant_freeze_err' \
+  't_freeze_guard_not_seen_to_end_is_killed'
+shmutant_mut 'a guard that does not say its pid is trusted' \
+  '    if [ "$b" = up ] && [ "$guard_pid" != "$a" ] && [ -n "$guard_pid" ] && [ -n "${guard_pid##*[!0-9]*}" ]; then' \
+  '    if [ "$b" = up ]; then' \
+  't_freeze_guard_that_does_not_answer_is_not_trusted'
 shmutant_mut 'the guard shares the process group of the shell that froze' \
   '( set -m; trap '"'"''"'"' INT TERM HUP; _shmutant_guard' \
   '( trap '"'"''"'"' INT TERM HUP; _shmutant_guard' \
@@ -2012,8 +2024,8 @@ shmutant_mut 'the guard is ended by INT, TERM or HUP' \
   'trap '"'"''"'"' INT TERM HUP; _shmutant_guard' \
   '_shmutant_guard' \
   't_freeze_guard_is_out_of_reach_and_gone_at_the_end'
-# (no row on the guard's handshake words: a guard that never says `ready` leaves the open waiting out
-# its 30-second bound, which no unit spends, before the freeze goes on unguarded)
+# (no row on the handshake's bound: a wait that runs out reads nothing, so whatever accepted the words
+# after it still refuses them, and a row would pass)
 # (no row on the wait for the guard to go: a guard not waited for is killed by the check after it,
 # with the same end, so the row would pass)
 # (no row on the guard reparented before `up`: the subshell that started it ends a moment after, and

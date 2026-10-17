@@ -1103,9 +1103,9 @@ _shmutant_guard_tell() {
 }
 
 # _shmutant_guard_close — tell the guard the KILL has been sent, wait, at most 30 seconds, for it to
-# go, and end it if it has not: nothing of the freeze outlives the call.
+# go, and end it if it has not: nothing of the freeze outlives the call unreported.
 _shmutant_guard_close() {
-  local rc=0
+  local rc=0 i
   [ -n "${guard_w:-}" ] || return 0
   { printf 'done\n' >&"$guard_w"; } 2>/dev/null
   exec {guard_w}>&-
@@ -1113,13 +1113,26 @@ _shmutant_guard_close() {
   # End-of-file is the guard gone, but a read that failed looks the same, and one that ran out of
   # time proves nothing: whatever the read said, a guard still the process started is killed (one
   # that has exited and waits to be reaped is unchanged by it), and a wait that ran out is reported.
-  if [ -n "${guard_pid:-}" ] && kill -0 "$guard_pid" 2>/dev/null && _shmutant_alive_since "$guard_pid" "${guard_id:-}"; then
-    kill -KILL "$guard_pid" 2>/dev/null
-    if [ "$rc" -gt 128 ] && [ -n "${err_fd:-}" ]; then _shmutant_err "the guard of a freeze did not end within 30 seconds of its KILL, and was killed" 2>&"$err_fd"; fi
+  if [ -n "${guard_pid:-}" ] && kill -0 "$guard_pid" 2>/dev/null; then
+    if _shmutant_alive_since "$guard_pid" "${guard_id:-}"; then
+      kill -KILL "$guard_pid" 2>/dev/null
+      if [ "$rc" -gt 128 ]; then _shmutant_freeze_err "the guard of a freeze did not end within 30 seconds of its KILL, and was killed"; fi
+    else
+      # Still there, and nothing to tell it by: never killed by number alone. A guard that has ended
+      # is reaped at once, so one still there a moment later is reported.
+      for (( i = 0; i < 20; i++ )); do kill -0 "$guard_pid" 2>/dev/null || break; command -p sleep 0.1; done
+      if kill -0 "$guard_pid" 2>/dev/null; then _shmutant_freeze_err "the guard of a freeze (pid $guard_pid) could not be confirmed ended, and could not be identified to be killed"; fi
+    fi
   fi
   exec {guard_r}<&-
   guard_w=""; guard_r=""
   return 0
+}
+
+# _shmutant_freeze_err <message> — a freeze's report: through the runner's descriptor where there is
+# one (the watchdog's and the runner's own stderr go nowhere), on stderr otherwise.
+_shmutant_freeze_err() {
+  if [ -n "${err_fd:-}" ]; then _shmutant_err "$1" 2>&"$err_fd"; else _shmutant_err "$1"; fi
 }
 
 # _shmutant_guard — the guard of one freeze. Says `ready <its pid>`, then reads on stdin what the
