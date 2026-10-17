@@ -2148,6 +2148,18 @@ shmutant_mut 'a holder shown gone once the group is stopped still lets its membe
   '    if [ -n "${holder:-}" ] && { _shmutant_holder_state "$holder" "${holderid:-}"; [ "$?" = 1 ]; }; then' \
   '    if false; then' \
   't_freeze_checks_its_root_and_holder_after_its_guard_starts'
+shmutant_mut 'a member the group KILL of the guard takes is continued after it' \
+  '    for p in "${conts[@]}"; do case "$members" in *" $p "*) ;; *) left+=("$p") ;; esac; done' \
+  '    left=("${conts[@]}")' \
+  't_guard_ends_only_what_it_can_verify'
+shmutant_mut 'a ps that failed is read as a stopped state' \
+  '" && case "$st" in *T*) return 0 ;; esac' \
+  '"; case "$st" in *T*) return 0 ;; esac' \
+  't_process_state_reads_take_a_failed_ps_as_no_state'
+shmutant_mut 'a ps that failed is read as a zombie' \
+  '" && case "$st" in *Z*) return 0 ;; esac' \
+  '"; case "$st" in *Z*) return 0 ;; esac' \
+  't_process_state_reads_take_a_failed_ps_as_no_state'
 # (no row on the second read of a group's members keeping awk's status: `command -p awk` over a table
 # already read cannot be made to fail from a unit)
 # (no row on confirming a killed guard has ended: a KILL of the guard's own group cannot be made to

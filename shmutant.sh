@@ -1231,16 +1231,19 @@ _shmutant_guard_close() {
   return 0
 }
 
-# _shmutant_guard_reaped <pid> — true when <pid> is a zombie: ended, and only waiting to be reaped.
+# _shmutant_guard_reaped <pid> — true when <pid> is a zombie: ended, and only waiting to be reaped;
+# false when it is not, or no state can be read (a ps that failed, whatever it printed).
 _shmutant_guard_reaped() {
-  case "$(command -p ps -o stat= -p "$1" 2>/dev/null)" in *Z*) return 0 ;; esac
+  local st
+  st="$(command -p ps -o stat= -p "$1" 2>/dev/null)" && case "$st" in *Z*) return 0 ;; esac
   return 1
 }
 
 # _shmutant_proc_stopped <pid> — true when <pid> is stopped now; false when it is not, or no state
-# can be read.
+# can be read (a ps that failed, whatever it printed).
 _shmutant_proc_stopped() {
-  case "$(command -p ps -o stat= -p "$1" 2>/dev/null)" in *T*) return 0 ;; esac
+  local st
+  st="$(command -p ps -o stat= -p "$1" 2>/dev/null)" && case "$st" in *T*) return 0 ;; esac
   return 1
 }
 
@@ -1275,7 +1278,7 @@ _shmutant_guard_freezer_there() {
 # uses no freeze step and no _shmutant_kill_tree, which a freezing shell killed in them may have left
 # half-done.
 _shmutant_guard() {
-  local line chunk part="" pg="" ph="" phid="" p pid st gcont="" hs kept="" want
+  local line chunk part="" pg="" ph="" phid="" p pid st gcont="" hs="" kept="" want members
   local -a recs=() kills=() conts=() stops=() left=()
   local -A SHMUTANT_START=()
   # Its own process: the caller's errexit would end it at the first refused signal or failed write.
@@ -1353,6 +1356,14 @@ _shmutant_guard() {
       want=1; for pid in "${kills[@]}"; do [ "$pid" != "$p" ] || want=""; done
       [ -z "$want" ] || left+=("$p")
     done
+    conts=("${left[@]}")
+  fi
+  # Nor one the group KILL takes: a member of that group, which the stop above keeps in it. Read in
+  # one table; with none readable, every one is continued, as before.
+  if [ "$hs" = 0 ] && [ "${#conts[@]}" -gt 0 ]; then
+    members=" $(command -p ps -A -o pid= -o pgid= 2>/dev/null | command -p awk -v g="$pg" '$2 == g { printf "%s ", $1 }')"
+    left=()
+    for p in "${conts[@]}"; do case "$members" in *" $p "*) ;; *) left+=("$p") ;; esac; done
     conts=("${left[@]}")
   fi
   # The group first, while what showed its number to be the run's is still there: the KILL below may

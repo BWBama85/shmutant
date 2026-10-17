@@ -4154,6 +4154,22 @@ t_guard_verifies_with_its_top_shell_gone() {
   kill -KILL "$a" 2>/dev/null; wait "$a" 2>/dev/null
 }
 
+t_process_state_reads_take_a_failed_ps_as_no_state() {
+  # #47: a process's state read through a ps that failed is no state, whatever that ps printed: never
+  # "stopped", which lets the guard take a holder it cannot identify for the run's, nor "a zombie",
+  # which takes a freezing shell for gone.
+  local how
+  for how in T Z; do
+    ( command() { if [ "${1:-}" = -p ] && [ "${2:-}" = ps ]; then printf '%s\n' "$how"; return 1; fi; builtin command "$@"; }
+      if [ "$how" = T ]; then ! _shmutant_proc_stopped "$BASHPID"; else ! _shmutant_guard_reaped "$BASHPID"; fi ) \
+      || fail_ "a ps that printed $how and then failed was believed"
+  done
+  # ...and one that succeeded is: this shell runs.
+  _shmutant_proc_stopped "$BASHPID" && fail_ 'a running shell was read as stopped'
+  _shmutant_guard_reaped "$BASHPID" && fail_ 'a running shell was read as a zombie'
+  return 0
+}
+
 # shellcheck disable=SC2034
 t_guard_ends_only_what_it_can_verify() {
   # #47: the guard of a freeze whose shell went partway KILLs a recorded pid only while it carries the
@@ -4175,6 +4191,12 @@ t_guard_ends_only_what_it_can_verify() {
   printf '%s\n' "$out" | grep -qx -- "kill -KILL -- -99999 $a" || fail_ "a verified pid and a group whose holder is verified are not killed in one kill: [$out]"
   printf '%s\n' "$out" | grep -qx -- "kill -CONT -- $b $b" || fail_ "a pid recorded with another start, or with none, is not continued: [$out]"
   if printf '%s\n' "$out" | grep -e '-KILL' | grep -qw -- "$b"; then fail_ "a pid it could not verify was killed: [$out]"; fi
+  # A recorded pid not shown to be the process recorded, but in the group it KILLs (m leads a group of
+  # its own and is its verified holder here), is taken by that KILL and never continued after it.
+  out="$( kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*"; fi; }
+          printf 'p %s not-%s\ng %s %s %s\n' "$m" "$mid" "$m" "$m" "$mid" | _shmutant_guard )"
+  printf '%s\n' "$out" | grep -qx -- "kill -KILL -- -$m" || fail_ "a group whose holder is verified was not killed: [$out]"
+  if printf '%s\n' "$out" | grep -e '-CONT' | grep -qw -- "$m"; then fail_ "a member the group KILL took was continued after it: [$out]"; fi
   # A pid told twice, once with a start that no longer shows (a clock step between two listings), is
   # killed by the record that verifies, and never continued after.
   out="$( kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*"; fi; }
