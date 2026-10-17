@@ -1977,8 +1977,12 @@ shmutant_mut 'the guard kills a group whose holder cannot be checked' \
   '    if [ "$hs" != 1 ]; then' \
   't_guard_ends_only_what_it_can_verify'
 shmutant_mut 'the guard leaves a group whose holder cannot be checked stopped' \
-  'elif [ "$hs" = 2 ] ||' \
+  'elif { [ "$hs" = 2 ] && _shmutant_proc_stopped "$ph"; } ||' \
   'elif false ||' \
+  't_guard_ends_only_what_it_can_verify'
+shmutant_mut 'the guard continues a group whose holder cannot be checked, though it runs' \
+  '{ [ "$hs" = 2 ] && _shmutant_proc_stopped "$ph"; }' \
+  '{ [ "$hs" = 2 ]; }' \
   't_guard_ends_only_what_it_can_verify'
 shmutant_mut 'the guard does not kill the group' \
   'then kills=(-"$pg" "${kills[@]}")' \
@@ -2017,7 +2021,7 @@ shmutant_mut 'the guard is not told whose shell it guards' \
   '  local guard_of="" guard_of_id' \
   't_guard_acts_while_a_helper_of_its_freezer_holds_the_records'
 shmutant_mut 'the guard takes a zombie for its freezer' \
-  '  case "$(command -p ps -o stat= -p "$guard_of" 2>/dev/null)" in *Z*) return 1 ;; esac' \
+  '  ! _shmutant_guard_reaped "$guard_of" || return 1' \
   '  :' \
   't_guard_takes_neither_a_reused_pid_nor_a_zombie_for_its_freezer'
 shmutant_mut 'the guard takes a reused pid for its freezer' \
@@ -2118,6 +2122,10 @@ shmutant_mut 'the guard is ended by INT, TERM or HUP' \
 # before: the fix is the order of two blocks, and the window it closes is one no unit can time)
 # (no row on confirming a killed guard has ended: a KILL of the guard's own group cannot be made to
 # fail from a unit, so the report of one that did is never reached)
+shmutant_mut 'a root shown changed once stopped is still taken as frozen' \
+  '    if [ -n "${rootid:-}" ] && [ -n "${have[$pid]:-}" ] && { _shmutant_holder_state "$pid" "$rootid"; [ "$?" = 1 ]; }; then' \
+  '    if false; then' \
+  't_freeze_checks_its_root_and_holder_after_its_guard_starts'
 # (no row on the root being checked after the guard starts rather than before: the fix is the order of
 # two blocks, which a row cannot move; t_freeze_checks_its_root_and_holder_after_its_guard_starts goes
 # red on the commit before it)

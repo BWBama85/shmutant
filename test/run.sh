@@ -3971,10 +3971,20 @@ t_freeze_checks_its_root_and_holder_after_its_guard_starts() {
   # #47: the guard's start can take a minute on a loaded host, so the root and the held group's
   # holder are checked after it, just before anything is stopped: one that ended while the guard was
   # starting, its number reused since, is neither stopped nor killed, with a guard or without one.
-  # Modelled by checks that pass until the guard is open and fail after.
+  # Modelled by checks that pass until the guard is open and fail after. And a root that passes its
+  # check but is shown to be another process once stopped is let go, never killed.
   local r g how
   sleep 60 > /dev/null 2>&1 & r=$!
   set -m; sleep 60 > /dev/null 2>&1 & g=$!; set +m
+  rm -f "$T/opened" "$T/signals"
+  ( holder="$g"; holderid="$(_shmutant_identity "$g")"
+    _shmutant_alive_since() { return 0; }
+    _shmutant_holder_state() { [ "$1" != "$r" ] || return 1; return 0; }
+    kill() { case " $* " in *" $r "*) printf '%s\n' "$*" >> "$T/signals" ;; esac; builtin kill "$@"; }
+    _shmutant_kill_tree_twice "$r:checked" ) > /dev/null 2>&1
+  grep -qx -- "-CONT $r" "$T/signals" 2>/dev/null || fail_ "a root shown changed once stopped was not let go: [$(tr '\n' ';' < "$T/signals" 2>/dev/null)]"
+  if grep -e '-KILL' "$T/signals" 2>/dev/null | grep -qw -- "$r"; then fail_ "a root shown changed once stopped was killed: [$(tr '\n' ';' < "$T/signals")]"; fi
+  kill -CONT "$r" 2>/dev/null
   for how in guarded unguarded; do
     rm -f "$T/opened" "$T/signals"
     ( holder="$g"; holderid="$(_shmutant_identity "$g")"
@@ -4055,11 +4065,20 @@ t_guard_ends_only_what_it_can_verify() {
   # to be the run's.
   printf '%s\n' "$out" | awk -v c="kill -CONT -- -$m" -v k="kill -KILL -- $m" '$0 == c && !ci { ci = NR } $0 == k && !ki { ki = NR } END { exit !(ci && ki && ci < ki) }' \
     || fail_ "the group was not continued before its verified member was killed: [$out]"
-  # A holder that is there but cannot be checked (no table to read) still reserves the number.
+  # A holder that is there but cannot be identified shows the number is still the run's only while it
+  # is stopped (a stopped process cannot end and give its number away): its group is then continued;
+  # one that runs proves nothing, and its group is sent nothing.
+  sleep 60 > /dev/null 2>&1 & local sh=$!
+  kill -STOP "$sh"
+  out="$( kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*"; fi; }
+          _shmutant_identity() { return 1; }; _shmutant_identity_table() { SHMUTANT_START=(); }
+          printf 'g %s %s %s\n' "$m" "$sh" "$aid" | _shmutant_guard )"
+  printf '%s\n' "$out" | grep -qx -- "kill -CONT -- -$m" || fail_ "a group whose stopped holder cannot be identified was not continued: [$out]"
   out="$( kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*"; fi; }
           _shmutant_identity() { return 1; }; _shmutant_identity_table() { SHMUTANT_START=(); }
           printf 'g %s %s %s\n' "$m" "$a" "$aid" | _shmutant_guard )"
-  printf '%s\n' "$out" | grep -qx -- "kill -CONT -- -$m" || fail_ "a group whose holder is there but cannot be checked was not continued: [$out]"
+  case "$out" in *" -$m"*) fail_ "a group whose running holder cannot be identified was signalled: [$out]" ;; esac
+  kill -KILL "$sh" 2>/dev/null; wait "$sh" 2>/dev/null
   # The membership test does not depend on the caller's IFS.
   ( IFS=:; _shmutant_group_has "$m" 1 "$m" ) || fail_ 'a member was missed with IFS set to a colon'
   ( IFS=; _shmutant_group_has "$m" 1 "$m" ) || fail_ 'a member was missed with IFS empty'

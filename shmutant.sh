@@ -978,14 +978,15 @@ _shmutant_kill_tree_guarded() {
   # cannot identify it); `pid:identity` carries what was captured while it lived and must still
   # match; `pid:` means reaped, whose number may already be someone else's, and neither it nor
   # the children it now has are touched.
+  # The held group's holder first, checked again for the same reason: a group whose holder has gone
+  # since the caller looked is no longer known to be the run's, and is neither stopped nor signalled.
+  if [ -n "$held" ] && [ -n "${holder:-}" ]; then
+    _shmutant_holder_state "$holder" "${holderid:-}" || [ "$?" = 2 ] || held=""
+  fi
+  # Then the root, last, so nothing stands between its check and its stop.
   local root_ok=0
   if [ "$spec" = "$pid" ]; then root_ok=1
   else rootid="${spec#*:}"; [ -n "$rootid" ] && _shmutant_alive_since "$pid" "$rootid" && root_ok=1
-  fi
-  # The held group's holder, checked again for the same reason: a group whose holder has gone since
-  # the caller looked is no longer known to be the run's, and is neither stopped nor signalled.
-  if [ -n "$held" ] && [ -n "${holder:-}" ]; then
-    _shmutant_holder_state "$holder" "${holderid:-}" || [ "$?" = 2 ] || held=""
   fi
   if [ "$guard_up" != 0 ]; then
     # No guard, no freeze: one KILL to what can be reached now, the group included, and the end
@@ -1004,6 +1005,12 @@ _shmutant_kill_tree_guarded() {
     rid="${rootid:-}"; [ -n "$rid" ] || rid="$(_shmutant_identity "$pid")" || rid=""
     _shmutant_guard_tell "p $pid $rid" && \
     kill -STOP "$pid" 2>/dev/null && { frozen+=("$pid:"); have["$pid"]=1; }
+    # Shown to be the root again once stopped, where a start can tell it: a number given away between
+    # the check and the stop is let go, and neither searched from nor killed by number.
+    if [ -n "${rootid:-}" ] && [ -n "${have[$pid]:-}" ] && { _shmutant_holder_state "$pid" "$rootid"; [ "$?" = 1 ]; }; then
+      kill -CONT "$pid" 2>/dev/null
+      frozen=(); roots=(); unset 'have[$pid]'; root_ok=0
+    fi
   fi
   # `-g <pgid>` names a process group the caller has verified is still its own (the holder
   # that leads it is alive): the whole group is stopped now and signalled at the end, whether
@@ -1203,6 +1210,13 @@ _shmutant_guard_reaped() {
   return 1
 }
 
+# _shmutant_proc_stopped <pid> — true when <pid> is stopped now; false when it is not, or no state
+# can be read.
+_shmutant_proc_stopped() {
+  case "$(command -p ps -o stat= -p "$1" 2>/dev/null)" in *T*) return 0 ;; esac
+  return 1
+}
+
 # _shmutant_freeze_err <message> — a freeze's report: through the runner's descriptor where there is
 # one (the watchdog's and the runner's own stderr go nowhere), on stderr otherwise.
 _shmutant_freeze_err() {
@@ -1214,7 +1228,7 @@ _shmutant_freeze_err() {
 # there is nothing to look for, and a start that cannot be read now is taken as it was.
 _shmutant_guard_freezer_there() {
   [ -n "${guard_of:-}" ] || return 0
-  case "$(command -p ps -o stat= -p "$guard_of" 2>/dev/null)" in *Z*) return 1 ;; esac
+  ! _shmutant_guard_reaped "$guard_of" || return 1
   _shmutant_holder_state "$guard_of" "${guard_of_id:-}" || [ "$?" = 2 ]
 }
 
@@ -1273,13 +1287,14 @@ _shmutant_guard() {
     fi
   done
   # The group is killed only while its holder is shown to be the holder. Otherwise it is continued,
-  # which lets go a member stopped there, while its number is still the run's: while a holder that is
-  # there but cannot be checked (no table to read) still reserves it, or a process verified above is
-  # still in it. With neither it may be anyone's by now, and nothing is sent to it.
+  # which lets go a member stopped there, while its number is shown to be still the run's: by a holder
+  # that cannot be identified but is stopped (a stopped process cannot end and give its number away),
+  # or by a process verified above still in it. With neither it may be anyone's by now, and nothing is
+  # sent to it.
   if [ -n "$pg" ]; then
     hs=1; [ -z "$ph" ] || { _shmutant_holder_state "$ph" "$phid"; hs=$?; }
     if [ "$hs" = 0 ]; then kills=(-"$pg" "${kills[@]}")
-    elif [ "$hs" = 2 ] || _shmutant_group_has "$pg" "${kills[@]}"; then gcont="$pg"
+    elif { [ "$hs" = 2 ] && _shmutant_proc_stopped "$ph"; } || _shmutant_group_has "$pg" "${kills[@]}"; then gcont="$pg"
     fi
   fi
   # The group first, while what showed its number to be the run's is still there: the KILL below may
