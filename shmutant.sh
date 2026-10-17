@@ -1117,7 +1117,7 @@ _shmutant_guard_members() {
   # nothing new can join a group whose members are all stopped. One gone from it between the reads
   # (killed, its number perhaps someone else's by the start read) is not told.
   table="$(command -p ps -A -o pid= -o pgid= 2>/dev/null)" && [ -n "$table" ] || return 1
-  out="$(printf '%s\n' "$table" | command -p awk -v g="$1" '$2 == g { print " " $1 " " }' | command -p tr -d '\n')" || return 1
+  out="$(set -o pipefail; printf '%s\n' "$table" | command -p awk -v g="$1" '$2 == g { print " " $1 " " }' | command -p tr -d '\n')" || return 1
   for p in "${members[@]}"; do
     [ -n "$p" ] && [ -z "${have[$p]:-}" ] || continue
     case "$out" in *" $p "*) ;; *) continue ;; esac
@@ -1201,6 +1201,9 @@ _shmutant_guard_close() {
   # time proves nothing: whatever the read said, a guard still the process started is killed (one
   # that has exited and waits to be reaped is unchanged by it), and a wait that ran out is reported.
   if [ -n "${guard_pid:-}" ] && kill -0 "$guard_pid" 2>/dev/null; then
+    # Stopped before it is identified: a guard still running could end, and give its numbers away,
+    # between that check and the KILL. One not shown to be the guard is let go at once.
+    kill -STOP "$guard_pid" 2>/dev/null
     if _shmutant_alive_since "$guard_pid" "${guard_id:-}"; then
       # With whatever it is waiting on (a process listing that stalled), through the process group it
       # leads, which its being there keeps its own: a child it forks meanwhile is in it too, where a
@@ -1213,6 +1216,7 @@ _shmutant_guard_close() {
     else
       # Still there, and nothing to tell it by: never killed by number alone. A guard that has ended
       # is reaped at once, so one still there a moment later is reported.
+      kill -CONT "$guard_pid" 2>/dev/null
       for (( i = 0; i < 20; i++ )); do kill -0 "$guard_pid" 2>/dev/null || break; command -p sleep 0.1; done
       if kill -0 "$guard_pid" 2>/dev/null; then _shmutant_freeze_err "the guard of a freeze (pid $guard_pid) could not be confirmed ended, and could not be identified to be killed"; fi
     fi
@@ -1254,8 +1258,9 @@ _shmutant_guard_freezer_there() {
 # freezing shell is about to stop, each record written before the stop it announces: `p <pid>
 # [<start>]` per process, and `g <pgid> <holder or -> [<holder identity>]` for a held group. `done`
 # (the KILL has been sent) ends it with nothing done. End-of-file without `done` means the freezing
-# shell has gone partway, killed: the guard then KILLs, in one kill, every recorded pid that still
-# carries the start it was recorded with, and the group while its holder is shown to be the process
+# shell has gone partway, killed: the guard then stops every recorded pid and the holder, and KILLs,
+# in one kill, every recorded pid that still carries the start it was recorded with, and the group
+# while its holder is shown to be the process
 # it was (_shmutant_holder_state 0), or, with no start to check it by, while the freeze kept it
 # stopped (`k`) and it is still stopped and in the group. Every other recorded pid is continued, never
 # killed and never left stopped. The group is continued when its holder is not shown, but only while
@@ -1265,8 +1270,8 @@ _shmutant_guard_freezer_there() {
 # uses no freeze step and no _shmutant_kill_tree, which a freezing shell killed in them may have left
 # half-done.
 _shmutant_guard() {
-  local line chunk part="" pg="" ph="" phid="" p pid st gcont="" hs kept=""
-  local -a recs=() kills=() conts=()
+  local line chunk part="" pg="" ph="" phid="" p pid st gcont="" hs kept="" want
+  local -a recs=() kills=() conts=() stops=()
   local -A SHMUTANT_START=()
   # Its own process: the caller's errexit would end it at the first refused signal or failed write.
   set +e
@@ -1294,6 +1299,14 @@ _shmutant_guard() {
   case "$pg" in *[!0-9]*) pg="" ;; esac
   case "$ph" in *[!0-9]*) ph="" ;; esac
   [ "${#recs[@]}" -gt 0 ] || [ -n "$pg" ] || return 0
+  # What it may KILL is stopped before any start is read: a recorded process the freezing shell had
+  # not stopped yet, or a holder it had let go, could otherwise end, and its number go to another
+  # process, between that read and the KILL. Every stop that does not end in a KILL is undone below.
+  for p in "${recs[@]}" "$ph"; do
+    pid="${p%% *}"
+    case "$pid" in ''|*[!0-9]*) ;; *) stops+=("$pid") ;; esac
+  done
+  [ "${#stops[@]}" -eq 0 ] || kill -STOP -- "${stops[@]}" 2>/dev/null
   _shmutant_identity_table
   for p in "${recs[@]}"; do
     pid="${p%% *}"; st=""
@@ -1315,14 +1328,20 @@ _shmutant_guard() {
     hs=1; [ -z "$ph" ] || { _shmutant_holder_state "$ph" "$phid"; hs=$?; }
     # A holder that cannot be identified shows the number is still the run's only while it is stopped
     # and in the group: stopped, it cannot end and give its number away, and a process at its number in
-    # another group is not it. One that runs proves nothing: anything may have continued it, and once
-    # it has ended a process now at its number may be another.
+    # another group is not it. One the stop above did not reach (not a process this guard may signal)
+    # proves nothing.
     [ "$hs" != 2 ] || { _shmutant_proc_stopped "$ph" && _shmutant_group_has "$pg" "$ph"; } || hs=1
     # One the freeze kept stopped (`k`) and still shown so is the holder: no start is needed to tell
     # it, as for a frozen pid.
     [ -z "$kept" ] || [ "$hs" != 2 ] || hs=0
     if [ "$hs" = 0 ]; then kills=(-"$pg" "${kills[@]}")
     elif [ "$hs" = 2 ] || _shmutant_group_has "$pg" "${kills[@]}"; then gcont="$pg"
+    fi
+    # A holder not taken for the holder was stopped above all the same, and is let go, unless it is a
+    # recorded pid this guard kills.
+    if [ "$hs" != 0 ] && [ -n "$ph" ]; then
+      want=1; for p in "${kills[@]}"; do [ "$p" != "$ph" ] || want=""; done
+      [ -z "$want" ] || conts+=("$ph")
     fi
   fi
   # The group first, while what showed its number to be the run's is still there: the KILL below may
@@ -2445,7 +2464,7 @@ _shmutant_pool_locals_writable() {
     p parent path pending phys pid pids pool_aliases pout pout_r pout_w prc \
     prep r rc red rel rest ret rjrc root root_ok rootid rootls \
     roots rounds row_why run s sdir sec seen seen_r seen_w sel sent setup_failed sig size starts nul counts_r2 \
-    spec st stat_bin state status stillours stillpids suffix swapped t t0 t1 \
+    spec st stat_bin state status stillours stillpids stops suffix swapped t t0 t1 \
     table target target_ck targets timeout tmp unpublished us v v_jobs v_red v_timeout \
     verdict vr vw wd who wit wrc wstatus \
     SHMUTANT_ABORT_PENDING SHMUTANT_ACTIVE SHMUTANT_ACTIVE_ID SHMUTANT_ACTIVE_KEY SHMUTANT_BASE_SEL SHMUTANT_COUNTS_FD \

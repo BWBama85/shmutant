@@ -1980,7 +1980,7 @@ shmutant_mut 'the guard leaves a group whose holder cannot be checked stopped' \
   '    elif [ "$hs" = 2 ] ||' \
   '    elif false ||' \
   't_guard_ends_only_what_it_can_verify'
-shmutant_mut 'the guard takes a holder it cannot check for the holder, though it runs' \
+shmutant_mut 'the guard takes a holder it cannot check for the holder, though its stop did not reach it' \
   '{ _shmutant_proc_stopped "$ph" && _shmutant_group_has "$pg" "$ph"; } || hs=1' \
   '{ _shmutant_group_has "$pg" "$ph"; } || hs=1' \
   't_guard_ends_only_what_it_can_verify'
@@ -2124,6 +2124,32 @@ shmutant_mut 'the guard is ended by INT, TERM or HUP' \
 # write, so no witness can split one across that second, and a row would pass)
 # (no row on _shmutant_kill_tree walking the root's descendants after the group's reads rather than
 # before: the fix is the order of two blocks, and the window it closes is one no unit can time)
+shmutant_mut 'the guard reads starts before it stops what it may kill' \
+  '  [ "${#stops[@]}" -eq 0 ] || kill -STOP -- "${stops[@]}" 2>/dev/null' \
+  '  :' \
+  't_guard_ends_only_what_it_can_verify'
+shmutant_mut 'the guard does not stop the holder before checking it' \
+  '  for p in "${recs[@]}" "$ph"; do' \
+  '  for p in "${recs[@]}"; do' \
+  't_guard_ends_only_what_it_can_verify'
+shmutant_mut 'a holder the guard stopped and did not take for the holder is left stopped' \
+  '      [ -z "$want" ] || conts+=("$ph")' \
+  '      :' \
+  't_guard_ends_only_what_it_can_verify'
+shmutant_mut 'a holder the guard kills as a recorded pid is continued after' \
+  '      want=1; for p in "${kills[@]}"; do [ "$p" != "$ph" ] || want=""; done' \
+  '      want=1' \
+  't_guard_ends_only_what_it_can_verify'
+shmutant_mut 'the end of a freeze checks its guard before stopping it' \
+  '    kill -STOP "$guard_pid" 2>/dev/null' \
+  '    :' \
+  't_freeze_guard_not_seen_to_end_is_killed'
+shmutant_mut 'a guard the end of a freeze could not identify is left stopped' \
+  '      kill -CONT "$guard_pid" 2>/dev/null' \
+  '      :' \
+  't_freeze_guard_not_seen_to_end_is_killed'
+# (no row on the second read of a group's members keeping awk's status: `command -p awk` over a table
+# already read cannot be made to fail from a unit)
 # (no row on confirming a killed guard has ended: a KILL of the guard's own group cannot be made to
 # fail from a unit, so the report of one that did is never reached)
 shmutant_mut 'a root shown changed once stopped is still taken as frozen' \
