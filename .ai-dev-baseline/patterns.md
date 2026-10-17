@@ -464,4 +464,5 @@ One line per resolved review thread, newest last.
 - `timeout-escalation-cancelled` `test/run.sh:5743` `65ebfe9` `PRRT_kwDOUT7q9s6sO17e` PR #44 2026-10-14 — an interrupt never reached a unit with no usable identity record; it now signals the group through the wrapper
 - `stale-artifact-reuse` `shmutant.sh:1180` `ea24416` `PRRT_kwDOUT7q9s6tduDB` PR #50 2026-10-17 — the guard continued a group whose holder it could not verify, a number that may be reused by now
 - `stale-artifact-reuse` `shmutant.sh:996` `da9a0fd` `PRRT_kwDOUT7q9s6texFx` PR #50 2026-10-17 — the root checked before the guard started was stopped and taken as frozen though its pid may have been reused during the handshake
+- `stale-artifact-reuse` `shmutant.sh:1106` `41a551c` `PRRT_kwDOUT7q9s6tfg1J` PR #50 2026-10-17 — members of the stopped group were taken as frozen without showing their own stop took or that they were still the process listed
 <!-- adb:hits:end -->
