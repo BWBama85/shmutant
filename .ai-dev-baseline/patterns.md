@@ -465,4 +465,7 @@ One line per resolved review thread, newest last.
 - `stale-artifact-reuse` `shmutant.sh:1180` `ea24416` `PRRT_kwDOUT7q9s6tduDB` PR #50 2026-10-17 — the guard continued a group whose holder it could not verify, a number that may be reused by now
 - `stale-artifact-reuse` `shmutant.sh:996` `da9a0fd` `PRRT_kwDOUT7q9s6texFx` PR #50 2026-10-17 — the root checked before the guard started was stopped and taken as frozen though its pid may have been reused during the handshake
 - `stale-artifact-reuse` `shmutant.sh:1106` `41a551c` `PRRT_kwDOUT7q9s6tfg1J` PR #50 2026-10-17 — members of the stopped group were taken as frozen without showing their own stop took or that they were still the process listed
+- `stale-artifact-reuse` `test/run.sh:3480` `da1750d` `PRRT_kwDOUT7q9s6tgTgN` PR #50 2026-10-17 — unit cleanup KILLed a saved process-group number after confirming every member gone, when the number may be another group by then
+- `pipeline-status-lost` `test/run.sh:3553` `da1750d` `PRRT_kwDOUT7q9s6tgTgQ` PR #50 2026-10-17 — a unit took a pgid from ps piped to tr, so a failed ps gave an empty pgid and the group check passed vacuously
+- `stale-artifact-reuse` `shmutant.sh:1302` `da1750d` `PRRT_kwDOUT7q9s6tgTgT` PR #50 2026-10-17 — the guard verified a recorded pid against a start table and KILLed it later without stopping it, so it could end and its pid be reused first
 <!-- adb:hits:end -->
