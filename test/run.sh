@@ -3745,6 +3745,69 @@ t_freeze_guard_that_does_not_answer_is_not_trusted() {
 }
 
 # shellcheck disable=SC2034
+t_guard_acts_while_a_helper_of_its_freezer_holds_the_records() {
+  # #47, #48: a helper subshell of the freezing shell (a process listing in a command substitution)
+  # inherits the guard's records and keeps them open after the freezing shell is killed, so their end
+  # never comes while it runs. The guard also looks for the freezing shell itself, and ends what was
+  # stopped within seconds, whatever the helper does. The helper here blocks until the unit ends it.
+  local root i fz hp
+  local -a kids=()
+  set -m; sh -c 'sleep 60 & sleep 60 & wait' < /dev/null > /dev/null 2>&1 & root=$!; set +m
+  disown "$root"
+  for (( i = 0; i < 50; i++ )); do mapfile -t kids < <(_shmutant_descendants "$root"); [ "${#kids[@]}" -lt 2 ] || break; sleep 0.1; done
+  ( eval "$(declare -f _shmutant_freeze_from | sed '1s/^_shmutant_freeze_from /_shmutant_freeze_from_real /')"
+    # the root is stopped by now; the listing that follows blocks, holding the records open
+    _shmutant_freeze_from() { printf '%s\n' "$BASHPID" > "$T/freezer.pid"; _shmutant_freeze_from_real; }
+    # `; :` keeps it a shell: a last command alone would be exec'd in its place, and an exec'd program
+    # does not keep the records (they are close-on-exec), a helper shell does
+    _shmutant_descendants_started() { printf '%s\n' "$BASHPID" > "$T/helper.pid"; sleep 60; :; }
+    _shmutant_kill_tree_twice "$root" ) < /dev/null > /dev/null 2>&1 &
+  local outer=$!
+  wait_for "$T/helper.pid" || fail_ 'fixture: the helper never started'
+  fz="$(cat "$T/freezer.pid" 2>/dev/null)"; hp="$(cat "$T/helper.pid" 2>/dev/null)"
+  case "$(command -p ps -o stat= -p "$root" 2>/dev/null)" in *T*) ;; *) fail_ 'fixture: the root was not stopped before the helper blocked' ;; esac
+  [ -z "$fz" ] || kill -KILL "$fz" 2>/dev/null
+  wait_gone "$root" "" 50 || fail_ "the root stayed $(command -p ps -o stat= -p "$root" 2>/dev/null | tr -d ' ') while a helper of its killed freezer held the guard's records"
+  # the helper and its sleep, then the rest
+  if [ -n "$hp" ]; then _shmutant_kill_tree KILL "$hp" "$hp:"; fi
+  wait "$outer" 2>/dev/null
+  for i in "${kids[@]}"; do kill -KILL "$i" 2>/dev/null; wait_gone "$i" "" 30; done
+  kill -KILL -- -"$root" 2>/dev/null
+}
+
+# shellcheck disable=SC2034
+t_guard_lets_go_a_pid_it_cannot_show_is_the_runs() {
+  # #47: a pid the freezing shell recorded and stopped, then went before checking it was still the
+  # process found (its number reused between the listing and the stop): the guard cannot show it is
+  # the run's, so it is continued, never killed and never left stopped. And with the elapsed-time
+  # identity, a clock stepped forward or back since the record makes a live victim look like another
+  # process: it is continued too, never left stopped; with the clock unmoved it is killed.
+  local d did step out
+  sleep 60 > /dev/null 2>&1 & d=$!
+  did="$(_shmutant_identity "$d")"
+  kill -STOP "$d"
+  printf 'p %s not-%s\n' "$d" "$did" | _shmutant_guard > /dev/null
+  case "$(command -p ps -o stat= -p "$d" 2>/dev/null)" in
+    *T*) fail_ 'a stopped pid the guard could not show to be the run'"'"'s was left stopped' ;;
+    '') fail_ 'a pid the guard could not show to be the run'"'"'s was killed' ;;
+  esac
+  kill -KILL "$d" 2>/dev/null; wait "$d" 2>/dev/null
+  sleep 60 > /dev/null 2>&1 & d=$!
+  for step in 0 10000000 -10000000; do
+    out="$( SHMUTANT_PROC=0 SHMUTANT_PS_LSTART=0
+            did="$(_shmutant_identity "$d")"
+            kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*"; fi; }
+            _shmutant_now() { local t="$EPOCHREALTIME"; t="${t//[!0-9]/}"; printf '%s' "$(( t + step ))"; }
+            printf 'p %s %s\n' "$d" "$did" | _shmutant_guard )"
+    case "$step" in
+      0) printf '%s\n' "$out" | grep -qx -- "kill -KILL -- $d" || fail_ "with the clock unmoved, a verified victim was not killed: [$out]" ;;
+      *) printf '%s\n' "$out" | grep -qx -- "kill -CONT -- $d" || fail_ "with the clock stepped $step us, a victim was neither killed nor continued: [$out]" ;;
+    esac
+  done
+  kill -KILL "$d" 2>/dev/null; wait "$d" 2>/dev/null
+}
+
+# shellcheck disable=SC2034
 t_guard_verifies_with_its_top_shell_gone() {
   # #47: a guard acts once the shells above it are killed, the top-level one ($$) often among them,
   # so what it reads a process's identity by must not hang on that shell: with $$ gone, a pid that
@@ -3769,8 +3832,8 @@ t_guard_verifies_with_its_top_shell_gone() {
 t_guard_ends_only_what_it_can_verify() {
   # #47: the guard of a freeze whose shell went partway KILLs a recorded pid only while it carries the
   # start it was recorded with, and the group only while its holder is shown to be the holder. A pid
-  # that now carries another start has gone and is left alone; one recorded with no start to check by
-  # is continued, never killed. A group whose holder is not shown is continued, before anything is
+  # recorded with another start, or with none, is continued, never killed. A group whose holder is not
+  # shown is continued, before anything is
   # killed, only while its number is still the run's (a pid it verified is a member, or the holder is
   # there but cannot be checked), and otherwise sent nothing. `done` stands it down, and an end with
   # nothing recorded does nothing. Driven with its records on stdin and every `kill` but the liveness
@@ -3784,7 +3847,7 @@ t_guard_ends_only_what_it_can_verify() {
           { printf 'p %s %s\n' "$a" "$aid"; printf 'p %s not-%s\n' "$b" "$bid"; printf 'p %s \n' "$b"
             printf 'g 99999 %s %s\n' "$a" "$aid"; } | _shmutant_guard )"
   printf '%s\n' "$out" | grep -qx -- "kill -KILL -- -99999 $a" || fail_ "a verified pid and a group whose holder is verified are not killed in one kill: [$out]"
-  printf '%s\n' "$out" | grep -qx -- "kill -CONT -- $b" || fail_ "a pid recorded with no start is not continued, or one with another start is: [$out]"
+  printf '%s\n' "$out" | grep -qx -- "kill -CONT -- $b $b" || fail_ "a pid recorded with another start, or with none, is not continued: [$out]"
   if printf '%s\n' "$out" | grep -e '-KILL' | grep -qw -- "$b"; then fail_ "a pid it could not verify was killed: [$out]"; fi
   # A group whose holder has gone, carries another identity or was never named, and that no verified
   # pid is in (a is not): nothing is sent to it.

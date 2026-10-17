@@ -956,6 +956,8 @@ _shmutant_kill_tree_guarded() {
   local held=""
   if [ "${1:-}" = -g ]; then held="$2"; shift 2; fi
   local spec="$1" pid rootid p d rid guard_w="" guard_r="" guard_lost=0 guard_pid="" guard_id=""
+  # The guard's way to tell this shell is gone while a helper of it still holds the records open.
+  local guard_of="$BASHPID"
   local -a frozen=() roots=()
   local -A have=()
   local SHMUTANT_KILL_GROUP="" SHMUTANT_FREEZE_UNSETTLED=0
@@ -1141,27 +1143,37 @@ _shmutant_freeze_err() {
 # (the KILL has been sent) ends it with nothing done. End-of-file without `done` means the freezing
 # shell has gone partway, killed: the guard then KILLs, in one kill, every recorded pid that still
 # carries the start it was recorded with, and the group while its holder is shown to be the process
-# it was (_shmutant_holder_state 0). A recorded pid that now carries another start, or none, has gone
-# and is left alone; one recorded with no start to check by is continued, never killed and never left
-# stopped. The group is continued when its holder is not shown, but only while its number is shown
+# it was (_shmutant_holder_state 0). Every other recorded pid is continued, never killed and never
+# left stopped. The group is continued when its holder is not shown, but only while its number is shown
 # to be the run's: a holder still there that cannot be checked, or a pid it verified still in it
 # (_shmutant_group_has), and before that pid is killed; otherwise nothing is sent to it. It
 # uses no freeze step and no _shmutant_kill_tree, which a freezing shell killed in them may have left
 # half-done.
 _shmutant_guard() {
-  local line pg="" ph="" phid="" p pid st gcont="" hs
+  local line chunk part="" pg="" ph="" phid="" p pid st gcont="" hs
   local -a recs=() kills=() conts=()
   local -A SHMUTANT_START=()
   # Its own process: the caller's errexit would end it at the first refused signal or failed write.
   set +e
   printf 'ready %s\n' "$BASHPID"
-  while IFS= read -r line; do
-    case "$line" in
-      done) return 0 ;;
-      'p '*) recs+=("${line#p }") ;;
-      'g '*) line="${line#g }"; pg="${line%% *}"; line="${line#"$pg"}"; line="${line# }"
-             ph="${line%% *}"; phid="${line#"$ph"}"; phid="${phid# }" ;;
-    esac
+  # The freezing shell (`guard_of`, its pid, inherited) is gone when its records end, or, should a
+  # helper subshell of its own still hold them open, when it is no longer there: looked at between
+  # reads, once a second. A read cut short by that second keeps what it got for the next.
+  while :; do
+    if IFS= read -t 1 -r chunk; then
+      line="$part$chunk"; part=""
+      case "$line" in
+        done) return 0 ;;
+        'p '*) recs+=("${line#p }") ;;
+        'g '*) line="${line#g }"; pg="${line%% *}"; line="${line#"$pg"}"; line="${line# }"
+               ph="${line%% *}"; phid="${line#"$ph"}"; phid="${phid# }" ;;
+      esac
+    elif [ "$?" -gt 128 ]; then
+      part="$part$chunk"
+      [ -z "${guard_of:-}" ] || kill -0 "$guard_of" 2>/dev/null || break
+    else
+      break
+    fi
   done
   case "$pg" in *[!0-9]*) pg="" ;; esac
   case "$ph" in *[!0-9]*) ph="" ;; esac
@@ -1172,10 +1184,10 @@ _shmutant_guard() {
     case "$p" in *' '?*) st="${p#* }" ;; esac
     case "$pid" in ''|*[!0-9]*) continue ;; esac
     if [ -n "$st" ] && [ -n "${SHMUTANT_START[$pid]:-}" ] && _shmutant_same_start "${SHMUTANT_START[$pid]}" "$st"; then kills+=("$pid")
-    # Recorded with a start, and checked against a table that could be read: the process has gone,
-    # and whoever holds its number now was not stopped by this freeze. Left alone.
-    elif [ -n "$st" ] && [ "${#SHMUTANT_START[@]}" -gt 0 ]; then continue
-    # Nothing to check it by: stopped by number, and let go rather than left stopped.
+    # Not shown to be the process recorded (another start, none, or no table): this freeze may have
+    # stopped it by number (a number reused between its listing and its stop, a start a clock step
+    # moved), so it is continued, as _shmutant_frozen_only continues one, and never killed. A CONT
+    # changes nothing for a process that is running.
     else conts+=("$pid")
     fi
   done
@@ -2326,7 +2338,7 @@ _shmutant_pool_locals_writable() {
     SHMUTANT_TARGET SHMUTANT_DECL_ERRORS SHMUTANT_SELECTED_N \
     _shmutant_bo _shmutant_so _shmutant_o _shmutant_n _shmutant_pc _shmutant_wrap_left \
     a budget dog e elapsed last leftovers linked lstart old rrc s tampered tmpd tnow victims wroot \
-    b conts g gcont gone_group guard_id guard_lost guard_pid guard_r guard_w hs kills pg ph phid recs rid seen_ck unfrozen w want \
+    b chunk conts g gcont gone_group guard_id guard_lost guard_of guard_pid guard_r guard_w hs kills part pg ph phid recs rid seen_ck unfrozen w want \
     SHMUTANT_GUARD SHMUTANT_GUARD_PID SHMUTANT_PS_LSTART
 }
 

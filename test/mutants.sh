@@ -2000,10 +2000,18 @@ shmutant_mut 'a group is taken for the run'"'"'s whatever pid is in it' \
   '$2 == g && index(want, " " $1 " ") { f = 1 }' \
   'index(want, " " $1 " ") { f = 1 }' \
   't_guard_ends_only_what_it_can_verify'
-shmutant_mut 'the guard continues a recorded pid that has gone' \
-  '    elif [ -n "$st" ] && [ "${#SHMUTANT_START[@]}" -gt 0 ]; then continue' \
-  '    elif false; then continue' \
-  't_guard_ends_only_what_it_can_verify'
+shmutant_mut 'the guard leaves a pid it cannot show is the run'"'"'s stopped' \
+  '    else conts+=("$pid")' \
+  '    else :' \
+  't_guard_lets_go_a_pid_it_cannot_show_is_the_runs'
+shmutant_mut 'the guard waits only for its records to end' \
+  '      [ -z "${guard_of:-}" ] || kill -0 "$guard_of" 2>/dev/null || break' \
+  '      :' \
+  't_guard_acts_while_a_helper_of_its_freezer_holds_the_records'
+shmutant_mut 'the guard is not told whose shell it guards' \
+  '  local guard_of="$BASHPID"' \
+  '  local guard_of=""' \
+  't_guard_acts_while_a_helper_of_its_freezer_holds_the_records'
 shmutant_mut 'a group whose holder went is left stopped' \
   '  [ -z "$gone_group" ] || kill -CONT -- -"$gone_group" 2>/dev/null' \
   '  :' \
@@ -2064,5 +2072,7 @@ shmutant_mut 'the guard is ended by INT, TERM or HUP' \
 # a row would be killed only if a check fell inside that moment)
 # (no row on the errexit resets in the freeze's subshell and its guard: no command a witness runs
 # through them fails while errexit is on, so a row would pass or fail by chance)
+# (no row on the guard keeping a read cut short by its one-second look: every record is one short
+# write, so no witness can split one across that second, and a row would pass)
 # (no row on the identity probe asking about $BASHPID rather than $$: its witness can fail only where
 # /proc is absent, and a row that survives on Linux would read as a defect endured)
