@@ -40,8 +40,9 @@ exactly the way the tests it checks do:
 
 And four that describe a run that never produced an answer: `aborted` (the suite exited
 with a status other than green or red, or red without a failure line), `timeout`, `unsettled`
-(the run's process tree kept forking out of reach while it was being ended, so nothing it did can
-be trusted), and `lost` (the worker died without reporting). An empty mutation table is a hard
+(the run's process tree kept forking out of reach while it was being ended, or could not be
+frozen before it was killed, so nothing it did can be trusted), and `lost` (the worker died
+without reporting). An empty mutation table is a hard
 failure, not a pass.
 
 ## A worked example
