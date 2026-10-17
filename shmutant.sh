@@ -956,8 +956,10 @@ _shmutant_kill_tree_guarded() {
   local held=""
   if [ "${1:-}" = -g ]; then held="$2"; shift 2; fi
   local spec="$1" pid rootid p d rid guard_w="" guard_r="" guard_lost=0 guard_pid="" guard_id=""
-  # The guard's way to tell this shell is gone while a helper of it still holds the records open.
-  local guard_of="$BASHPID"
+  # The guard's way to tell this shell is gone while a helper of it still holds the records open:
+  # its pid, and the start it carries, so a number reused since is not taken for it.
+  local guard_of="$BASHPID" guard_of_id
+  guard_of_id="$(_shmutant_identity "$BASHPID")" || guard_of_id=""
   local -a frozen=() roots=()
   local -A have=()
   local SHMUTANT_KILL_GROUP="" SHMUTANT_FREEZE_UNSETTLED=0
@@ -999,11 +1001,15 @@ _shmutant_kill_tree_guarded() {
     # The guard hears of the group, and of the holder it is checked by, before the group stop.
     _shmutant_guard_tell "g $held ${holder:--} ${holderid:-}" && \
     kill -STOP -- -"$held" 2>/dev/null
-    # The caller's holder is in that group and only blocks on a read: continued in the very next
-    # command, so a freeze cut short before its KILL leaves it running to its end-of-file rather
-    # than stopped. The caller verified it just before (_shmutant_held_group), the check the group
-    # stop itself relies on; a KILL landing between these two commands leaves it stopped only
-    # until the guard ends the group, holder and all.
+    # Then every member of the stopped group, with its start, while the holder is still stopped too
+    # and so cannot end: told to the guard and taken as frozen. A member no walk reaches, and that
+    # holds none of the run's descriptors (a child that closed them all), would otherwise be reached
+    # only through a group whose holder may have ended by the time the guard acts.
+    _shmutant_guard_members "$held"
+    # The caller's holder is in that group and only blocks on a read: continued next, so a freeze cut
+    # short before its KILL leaves it running to its end-of-file rather than stopped. The caller
+    # verified it just before (_shmutant_held_group), the check the group stop itself relies on; a
+    # KILL landing before this leaves it stopped only until the guard ends the group, holder and all.
     [ -z "${holder:-}" ] || kill -CONT "$holder" 2>/dev/null
     SHMUTANT_KILL_GROUP="$held"
   fi
@@ -1055,6 +1061,27 @@ _shmutant_kill_tree_guarded() {
   # of the freeze outlives the call.
   _shmutant_guard_close
   return 0
+}
+
+# _shmutant_guard_members <pgid> — tell the guard of each member of the stopped group <pgid>, with
+# the start it carries, and add each to `frozen` (it is stopped, so its number is its own): read from
+# one table of groups and one of starts. A member whose start cannot be read is not told, and is left
+# to the group signal. Shares its caller's `frozen` and `have`.
+_shmutant_guard_members() {
+  local table p
+  local -a members=() recs=()
+  local -A SHMUTANT_START=()
+  table="$(command -p ps -A -o pid= -o pgid= 2>/dev/null)" && [ -n "$table" ] || return 0
+  mapfile -t members < <(printf '%s\n' "$table" | command -p awk -v g="$1" '$2 == g { print $1 }')
+  [ "${#members[@]}" -gt 0 ] || return 0
+  _shmutant_identity_table
+  for p in "${members[@]}"; do
+    [ -n "$p" ] && [ -n "${SHMUTANT_START[$p]:-}" ] && [ -z "${have[$p]:-}" ] || continue
+    recs+=("p $p ${SHMUTANT_START[$p]}")
+  done
+  [ "${#recs[@]}" -gt 0 ] || return 0
+  if ! _shmutant_guard_tell "${recs[@]}"; then return 0; fi
+  for p in "${recs[@]}"; do p="${p#p }"; p="${p%% *}"; have["$p"]=1; frozen+=("$p:"); done
 }
 
 # _shmutant_guard_open — start the guard of one freeze (_shmutant_guard) and wait, at most 30
@@ -1137,6 +1164,15 @@ _shmutant_freeze_err() {
   if [ -n "${err_fd:-}" ]; then _shmutant_err "$1" 2>&"$err_fd"; else _shmutant_err "$1"; fi
 }
 
+# _shmutant_guard_freezer_there — the freezing shell (`guard_of`, with `guard_of_id`) is still there:
+# its pid in use, not by a zombie, and not by a process carrying another start. With no pid named
+# there is nothing to look for, and a start that cannot be read now is taken as it was.
+_shmutant_guard_freezer_there() {
+  [ -n "${guard_of:-}" ] || return 0
+  case "$(command -p ps -o stat= -p "$guard_of" 2>/dev/null)" in *Z*) return 1 ;; esac
+  _shmutant_holder_state "$guard_of" "${guard_of_id:-}" || [ "$?" = 2 ]
+}
+
 # _shmutant_guard — the guard of one freeze. Says `ready <its pid>`, then reads on stdin what the
 # freezing shell is about to stop, each record written before the stop it announces: `p <pid>
 # [<start>]` per process, and `g <pgid> <holder or -> [<holder identity>]` for a held group. `done`
@@ -1156,9 +1192,9 @@ _shmutant_guard() {
   # Its own process: the caller's errexit would end it at the first refused signal or failed write.
   set +e
   printf 'ready %s\n' "$BASHPID"
-  # The freezing shell (`guard_of`, its pid, inherited) is gone when its records end, or, should a
-  # helper subshell of its own still hold them open, when it is no longer there: looked at between
-  # reads, once a second. A read cut short by that second keeps what it got for the next.
+  # The freezing shell (`guard_of`, inherited) is gone when its records end, or, should a helper
+  # subshell of its own still hold them open, when it is no longer there (_shmutant_guard_freezer_there):
+  # looked at between reads, once a second. A read cut short by that second keeps what it got.
   while :; do
     if IFS= read -t 1 -r chunk; then
       line="$part$chunk"; part=""
@@ -1170,7 +1206,7 @@ _shmutant_guard() {
       esac
     elif [ "$?" -gt 128 ]; then
       part="$part$chunk"
-      [ -z "${guard_of:-}" ] || kill -0 "$guard_of" 2>/dev/null || break
+      _shmutant_guard_freezer_there || break
     else
       break
     fi
@@ -2338,7 +2374,7 @@ _shmutant_pool_locals_writable() {
     SHMUTANT_TARGET SHMUTANT_DECL_ERRORS SHMUTANT_SELECTED_N \
     _shmutant_bo _shmutant_so _shmutant_o _shmutant_n _shmutant_pc _shmutant_wrap_left \
     a budget dog e elapsed last leftovers linked lstart old rrc s tampered tmpd tnow victims wroot \
-    b chunk conts g gcont gone_group guard_id guard_lost guard_of guard_pid guard_r guard_w hs kills part pg ph phid recs rid seen_ck unfrozen w want \
+    b chunk conts g gcont gone_group guard_id guard_lost guard_of guard_of_id guard_pid guard_r guard_w hs kills members part pg ph phid recs rid seen_ck unfrozen w want \
     SHMUTANT_GUARD SHMUTANT_GUARD_PID SHMUTANT_PS_LSTART
 }
 

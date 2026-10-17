@@ -2005,13 +2005,25 @@ shmutant_mut 'the guard leaves a pid it cannot show is the run'"'"'s stopped' \
   '    else :' \
   't_guard_lets_go_a_pid_it_cannot_show_is_the_runs'
 shmutant_mut 'the guard waits only for its records to end' \
-  '      [ -z "${guard_of:-}" ] || kill -0 "$guard_of" 2>/dev/null || break' \
+  '      _shmutant_guard_freezer_there || break' \
   '      :' \
   't_guard_acts_while_a_helper_of_its_freezer_holds_the_records'
 shmutant_mut 'the guard is not told whose shell it guards' \
-  '  local guard_of="$BASHPID"' \
-  '  local guard_of=""' \
+  '  local guard_of="$BASHPID" guard_of_id' \
+  '  local guard_of="" guard_of_id' \
   't_guard_acts_while_a_helper_of_its_freezer_holds_the_records'
+shmutant_mut 'the guard takes a zombie for its freezer' \
+  '  case "$(command -p ps -o stat= -p "$guard_of" 2>/dev/null)" in *Z*) return 1 ;; esac' \
+  '  :' \
+  't_guard_takes_neither_a_reused_pid_nor_a_zombie_for_its_freezer'
+shmutant_mut 'the guard takes a reused pid for its freezer' \
+  '  _shmutant_holder_state "$guard_of" "${guard_of_id:-}" || [ "$?" = 2 ]' \
+  '  kill -0 "$guard_of" 2>/dev/null' \
+  't_guard_takes_neither_a_reused_pid_nor_a_zombie_for_its_freezer'
+shmutant_mut 'the guard is not told the members of the stopped group' \
+  '    _shmutant_guard_members "$held"' \
+  '    :' \
+  't_guard_ends_a_group_member_whose_holder_went_first'
 shmutant_mut 'a group whose holder went is left stopped' \
   '  [ -z "$gone_group" ] || kill -CONT -- -"$gone_group" 2>/dev/null' \
   '  :' \
