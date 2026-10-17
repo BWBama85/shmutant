@@ -1929,9 +1929,13 @@ shmutant_mut 'the guard is not told of the victims' \
   '&& :; then' \
   't_freeze_killed_before_its_kill_leaves_nothing_stopped'
 shmutant_mut 'a freeze runs with no guard' \
-  '  if ! _shmutant_guard_open; then' \
+  '  if [ "$guard_up" != 0 ]; then' \
   '  if false; then' \
   't_freeze_without_a_guard_stops_nothing'
+shmutant_mut 'the held group is taken as checked before the guard started' \
+  '    _shmutant_holder_state "$holder" "${holderid:-}" || [ "$?" = 2 ] || held=""' \
+  '    :' \
+  't_freeze_checks_its_root_and_holder_after_its_guard_starts'
 shmutant_mut 'a tree killed with no guard is not reported unsettled' \
   '    [ -z "${SHMUTANT_UNSETTLED_FD:-}" ] || printf '"'"'unsettled\n'"'"' >&"$SHMUTANT_UNSETTLED_FD"' \
   '    :' \
@@ -2102,5 +2106,8 @@ shmutant_mut 'the guard is ended by INT, TERM or HUP' \
 # through them fails while errexit is on, so a row would pass or fail by chance)
 # (no row on the guard keeping a read cut short by its one-second look: every record is one short
 # write, so no witness can split one across that second, and a row would pass)
+# (no row on the root being checked after the guard starts rather than before: the fix is the order of
+# two blocks, which a row cannot move; t_freeze_checks_its_root_and_holder_after_its_guard_starts goes
+# red on the commit before it)
 # (no row on the identity probe asking about $BASHPID rather than $$: its witness can fail only where
 # /proc is absent, and a row that survives on Linux would read as a defect endured)

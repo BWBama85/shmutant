@@ -3950,6 +3950,32 @@ t_freeze_keeps_the_holder_stopped_when_its_members_cannot_be_told() {
 }
 
 # shellcheck disable=SC2034
+t_freeze_checks_its_root_and_holder_after_its_guard_starts() {
+  # #47: the guard's start can take a minute on a loaded host, so the root and the held group's
+  # holder are checked after it, just before anything is stopped: one that ended while the guard was
+  # starting, its number reused since, is neither stopped nor killed, with a guard or without one.
+  # Modelled by checks that pass until the guard is open and fail after.
+  local r g how
+  sleep 60 > /dev/null 2>&1 & r=$!
+  set -m; sleep 60 > /dev/null 2>&1 & g=$!; set +m
+  for how in guarded unguarded; do
+    rm -f "$T/opened" "$T/signals"
+    ( holder="$g"; holderid="$(_shmutant_identity "$g")"
+      eval "$(declare -f _shmutant_guard_open | sed '1s/^_shmutant_guard_open /_shmutant_guard_open_real /')"
+      if [ "$how" = guarded ]; then _shmutant_guard_open() { _shmutant_guard_open_real; local rc=$?; : > "$T/opened"; return "$rc"; }
+      else _shmutant_guard_open() { : > "$T/opened"; return 1; }
+      fi
+      _shmutant_alive_since() { [ ! -e "$T/opened" ]; }
+      _shmutant_holder_state() { [ ! -e "$T/opened" ] || return 1; return 0; }
+      kill() { case " $* " in *" $r "*|*" -$g "*) printf '%s\n' "$*" >> "$T/signals" ;; esac; [ "${1:-}" = -0 ] && builtin kill "$@"; return 0; }
+      _shmutant_kill_tree_twice -g "$g" "$r:$(builtin printf 'checked')" ) > /dev/null 2>&1
+    [ -e "$T/opened" ] || fail_ "$how: fixture: the guard was never opened"
+    [ ! -s "$T/signals" ] || fail_ "$how: a root or group that changed while the guard started was signalled: [$(tr '\n' ';' < "$T/signals")]"
+  done
+  kill -KILL "$r" "$g" 2>/dev/null; wait "$r" "$g" 2>/dev/null
+}
+
+# shellcheck disable=SC2034
 t_guard_verifies_with_its_top_shell_gone() {
   # #47: a guard acts once the shells above it are killed, the top-level one ($$) often among them,
   # so what it reads a process's identity by must not hang on that shell: with $$ gone, a pid that

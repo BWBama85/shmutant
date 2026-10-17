@@ -966,6 +966,13 @@ _shmutant_kill_tree_guarded() {
   local SHMUTANT_KILL_GROUP="" SHMUTANT_FREEZE_UNSETTLED=0
   shift
   pid="${spec%%:*}"
+  # A write to a guard that has gone fails here; it does not end this shell partway through a freeze.
+  trap '' PIPE
+  # The guard first: its start can take a minute on a loaded host, so whatever is checked to decide
+  # what may be stopped and killed is checked after it, just before it is acted on. A root or a
+  # holder found alive before that may have ended and given its number away by then.
+  local guard_up=1
+  _shmutant_guard_open && guard_up=0
   # The root is stopped, searched from and later signalled by number only when it is known to
   # be the process it was: a bare pid means live at the caller's hands (stopped even when ps
   # cannot identify it); `pid:identity` carries what was captured while it lived and must still
@@ -975,9 +982,12 @@ _shmutant_kill_tree_guarded() {
   if [ "$spec" = "$pid" ]; then root_ok=1
   else rootid="${spec#*:}"; [ -n "$rootid" ] && _shmutant_alive_since "$pid" "$rootid" && root_ok=1
   fi
-  # A write to a guard that has gone fails here; it does not end this shell partway through a freeze.
-  trap '' PIPE
-  if ! _shmutant_guard_open; then
+  # The held group's holder, checked again for the same reason: a group whose holder has gone since
+  # the caller looked is no longer known to be the run's, and is neither stopped nor signalled.
+  if [ -n "$held" ] && [ -n "${holder:-}" ]; then
+    _shmutant_holder_state "$holder" "${holderid:-}" || [ "$?" = 2 ] || held=""
+  fi
+  if [ "$guard_up" != 0 ]; then
     # No guard, no freeze: one KILL to what can be reached now, the group included, and the end
     # reported unsettled (before the kill, as below), since a child forked meanwhile may escape it.
     [ -z "${SHMUTANT_UNSETTLED_FD:-}" ] || printf 'unsettled\n' >&"$SHMUTANT_UNSETTLED_FD"
@@ -2388,7 +2398,7 @@ _shmutant_pool_locals_writable() {
     SHMUTANT_TARGET SHMUTANT_DECL_ERRORS SHMUTANT_SELECTED_N \
     _shmutant_bo _shmutant_so _shmutant_o _shmutant_n _shmutant_pc _shmutant_wrap_left \
     a budget dog e elapsed last leftovers linked lstart old rrc s tampered tmpd tnow victims wroot \
-    b chunk conts g gcont gone_group guard_id guard_lost guard_of guard_of_id guard_pid guard_r guard_w hs kills members out part pg ph phid recs rid seen_ck unfrozen w want \
+    b chunk conts g gcont gone_group guard_id guard_lost guard_of guard_of_id guard_pid guard_r guard_up guard_w hs kills members out part pg ph phid recs rid seen_ck unfrozen w want \
     SHMUTANT_GUARD SHMUTANT_GUARD_PID SHMUTANT_PS_LSTART
 }
 
