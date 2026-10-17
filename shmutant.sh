@@ -1143,12 +1143,13 @@ _shmutant_freeze_err() {
 # carries the start it was recorded with, and the group while its holder is shown to be the process
 # it was (_shmutant_holder_state 0). A recorded pid that now carries another start, or none, has gone
 # and is left alone; one recorded with no start to check by is continued, never killed and never left
-# stopped. The group is continued when its holder is not shown, but only while a pid it verified is
-# still in it (_shmutant_group_has); otherwise nothing is sent to a number that may be anyone's. It
+# stopped. The group is continued when its holder is not shown, but only while its number is shown
+# to be the run's: a holder still there that cannot be checked, or a pid it verified still in it
+# (_shmutant_group_has), and before that pid is killed; otherwise nothing is sent to it. It
 # uses no freeze step and no _shmutant_kill_tree, which a freezing shell killed in them may have left
 # half-done.
 _shmutant_guard() {
-  local line pg="" ph="" phid="" p pid st
+  local line pg="" ph="" phid="" p pid st gcont="" hs
   local -a recs=() kills=() conts=()
   local -A SHMUTANT_START=()
   # Its own process: the caller's errexit would end it at the first refused signal or failed write.
@@ -1178,14 +1179,19 @@ _shmutant_guard() {
     else conts+=("$pid")
     fi
   done
-  # The group is killed only while its holder is shown to be the holder. Otherwise its number is the
-  # run's only while a process verified above is still in it, and it is then continued, which lets go
-  # a member stopped there; with no such process it may be anyone's by now, and nothing is sent to it.
+  # The group is killed only while its holder is shown to be the holder. Otherwise it is continued,
+  # which lets go a member stopped there, while its number is still the run's: while a holder that is
+  # there but cannot be checked (no table to read) still reserves it, or a process verified above is
+  # still in it. With neither it may be anyone's by now, and nothing is sent to it.
   if [ -n "$pg" ]; then
-    if [ -n "$ph" ] && _shmutant_holder_state "$ph" "$phid"; then kills=(-"$pg" "${kills[@]}")
-    elif _shmutant_group_has "$pg" "${kills[@]}"; then conts=(-"$pg" "${conts[@]}")
+    hs=1; [ -z "$ph" ] || { _shmutant_holder_state "$ph" "$phid"; hs=$?; }
+    if [ "$hs" = 0 ]; then kills=(-"$pg" "${kills[@]}")
+    elif [ "$hs" = 2 ] || _shmutant_group_has "$pg" "${kills[@]}"; then gcont="$pg"
     fi
   fi
+  # The group first, while what showed its number to be the run's is still there: the KILL below may
+  # take the last of it.
+  [ -z "$gcont" ] || kill -CONT -- -"$gcont" 2>/dev/null
   [ "${#kills[@]}" -eq 0 ] || kill -KILL -- "${kills[@]}" 2>/dev/null
   [ "${#conts[@]}" -eq 0 ] || kill -CONT -- "${conts[@]}" 2>/dev/null
   return 0
@@ -1234,8 +1240,10 @@ _shmutant_kill_tree() {
       _shmutant_group_has "$SHMUTANT_KILL_GROUP" "${targets[@]}" && gone_group="$SHMUTANT_KILL_GROUP"
     fi
   fi
-  [ "${#targets[@]}" -eq 0 ] || kill "-$sig" -- "${targets[@]}" 2>/dev/null
+  # The group first, while the target that showed its number to be the run's is still there: the
+  # signal below may take the last of it.
   [ -z "$gone_group" ] || kill -CONT -- -"$gone_group" 2>/dev/null
+  [ "${#targets[@]}" -eq 0 ] || kill "-$sig" -- "${targets[@]}" 2>/dev/null
   return 0
 }
 
@@ -1570,11 +1578,13 @@ _shmutant_count_diff() {
 # now, from one process table: a group a process of the run's is still in keeps its number, so a
 # signal sent to it reaches nobody else's. False with no <pid>, and when no table can be read.
 _shmutant_group_has() {
-  local g="$1" table
+  local g="$1" table want=" " p
   shift
   [ "$#" -gt 0 ] || return 1
+  # Joined here, one space each: "$*" would join with the caller's IFS.
+  for p in "$@"; do want="$want$p "; done
   table="$(command -p ps -A -o pid= -o pgid= 2>/dev/null)" && [ -n "$table" ] || return 1
-  printf '%s\n' "$table" | command -p awk -v g="$g" -v want=" $* " '$2 == g && index(want, " " $1 " ") { f = 1 } END { exit !f }'
+  printf '%s\n' "$table" | command -p awk -v g="$g" -v want="$want" '$2 == g && index(want, " " $1 " ") { f = 1 } END { exit !f }'
 }
 
 # _shmutant_holder_state <pid> <identity> — whether a run's holder, started as <pid> with
@@ -2316,7 +2326,7 @@ _shmutant_pool_locals_writable() {
     SHMUTANT_TARGET SHMUTANT_DECL_ERRORS SHMUTANT_SELECTED_N \
     _shmutant_bo _shmutant_so _shmutant_o _shmutant_n _shmutant_pc _shmutant_wrap_left \
     a budget dog e elapsed last leftovers linked lstart old rrc s tampered tmpd tnow victims wroot \
-    b conts g gone_group guard_id guard_lost guard_pid guard_r guard_w kills pg ph phid recs rid seen_ck unfrozen w want \
+    b conts g gcont gone_group guard_id guard_lost guard_pid guard_r guard_w hs kills pg ph phid recs rid seen_ck unfrozen w want \
     SHMUTANT_GUARD SHMUTANT_GUARD_PID SHMUTANT_PS_LSTART
 }
 

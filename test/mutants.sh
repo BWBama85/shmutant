@@ -1965,24 +1965,36 @@ shmutant_mut 'the guard kills a pid whose start no longer matches' \
   '; then' \
   't_guard_ends_only_what_it_can_verify'
 shmutant_mut 'the guard kills the group without checking its holder' \
-  '    if [ -n "$ph" ] && _shmutant_holder_state "$ph" "$phid"; then kills=(-"$pg" "${kills[@]}")' \
+  '    if [ "$hs" = 0 ]; then kills=(-"$pg" "${kills[@]}")' \
   '    if :; then kills=(-"$pg" "${kills[@]}")' \
   't_guard_ends_only_what_it_can_verify'
 shmutant_mut 'the guard kills a group whose holder cannot be checked' \
-  '[ -n "$ph" ] && _shmutant_holder_state "$ph" "$phid"; then' \
-  '[ -n "$ph" ] && { _shmutant_holder_state "$ph" "$phid" || [ "$?" = 2 ]; }; then' \
+  '    if [ "$hs" = 0 ]; then' \
+  '    if [ "$hs" != 1 ]; then' \
+  't_guard_ends_only_what_it_can_verify'
+shmutant_mut 'the guard leaves a group whose holder cannot be checked stopped' \
+  'elif [ "$hs" = 2 ] ||' \
+  'elif false ||' \
   't_guard_ends_only_what_it_can_verify'
 shmutant_mut 'the guard does not kill the group' \
   'then kills=(-"$pg" "${kills[@]}")' \
   'then :' \
   't_guard_ends_only_what_it_can_verify'
 shmutant_mut 'the guard leaves a group shown to be the run'"'"'s stopped' \
-  'then conts=(-"$pg" "${conts[@]}")' \
-  'then :' \
+  '  [ -z "$gcont" ] || kill -CONT -- -"$gcont" 2>/dev/null' \
+  '  :' \
+  't_guard_ends_only_what_it_can_verify'
+shmutant_mut 'the guard continues the group after killing what showed it the run'"'"'s' \
+  '  [ -z "$gcont" ] || kill -CONT -- -"$gcont" 2>/dev/null' \
+  '  [ -z "$gcont" ] || { kill -KILL -- "${kills[@]}" 2>/dev/null; kill -CONT -- -"$gcont" 2>/dev/null; }' \
   't_guard_ends_only_what_it_can_verify'
 shmutant_mut 'the guard continues a group with no verified pid in it' \
-  '    elif _shmutant_group_has "$pg" "${kills[@]}"; then' \
-  '    elif :; then' \
+  '|| _shmutant_group_has "$pg" "${kills[@]}"; then gcont=' \
+  '|| :; then gcont=' \
+  't_guard_ends_only_what_it_can_verify'
+shmutant_mut 'the group membership test joins pids with the caller'"'"'s IFS' \
+  '  for p in "$@"; do want="$want$p "; done' \
+  '  want=" $* "' \
   't_guard_ends_only_what_it_can_verify'
 shmutant_mut 'a group is taken for the run'"'"'s whatever pid is in it' \
   '$2 == g && index(want, " " $1 " ") { f = 1 }' \
@@ -1995,6 +2007,10 @@ shmutant_mut 'the guard continues a recorded pid that has gone' \
 shmutant_mut 'a group whose holder went is left stopped' \
   '  [ -z "$gone_group" ] || kill -CONT -- -"$gone_group" 2>/dev/null' \
   '  :' \
+  't_group_kill_checks_the_holder_identity'
+shmutant_mut 'a group whose holder went is continued after its target is killed' \
+  '  [ -z "$gone_group" ] || kill -CONT -- -"$gone_group" 2>/dev/null' \
+  '  [ -z "$gone_group" ] || { kill "-$sig" -- "${targets[@]}" 2>/dev/null; kill -CONT -- -"$gone_group" 2>/dev/null; }' \
   't_group_kill_checks_the_holder_identity'
 shmutant_mut 'a group whose holder went is continued with no target in it' \
   '      _shmutant_group_has "$SHMUTANT_KILL_GROUP" "${targets[@]}" && gone_group=' \
