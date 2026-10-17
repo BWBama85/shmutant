@@ -4113,6 +4113,17 @@ t_guard_ends_only_what_it_can_verify() {
           _shmutant_identity() { return 1; }; _shmutant_identity_table() { SHMUTANT_START=(); }
           printf 'g %s %s %s\n' "$m" "$a" "$aid" | _shmutant_guard )"
   case "$out" in *" -$m"*) fail_ "a group whose running holder cannot be identified was signalled: [$out]" ;; esac
+  # One the freeze kept stopped (`k`) is the holder while it is still stopped, and its group is
+  # killed; once it runs again it proves nothing (anything may have continued it, and a process now at
+  # its number may be another), and the group is sent nothing.
+  out="$( kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*"; fi; }
+          _shmutant_identity() { return 1; }; _shmutant_identity_table() { SHMUTANT_START=(); }
+          printf 'g %s %s %s\nk\n' "$m" "$sh" "$aid" | _shmutant_guard )"
+  printf '%s\n' "$out" | grep -qx -- "kill -KILL -- -$m" || fail_ "a group whose kept holder is still stopped was not killed: [$out]"
+  out="$( kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*"; fi; }
+          _shmutant_identity() { return 1; }; _shmutant_identity_table() { SHMUTANT_START=(); }
+          printf 'g %s %s %s\nk\n' "$m" "$a" "$aid" | _shmutant_guard )"
+  case "$out" in *" -$m"*) fail_ "a group whose kept holder runs again was signalled: [$out]" ;; esac
   kill -KILL "$sh" 2>/dev/null; wait "$sh" 2>/dev/null
   # The membership test does not depend on the caller's IFS.
   ( IFS=:; _shmutant_group_has "$m" 1 "$m" ) || fail_ 'a member was missed with IFS set to a colon'

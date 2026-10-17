@@ -1041,7 +1041,8 @@ _shmutant_kill_tree_guarded() {
       [ -z "${holder:-}" ] || kill -CONT "$holder" 2>/dev/null
     else
       # Kept stopped, and the guard is told so: a holder this freeze keeps stopped cannot end, so its
-      # number is still the holder's, and the guard ends the group by it, start or no start.
+      # number is still the holder's, and the guard ends the group by it, start or no start, while it
+      # finds it still stopped.
       _shmutant_guard_tell k
     fi
     SHMUTANT_KILL_GROUP="$held"
@@ -1311,9 +1312,11 @@ _shmutant_guard() {
   # sent to it.
   if [ -n "$pg" ]; then
     hs=1; [ -z "$ph" ] || { _shmutant_holder_state "$ph" "$phid"; hs=$?; }
-    # A holder the freeze kept stopped (`k`) and that is still there is the holder: stopped, it could
-    # not end and give its number away, so no start is needed to tell it, as for a frozen pid.
-    [ -z "$kept" ] || [ "$hs" != 2 ] || hs=0
+    # A holder the freeze kept stopped (`k`) that is still there and still stopped is the holder:
+    # stopped, it could not end and give its number away, so no start is needed to tell it, as for a
+    # frozen pid. One running again proves nothing: anything may have continued it, and a process now
+    # at its number may be another.
+    [ -z "$kept" ] || [ "$hs" != 2 ] || ! _shmutant_proc_stopped "$ph" || hs=0
     if [ "$hs" = 0 ]; then kills=(-"$pg" "${kills[@]}")
     elif { [ "$hs" = 2 ] && _shmutant_proc_stopped "$ph"; } || _shmutant_group_has "$pg" "${kills[@]}"; then gcont="$pg"
     fi

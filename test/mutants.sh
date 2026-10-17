@@ -2127,9 +2127,13 @@ shmutant_mut 'a root shown changed once stopped is still taken as frozen' \
   '    if false; then' \
   't_freeze_checks_its_root_and_holder_after_its_guard_starts'
 shmutant_mut 'a holder the freeze kept stopped does not let the guard end its group' \
-  '    [ -z "$kept" ] || [ "$hs" != 2 ] || hs=0' \
+  '    [ -z "$kept" ] || [ "$hs" != 2 ] || ! _shmutant_proc_stopped "$ph" || hs=0' \
   '    :' \
   't_freeze_keeps_the_holder_stopped_when_its_members_cannot_be_told'
+shmutant_mut 'a holder the freeze kept stopped is taken for the holder once it runs again' \
+  '    [ -z "$kept" ] || [ "$hs" != 2 ] || ! _shmutant_proc_stopped "$ph" || hs=0' \
+  '    [ -z "$kept" ] || [ "$hs" != 2 ] || hs=0' \
+  't_guard_ends_only_what_it_can_verify'
 shmutant_mut 'the guard is not told the holder was kept stopped' \
   '      _shmutant_guard_tell k' \
   '      :' \
