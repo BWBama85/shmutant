@@ -76,8 +76,12 @@ jobs:
           d="$RUNNER_TEMP/it's tmp"
           mkdir -p "$d"
           TMPDIR="$d" bash test/run.sh
+      # With SIGPIPE at its default, as under a terminal, cron or systemd: the runner hands every step
+      # one already ignored, which bash cannot restore, and under it a row on the freezing shell's own
+      # `trap '' PIPE` cannot be witnessed.
       - name: self-mutation
-        run: bash shmutant.sh run test/mutants.sh --workdir "$RUNNER_TEMP/mutants" --keep > mutants.tsv
+        run: |
+          perl -e '$SIG{PIPE} = "DEFAULT"; exec @ARGV or die "exec: $!\n"' bash shmutant.sh run test/mutants.sh --workdir "$RUNNER_TEMP/mutants" --keep > mutants.tsv
       - name: verdicts
         if: always()
         run: cat mutants.tsv || true
@@ -145,8 +149,12 @@ jobs:
         run: /bin/bash shmutant.sh version
       - name: suite
         run: bash test/run.sh
+      # With SIGPIPE at its default, as under a terminal, cron or systemd: the runner hands every step
+      # one already ignored, which bash cannot restore, and under it a row on the freezing shell's own
+      # `trap '' PIPE` cannot be witnessed.
       - name: self-mutation
-        run: bash shmutant.sh run test/mutants.sh --workdir "$RUNNER_TEMP/mutants" --keep > mutants.tsv
+        run: |
+          perl -e '$SIG{PIPE} = "DEFAULT"; exec @ARGV or die "exec: $!\n"' bash shmutant.sh run test/mutants.sh --workdir "$RUNNER_TEMP/mutants" --keep > mutants.tsv
       - name: verdicts
         if: always()
         run: cat mutants.tsv || true

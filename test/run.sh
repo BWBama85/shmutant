@@ -3144,9 +3144,13 @@ t_post_run_cleanup_never_signals_a_reaped_root_by_number() {
   _shmutant_kill_tree_twice "$dead"; rc_is $? 0 'kill_tree_twice on a reaped root is a quiet no-op'
   sleep 5 & local b2=$!
   local id2; id2="$(_shmutant_identity "$b2")"
-  _shmutant_kill_tree_twice "$b2:not-$id2"; sleep 0.2
+  # Every signal it is sent is recorded: a stop let go again at once leaves no state behind to see.
+  rm -f "$T/b2.signals"
+  ( kill() { [ "${1:-}" = -0 ] || case " $* " in *" $b2 "*) printf '%s\n' "$*" >> "$T/b2.signals" ;; esac; builtin kill "$@"; }
+    _shmutant_kill_tree_twice "$b2:not-$id2" ); sleep 0.2
   kill -0 "$b2" 2>/dev/null; rc_is $? 0 'a root whose given identity does not match is neither stopped nor killed'
   case "$(ps -o stat= -p "$b2")" in T*) fail_ 'the mismatched root was left stopped' ;; esac
+  [ ! -s "$T/b2.signals" ] || fail_ "a root whose given identity does not match was signalled, if only stopped and let go: [$(tr '\n' ';' < "$T/b2.signals")]"
   kill "$b2" 2>/dev/null; wait "$b2" 2>/dev/null
   # a rejected root's current children are not searched from either
   ( sleep 5; : ) & local b3=$!
