@@ -3531,7 +3531,9 @@ t_pool_killed_while_its_abort_freezes_leaves_nothing_stopped() {
   shmutant_reset; shmutant_target lib.sh
   shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
   shmutant_mut 'b' '$1 + $2' '$1 * $2' 'add-works'
-  orphan_run() { ( sleep 60 & echo "$!" >> "$T/orphans" ); echo x >> "$T/started"; sleep 60; }
+  # The orphan ignores HUP: the caller's KILL orphans the run's group, and the kernel hangs up and
+  # continues a group orphaned with members stopped, which would end it whatever the guard did.
+  orphan_run() { ( trap '' HUP; sleep 60 & echo "$!" >> "$T/orphans" ); echo x >> "$T/started"; sleep 60; }
   local pp o g i members="" ok=0
   local -a orphans=() grps=()
   # Made before the pool starts: a callback may write its line before this shell runs again.
@@ -3834,7 +3836,7 @@ t_guard_ends_a_group_member_whose_holder_went_first() {
   ( exec {vf}>|"$T/chan"; SHMUTANT_VERDICT_FD="$vf"
     cb() {
       ( for f in /dev/fd/*; do n="${f##*/}"; case "$n" in 0|1|2) ;; *) eval "exec $n>&-" ;; esac; done 2>/dev/null
-        sleep 60 & echo "$!" > "$T/orphan.pid" )
+        trap '' HUP; sleep 60 & echo "$!" > "$T/orphan.pid" )
       : > "$T/started"; sleep 60
     }
     SHMUTANT_TIMEOUT=0 _shmutant_run_bounded "$T/d" cb "$T/d" sel ) > /dev/null 2>&1 & outer=$!
@@ -3950,16 +3952,16 @@ t_freeze_takes_group_members_as_roots_but_not_the_holder() {
 t_freeze_keeps_the_holder_stopped_when_its_members_cannot_be_told() {
   # #47: when the members of a stopped group cannot all be told to the guard (no table of starts,
   # here), the holder is not let go: it cannot end, so it goes on showing the group is the run's, and
-  # the guard is told it was kept stopped. Once the run's shells and then its freezing shell are
-  # killed, the guard still reaches a child that holds nothing of the run's, through the group of a
-  # holder it can verify, or, with no start readable at all, one it knows the freeze kept stopped.
+  # the guard is told it was kept stopped. Once the freezing shell is killed, the guard still ends a
+  # child that holds nothing of the run's, through the group of a holder it can verify, or, with no
+  # start readable at all, one it knows the freeze kept stopped.
   local how outer grp holder holderid orphan oid fz fzo
   for how in no-table no-start; do
     mkdir -p "$T/$how"; rm -f "$T/started" "$T/orphan.pid" "$T/freezer.pid" "$T/never"
     ( exec {vf}>|"$T/$how/chan"; SHMUTANT_VERDICT_FD="$vf"
       cb() {
         ( for f in /dev/fd/*; do n="${f##*/}"; case "$n" in 0|1|2) ;; *) eval "exec $n>&-" ;; esac; done 2>/dev/null
-          sleep 60 & echo "$!" > "$T/orphan.pid" )
+          trap '' HUP; sleep 60 & echo "$!" > "$T/orphan.pid" )
         : > "$T/started"; sleep 60
       }
       SHMUTANT_TIMEOUT=0 _shmutant_run_bounded "$T/$how" cb "$T/$how" sel ) > /dev/null 2>&1 & outer=$!
@@ -3975,7 +3977,8 @@ t_freeze_keeps_the_holder_stopped_when_its_members_cannot_be_told() {
       _shmutant_kill_tree_twice -g "$grp" "$grp:" ) > /dev/null 2>&1 & fzo=$!
     wait_for "$T/freezer.pid" || fail_ "$how: fixture: the freeze never reached its walk"
     fz="$(cat "$T/freezer.pid" 2>/dev/null)"
-    _shmutant_kill_tree KILL "$outer" "$outer:"; wait "$outer" 2>/dev/null
+    # Nothing else of the run is killed first: that would orphan its group, and the kernel hangs up
+    # and continues a group orphaned with members stopped, holder included, whatever the freeze did.
     sleep 0.5
     case "$(command -p ps -o stat= -p "$holder" 2>/dev/null)" in
       *T*) ;;
@@ -3985,6 +3988,7 @@ t_freeze_keeps_the_holder_stopped_when_its_members_cannot_be_told() {
     wait_gone "$orphan" "$oid" 50 || fail_ "$how: a member of the stopped group was left $(command -p ps -o stat= -p "$orphan" 2>/dev/null | tr -d ' ')"
     wait_gone "$holder" "$holderid" 50 || fail_ "$how: the holder was left behind"
     _shmutant_kill_tree KILL "$fzo" "$fzo:"; wait "$fzo" 2>/dev/null
+    _shmutant_kill_tree KILL "$outer" "$outer:"; wait "$outer" 2>/dev/null
     _shmutant_kill_tree KILL "" "$orphan:$oid" "$holder:$holderid"; wait_gone "$orphan" "$oid"
   done
 }
