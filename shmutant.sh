@@ -1042,7 +1042,7 @@ _shmutant_kill_tree_guarded() {
     else
       # Kept stopped, and the guard is told so: a holder this freeze keeps stopped cannot end, so its
       # number is still the holder's, and the guard ends the group by it, start or no start, while it
-      # finds it still stopped.
+      # finds it still stopped and in the group.
       _shmutant_guard_tell k
     fi
     SHMUTANT_KILL_GROUP="$held"
@@ -1256,10 +1256,12 @@ _shmutant_guard_freezer_there() {
 # (the KILL has been sent) ends it with nothing done. End-of-file without `done` means the freezing
 # shell has gone partway, killed: the guard then KILLs, in one kill, every recorded pid that still
 # carries the start it was recorded with, and the group while its holder is shown to be the process
-# it was (_shmutant_holder_state 0). Every other recorded pid is continued, never killed and never
-# left stopped. The group is continued when its holder is not shown, but only while its number is shown
-# to be the run's: a holder still there that cannot be checked, or a pid it verified still in it
-# (_shmutant_group_has), and before that pid is killed; otherwise nothing is sent to it. It
+# it was (_shmutant_holder_state 0), or, with no start to check it by, while the freeze kept it
+# stopped (`k`) and it is still stopped and in the group. Every other recorded pid is continued, never
+# killed and never left stopped. The group is continued when its holder is not shown, but only while
+# its number is shown to be the run's: a holder still there, stopped and in the group that cannot be
+# checked, or a pid it verified still in it (_shmutant_group_has), and before that pid is killed;
+# otherwise nothing is sent to it. It
 # uses no freeze step and no _shmutant_kill_tree, which a freezing shell killed in them may have left
 # half-done.
 _shmutant_guard() {
@@ -1307,18 +1309,20 @@ _shmutant_guard() {
   done
   # The group is killed only while its holder is shown to be the holder. Otherwise it is continued,
   # which lets go a member stopped there, while its number is shown to be still the run's: by a holder
-  # that cannot be identified but is stopped (a stopped process cannot end and give its number away),
-  # or by a process verified above still in it. With neither it may be anyone's by now, and nothing is
-  # sent to it.
+  # that cannot be identified but is stopped and in the group, or by a process verified above still in
+  # it. With neither it may be anyone's by now, and nothing is sent to it.
   if [ -n "$pg" ]; then
     hs=1; [ -z "$ph" ] || { _shmutant_holder_state "$ph" "$phid"; hs=$?; }
-    # A holder the freeze kept stopped (`k`) that is still there and still stopped is the holder:
-    # stopped, it could not end and give its number away, so no start is needed to tell it, as for a
-    # frozen pid. One running again proves nothing: anything may have continued it, and a process now
-    # at its number may be another.
-    [ -z "$kept" ] || [ "$hs" != 2 ] || ! _shmutant_proc_stopped "$ph" || hs=0
+    # A holder that cannot be identified shows the number is still the run's only while it is stopped
+    # and in the group: stopped, it cannot end and give its number away, and a process at its number in
+    # another group is not it. One that runs proves nothing: anything may have continued it, and once
+    # it has ended a process now at its number may be another.
+    [ "$hs" != 2 ] || { _shmutant_proc_stopped "$ph" && _shmutant_group_has "$pg" "$ph"; } || hs=1
+    # One the freeze kept stopped (`k`) and still shown so is the holder: no start is needed to tell
+    # it, as for a frozen pid.
+    [ -z "$kept" ] || [ "$hs" != 2 ] || hs=0
     if [ "$hs" = 0 ]; then kills=(-"$pg" "${kills[@]}")
-    elif { [ "$hs" = 2 ] && _shmutant_proc_stopped "$ph"; } || _shmutant_group_has "$pg" "${kills[@]}"; then gcont="$pg"
+    elif [ "$hs" = 2 ] || _shmutant_group_has "$pg" "${kills[@]}"; then gcont="$pg"
     fi
   fi
   # The group first, while what showed its number to be the run's is still there: the KILL below may

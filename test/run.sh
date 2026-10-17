@@ -4100,37 +4100,41 @@ t_guard_ends_only_what_it_can_verify() {
   # to be the run's.
   printf '%s\n' "$out" | awk -v c="kill -CONT -- -$m" -v k="kill -KILL -- $m" '$0 == c && !ci { ci = NR } $0 == k && !ki { ki = NR } END { exit !(ci && ki && ci < ki) }' \
     || fail_ "the group was not continued before its verified member was killed: [$out]"
+  if printf '%s\n' "$out" | awk -v g="-$m" '$2 == "-KILL" { for (i = 3; i <= NF; i++) if ($i == g) f = 1 } END { exit !f }'; then
+    fail_ "a group whose holder had gone was killed: [$out]"
+  fi
   # A holder that is there but cannot be identified shows the number is still the run's only while it
-  # is stopped (a stopped process cannot end and give its number away): its group is then continued;
-  # one that runs proves nothing, and its group is sent nothing.
-  sleep 60 > /dev/null 2>&1 & local sh=$!
+  # is stopped and in the group (a stopped process cannot end and give its number away, and one at its
+  # number in another group is not it): its group is then continued, never killed. One that runs, or
+  # is stopped in another group, proves nothing, and its group is sent nothing. sh leads a group of
+  # its own and is stopped; m leads one and runs.
+  set -m; sleep 60 > /dev/null 2>&1 & local sh=$!; set +m
   kill -STOP "$sh"
-  out="$( kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*"; fi; }
-          _shmutant_identity() { return 1; }; _shmutant_identity_table() { SHMUTANT_START=(); }
-          printf 'g %s %s %s\n' "$m" "$sh" "$aid" | _shmutant_guard )"
-  printf '%s\n' "$out" | grep -qx -- "kill -CONT -- -$m" || fail_ "a group whose stopped holder cannot be identified was not continued: [$out]"
-  out="$( kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*"; fi; }
-          _shmutant_identity() { return 1; }; _shmutant_identity_table() { SHMUTANT_START=(); }
-          printf 'g %s %s %s\n' "$m" "$a" "$aid" | _shmutant_guard )"
+  guard_unidentified() {
+    ( kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*"; fi; }
+      _shmutant_identity() { return 1; }; _shmutant_identity_table() { SHMUTANT_START=(); }
+      printf '%s\n' "$@" | _shmutant_guard )
+  }
+  out="$(guard_unidentified "g $sh $sh $aid")"
+  printf '%s\n' "$out" | grep -qx -- "kill -CONT -- -$sh" || fail_ "a group whose stopped holder cannot be identified was not continued: [$out]"
+  case "$out" in *-KILL*) fail_ "a group whose holder cannot be identified was killed: [$out]" ;; esac
+  out="$(guard_unidentified "g $m $m $aid")"
   case "$out" in *" -$m"*) fail_ "a group whose running holder cannot be identified was signalled: [$out]" ;; esac
-  # One the freeze kept stopped (`k`) is the holder while it is still stopped, and its group is
-  # killed; once it runs again it proves nothing (anything may have continued it, and a process now at
-  # its number may be another), and the group is sent nothing.
-  out="$( kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*"; fi; }
-          _shmutant_identity() { return 1; }; _shmutant_identity_table() { SHMUTANT_START=(); }
-          printf 'g %s %s %s\nk\n' "$m" "$sh" "$aid" | _shmutant_guard )"
-  printf '%s\n' "$out" | grep -qx -- "kill -KILL -- -$m" || fail_ "a group whose kept holder is still stopped was not killed: [$out]"
-  out="$( kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*"; fi; }
-          _shmutant_identity() { return 1; }; _shmutant_identity_table() { SHMUTANT_START=(); }
-          printf 'g %s %s %s\nk\n' "$m" "$a" "$aid" | _shmutant_guard )"
+  out="$(guard_unidentified "g $m $sh $aid")"
+  case "$out" in *" -$m"*) fail_ "a group whose holder, stopped in another group, cannot be identified was signalled: [$out]" ;; esac
+  # One the freeze kept stopped (`k`) is the holder while it is still stopped and in the group, and
+  # its group is killed; once it runs again, or one stopped in another group is at its number, it
+  # proves nothing, and the group is sent nothing.
+  out="$(guard_unidentified "g $sh $sh $aid" k)"
+  printf '%s\n' "$out" | grep -qx -- "kill -KILL -- -$sh" || fail_ "a group whose kept holder is still stopped was not killed: [$out]"
+  out="$(guard_unidentified "g $m $m $aid" k)"
   case "$out" in *" -$m"*) fail_ "a group whose kept holder runs again was signalled: [$out]" ;; esac
+  out="$(guard_unidentified "g $m $sh $aid" k)"
+  case "$out" in *" -$m"*) fail_ "a group whose kept holder is now one stopped in another group was signalled: [$out]" ;; esac
   kill -KILL "$sh" 2>/dev/null; wait "$sh" 2>/dev/null
   # The membership test does not depend on the caller's IFS.
   ( IFS=:; _shmutant_group_has "$m" 1 "$m" ) || fail_ 'a member was missed with IFS set to a colon'
   ( IFS=; _shmutant_group_has "$m" 1 "$m" ) || fail_ 'a member was missed with IFS empty'
-  if printf '%s\n' "$out" | awk -v g="-$m" '$2 == "-KILL" { for (i = 3; i <= NF; i++) if ($i == g) f = 1 } END { exit !f }'; then
-    fail_ "a group whose holder had gone was killed: [$out]"
-  fi
   out="$( kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*"; fi; }; printf 'p %s %s\ng 99999 %s %s\ndone\n' "$a" "$aid" "$a" "$aid" | _shmutant_guard )"
   [[ "$out" =~ ^ready\ [0-9]+$ ]] || fail_ "\`done\` did not stand the guard down with nothing signalled: [$out]"
   out="$( kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*"; fi; }; _shmutant_guard < /dev/null )"
