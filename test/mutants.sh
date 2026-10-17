@@ -2126,6 +2126,22 @@ shmutant_mut 'a root shown changed once stopped is still taken as frozen' \
   '    if [ -n "${rootid:-}" ] && [ -n "${have[$pid]:-}" ] && { _shmutant_holder_state "$pid" "$rootid"; [ "$?" = 1 ]; }; then' \
   '    if false; then' \
   't_freeze_checks_its_root_and_holder_after_its_guard_starts'
+shmutant_mut 'a holder the freeze kept stopped does not let the guard end its group' \
+  '    [ -z "$kept" ] || [ "$hs" != 2 ] || hs=0' \
+  '    :' \
+  't_freeze_keeps_the_holder_stopped_when_its_members_cannot_be_told'
+shmutant_mut 'the guard is not told the holder was kept stopped' \
+  '      _shmutant_guard_tell k' \
+  '      :' \
+  't_freeze_keeps_the_holder_stopped_when_its_members_cannot_be_told'
+shmutant_mut 'a process in only one read of the group is taken for a member' \
+  '    case "$out" in *" $p "*) ;; *) continue ;; esac' \
+  '    :' \
+  't_freeze_takes_group_members_as_roots_but_not_the_holder'
+shmutant_mut 'a bare root is not checked after the guard starts' \
+  '    rootid="$rootid_pre"; _shmutant_alive_since "$pid" "$rootid" || root_ok=0' \
+  '    :' \
+  't_freeze_checks_its_root_and_holder_after_its_guard_starts'
 # (no row on the root being checked after the guard starts rather than before: the fix is the order of
 # two blocks, which a row cannot move; t_freeze_checks_its_root_and_holder_after_its_guard_starts goes
 # red on the commit before it)

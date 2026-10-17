@@ -3924,46 +3924,69 @@ t_freeze_takes_group_members_as_roots_but_not_the_holder() {
           kill() { if [ "${1:-}" = -STOP ] && [ "${2:-}" = "$kid" ]; then return 1; fi; builtin kill "$@"; }
           _shmutant_guard_members "$h"; printf 'rc=%s frozen=%s roots=%s\n' "$?" "${frozen[*]}" "${roots[*]}" )"
   eq "$out" "rc=0 frozen= roots=" 'a member whose stop did not take is neither frozen nor searched from'
+  # A process listed in the group by the first read and gone from it by the second (here: never in it)
+  # is not told, so its start, which the read between took, is never taken for a member's.
+  sleep 60 > /dev/null 2>&1 & local stray=$!
+  rm -f "$T/reads"
+  out="$( declare -a frozen=() roots=(); declare -A have=(); holder="$h"; guard_w=""
+          command() {
+            if [ "${1:-}" = -p ] && [ "${2:-}" = ps ] && [ "$*" = "-p ps -A -o pid= -o pgid=" ]; then
+              builtin command -p ps -A -o pid= -o pgid=
+              [ -e "$T/reads" ] || { printf '%s %s
+' "$stray" "$h"; : > "$T/reads"; }
+              return 0
+            fi
+            builtin command "$@"
+          }
+          _shmutant_guard_members "$h"; printf 'rc=%s frozen=%s roots=%s
+' "$?" "${frozen[*]}" "${roots[*]}" )"
+  case "$out" in *"$stray"*) fail_ "a process the group held for only one of its reads was taken for a member: [$out]" ;; esac
+  case "$(command -p ps -o stat= -p "$stray" 2>/dev/null)" in *T*) fail_ 'a process the group held for only one of its reads was stopped' ;; esac
+  kill -KILL "$stray" 2>/dev/null; wait "$stray" 2>/dev/null
   kill -KILL -- -"$h" 2>/dev/null; wait_gone "$h" "" 30; wait_gone "$kid" "" 30
 }
 
 # shellcheck disable=SC2034
 t_freeze_keeps_the_holder_stopped_when_its_members_cannot_be_told() {
   # #47: when the members of a stopped group cannot all be told to the guard (no table of starts,
-  # here), the holder is not let go: it cannot end, so it goes on showing the group is the run's.
-  # Once the run's shells and then its freezing shell are killed, the guard still reaches a child
-  # that holds nothing of the run's, through the group of a holder it can verify.
-  local outer grp holder holderid orphan oid fz fzo
-  mkdir -p "$T/d"; rm -f "$T/started" "$T/orphan.pid"
-  ( exec {vf}>|"$T/chan"; SHMUTANT_VERDICT_FD="$vf"
-    cb() {
-      ( for f in /dev/fd/*; do n="${f##*/}"; case "$n" in 0|1|2) ;; *) eval "exec $n>&-" ;; esac; done 2>/dev/null
-        sleep 60 & echo "$!" > "$T/orphan.pid" )
-      : > "$T/started"; sleep 60
-    }
-    SHMUTANT_TIMEOUT=0 _shmutant_run_bounded "$T/d" cb "$T/d" sel ) > /dev/null 2>&1 & outer=$!
-  if ! wait_for "$T/started" || ! wait_for "$T/orphan.pid"; then
-    fail_ 'the callback never started'; _shmutant_kill_tree KILL "$outer" "$outer:"; wait "$outer" 2>/dev/null; return
-  fi
-  orphan="$(cat "$T/orphan.pid")"; oid="$(_shmutant_identity "$orphan")"
-  read -r _ grp holder holderid < <(awk '$1 == "group" { print; exit }' "$T/chan")
-  command -p mkfifo "$T/never" || { fail_ 'fixture: no FIFO'; return; }
-  ( _shmutant_identity_table() { SHMUTANT_START=(); }
-    _shmutant_freeze_from() { printf '%s\n' "$BASHPID" > "$T/freezer.pid"; IFS= read -r _ <> "$T/never"; }
-    _shmutant_kill_tree_twice -g "$grp" "$grp:" ) > /dev/null 2>&1 & fzo=$!
-  wait_for "$T/freezer.pid" || fail_ 'fixture: the freeze never reached its walk'
-  fz="$(cat "$T/freezer.pid" 2>/dev/null)"
-  _shmutant_kill_tree KILL "$outer" "$outer:"; wait "$outer" 2>/dev/null
-  sleep 0.5
-  case "$(command -p ps -o stat= -p "$holder" 2>/dev/null)" in
-    *T*) ;;
-    *) fail_ "the holder was let go although the group's members could not be told ($(command -p ps -o stat= -p "$holder" 2>/dev/null | tr -d ' '))" ;;
-  esac
-  [ -z "$fz" ] || kill -KILL "$fz" 2>/dev/null
-  wait_gone "$orphan" "$oid" 50 || fail_ "a member of the stopped group was left $(command -p ps -o stat= -p "$orphan" 2>/dev/null | tr -d ' ')"
-  wait_gone "$holder" "$holderid" 50 || fail_ 'the holder was left behind'
-  _shmutant_kill_tree KILL "$fzo" "$fzo:"; wait "$fzo" 2>/dev/null
-  _shmutant_kill_tree KILL "" "$orphan:$oid" "$holder:$holderid"; wait_gone "$orphan" "$oid"
+  # here), the holder is not let go: it cannot end, so it goes on showing the group is the run's, and
+  # the guard is told it was kept stopped. Once the run's shells and then its freezing shell are
+  # killed, the guard still reaches a child that holds nothing of the run's, through the group of a
+  # holder it can verify, or, with no start readable at all, one it knows the freeze kept stopped.
+  local how outer grp holder holderid orphan oid fz fzo
+  for how in no-table no-start; do
+    mkdir -p "$T/$how"; rm -f "$T/started" "$T/orphan.pid" "$T/freezer.pid" "$T/never"
+    ( exec {vf}>|"$T/$how/chan"; SHMUTANT_VERDICT_FD="$vf"
+      cb() {
+        ( for f in /dev/fd/*; do n="${f##*/}"; case "$n" in 0|1|2) ;; *) eval "exec $n>&-" ;; esac; done 2>/dev/null
+          sleep 60 & echo "$!" > "$T/orphan.pid" )
+        : > "$T/started"; sleep 60
+      }
+      SHMUTANT_TIMEOUT=0 _shmutant_run_bounded "$T/$how" cb "$T/$how" sel ) > /dev/null 2>&1 & outer=$!
+    if ! wait_for "$T/started" || ! wait_for "$T/orphan.pid"; then
+      fail_ "$how: the callback never started"; _shmutant_kill_tree KILL "$outer" "$outer:"; wait "$outer" 2>/dev/null; continue
+    fi
+    orphan="$(cat "$T/orphan.pid")"; oid="$(_shmutant_identity "$orphan")"
+    read -r _ grp holder holderid < <(awk '$1 == "group" { print; exit }' "$T/$how/chan")
+    command -p mkfifo "$T/never" || { fail_ 'fixture: no FIFO'; return; }
+    ( _shmutant_identity_table() { SHMUTANT_START=(); }
+      [ "$how" != no-start ] || _shmutant_identity() { return 1; }
+      _shmutant_freeze_from() { printf '%s\n' "$BASHPID" > "$T/freezer.pid"; IFS= read -r _ <> "$T/never"; }
+      _shmutant_kill_tree_twice -g "$grp" "$grp:" ) > /dev/null 2>&1 & fzo=$!
+    wait_for "$T/freezer.pid" || fail_ "$how: fixture: the freeze never reached its walk"
+    fz="$(cat "$T/freezer.pid" 2>/dev/null)"
+    _shmutant_kill_tree KILL "$outer" "$outer:"; wait "$outer" 2>/dev/null
+    sleep 0.5
+    case "$(command -p ps -o stat= -p "$holder" 2>/dev/null)" in
+      *T*) ;;
+      *) fail_ "$how: the holder was let go although the group's members could not be told ($(command -p ps -o stat= -p "$holder" 2>/dev/null | tr -d ' '))" ;;
+    esac
+    [ -z "$fz" ] || kill -KILL "$fz" 2>/dev/null
+    wait_gone "$orphan" "$oid" 50 || fail_ "$how: a member of the stopped group was left $(command -p ps -o stat= -p "$orphan" 2>/dev/null | tr -d ' ')"
+    wait_gone "$holder" "$holderid" 50 || fail_ "$how: the holder was left behind"
+    _shmutant_kill_tree KILL "$fzo" "$fzo:"; wait "$fzo" 2>/dev/null
+    _shmutant_kill_tree KILL "" "$orphan:$oid" "$holder:$holderid"; wait_gone "$orphan" "$oid"
+  done
 }
 
 # shellcheck disable=SC2034
@@ -3985,6 +4008,14 @@ t_freeze_checks_its_root_and_holder_after_its_guard_starts() {
   grep -qx -- "-CONT $r" "$T/signals" 2>/dev/null || fail_ "a root shown changed once stopped was not let go: [$(tr '\n' ';' < "$T/signals" 2>/dev/null)]"
   if grep -e '-KILL' "$T/signals" 2>/dev/null | grep -qw -- "$r"; then fail_ "a root shown changed once stopped was killed: [$(tr '\n' ';' < "$T/signals")]"; fi
   kill -CONT "$r" 2>/dev/null
+  # A bare root (no start given) whose start, read before the guard starts, is another after it.
+  rm -f "$T/opened" "$T/signals"
+  ( eval "$(declare -f _shmutant_guard_open | sed '1s/^_shmutant_guard_open /_shmutant_guard_open_real /')"
+    _shmutant_guard_open() { _shmutant_guard_open_real; local rc=$?; : > "$T/opened"; return "$rc"; }
+    _shmutant_identity() { if [ "$1" = "$r" ]; then if [ -e "$T/opened" ]; then printf 'after'; else printf 'before'; fi; else printf 'id-%s' "$1"; fi; }
+    kill() { case " $* " in *" $r "*) printf '%s\n' "$*" >> "$T/signals" ;; esac; [ "${1:-}" != -0 ] || builtin kill "$@"; return 0; }
+    _shmutant_kill_tree_twice "$r" ) > /dev/null 2>&1
+  [ ! -s "$T/signals" ] || fail_ "a bare root whose start changed while the guard started was signalled: [$(tr '\n' ';' < "$T/signals")]"
   for how in guarded unguarded; do
     rm -f "$T/opened" "$T/signals"
     ( holder="$g"; holderid="$(_shmutant_identity "$g")"

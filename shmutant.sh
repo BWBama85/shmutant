@@ -971,6 +971,9 @@ _shmutant_kill_tree_guarded() {
   # The guard first: its start can take a minute on a loaded host, so whatever is checked to decide
   # what may be stopped and killed is checked after it, just before it is acted on. A root or a
   # holder found alive before that may have ended and given its number away by then.
+  # A bare root's start, where one can be read, before the guard's start: compared after it.
+  local rootid_pre=""
+  [ "$spec" != "$pid" ] || rootid_pre="$(_shmutant_identity "$pid")" || rootid_pre=""
   local guard_up=1
   _shmutant_guard_open && guard_up=0
   # The root is stopped, searched from and later signalled by number only when it is known to
@@ -987,6 +990,10 @@ _shmutant_kill_tree_guarded() {
   local root_ok=0
   if [ "$spec" = "$pid" ]; then root_ok=1
   else rootid="${spec#*:}"; [ -n "$rootid" ] && _shmutant_alive_since "$pid" "$rootid" && root_ok=1
+  fi
+  # A bare root whose start was read before is held to it now, as a `pid:identity` one is.
+  if [ "$spec" = "$pid" ] && [ -n "$rootid_pre" ]; then
+    rootid="$rootid_pre"; _shmutant_alive_since "$pid" "$rootid" || root_ok=0
   fi
   if [ "$guard_up" != 0 ]; then
     # No guard, no freeze: one KILL to what can be reached now, the group included, and the end
@@ -1032,6 +1039,10 @@ _shmutant_kill_tree_guarded() {
     # cannot end then, and goes on showing the group is the run's, to the guard and to the KILL.
     if _shmutant_guard_members "$held"; then
       [ -z "${holder:-}" ] || kill -CONT "$holder" 2>/dev/null
+    else
+      # Kept stopped, and the guard is told so: a holder this freeze keeps stopped cannot end, so its
+      # number is still the holder's, and the guard ends the group by it, start or no start.
+      _shmutant_guard_tell k
     fi
     SHMUTANT_KILL_GROUP="$held"
   fi
@@ -1101,8 +1112,14 @@ _shmutant_guard_members() {
   [ -n "$out" ] || return 0
   mapfile -t members <<< "$out"
   _shmutant_identity_table
+  # The group read again after the starts: a member still in it is the process both reads saw, since
+  # nothing new can join a group whose members are all stopped. One gone from it between the reads
+  # (killed, its number perhaps someone else's by the start read) is not told.
+  table="$(command -p ps -A -o pid= -o pgid= 2>/dev/null)" && [ -n "$table" ] || return 1
+  out="$(printf '%s\n' "$table" | command -p awk -v g="$1" '$2 == g { print " " $1 " " }' | command -p tr -d '\n')" || return 1
   for p in "${members[@]}"; do
     [ -n "$p" ] && [ -z "${have[$p]:-}" ] || continue
+    case "$out" in *" $p "*) ;; *) continue ;; esac
     [ -n "${SHMUTANT_START[$p]:-}" ] || return 1
     recs+=("p $p ${SHMUTANT_START[$p]}")
   done
@@ -1245,7 +1262,7 @@ _shmutant_guard_freezer_there() {
 # uses no freeze step and no _shmutant_kill_tree, which a freezing shell killed in them may have left
 # half-done.
 _shmutant_guard() {
-  local line chunk part="" pg="" ph="" phid="" p pid st gcont="" hs
+  local line chunk part="" pg="" ph="" phid="" p pid st gcont="" hs kept=""
   local -a recs=() kills=() conts=()
   local -A SHMUTANT_START=()
   # Its own process: the caller's errexit would end it at the first refused signal or failed write.
@@ -1259,6 +1276,7 @@ _shmutant_guard() {
       line="$part$chunk"; part=""
       case "$line" in
         done) return 0 ;;
+        k) kept=1 ;;
         'p '*) recs+=("${line#p }") ;;
         'g '*) line="${line#g }"; pg="${line%% *}"; line="${line#"$pg"}"; line="${line# }"
                ph="${line%% *}"; phid="${line#"$ph"}"; phid="${phid# }" ;;
@@ -1293,6 +1311,9 @@ _shmutant_guard() {
   # sent to it.
   if [ -n "$pg" ]; then
     hs=1; [ -z "$ph" ] || { _shmutant_holder_state "$ph" "$phid"; hs=$?; }
+    # A holder the freeze kept stopped (`k`) and that is still there is the holder: stopped, it could
+    # not end and give its number away, so no start is needed to tell it, as for a frozen pid.
+    [ -z "$kept" ] || [ "$hs" != 2 ] || hs=0
     if [ "$hs" = 0 ]; then kills=(-"$pg" "${kills[@]}")
     elif { [ "$hs" = 2 ] && _shmutant_proc_stopped "$ph"; } || _shmutant_group_has "$pg" "${kills[@]}"; then gcont="$pg"
     fi
@@ -2436,7 +2457,7 @@ _shmutant_pool_locals_writable() {
     SHMUTANT_TARGET SHMUTANT_DECL_ERRORS SHMUTANT_SELECTED_N \
     _shmutant_bo _shmutant_so _shmutant_o _shmutant_n _shmutant_pc _shmutant_wrap_left \
     a budget dog e elapsed last leftovers linked lstart old rrc s tampered tmpd tnow victims wroot \
-    b chunk conts g gcont gone_group guard_id guard_lost guard_of guard_of_id guard_pid guard_r guard_up guard_w hs kills members out pairs part pg ph phid recs rid seen_ck unfrozen w want \
+    b chunk conts g gcont gone_group guard_id guard_lost guard_of guard_of_id guard_pid guard_r guard_up guard_w hs kept kills members out pairs part pg ph phid recs rid rootid_pre seen_ck unfrozen w want \
     SHMUTANT_GUARD SHMUTANT_GUARD_PID SHMUTANT_PS_LSTART
 }
 
