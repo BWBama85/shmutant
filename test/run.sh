@@ -3423,7 +3423,7 @@ t_interrupted_freeze_does_not_leave_the_holder_stopped() {
     wait_for "$T/started" || { fail_ "$point: the callback never started"; _shmutant_kill_tree KILL "$outer" "$outer:"; wait "$outer" 2>/dev/null; continue; }
     read -r _ grp holder holderid < <(awk '$1 == "group" { print; exit }' "$T/$point/chan")
     if [ -z "$holder" ] || ! kill -0 "$holder" 2>/dev/null; then fail_ "$point: no live holder was published"; _shmutant_kill_tree KILL "$outer" "$outer:"; wait "$outer" 2>/dev/null; continue; fi
-    { ( _shmutant_guard() { printf 'ready\n'; command -p cat > /dev/null; }
+    { ( _shmutant_guard() { printf 'ready %s\n' "$BASHPID"; command -p cat > /dev/null; }
         eval "$point() { kill -KILL \"\$BASHPID\"; }"; _shmutant_kill_tree_twice -g "$grp" "$grp:" ); } > /dev/null 2>&1
     # Read now, before the run is ended: once its group is orphaned the kernel may continue or hang up a
     # stopped holder by itself, which would hide one this freeze left stopped.
@@ -3527,7 +3527,8 @@ t_pool_killed_while_its_abort_freezes_leaves_nothing_stopped() {
   ( _shmutant_freeze_from() { echo x >> "$T/freezing"; sleep 60; }
     SHMUTANT_JOBS=2 SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=0 shmutant_pool lbl "$T/wd" toy_prepare orphan_run ) < /dev/null > /dev/null 2>&1 & pp=$!
   set +m
-  for (( i = 0; i < 100; i++ )); do [ "$(wc -l < "$T/started" 2>/dev/null)" -ge 2 ] 2>/dev/null && { ok=1; break; }; sleep 0.1; done
+  : > "$T/started"; : > "$T/freezing"
+  for (( i = 0; i < 100; i++ )); do [ "$(wc -l < "$T/started")" -ge 2 ] && { ok=1; break; }; sleep 0.1; done
   mapfile -t orphans < "$T/orphans" 2>/dev/null
   if [ "$ok" = 0 ] || [ "${#orphans[@]}" -lt 2 ]; then
     fail_ 'the two runs never started'; _shmutant_kill_tree KILL "$pp" "$pp:"; kill -KILL -- -"$pp" 2>/dev/null; wait "$pp" 2>/dev/null
@@ -3535,7 +3536,7 @@ t_pool_killed_while_its_abort_freezes_leaves_nothing_stopped() {
   fi
   for o in "${orphans[@]}"; do grps+=("$(command -p ps -o pgid= -p "$o" 2>/dev/null | tr -d ' ')"); done
   kill -TERM "$pp"
-  ok=0; for (( i = 0; i < 100; i++ )); do [ "$(wc -l < "$T/freezing" 2>/dev/null)" -ge 2 ] 2>/dev/null && { ok=1; break; }; sleep 0.1; done
+  ok=0; for (( i = 0; i < 100; i++ )); do [ "$(wc -l < "$T/freezing")" -ge 2 ] && { ok=1; break; }; sleep 0.1; done
   [ "$ok" = 1 ] || fail_ 'the abort never reached both freezes'
   # the caller's KILL: every process of the tree it started, and its group
   _shmutant_kill_tree KILL "$pp" "$pp:"; kill -KILL -- -"$pp" 2>/dev/null; wait "$pp" 2>/dev/null
@@ -3647,6 +3648,45 @@ t_freeze_guard_is_out_of_reach_and_gone_at_the_end() {
 }
 
 # shellcheck disable=SC2034
+t_freeze_guard_not_seen_to_end_is_killed() {
+  # #47: the end of a freeze waits for its guard to go, but end-of-file and a read that failed look
+  # alike, and a wait that runs out proves nothing: whatever the read said, a guard still running is
+  # killed, so nothing of the freeze outlives the call, and a wait that ran out is reported. The
+  # guard lingers here after standing down; the report descriptor is closed first, then the wait is
+  # made to run out.
+  local how root i g st e
+  local -a kids=()
+  for how in closed timeout; do
+    rm -f "$T/guard.pid" "$T/err"
+    set -m; sh -c 'sleep 60 & sleep 60 & wait' < /dev/null > /dev/null 2>&1 & root=$!; set +m
+    disown "$root"
+    for (( i = 0; i < 50; i++ )); do mapfile -t kids < <(_shmutant_descendants "$root"); [ "${#kids[@]}" -lt 2 ] || break; sleep 0.1; done
+    ( exec {err_fd}>"$T/err"
+      eval "$(declare -f _shmutant_guard | sed '1s/^_shmutant_guard /_shmutant_guard_real /')"
+      eval "$(declare -f _shmutant_guard_close | sed '1s/^_shmutant_guard_close /_shmutant_guard_close_real /')"
+      _shmutant_guard() { printf '%s\n' "$BASHPID" > "$T/guard.pid"; _shmutant_guard_real; sleep 5; }
+      if [ "$how" = closed ]; then
+        # shellcheck disable=SC2154  # guard_r is the freeze's own, by dynamic scope
+        _shmutant_guard_close() { exec {guard_r}<&-; _shmutant_guard_close_real; }
+      else
+        read() { if [ -n "${RUN_OUT:-}" ] && [ "${1:-}" = -t ] && [ "${2:-}" = 30 ]; then return 142; fi; builtin read "$@"; }
+        _shmutant_guard_close() { RUN_OUT=1 _shmutant_guard_close_real; }
+      fi
+      _shmutant_kill_tree_twice "$root" ) < /dev/null > /dev/null 2>&1
+    g="$(cat "$T/guard.pid" 2>/dev/null)"
+    if [ -z "$g" ]; then fail_ "$how: fixture: the guard never recorded itself"
+    else
+      st="$(command -p ps -o stat= -p "$g" 2>/dev/null)"
+      case "$st" in ''|*Z*) ;; *) fail_ "$how: the guard was still running when the freeze returned ($st)"; kill -KILL "$g" 2>/dev/null ;; esac
+    fi
+    e="$(cat "$T/err" 2>/dev/null)"
+    if [ "$how" = timeout ]; then has "$e" 'did not end within 30 seconds' "$how: says so"; fi
+    for i in "$root" "${kids[@]}"; do wait_gone "$i" "" 30 || fail_ "$how: $i was not killed"; done
+    kill -KILL -- -"$root" 2>/dev/null
+  done
+}
+
+# shellcheck disable=SC2034
 t_guard_verifies_with_its_top_shell_gone() {
   # #47: a guard acts once the shells above it are killed, the top-level one ($$) often among them,
   # so what it reads a process's identity by must not hang on that shell: with $$ gone, a pid that
@@ -3670,13 +3710,14 @@ t_guard_verifies_with_its_top_shell_gone() {
 # shellcheck disable=SC2034
 t_guard_ends_only_what_it_can_verify() {
   # #47: the guard of a freeze whose shell went partway KILLs a recorded pid only while it carries the
-  # start it was recorded with, and the group only while its holder is still the holder; every other
-  # recorded pid is continued, never left stopped and never killed. `done` stands it down, and an
-  # end with nothing recorded does nothing. Driven with its records on stdin and every `kill` but
-  # the liveness probe stubbed.
+  # start it was recorded with, and the group only while its holder is shown to be the holder; every
+  # other recorded pid is continued, never left stopped and never killed, and so is a group whose
+  # holder has gone, carries another identity, cannot be checked now, or was never named. `done`
+  # stands it down, and an end with nothing recorded does nothing. Driven with its records on stdin
+  # and every `kill` but the liveness probe stubbed.
   sleep 60 > /dev/null 2>&1 & local a=$!
   sleep 60 > /dev/null 2>&1 & local b=$!
-  local aid bid out
+  local aid bid out how
   aid="$(_shmutant_identity "$a")"; bid="$(_shmutant_identity "$b")"
   out="$( kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*"; fi; }
           { printf 'p %s %s\n' "$a" "$aid"; printf 'p %s not-%s\n' "$b" "$bid"; printf 'p %s \n' "$b"
@@ -3684,14 +3725,23 @@ t_guard_ends_only_what_it_can_verify() {
   printf '%s\n' "$out" | grep -qx -- "kill -KILL -- -99999 $a" || fail_ "a verified pid and a group whose holder is verified are not killed in one kill: [$out]"
   printf '%s\n' "$out" | grep -qx -- "kill -CONT -- $b $b" || fail_ "a pid recorded with another start, or with none, is not continued: [$out]"
   if printf '%s\n' "$out" | grep -e '-KILL' | grep -qw -- "$b"; then fail_ "a pid it could not verify was killed: [$out]"; fi
-  out="$( kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*"; fi; }; printf 'g 99999 %s not-%s\n' "$a" "$aid" | _shmutant_guard )"
-  case "$out" in *-99999*) fail_ "the group was signalled for a holder whose identity no longer matches: [$out]" ;; esac
-  out="$( kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*"; fi; }; printf 'g 99999 %s %s\n' "$((a + 1000000))" "$aid" | _shmutant_guard )"
-  case "$out" in *-99999*) fail_ "the group was signalled with its holder gone: [$out]" ;; esac
+  # A group whose holder is not shown to be the holder is continued, never killed.
+  for how in mismatch gone unreadable unnamed; do
+    out="$( kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*"; fi; }
+            [ "$how" != unreadable ] || _shmutant_identity() { return 1; }
+            case "$how" in
+              mismatch)   printf 'g 99999 %s not-%s\n' "$a" "$aid" ;;
+              gone)       printf 'g 99999 %s %s\n' "$((a + 1000000))" "$aid" ;;
+              unreadable) printf 'g 99999 %s %s\n' "$a" "$aid" ;;
+              unnamed)    printf 'g 99999 - \n' ;;
+            esac | _shmutant_guard )"
+    case "$out" in *KILL*-99999*) fail_ "$how: the group was killed with its holder not shown to be the holder: [$out]" ;; esac
+    printf '%s\n' "$out" | grep -qx -- "kill -CONT -- -99999" || fail_ "$how: the group was not continued: [$out]"
+  done
   out="$( kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*"; fi; }; printf 'p %s %s\ng 99999 %s %s\ndone\n' "$a" "$aid" "$a" "$aid" | _shmutant_guard )"
-  eq "$out" ready '`done` stands the guard down with nothing signalled'
+  [[ "$out" =~ ^ready\ [0-9]+$ ]] || fail_ "\`done\` did not stand the guard down with nothing signalled: [$out]"
   out="$( kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*"; fi; }; _shmutant_guard < /dev/null )"
-  eq "$out" ready 'an end with nothing recorded signals nothing'
+  [[ "$out" =~ ^ready\ [0-9]+$ ]] || fail_ "an end with nothing recorded signalled something: [$out]"
   kill -KILL "$a" "$b" 2>/dev/null; wait "$a" "$b" 2>/dev/null
 }
 
@@ -5746,9 +5796,11 @@ t_group_kill_skips_a_group_its_holder_no_longer_holds() {
   kill -STOP "$holder"
   _shmutant_kill_tree KILL "$outer" "$outer:"; wait "$outer" 2>/dev/null
   ( _shmutant_freeze_from() { wait_gone "$holder"; }
-    kill() { case " $* " in *" -KILL "*" -$grp "*) printf 'x\n' >> "$T/group-killed" ;; esac; builtin kill "$@"; }
+    kill() { case " $* " in *" -KILL "*" -$grp "*) printf 'x\n' >> "$T/group-killed" ;; *" -CONT -- -$grp "*) printf 'x\n' >> "$T/group-continued" ;; esac; builtin kill "$@"; }
     _shmutant_kill_tree_twice -g "$grp" "$grp:" ) 2>/dev/null
   if [ -e "$T/group-killed" ]; then fail_ 'the group was signalled by number after its holder had gone'; fi
+  # A member the freeze stopped may still be in it: the group is continued, never left stopped.
+  [ -e "$T/group-continued" ] || fail_ 'a group whose holder had gone was not continued'
   kill -KILL "$holder" 2>/dev/null; wait_gone "$holder"
 }
 
@@ -5794,12 +5846,14 @@ t_sampler_never_samples_a_pid_that_is_not_the_unit() {
 # shellcheck disable=SC2034
 t_group_kill_checks_the_holder_identity() {
   # A live pid at the holder's number that no longer carries the holder's identity is not the
-  # holder: the group it once reserved may have been reused, so it must not be signalled.
+  # holder: the group it once reserved may have been reused, so it must not be killed. It is
+  # continued instead (#47): a member a freeze stopped there would otherwise stay stopped.
   sleep 30 > /dev/null 2>&1 & local stranger=$!
   ( holder="$stranger"; holderid="not-the-holders-start"; SHMUTANT_KILL_GROUP=99999
-    kill() { case " $* " in *" -99999 "*) printf 'x\n' >> "$T/group-killed" ;; esac; }
+    kill() { case " $* " in *" -KILL "*" -99999 "*) printf 'x\n' >> "$T/group-killed" ;; *" -CONT -- -99999 "*) printf 'x\n' >> "$T/group-continued" ;; esac; }
     _shmutant_kill_tree KILL "" )
-  if [ -e "$T/group-killed" ]; then fail_ 'the group was signalled for a holder whose identity no longer matches'; fi
+  if [ -e "$T/group-killed" ]; then fail_ 'the group was killed for a holder whose identity no longer matches'; fi
+  [ -e "$T/group-continued" ] || fail_ 'the group of a holder whose identity no longer matches was not continued'
   kill -KILL "$stranger" 2>/dev/null; wait "$stranger" 2>/dev/null
 }
 

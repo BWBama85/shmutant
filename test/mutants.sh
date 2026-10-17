@@ -538,8 +538,8 @@ shmutant_mut 'plan-load output reaches the verdict stream' \
 
 # --- guards added for the fourteenth review round ---
 shmutant_mut 'the root pid is signalled by number even after it was reaped' \
-  '  [ "${#targets[@]}" -gt 0 ] || return 0' \
-  '  [ -n "$pid" ] && targets+=("$pid")' \
+  '  [ "${#targets[@]}" -eq 0 ] || kill "-$sig"' \
+  '  [ -n "$pid" ] && targets+=("$pid"); [ "${#targets[@]}" -eq 0 ] || kill "-$sig"' \
   't_post_run_cleanup_never_signals_a_reaped_root_by_number'
 shmutant_mut 'the stream is reopened by path for every record' \
   '{ printf '"'"'%s\n'"'"' "$out" >&"$SHMUTANT_STREAM_FD"; } 2>/dev/null || SHMUTANT_EMIT_FAILED=1' \
@@ -712,7 +712,7 @@ shmutant_mut 'a held group is neither stopped nor signalled by number' \
   '  if false; then' \
   't_returned_run_without_an_identity_is_still_cleaned_up'
 shmutant_mut 'a group is signalled by number after its holder is gone' \
-  '  kill -0 "$holder" 2>/dev/null || return 0' \
+  '  _shmutant_holder_state "$holder" "${holderid:-}" || [ "$?" = 2 ] || return 0' \
   '  :' \
   't_run_group_is_not_signalled_by_number_without_its_holder'
 shmutant_mut 'a bare exit takes the snapshot status' \
@@ -1483,8 +1483,8 @@ shmutant_mut 'a readonly name is assigned when the file is sourced' \
 
 # --- guards added for the forty-sixth review round ---
 shmutant_mut 'the CLI holder is killed by number alone' \
-  '  if [ -n "$hid" ] && _shmutant_identity "$hp" > /dev/null; then _shmutant_alive_since "$hp" "$hid" || return 0; fi' \
-  '  :' \
+  '  _shmutant_holder_state "$hp" "$hid" || [ "$?" = 2 ] || return 0' \
+  '  kill -0 "$hp" 2>/dev/null || return 0' \
   't_cli_end_group_checks_the_holder_identity'
 shmutant_mut 'the line terminator prepare printed is part of the root' \
   '  root="${root%$'"'"'\n'"'"'}"' \
@@ -1615,8 +1615,8 @@ shmutant_mut 'the CLI sampler keeps the pid of a sleep it already reaped' \
 # (no row on the run watchdog clearing its sleep pid after the wait: that loop lives inside
 # _shmutant_run_bounded, and no unit can land a TERM between two of its polls deterministically)
 shmutant_mut 'the group is signalled after its holder has gone' \
-  '  if [ -n "${SHMUTANT_KILL_GROUP:-}" ] && { [ -z "${holder:-}" ] || kill -0 "$holder" 2>/dev/null; }; then' \
-  '  if [ -n "${SHMUTANT_KILL_GROUP:-}" ]; then' \
+  '  kill -0 "$1" 2>/dev/null || return 1' \
+  '  :' \
   't_group_kill_skips_a_group_its_holder_no_longer_holds'
 shmutant_mut 'an unreadable listing in a freeze passes for a settled one' \
   '        _shmutant_can_list && SHMUTANT_FREEZE_UNSETTLED=1' \
@@ -1627,8 +1627,8 @@ shmutant_mut 'a host with no process listing counts every freeze as unsettled' \
   '        SHMUTANT_FREEZE_UNSETTLED=1' \
   't_freeze_without_any_listing_is_not_unsettled'
 shmutant_mut 'the group kill takes any live pid at the holder number for the holder' \
-  '! _shmutant_identity "$holder" > /dev/null || _shmutant_alive_since "$holder" "$holderid"; then' \
-  '! _shmutant_identity "$holder" > /dev/null || :; then' \
+  '  if ! _shmutant_same_start "$now" "$2"; then return 1; fi' \
+  '  :' \
   't_group_kill_checks_the_holder_identity'
 shmutant_mut 'an unreadable /proc table lists no descendants and succeeds' \
   '    table="$(_shmutant_proc_table)"; [ -n "$table" ] || return 1' \
@@ -1965,17 +1965,25 @@ shmutant_mut 'the guard kills a pid whose start no longer matches' \
   '; then' \
   't_guard_ends_only_what_it_can_verify'
 shmutant_mut 'the guard kills the group without checking its holder' \
-  '    if [ -z "$ph" ] || [ -z "$phid" ] || ! _shmutant_identity "$ph" > /dev/null || _shmutant_alive_since "$ph" "$phid"; then' \
-  '    if :; then' \
+  '    if [ -n "$ph" ] && _shmutant_holder_state "$ph" "$phid"; then kills=(-"$pg" "${kills[@]}")' \
+  '    if :; then kills=(-"$pg" "${kills[@]}")' \
   't_guard_ends_only_what_it_can_verify'
-shmutant_mut 'the guard kills the group of a holder that has gone' \
-  '  if [ -n "$pg" ] && { [ -z "$ph" ] || kill -0 "$ph" 2>/dev/null; }; then' \
-  '  if [ -n "$pg" ]; then' \
+shmutant_mut 'the guard kills a group whose holder cannot be checked' \
+  '[ -n "$ph" ] && _shmutant_holder_state "$ph" "$phid"; then' \
+  '[ -n "$ph" ] && { _shmutant_holder_state "$ph" "$phid" || [ "$?" = 2 ]; }; then' \
   't_guard_ends_only_what_it_can_verify'
 shmutant_mut 'the guard does not kill the group' \
-  '      kills=(-"$pg" "${kills[@]}")' \
-  '      :' \
+  'then kills=(-"$pg" "${kills[@]}")' \
+  'then :' \
   't_guard_ends_only_what_it_can_verify'
+shmutant_mut 'the guard leaves a group it cannot verify stopped' \
+  '    else conts=(-"$pg" "${conts[@]}")' \
+  '    else :' \
+  't_guard_ends_only_what_it_can_verify'
+shmutant_mut 'a group whose holder went is left stopped' \
+  '  [ -z "$gone_group" ] || kill -CONT -- -"$gone_group" 2>/dev/null' \
+  '  :' \
+  't_group_kill_skips_a_group_its_holder_no_longer_holds'
 shmutant_mut 'the guard leaves what it could not verify stopped' \
   '  [ "${#conts[@]}" -eq 0 ] || kill -CONT -- "${conts[@]}" 2>/dev/null' \
   '  :' \
@@ -1984,10 +1992,18 @@ shmutant_mut 'done does not stand the guard down' \
   '      done) return 0 ;;' \
   '      done) ;;' \
   't_guard_ends_only_what_it_can_verify'
-shmutant_mut 'the freeze returns before its guard has gone' \
-  '  IFS= read -t 30 -r _ <&"$guard_r" || :' \
-  '  :' \
-  't_freeze_guard_is_out_of_reach_and_gone_at_the_end'
+shmutant_mut 'the freeze returns with its guard still running' \
+  '    kill -KILL "$guard_pid" 2>/dev/null' \
+  '    :' \
+  't_freeze_guard_not_seen_to_end_is_killed'
+shmutant_mut 'the guard'"'"'s identity is not kept for the end of the freeze' \
+  '      guard_id="$(_shmutant_identity "$guard_pid")" || guard_id=""' \
+  '      guard_id=""' \
+  't_freeze_guard_not_seen_to_end_is_killed'
+shmutant_mut 'a wait for the guard that ran out is not reported' \
+  '    if [ "$rc" -gt 128 ] && [ -n "${err_fd:-}" ]; then _shmutant_err' \
+  '    if false; then _shmutant_err' \
+  't_freeze_guard_not_seen_to_end_is_killed'
 shmutant_mut 'the guard shares the process group of the shell that froze' \
   '( set -m; trap '"'"''"'"' INT TERM HUP; _shmutant_guard' \
   '( trap '"'"''"'"' INT TERM HUP; _shmutant_guard' \
@@ -1996,8 +2012,10 @@ shmutant_mut 'the guard is ended by INT, TERM or HUP' \
   'trap '"'"''"'"' INT TERM HUP; _shmutant_guard' \
   '_shmutant_guard' \
   't_freeze_guard_is_out_of_reach_and_gone_at_the_end'
-# (no row on the guard's handshake words: a guard that never says `ready` is found gone at the first
-# record, before any stop, with the same kill and report, so the row would pass whichever way it ran)
+# (no row on the guard's handshake words: a guard that never says `ready` leaves the open waiting out
+# its 30-second bound, which no unit spends, before the freeze goes on unguarded)
+# (no row on the wait for the guard to go: a guard not waited for is killed by the check after it,
+# with the same end, so the row would pass)
 # (no row on the guard reparented before `up`: the subshell that started it ends a moment after, and
 # a row would be killed only if a check fell inside that moment)
 # (no row on the errexit resets in the freeze's subshell and its guard: no command a witness runs

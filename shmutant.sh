@@ -955,7 +955,7 @@ _shmutant_kill_tree_twice() {
 _shmutant_kill_tree_guarded() {
   local held=""
   if [ "${1:-}" = -g ]; then held="$2"; shift 2; fi
-  local spec="$1" pid rootid p d rid guard_w="" guard_r="" guard_lost=0
+  local spec="$1" pid rootid p d rid guard_w="" guard_r="" guard_lost=0 guard_pid="" guard_id=""
   local -a frozen=() roots=()
   local -A have=()
   local SHMUTANT_KILL_GROUP="" SHMUTANT_FREEZE_UNSETTLED=0
@@ -1063,9 +1063,9 @@ _shmutant_kill_tree_guarded() {
 # own, so a signal to the group of the shell that froze does not reach it, and reparented before
 # the coprocess sends `up`, which it does only once the subshell that started the guard has
 # ended, so no walk of that shell's tree reaches it either: as the run's holder, it is reached by
-# a kill aimed at it, not by one aimed at shmutant. `ready` is the guard's own first word. The
-# coprocess waits for `go` first: one that ended before its descriptors were copied would take
-# them with it.
+# a kill aimed at it, not by one aimed at shmutant. `ready <pid>` is the guard's own first word,
+# and `guard_pid`/`guard_id` keep its pid and identity. The coprocess waits for `go` first: one
+# that ended before its descriptors were copied would take them with it.
 _shmutant_guard_open() {
   local a="" b="" w r
   guard_w=""; guard_r=""
@@ -1078,7 +1078,13 @@ _shmutant_guard_open() {
     guard_w=""; guard_r=""; return 1
   fi 2>/dev/null
   if { printf 'go\n' >&"$guard_w"; } 2>/dev/null && IFS= read -t 30 -r a <&"$guard_r" && IFS= read -t 30 -r b <&"$guard_r"; then
-    case "$a $b" in 'ready up'|'up ready') return 0 ;; esac
+    [ "$a" != up ] || { a="$b"; b=up; }
+    guard_pid="${a#ready }"
+    if [ "$b" = up ] && [ "$guard_pid" != "$a" ] && [ -n "$guard_pid" ] && [ -n "${guard_pid##*[!0-9]*}" ]; then
+      # What the end of the freeze checks the guard by, should it not be seen to go.
+      guard_id="$(_shmutant_identity "$guard_pid")" || guard_id=""
+      return 0
+    fi
   fi
   exec {guard_w}>&- {guard_r}<&-
   guard_w=""; guard_r=""
@@ -1096,27 +1102,35 @@ _shmutant_guard_tell() {
   return 1
 }
 
-# _shmutant_guard_close — tell the guard the KILL has been sent, and wait, at most 30 seconds, for
-# it to go.
+# _shmutant_guard_close — tell the guard the KILL has been sent, wait, at most 30 seconds, for it to
+# go, and end it if it has not: nothing of the freeze outlives the call.
 _shmutant_guard_close() {
+  local rc=0
   [ -n "${guard_w:-}" ] || return 0
   { printf 'done\n' >&"$guard_w"; } 2>/dev/null
   exec {guard_w}>&-
-  IFS= read -t 30 -r _ <&"$guard_r" || :
+  IFS= read -t 30 -r _ <&"$guard_r" || rc=$?
+  # End-of-file is the guard gone, but a read that failed looks the same, and one that ran out of
+  # time proves nothing: whatever the read said, a guard still the process started is killed (one
+  # that has exited and waits to be reaped is unchanged by it), and a wait that ran out is reported.
+  if [ -n "${guard_pid:-}" ] && kill -0 "$guard_pid" 2>/dev/null && _shmutant_alive_since "$guard_pid" "${guard_id:-}"; then
+    kill -KILL "$guard_pid" 2>/dev/null
+    if [ "$rc" -gt 128 ] && [ -n "${err_fd:-}" ]; then _shmutant_err "the guard of a freeze did not end within 30 seconds of its KILL, and was killed" 2>&"$err_fd"; fi
+  fi
   exec {guard_r}<&-
   guard_w=""; guard_r=""
   return 0
 }
 
-# _shmutant_guard — the guard of one freeze. Reads on stdin what the freezing shell is about to
-# stop, each record written before the stop it announces: `p <pid> [<start>]` per process, and
-# `g <pgid> <holder or -> [<holder identity>]` for a held group. `done` (the KILL has been sent)
-# ends it with nothing done. End-of-file without `done` means the freezing shell has gone partway,
-# killed: the guard then KILLs, in one kill, every recorded pid that still carries the start it
-# was recorded with, and the group while its holder is still the process it was (the test
-# _shmutant_kill_tree applies), and continues every other recorded pid. A pid it cannot tell from
-# a stranger's is never killed, and never left stopped either: one stopped by mistake, or with no
-# start to verify it by, goes on as an ordinary orphan. It uses no freeze step and no
+# _shmutant_guard — the guard of one freeze. Says `ready <its pid>`, then reads on stdin what the
+# freezing shell is about to stop, each record written before the stop it announces: `p <pid>
+# [<start>]` per process, and `g <pgid> <holder or -> [<holder identity>]` for a held group. `done`
+# (the KILL has been sent) ends it with nothing done. End-of-file without `done` means the freezing
+# shell has gone partway, killed: the guard then KILLs, in one kill, every recorded pid that still
+# carries the start it was recorded with, and the group while its holder is shown to be the process
+# it was (_shmutant_holder_state 0), and continues every other recorded pid, and the group when its
+# holder has gone or cannot be checked. What it cannot tell from a stranger's is never killed, and
+# never left stopped either: it goes on as an ordinary orphan. It uses no freeze step and no
 # _shmutant_kill_tree, which a freezing shell killed in them may have left half-done.
 _shmutant_guard() {
   local line pg="" ph="" phid="" p pid st
@@ -1124,7 +1138,7 @@ _shmutant_guard() {
   local -A SHMUTANT_START=()
   # Its own process: the caller's errexit would end it at the first refused signal or failed write.
   set +e
-  printf 'ready\n'
+  printf 'ready %s\n' "$BASHPID"
   while IFS= read -r line; do
     case "$line" in
       done) return 0 ;;
@@ -1145,9 +1159,12 @@ _shmutant_guard() {
     else conts+=("$pid")
     fi
   done
-  if [ -n "$pg" ] && { [ -z "$ph" ] || kill -0 "$ph" 2>/dev/null; }; then
-    if [ -z "$ph" ] || [ -z "$phid" ] || ! _shmutant_identity "$ph" > /dev/null || _shmutant_alive_since "$ph" "$phid"; then
-      kills=(-"$pg" "${kills[@]}")
+  # The group is killed only while its holder is shown to be the holder; one whose holder has gone,
+  # or cannot be checked now, is continued: a member stopped there is let go, and a stranger that
+  # has the number since is not killed.
+  if [ -n "$pg" ]; then
+    if [ -n "$ph" ] && _shmutant_holder_state "$ph" "$phid"; then kills=(-"$pg" "${kills[@]}")
+    else conts=(-"$pg" "${conts[@]}")
     fi
   fi
   [ "${#kills[@]}" -eq 0 ] || kill -KILL -- "${kills[@]}" 2>/dev/null
@@ -1158,7 +1175,8 @@ _shmutant_guard() {
 # _shmutant_kill_tree <signal> <pid> <pids…> — send <signal> to every descendant of <pid> found
 # now, to each of <pids…> (the descendants found before an earlier signal, which a leader's
 # death may have reparented out of reach of a fresh walk), and to the process group named by
-# SHMUTANT_KILL_GROUP when set. An empty <pid> means no walk.
+# SHMUTANT_KILL_GROUP when set, while its holder is still the holder; a group whose holder has gone
+# is continued instead. An empty <pid> means no walk.
 # <pids…> are `pid:identity` pairs recorded when each was seen (see _shmutant_identity); one that
 # no longer matches is a reused pid and is left alone. `pid:` with no identity is a frozen pid.
 # Every target is decided first and signalled in ONE kill: a parent signalled after its child
@@ -1182,16 +1200,22 @@ _shmutant_kill_tree() {
   fi
   # The group is the run's only while its holder lives. Checked again here: a holder continued after
   # the group stop may have read its end-of-file and gone, and a group number nothing reserves may
-  # belong to someone else by now. A zombie holder still reserves it.
-  if [ -n "${SHMUTANT_KILL_GROUP:-}" ] && { [ -z "${holder:-}" ] || kill -0 "$holder" 2>/dev/null; }; then
-    # A live pid at that number is the holder only while it carries the holder's identity, where one
-    # can be read now: the same test _shmutant_held_group applied before the stop.
-    if [ -z "${holder:-}" ] || [ -z "${holderid:-}" ] || ! _shmutant_identity "$holder" > /dev/null || _shmutant_alive_since "$holder" "$holderid"; then
+  # belong to someone else by now. A zombie holder still reserves it. A live pid at that number is
+  # the holder only while it carries the holder's identity, where one can be read now: the same test
+  # _shmutant_held_group applied before the stop (_shmutant_holder_state).
+  local gone_group=""
+  if [ -n "${SHMUTANT_KILL_GROUP:-}" ]; then
+    if [ -z "${holder:-}" ] || _shmutant_holder_state "$holder" "${holderid:-}" || [ "$?" = 2 ]; then
       targets=(-"$SHMUTANT_KILL_GROUP" "${targets[@]}")
+    else
+      # The holder has gone: a member the freeze stopped may still be in the group (and then keeps its
+      # number from being anyone else's), and is continued rather than left stopped or killed blind.
+      gone_group="$SHMUTANT_KILL_GROUP"
     fi
   fi
-  [ "${#targets[@]}" -gt 0 ] || return 0
-  kill "-$sig" -- "${targets[@]}" 2>/dev/null
+  [ "${#targets[@]}" -eq 0 ] || kill "-$sig" -- "${targets[@]}" 2>/dev/null
+  [ -z "$gone_group" ] || kill -CONT -- -"$gone_group" 2>/dev/null
+  return 0
 }
 
 # _shmutant_snapshot <pid> — print `pid:identity` for every live descendant of <pid> now.
@@ -1521,6 +1545,22 @@ _shmutant_count_diff() {
     }' <<< "$1"$'\n\n'"$2"
 }
 
+# _shmutant_holder_state <pid> <identity> — whether a run's holder, started as <pid> with
+# <identity>, is still that process: 0 when it is alive and carries <identity>; 2 when it is alive
+# but cannot be checked (no identity was captured, or none can be read now: ps broke after the run
+# started, or there is none); 1 when it is gone or carries another identity (its number reused).
+# One reading for every caller: a freeze, which acts at once, takes 2 as the holder, as it would
+# with no ps at all; a freeze's guard, acting after its shell was killed, takes only 0.
+_shmutant_holder_state() {
+  local now
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  kill -0 "$1" 2>/dev/null || return 1
+  [ -n "$2" ] || return 2
+  now="$(_shmutant_identity "$1")" || return 2
+  if ! _shmutant_same_start "$now" "$2"; then return 1; fi
+  return 0
+}
+
 # _shmutant_held_group <pgid> — set SHMUTANT_HELD to `-g <pgid>` when the run's holder is still
 # the process it was (or, without ps, still there at all); to nothing when it is not, in which
 # case the group is no longer known to be the run's and is not signalled by number.
@@ -1528,12 +1568,8 @@ _shmutant_count_diff() {
 _shmutant_held_group() {
   SHMUTANT_HELD=()
   [ -n "${holder:-}" ] || return 0
-  kill -0 "$holder" 2>/dev/null || return 0
-  if [ -n "${holderid:-}" ]; then
-    # An identity that cannot be read now, for a pid that is there, means ps broke after the
-    # run started: the holder is taken as it was, as it would be with no ps at all.
-    if _shmutant_identity "$holder" > /dev/null; then _shmutant_alive_since "$holder" "$holderid" || return 0; fi
-  fi
+  # A holder that cannot be checked (2) is taken as it was, as it would be with no ps at all.
+  _shmutant_holder_state "$holder" "${holderid:-}" || [ "$?" = 2 ] || return 0
   SHMUTANT_HELD=(-g "$1")
 }
 
@@ -2248,7 +2284,7 @@ _shmutant_pool_locals_writable() {
     SHMUTANT_TARGET SHMUTANT_DECL_ERRORS SHMUTANT_SELECTED_N \
     _shmutant_bo _shmutant_so _shmutant_o _shmutant_n _shmutant_pc _shmutant_wrap_left \
     a budget dog e elapsed last leftovers linked lstart old rrc s tampered tmpd tnow victims wroot \
-    b conts guard_lost guard_r guard_w kills pg ph phid recs rid seen_ck unfrozen w \
+    b conts gone_group guard_id guard_lost guard_pid guard_r guard_w kills pg ph phid recs rid seen_ck unfrozen w \
     SHMUTANT_GUARD SHMUTANT_GUARD_PID SHMUTANT_PS_LSTART
 }
 
@@ -2956,8 +2992,8 @@ _shmutant_cli_wd_is_ours() {
 _shmutant_cli_end_group() {
   local hp="${2%% *}" hid=""
   case "$2" in *" "*) hid="${2#* }" ;; esac
-  [ -n "$hp" ] && kill -0 "$hp" 2>/dev/null || return 0
-  if [ -n "$hid" ] && _shmutant_identity "$hp" > /dev/null; then _shmutant_alive_since "$hp" "$hid" || return 0; fi
+  [ -n "$hp" ] || return 0
+  _shmutant_holder_state "$hp" "$hid" || [ "$?" = 2 ] || return 0
   kill -KILL -- -"$1" 2>/dev/null
   kill -KILL "$hp" 2>/dev/null
   return 0
