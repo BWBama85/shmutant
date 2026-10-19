@@ -470,4 +470,8 @@ One line per resolved review thread, newest last.
 - `stale-artifact-reuse` `shmutant.sh:1302` `da1750d` `PRRT_kwDOUT7q9s6tgTgT` PR #50 2026-10-17 — the guard verified a recorded pid against a start table and KILLed it later without stopping it, so it could end and its pid be reused first
 - `caller-owned-path-deleted` `test/run.sh:7074` `957af2b` `PRRT_kwDOUT7q9s6t8e-d` PR #56 2026-10-19 — the runner granted removal of a unit directory after a sweep that left a survivor, which could swap the path before rm -rf
 - `clock-dependent-deadline` `test/run.sh:6236` `957af2b` `PRRT_kwDOUT7q9s6t8e-o` PR #56 2026-10-19 — a harness fixture gave the sampler a fixed 0.7s to record its leftover instead of waiting until the record named it
+- `timeout-escalation-cancelled` `test/run.sh:7071` `b4d2834` `PRRT_kwDOUT7q9s6t-VXr` PR #56 2026-10-19 — a stopped sampler whose identity reread failed was left unkilled, so the interrupted suite hung waiting on it
+- `stale-artifact-reuse` `test/run.sh:7069` `b4d2834` `PRRT_kwDOUT7q9s6t-VXw` PR #56 2026-10-19 — the sampler kill walked from a bare root pid after its identity check, which a reused pid could answer
+- `early-return-skips-cleanup` `test/run.sh:6843` `b4d2834` `PRRT_kwDOUT7q9s6t-VX2` PR #56 2026-10-19 — a unit directory whose parent could not be searched was taken for absent, so it leaked unreported
+- `stale-artifact-reuse` `test/run.sh:7195` `b4d2834` `PRRT_kwDOUT7q9s6t-VX9` PR #56 2026-10-19 — a sweep record the unit removed or replaced read as no leftover and allowed removal
 <!-- adb:hits:end -->
