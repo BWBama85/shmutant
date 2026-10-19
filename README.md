@@ -197,7 +197,9 @@ session launchd started (as on the CI runner), the exit of a member launchd adop
 treating its group as newly orphaned, and an orphaned group with a member stopped is hung up whole: in
 the suite's group, that ended the suite with status 129. An INT, TERM or HUP sent to the suite is
 passed on to the unit it is running, which is killed if it has not ended three seconds later and then
-swept as any unit is, so a `^C` at the terminal still ends both.
+swept as any unit is, so a `^C` at the terminal still ends both. The suite makes each unit's
+directory and removes it once the unit has ended, but only while that path still names the directory
+it made: a unit that puts another directory there fails, and that directory is left alone.
 
 An agent sandbox is the usual cause: on macOS `/bin/ps` is setuid root, and Claude Code's sandbox
 refuses to execute it. This repository's `.claude/settings.json` lists `bash test/run.sh` in
