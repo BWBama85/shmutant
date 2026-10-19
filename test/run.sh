@@ -6703,7 +6703,9 @@ unit_snapshot() {
 # directory aside and put another in its place, and that one is never removed. The directory moved
 # aside is not looked for. 0 when nothing is at the path or it was removed; 1 when the removal
 # failed; 2 when the path names something else (another directory, a symlink, or no identity to
-# compare it with). It keeps no variable of its own, for unit_finish.
+# compare it with). It keeps no variable of its own, for unit_finish. The check and the removal are
+# two steps: a process of the unit's still running between them (unit_finish runs before the sweep)
+# can still put another directory at the path in that window.
 unit_dir_remove() {
   [ -e "$T" ] || [ -L "$T" ] || return 0
   [ -n "${T_ID:-}" ] && [ ! -L "$T" ] && [ "$(_shmutant_dir_id "$T")" = "$T_ID" ] || return 2
