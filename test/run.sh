@@ -6089,7 +6089,7 @@ EOF
       'eval "_real_descendants() $(declare -f _shmutant_descendants | sed 1d)"' \
       '_shmutant_descendants() { [ -n "${WALK_FAILS:-}" ] && [ "${FUNCNAME[1]:-}" = _real_kill_tree ] && [ "${FUNCNAME[3]:-}" = suite_signalled ] && return 0; _real_descendants "$@"; }' \
       'eval "_real_alive_since() $(declare -f _shmutant_alive_since | sed 1d)"' \
-      '_shmutant_alive_since() { [ "${WALK_FAILS:-}" = recheck ] && [ "${FUNCNAME[3]:-}" = suite_signalled ] && return 1; _real_alive_since "$@"; }' \
+      '_shmutant_alive_since() { [ "${WALK_FAILS:-}" = recheck ] && [ "${FUNCNAME[3]:-}" = suite_signalled ] && [ "$1" = "${sampler:-}" ] && return 1; _real_alive_since "$@"; }' \
       'eval "_real_desc_started() $(declare -f _shmutant_descendants_started | sed 1d)"' \
       '_shmutant_descendants_started() {' \
       '  if [ "${FUNCNAME[1]:-}" = suite_signalled ]; then' \
@@ -6175,7 +6175,7 @@ EOF
   # and what the walk listed is not trusted either (its number may have passed to another process,
   # whose children those would be): that is said. One whose start cannot be read (noid) still has its descendants
   # listed and killed, and one whose start cannot be read again (recheck) is still killed while it
-  # is this shell's job: left stopped, it would hang the suite.
+  # is this shell's job, with its descendants: left stopped, it would hang the suite.
   local stranger strangerid walk
   for walk in '' bare all exits recheck noid; do
     rm -f "$T/slow.pid" "$T/slow.started" "$T/slow.finished" "$T/sampler.kids" "$T/sampler.gkid" "$T/kill.log"; sampler=""
@@ -6204,8 +6204,7 @@ EOF
     fi
     if [ "$(command -p grep -c . "$T/sampler.kids" 2>/dev/null)" = 3 ]; then
       out="$(left_running "$T/sampler.kids")" || fail_ 'fixture: the record of what the sampler started could not be checked'
-      if [ "$walk" = recheck ]; then :
-      elif [ "$walk" = all ] || [ "$walk" = exits ]; then
+      if [ "$walk" = all ] || [ "$walk" = exits ]; then
         has "$(cat "$T/stopped.out")" 'FAIL: t_zz_slow: the descendant sampler did not stop and was killed, but what it had started could not be listed' 'a stopped sampler whose descendants could not be listed says so'
       else eq "$out" '' "no process the stopped sampler had started outlived the suite (walk=[$walk])"; fi
       for pid in $out; do kill -KILL "$pid" 2>/dev/null; done
@@ -7064,14 +7063,23 @@ sweep_record() {
       printf 'FAIL: %s: its sweep record is missing or was replaced, so what the unit left behind is unverified\n' "$u"
       urc=1; SEEN_BAD=1
     fi
-    # The copy is named before the descriptor is read, so that an interrupt arriving once it has been
-    # read sweeps that copy: a trap runs only after the read has finished.
+    # The copy is named before the descriptor is read (SEEN_TAKEN=reading), and marked whole
+    # once it has finished: a sweep entered again in between finishes the read from wherever the
+    # descriptor is, so the copy it sweeps holds the whole record. A trap runs only once a read
+    # under way has finished, never in its middle.
     taken="$(mktemp "$SWEEP_DIR/taken.XXXXXX")" || taken=""
-    if [ -n "$taken" ]; then SWEEP_SEEN="$taken"; SEEN_TAKEN=1; fi
-    if [ -z "$taken" ] || ! command -p cat <&"$sfd" > "$taken" 2>/dev/null; then
+    if [ -z "$taken" ]; then
       printf 'FAIL: %s: its sweep record could not be read, so what the unit left behind is unverified\n' "$u"
       urc=1; SEEN_BAD=1; return 0
     fi
+    SWEEP_SEEN="$taken"; SEEN_TAKEN=reading
+  fi
+  if [ "$SEEN_TAKEN" = reading ]; then
+    if ! command -p cat <&"$sfd" >> "$SWEEP_SEEN" 2>/dev/null; then
+      printf 'FAIL: %s: its sweep record could not be read, so what the unit left behind is unverified\n' "$u"
+      urc=1; SEEN_BAD=1; return 0
+    fi
+    SEEN_TAKEN=whole
   fi
   if sweep_unit "$u" && [ -z "${SEEN_BAD:-}" ] && [ "${T_SAMPLED:-}" = 1 ]; then T_SWEPT=1; fi
   return 0
