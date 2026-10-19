@@ -5709,6 +5709,9 @@ t_suite_sweeps_what_a_unit_leaves_behind() {
   # The leftovers write nowhere: one holding the capture's pipe would make `$(…)` wait for it to
   # end by itself, and the check that it was killed could then never fail.
   [ "$(tail -n 1 "$here/run.sh")" = 'main "$@"' ] || { fail_ 'run.sh no longer ends with main "$@"'; return; }
+  # A copy's unit whose leftovers its sweep cannot show gone keeps its directory: the copies make
+  # theirs in this unit's, which the runner removes.
+  mkdir "$T/tmp" && export TMPDIR="$T/tmp" || { fail_ 'fixture: could not make the copies'"'"' TMPDIR'; return; }
   mkdir -p "$T/suite/test"
   cp -- "$SHMUTANT" "$T/suite/shmutant.sh"
   # The units below are written as source, so this directory goes into them quoted for the shell.
@@ -6024,6 +6027,9 @@ t_suite_runs_each_unit_in_a_process_group_of_its_own() {
   # place and says so; a T the caller exported is never removed. A unit sees none of the suite's handlers, reads end-of-file on stdin whatever
   # the suite was given, and still has its own errexit ignored.
   [ "$(tail -n 1 "$here/run.sh")" = 'main "$@"' ] || { fail_ 'run.sh no longer ends with main "$@"'; return; }
+  # A copy's unit whose leftovers its sweep cannot show gone keeps its directory: the copies make
+  # theirs in this unit's, which the runner removes.
+  mkdir "$T/tmp" && export TMPDIR="$T/tmp" || { fail_ 'fixture: could not make the copies'"'"' TMPDIR'; return; }
   mkdir -p "$T/suite/test"
   cp -- "$SHMUTANT" "$T/suite/shmutant.sh"
   local qt; printf -v qt '%q' "$T"
@@ -6045,7 +6051,12 @@ t_suite_runs_each_unit_in_a_process_group_of_its_own() {
   t_zz_selfkill() { echo "\$T" > $qt/selfkill.dir; kill -KILL "\$BASHPID"; }
   t_zz_breaks() {
     echo "\$T" > $qt/breaks.dir; sleep 30 > /dev/null 2>&1 & echo \$! > $qt/breaks.pid
-    mkdir "\$SWEEP_DIR/unsettled"; sleep 0.7; kill -KILL "\$BASHPID"
+    seen_by_sampler \$!; mkdir "\$SWEEP_DIR/unsettled"; kill -KILL "\$BASHPID"
+  }
+  seen_by_sampler() {
+    local i
+    for (( i = 0; i < 100; i++ )); do command -p grep -q "^\$1:" "\$SWEEP_SEEN" && return 0; sleep 0.1; done
+    echo "fixture: the sampler never recorded pid \$1"; return 1
   }
   t_zz_stdin() { if IFS= read -r line; then printf 'read %s\n' "\$line"; else echo eof; fi > $qt/stdin; }
   t_zz_errexit() { set -e; false; : > $qt/errexit; }
@@ -6178,7 +6189,7 @@ EOF
   if [ -z "$dir" ]; then fail_ 'fixture: t_zz_breaks never recorded its directory'
   else
     [ -d "$dir" ] || fail_ 'a harness failure removed the directory of a unit whose leftovers were not swept'
-    has "$out" "run.sh: t_zz_breaks: its directory $dir was left in place, because what the unit left behind was not swept" 'and says so'
+    has "$out" "run.sh: t_zz_breaks: its directory $dir was left in place, because what the unit left behind was not shown to be gone" 'and says so'
     rm -rf -- "$dir"
   fi
   pid="$(cat "$T/breaks.pid" 2>/dev/null)"; [ -z "$pid" ] || { kill -KILL "$pid" 2>/dev/null; wait_gone "$pid"; }
@@ -6218,7 +6229,9 @@ t_suite_removes_a_unit_directory_only_while_it_is_the_runners() {
   # directory and its file survive, the refusal names the path, and the directory moved aside is left
   # where it is. The same unit leaving its directory in place has it removed on each of those paths.
   # Only the runner checks and removes it, never the unit's shell nor before the unit's leftovers are
-  # swept (a harness failure leaves the path as it is), and a symlink is refused too.
+  # swept and shown gone (a harness failure, or a leftover the sweep could not kill, leaves the path
+  # as it is), and a symlink is refused too. A leftover the fixture needs swept is first seen by the
+  # sampler (seen_by_sampler), not given a fixed time to be.
   [ "$(tail -n 1 "$here/run.sh")" = 'main "$@"' ] || { fail_ 'run.sh no longer ends with main "$@"'; return; }
   mkdir -p "$T/suite/test"
   cp -- "$SHMUTANT" "$T/suite/shmutant.sh"
@@ -6233,18 +6246,27 @@ t_suite_removes_a_unit_directory_only_while_it_is_the_runners() {
     case "\${HOW:-}" in
       selfkill) kill -KILL "\$BASHPID" ;;
       signal)   : > $qt/swaps.started; sleep 10 ;;
-      harness)  sleep 30 > /dev/null 2>&1 & echo \$! > $qt/swaps.pid; mkdir "\$SWEEP_DIR/unsettled"; sleep 0.7 ;;
+      harness)  sleep 30 > /dev/null 2>&1 & note_started $qt/swaps.pid; seen_by_sampler \$!; mkdir "\$SWEEP_DIR/unsettled" ;;
+      # A leftover in a group of its own, which a TERM sent to the unit's group does not reach.
+      survivor) set -m; sleep 30 > /dev/null 2>&1 & note_started $qt/swaps.pid; set +m; seen_by_sampler \$!
+                [ -z "\${LATE:-}" ] || { : > $qt/swaps.started; sleep 10; } ;;
     esac
+  }
+  seen_by_sampler() {
+    local i
+    for (( i = 0; i < 100; i++ )); do command -p grep -q "^\$1:" "\$SWEEP_SEEN" && return 0; sleep 0.1; done
+    echo "fixture: the sampler never recorded pid \$1"; return 1
   }
 EOF
     printf '%s\n' 'eval "_real_dir_id() $(declare -f _shmutant_dir_id | sed 1d)"' \
       '_shmutant_dir_id() {' \
       '  _real_dir_id "$@"' \
       '  [ -n "${SWAP_RACE:-}" ] && [ "${FUNCNAME[1]:-}" = unit_dir_remove ] && [ ! -e "$SWAP_RACE/raced" ] || return 0' \
-      '  local p; p="$(cat "$SWAP_RACE/swaps.pid" 2>/dev/null)"' \
-      '  [ -n "${_unit:-}" ] || { [ -n "$p" ] && kill -0 "$p" 2>/dev/null; } || return 0' \
+      '  [ -n "${_unit:-}" ] || [ -n "$(left_running "$SWAP_RACE/swaps.pid" 2>/dev/null)" ] || return 0' \
       '  : > "$SWAP_RACE/raced"; mv -- "$1" "$SWAP_RACE/swaps.aside" && mv -- "$SWAP_RACE/callers" "$1"' \
       '}' \
+      'eval "_real_kill_twice() $(declare -f _shmutant_kill_tree_twice | sed 1d)"' \
+      '_shmutant_kill_tree_twice() { [ -n "${SURVIVE:-}" ] && [ "${FUNCNAME[1]:-}" = sweep_unit ] && return 0; _real_kill_twice "$@"; }' \
       'main "$@"'
   } > "$T/suite/test/run.sh"
   local how keep out rc want dir pid suite refusal
@@ -6264,13 +6286,13 @@ EOF
       fi
       out="$(cat "$T/swaps.out")"
       rc_is "$rc" "$want" "the suite's status when the unit ends by $how (keep=[$keep])"
-      pid="$(cat "$T/swaps.pid" 2>/dev/null)"; [ -z "$pid" ] || { kill -KILL "$pid" 2>/dev/null; wait_gone "$pid"; }
+      for pid in $(left_running "$T/swaps.pid" 2>/dev/null); do kill -KILL "$pid" 2>/dev/null; wait_gone "$pid"; done
       dir="$(cat "$T/swaps.dir" 2>/dev/null)"
       [ -n "$dir" ] || { fail_ "fixture: t_zz_swaps never recorded its directory ($how, keep=[$keep]): [$out]"; continue; }
       refusal="$dir could not be shown to be the directory the runner made for it, so it was not removed"
       if [ "$how" = harness ]; then
         # Before the sweep, whatever is at the path is left there: a leftover could still swap it.
-        refusal="its directory $dir was left in place, because what the unit left behind was not swept"
+        refusal="its directory $dir was left in place, because what the unit left behind was not shown to be gone"
         has "$out" "$refusal" "a harness failure before the sweep leaves the path as it is (keep=[$keep])"
         if [ -n "$keep" ]; then [ -d "$dir" ] || fail_ 'a harness failure before the sweep removed the unit'"'"'s directory'; rm -rf -- "$dir"
         elif [ -e "$dir/precious" ]; then rm -rf -- "$dir"
@@ -6295,9 +6317,9 @@ EOF
   [ -z "$dir" ] || rm -rf -- "$dir"
   rm -rf -- "$T/swaps.aside" "$T/callers"; mkdir "$T/callers"; : > "$T/callers/precious"
   out="$(KEEP='' HOW=harness SHMUTANT_SELECT=t_zz_swaps bash "$T/suite/test/run.sh" 2>&1 >/dev/null)"
-  pid="$(cat "$T/swaps.pid" 2>/dev/null)"; [ -z "$pid" ] || { kill -KILL "$pid" 2>/dev/null; wait_gone "$pid"; }
+  for pid in $(left_running "$T/swaps.pid" 2>/dev/null); do kill -KILL "$pid" 2>/dev/null; wait_gone "$pid"; done
   dir="$(cat "$T/swaps.dir" 2>/dev/null)"
-  has "$out" "run.sh: t_zz_swaps: its directory $dir was left in place, because what the unit left behind was not swept and could still put another directory there" 'a harness failure says so on stderr'
+  has "$out" "run.sh: t_zz_swaps: its directory $dir was left in place, because what the unit left behind was not shown to be gone and could still put another directory there" 'a harness failure says so on stderr'
   [ -z "$dir" ] || rm -rf -- "$dir"
   # The check and the removal are two steps, taken only by the runner once the unit's leftovers are
   # swept. A swap right after a check made while a process of the unit's could still run (in the
@@ -6305,12 +6327,38 @@ EOF
   for how in trap harness; do
     rm -rf -- "$T/swaps.aside" "$T/callers" "$T/raced" "$T/swaps.pid"; mkdir "$T/callers"; : > "$T/callers/precious"
     out="$(SWAP_RACE="$T" KEEP=1 HOW="$how" SHMUTANT_SELECT=t_zz_swaps bash "$T/suite/test/run.sh" 2>&1)"
-    pid="$(cat "$T/swaps.pid" 2>/dev/null)"; [ -z "$pid" ] || { kill -KILL "$pid" 2>/dev/null; wait_gone "$pid"; }
+    for pid in $(left_running "$T/swaps.pid" 2>/dev/null); do kill -KILL "$pid" 2>/dev/null; wait_gone "$pid"; done
     [ ! -e "$T/raced" ] || fail_ "the directory was checked for removal while a process of the unit's could still swap it ($how): [$out]"
     [ -e "$T/callers/precious" ] || fail_ "a directory swapped in between the check and the removal lost its file ($how)"
     dir="$(cat "$T/swaps.dir" 2>/dev/null)"
     if [ "$how" = trap ]; then [ -n "$dir" ] && [ ! -e "$dir" ] || fail_ "the directory of a unit that left it in place was not removed: [$out]"
     else [ -z "$dir" ] || rm -rf -- "$dir"; fi
+  done
+  # A sweep that could not kill what the unit left behind (SURVIVE) does not let the directory go,
+  # after the unit ends or when the suite is sent TERM (LATE): the survivor could still swap it.
+  local late
+  for late in '' 1; do
+    rm -rf -- "$T/swaps.aside" "$T/callers" "$T/raced" "$T/swaps.pid" "$T/swaps.started"; mkdir "$T/callers"; : > "$T/callers/precious"
+    rc=0
+    if [ -n "$late" ]; then
+      SURVIVE=1 LATE=1 SWAP_RACE="$T" KEEP=1 HOW=survivor SHMUTANT_SELECT=t_zz_swaps bash "$T/suite/test/run.sh" > "$T/swaps.out" 2>&1 & suite=$!
+      if wait_for "$T/swaps.started"; then kill -TERM "$suite"; else fail_ 'fixture: t_zz_swaps never started with a survivor'; kill -KILL "$suite" 2>/dev/null; fi
+      wait "$suite" 2>/dev/null || rc=$?
+      want=143
+    else
+      SURVIVE=1 SWAP_RACE="$T" KEEP=1 HOW=survivor SHMUTANT_SELECT=t_zz_swaps bash "$T/suite/test/run.sh" > "$T/swaps.out" 2>&1 || rc=$?
+      want=1
+    fi
+    out="$(cat "$T/swaps.out")"
+    for pid in $(left_running "$T/swaps.pid" 2>/dev/null); do kill -KILL "$pid" 2>/dev/null; wait_gone "$pid"; done
+    rc_is "$rc" "$want" "the suite's status when a leftover survives the sweep (late=[$late])"
+    has "$out" 'FAIL: t_zz_swaps: 1 process(es) outlived the unit and could not be killed' "and the survivor is reported (late=[$late])"
+    [ ! -e "$T/raced" ] || fail_ "the directory was checked for removal while a survivor of the sweep could still swap it (late=[$late]): [$out]"
+    [ -e "$T/callers/precious" ] || fail_ "a directory a survivor of the sweep swapped in lost its file (late=[$late])"
+    dir="$(cat "$T/swaps.dir" 2>/dev/null)"
+    has "$out" "its directory $dir was left in place, because what the unit left behind was not shown to be gone" "and its directory is left in place, and named (late=[$late])"
+    [ -n "$dir" ] && [ -d "$dir" ] || fail_ "the directory of a unit whose leftover survived the sweep was removed (late=[$late])"
+    [ -z "$dir" ] || rm -rf -- "$dir"
   done
   # A symlink put at the path, even to a directory, is not the runner's directory either: left as it is.
   rm -rf -- "$T/swaps.aside" "$T/callers"; mkdir "$T/callers"; : > "$T/callers/precious"
@@ -6743,11 +6791,11 @@ unit_snapshot() {
 # identity, the directory the runner made ($T_ID, read when it was made): a unit can move its
 # directory aside and put another in its place, and that one is never removed. The directory moved
 # aside is not looked for. The check and the removal are two steps, so nothing is removed until the
-# unit's leftovers have been swept ($T_SWEPT): a process of the unit's still running could put
-# another directory at the path between them. One the sweep never saw (it detached between two
-# samples) still could. 0 when nothing is at the path or it was removed; 1 when the removal failed;
+# unit's leftovers have been swept and shown gone ($T_SWEPT): a process of the unit's still running
+# could put another directory at the path between them. One the sweep never saw (it detached
+# between two samples) still could. 0 when nothing is at the path or it was removed; 1 when the removal failed;
 # 2 when the path names something else (another directory, a symlink, or no identity to compare it
-# with); 3 when the unit's leftovers have not been swept.
+# with); 3 when the unit's leftovers have not been swept, or the sweep could not show them gone.
 unit_dir_remove() {
   [ -e "$T" ] || [ -L "$T" ] || return 0
   [ "${T_SWEPT:-}" = 1 ] || return 3
@@ -6755,12 +6803,12 @@ unit_dir_remove() {
   rm -rf -- "$T"
 }
 
-# unit_dir_failed <prefix> <unit> <status> [by] — the line reporting a unit_dir_remove <status> of 1
-# or 2 for <unit>, led by <prefix> (`FAIL` for a unit's verdict, `run.sh` for the harness's own
+# unit_dir_failed <prefix> <unit> <status> [by] — the line reporting a unit_dir_remove <status> of 1,
+# 2 or 3 for <unit>, led by <prefix> (`FAIL` for a unit's verdict, `run.sh` for the harness's own
 # report), with [by] naming who tried.
 unit_dir_failed() {
   if [ "$3" = 3 ]; then
-    printf '%s: %s: its directory %s was left in place, because what the unit left behind was not swept and could still put another directory there\n' "$1" "$2" "$T"
+    printf '%s: %s: its directory %s was left in place, because what the unit left behind was not shown to be gone and could still put another directory there\n' "$1" "$2" "$T"
   elif [ "$3" = 2 ]; then
     printf '%s: %s: %s could not be shown to be the directory the runner made for it, so it was not removed%s\n' "$1" "$2" "$T" "${4:+ by $4}"
   else
@@ -6870,14 +6918,16 @@ ps_runs() {
 # sweep_unit <unit> — what follows a unit once it has ended: every process its record ($SWEEP_SEEN)
 # names that is still the process it was when seen is listed, frozen and killed, then checked gone.
 # Each is counted, and one unverified or surviving fails the unit. It runs in main's scope, setting
-# main's `urc` and `swept`; an interrupted suite sweeps the same way (suite_signalled).
+# main's `urc` and `swept`; an interrupted suite sweeps the same way (suite_signalled). Returns 1
+# when what it found could not be shown gone (unverified, escaped a freeze, or not killed), so a
+# process of the unit's may still run; 0 otherwise.
 sweep_unit() {
-  local u="$1" ufd i
+  local u="$1" ufd i unshown=0
   local -a victims=()
   unit_leftovers "$SWEEP_SEEN"
   if [ "$left_unverified" = 1 ]; then
     printf 'FAIL: %s: the process table could not be read, so what the unit left behind is unverified\n' "$u"
-    urc=1
+    urc=1; unshown=1
   fi
   if [ "${#left[@]}" -gt 0 ]; then
     # Named before the kill: a leftover is diagnosed from this list, not from a count.
@@ -6893,7 +6943,7 @@ sweep_unit() {
     exec {ufd}>&-
     if command -p grep -qx unsettled "$SWEEP_DIR/unsettled"; then
       printf 'FAIL: %s: its leftovers kept forking through every freeze pass, so what escaped them is unverified\n' "$u"
-      urc=1
+      urc=1; unshown=1
     fi
     # Checked, not assumed: a process the suite cannot signal is still there after the kill. A
     # record that could not be rewritten may read as empty, and a victim the kill missed would
@@ -6907,9 +6957,10 @@ sweep_unit() {
     done
     [ "$left_unverified" = 1 ] && left=("${victims[@]}")
     [ "${#left[@]}" -eq "${#victims[@]}" ] || printf 'FAIL: %s: %d process(es) outlived the unit and were killed\n' "$u" "$(( ${#victims[@]} - ${#left[@]} ))"
-    [ "${#left[@]}" -eq 0 ] || printf 'FAIL: %s: %d process(es) outlived the unit and could not be killed\n' "$u" "${#left[@]}"
+    [ "${#left[@]}" -eq 0 ] || { printf 'FAIL: %s: %d process(es) outlived the unit and could not be killed\n' "$u" "${#left[@]}"; unshown=1; }
     swept=$((swept + ${#victims[@]} - ${#left[@]})); urc=1
   fi
+  return "$unshown"
 }
 
 # suite_job_runs <pid> — true while <pid> is a job of this shell that bash has not seen end, running or
@@ -6971,7 +7022,7 @@ suite_signalled() {
   fi
   # The record is named only while this unit's sweep is owed; gone by then, nothing it held is verified.
   if [ -n "${SWEEP_SEEN:-}" ]; then
-    if [ -e "$SWEEP_SEEN" ]; then sweep_unit "$u"; T_SWEPT=1; rm -f -- "$SWEEP_SEEN"
+    if [ -e "$SWEEP_SEEN" ]; then sweep_unit "$u" && T_SWEPT=1; rm -f -- "$SWEEP_SEEN"
     else printf 'FAIL: %s: its sweep record is missing, so what the unit left behind is unverified\n' "$u"; fi
   fi
   if [ -n "${T:-}" ]; then
@@ -7071,10 +7122,13 @@ main() {
       printf 'FAIL: %s: the descendant sampler stopped abnormally (status %s), so what the unit left behind is unverified\n' "$u" "$src"
       urc=1
     fi
-    sweep_unit "$u"; T_SWEPT=1
+    # Only a sweep that showed every leftover gone lets the directory go: one still running could
+    # put another directory at the path between the check and the removal.
+    sweep_unit "$u" && T_SWEPT=1
     rm -f -- "$SWEEP_SEEN"; SWEEP_SEEN=""
     # The directory is the runner's, removed now the unit's leftovers are swept, and only while it is
-    # still the one the runner made: another directory there, or one that cannot go, fails the unit.
+    # still the one the runner made: another directory there, one that cannot go, or a sweep that
+    # could not show the unit's leftovers gone, fails the unit.
     unit_dir_remove || { unit_dir_failed FAIL "$u" "$?" 'the runner'; urc=1; }
     T=""; T_ID=""; T_SWEPT=""
     [ "$urc" -eq 0 ] || failed=$((failed + 1))
