@@ -6325,6 +6325,7 @@ EOF
       'sample_unit() { [ -z "${SAMPLER_FAILS:-}" ] || return 3; _real_sample_unit "$@"; }' \
       'eval "_real_sweep_unit() $(declare -f sweep_unit | sed 1d)"' \
       'sweep_unit() { if [ -n "${TERM_IN_SWEEP:-}" ] && [ ! -e "$SWEEP_DIR/termed" ]; then : > "$SWEEP_DIR/termed"; kill -TERM "$$"; fi; _real_sweep_unit "$@"; }' \
+      'rm() { command rm "$@"; local r=$?; if [ -n "${TERM_AFTER_RM:-}" ] && [ "${FUNCNAME[1]:-}" = main ] && [ ! -e "$SWEEP_DIR/termed" ] && [ -z "${T_SWEPT:-}" ] && [ -n "${T:-}" ]; then : > "$SWEEP_DIR/termed"; kill -TERM "$$"; fi; return "$r"; }' \
       'eval "_real_dir_remove() $(declare -f unit_dir_remove | sed 1d)"' \
       'unit_dir_remove() { local r=0; [ -z "${HIDE:-}" ] || chmod a-x -- "${T%/*}"; _real_dir_remove || r=$?; [ -z "${HIDE:-}" ] || chmod u+x -- "${T%/*}"; return "$r"; }' \
       'main "$@"'
@@ -6458,6 +6459,17 @@ EOF
   has "$out" 'FAIL: t_zz_swaps: its sweep record is missing or was replaced' 'and says what was wrong with the record'
   dir="$(cat "$T/swaps.dir" 2>/dev/null)"
   [ -n "$dir" ] && [ -d "$dir" ] || fail_ "the interrupted sweep of a record the unit removed let its directory go: [$out]"
+  [ -z "$dir" ] || rm -rf -- "$dir"
+  # Sent TERM just after the runner removed the record of a sweep that left a survivor, the suite
+  # sweeps again from nothing: that never lets the directory go either.
+  rm -rf -- "$T/swaps.aside" "$T/callers" "$T/raced" "$T/swaps.pid"; mkdir "$T/callers"; : > "$T/callers/precious"
+  rc=0; out="$(TERM_AFTER_RM=1 SURVIVE=1 SWAP_RACE="$T" KEEP=1 HOW=survivor SHMUTANT_SELECT=t_zz_swaps bash "$T/suite/test/run.sh" 2>&1)" || rc=$?
+  for pid in $(left_running "$T/swaps.pid" 2>/dev/null); do kill -KILL "$pid" 2>/dev/null; wait_gone "$pid"; done
+  rc_is "$rc" 143 'the suite sent TERM after it removed a swept record ends by TERM'
+  [ ! -e "$T/raced" ] || fail_ "a sweep entered again after its record was removed let the directory be checked for removal: [$out]"
+  [ -e "$T/callers/precious" ] || fail_ 'a directory a survivor swapped in after an interrupted sweep lost its file'
+  dir="$(cat "$T/swaps.dir" 2>/dev/null)"
+  [ -n "$dir" ] && [ -d "$dir" ] || fail_ "the directory of a unit whose sweep was entered again was removed: [$out]"
   [ -z "$dir" ] || rm -rf -- "$dir"
   # A path whose parent cannot be searched cannot be shown absent: the directory there is reported as
   # not removed, not taken for gone. (Root searches any directory, so this cannot be set up as root.)
@@ -7036,10 +7048,15 @@ seen_record_held() {
 # the record was still at its name, the unit's last snapshot reached it (nothing on $lrd, the
 # runner's end of $SWEEP_LOST_FD), the sweep showed every leftover gone, and the sampler kept the
 # record to the end (T_SAMPLED). What it finds wrong with the record is kept for the unit
-# (SEEN_BAD): an interrupt that sweeps again does not forget it. A record truncated in place is not
-# told apart: what was cut from it is not swept. It runs in main's scope.
+# (SEEN_BAD): an interrupt that sweeps again does not forget it. A sweep entered again by an
+# interrupt (SEEN_SWEEPING already set) sweeps what it can but never lets the directory go: the
+# first may have been cut anywhere, between reading the record and saying so, or after its copy was
+# removed. A record truncated in place is not told apart: what was cut from it is not swept. It
+# runs in main's scope.
 sweep_record() {
   local u="$1" lost taken
+  [ -z "${SEEN_SWEEPING:-}" ] || SEEN_BAD=1
+  SEEN_SWEEPING=1
   if [ -z "${SEEN_TAKEN:-}" ]; then
     lost="$(command -p cat <&"$lrd" 2>/dev/null)" || SEEN_BAD=1
     [ -z "$lost" ] || SEEN_BAD=1
@@ -7213,7 +7230,7 @@ main() {
   # Every name the cleanup below reads is this run's own before any handler can run: a T or a
   # SWEEP_SEEN inherited from the environment is someone else's path, a T_ID someone else's
   # directory, and a T_SWEPT or T_SAMPLED no sweep or sampler of this run's.
-  T=""; T_ID=""; T_SWEPT=""; T_SAMPLED=""; SWEEP_SEEN=""; SWEEP_LOST_FD=""; SEEN_ID=""; SEEN_TAKEN=""; SEEN_BAD=""; SWEEP_UNIT=""
+  T=""; T_ID=""; T_SWEPT=""; T_SAMPLED=""; SWEEP_SEEN=""; SWEEP_LOST_FD=""; SEEN_ID=""; SEEN_TAKEN=""; SEEN_BAD=""; SEEN_SWEEPING=""; SWEEP_UNIT=""
   SWEEP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/shmutant-sweep.XXXXXX")" || { echo 'run.sh: cannot create the sweep directory' >&2; exit 2; }
   # A harness failure (exit 2) mid-run still removes the unit directory the runner made, and only that,
   # unless it came before the unit's leftovers were swept: it is then left in place, and said so.
@@ -7228,7 +7245,7 @@ main() {
   for u in $units; do
     shmutant_selected "$u" || continue
     ran=$((ran + 1))
-    SWEEP_SEEN=""; SEEN_ID=""; SEEN_TAKEN=""; SEEN_BAD=""
+    SWEEP_SEEN=""; SEEN_ID=""; SEEN_TAKEN=""; SEEN_BAD=""; SEEN_SWEEPING=""
     # The record and the channel for a lost last snapshot have names no unit can have planted, and
     # are held open until the unit is swept (sweep_record): what was written to them is read through
     # the runner's own descriptors, and the record's identity cannot pass to a file put in its place.
