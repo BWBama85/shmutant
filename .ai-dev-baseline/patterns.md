@@ -477,4 +477,5 @@ One line per resolved review thread, newest last.
 - `stale-artifact-reuse` `test/run.sh:7195` `b4d2834` `PRRT_kwDOUT7q9s6t-VX9` PR #56 2026-10-19 — a sweep record the unit removed or replaced read as no leftover and allowed removal
 - `check-then-act-race` `test/run.sh:7051` `47e5a15` `PRRT_kwDOUT7q9s6uALFb` PR #56 2026-10-19 — an interrupt between consuming the held record and marking it taken re-entered the sweep, which read EOF and could grant removal
 - `check-then-act-race` `test/run.sh:7311` `47e5a15` `PRRT_kwDOUT7q9s6uALFf` PR #56 2026-10-19 — an interrupt after the swept record was removed re-entered the sweep, which read nothing and could grant removal despite a survivor
+- `early-return-skips-cleanup` `test/run.sh:7073` `aa22206` `PRRT_kwDOUT7q9s6uBo2I` PR #56 2026-10-19 — a sweep copy that could not be made returned before sweep_unit ran, so recorded leftovers kept running
 <!-- adb:hits:end -->
