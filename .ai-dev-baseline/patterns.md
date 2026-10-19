@@ -468,4 +468,6 @@ One line per resolved review thread, newest last.
 - `stale-artifact-reuse` `test/run.sh:3480` `da1750d` `PRRT_kwDOUT7q9s6tgTgN` PR #50 2026-10-17 — unit cleanup KILLed a saved process-group number after confirming every member gone, when the number may be another group by then
 - `pipeline-status-lost` `test/run.sh:3553` `da1750d` `PRRT_kwDOUT7q9s6tgTgQ` PR #50 2026-10-17 — a unit took a pgid from ps piped to tr, so a failed ps gave an empty pgid and the group check passed vacuously
 - `stale-artifact-reuse` `shmutant.sh:1302` `da1750d` `PRRT_kwDOUT7q9s6tgTgT` PR #50 2026-10-17 — the guard verified a recorded pid against a start table and KILLed it later without stopping it, so it could end and its pid be reused first
+- `caller-owned-path-deleted` `test/run.sh:7074` `957af2b` `PRRT_kwDOUT7q9s6t8e-d` PR #56 2026-10-19 — the runner granted removal of a unit directory after a sweep that left a survivor, which could swap the path before rm -rf
+- `clock-dependent-deadline` `test/run.sh:6236` `957af2b` `PRRT_kwDOUT7q9s6t8e-o` PR #56 2026-10-19 — a harness fixture gave the sampler a fixed 0.7s to record its leftover instead of waiting until the record named it
 <!-- adb:hits:end -->
