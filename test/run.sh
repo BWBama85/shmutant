@@ -189,12 +189,12 @@ note_started() {
 }
 
 # seen_by_sampler <pid> — in a unit of a copy of this suite, wait until its sweep record names <pid>:
-# a fixture that needs its leftover swept waits for the sampler to see it, not a fixed time. Says so
-# and returns 1 when it is not named within ten seconds.
+# a fixture that needs its leftover swept waits for the sampler to see it, not a fixed time. Says so,
+# fails the unit and returns 1 when it is not named within ten seconds.
 seen_by_sampler() {
   local i
   for (( i = 0; i < 100; i++ )); do command -p grep -q "^$1:" "$SWEEP_SEEN" && return 0; sleep 0.1; done
-  echo "fixture: the sampler never recorded pid $1"; return 1
+  echo "fixture: the sampler never recorded pid $1"; _failed=1; return 1
 }
 
 # left_running <file> — print the pid of each process recorded in <file> (a `pid` or `pid:identity`
@@ -6066,12 +6066,15 @@ t_suite_runs_each_unit_in_a_process_group_of_its_own() {
   t_zz_stdin() { if IFS= read -r line; then printf 'read %s\n' "\$line"; else echo eof; fi > $qt/stdin; }
   t_zz_errexit() { set -e; false; : > $qt/errexit; }
   sampler_kids() {
-    sleep 30 > /dev/null 2>&1 & echo "\$!" >> $qt/sampler.kids
-    set -m; bash -c 'sleep 30 > /dev/null 2>&1 & echo "\$!" >> "\$1/sampler.kids"; wait' _ $qt > /dev/null 2>&1 & echo "\$!" >> $qt/sampler.kids; set +m
+    local i
+    sleep 30 > /dev/null 2>&1 & pairs_of "\$!" >> $qt/sampler.kids
+    set -m; bash -c 'sleep 30 > /dev/null 2>&1 & echo "\$!" > "\$1/sampler.gkid.part" && mv -f "\$1/sampler.gkid.part" "\$1/sampler.gkid"; wait' _ $qt > /dev/null 2>&1 & pairs_of "\$!" >> $qt/sampler.kids; set +m
+    for (( i = 0; i < 100; i++ )); do [ -s $qt/sampler.gkid ] && break; sleep 0.05; done
+    pairs_of "\$(cat $qt/sampler.gkid 2>/dev/null)" >> $qt/sampler.kids
   }
 EOF
     printf '%s\n' 'eval "_real_kill_tree() $(declare -f _shmutant_kill_tree | sed 1d)"' \
-      '_shmutant_kill_tree() { [ "${FUNCNAME[2]:-}" = sweep_unit ] || { _real_kill_tree "$@"; return; }; kill() { if [ "$1" = -KILL ] && [ "$2" = -- ]; then shift 2; local t; for t; do builtin kill -KILL -- "$t"; sleep 0.3; done; else builtin kill "$@"; fi; }; _real_kill_tree "$@"; unset -f kill; }' \
+      '_shmutant_kill_tree() { [ -z "${KILL_LOG:-}" ] || [ "${FUNCNAME[1]:-}" != suite_signalled ] || printf "%s\n" "$*" >> "$KILL_LOG"; [ "${FUNCNAME[2]:-}" = sweep_unit ] || { _real_kill_tree "$@"; return; }; kill() { if [ "$1" = -KILL ] && [ "$2" = -- ]; then shift 2; local t; for t; do builtin kill -KILL -- "$t"; sleep 0.3; done; else builtin kill "$@"; fi; }; _real_kill_tree "$@"; unset -f kill; }' \
       'eval "_real_leftovers() $(declare -f unit_leftovers | sed 1d)"' \
       'unit_leftovers() { if [ -n "${LATE_TERM:-}" ] && [ ! -e "$SWEEP_DIR/late" ]; then : > "$SWEEP_DIR/late"; kill -TERM "$$"; fi; _real_leftovers "$@"; }' \
       'eval "_real_identity() $(declare -f _shmutant_identity | sed 1d)"' \
@@ -6083,7 +6086,17 @@ EOF
       'eval "_real_descendants() $(declare -f _shmutant_descendants | sed 1d)"' \
       '_shmutant_descendants() { [ -n "${WALK_FAILS:-}" ] && [ "${FUNCNAME[1]:-}" = _real_kill_tree ] && [ "${FUNCNAME[3]:-}" = suite_signalled ] && return 0; _real_descendants "$@"; }' \
       'eval "_real_desc_started() $(declare -f _shmutant_descendants_started | sed 1d)"' \
-      '_shmutant_descendants_started() { [ "${WALK_FAILS:-}" = all ] && [ "${FUNCNAME[1]:-}" = suite_signalled ] && return 1; _real_desc_started "$@"; }' \
+      '_shmutant_descendants_started() {' \
+      '  if [ "${FUNCNAME[1]:-}" = suite_signalled ]; then' \
+      '    case "${WALK_FAILS:-}" in' \
+      '      all) return 1 ;;' \
+      '      exits) local o i; o="$(_real_desc_started "$@")" || return 1; kill -KILL "$1"' \
+      '        for (( i = 0; i < 50; i++ )); do command -p ps -o pid= -p "$1" > /dev/null 2>&1 || break; sleep 0.1; done' \
+      '        printf "%s\n" "$o"; return 0 ;;' \
+      '    esac' \
+      '  fi' \
+      '  _real_desc_started "$@"' \
+      '}' \
       'main "$@"'
   } > "$T/suite/test/run.sh"
   local out c pid dir suite rc unitpid wrapper sampler i
@@ -6152,12 +6165,16 @@ EOF
   # what it had started: a child, and one in a process group of its own with a child of its own. A
   # process group the suite inherited the name of in SHMUTANT_KILL_GROUP is not signalled with them.
   # They are found by a walk that reports a process table it cannot read: with the kill's own walk
-  # finding nothing (bare) they are still killed, and with every walk failing (all) that is said.
-  local stranger walk
-  for walk in '' bare all; do
-    rm -f "$T/slow.pid" "$T/slow.started" "$T/slow.finished" "$T/sampler.kids"
+  # finding nothing (bare) they are still killed, and with every walk failing (all) that is said. A
+  # sampler that ends and is reaped during that walk (exits) is not signalled by its number again,
+  # while what the walk listed is.
+  local stranger strangerid walk
+  for walk in '' bare all exits; do
+    rm -f "$T/slow.pid" "$T/slow.started" "$T/slow.finished" "$T/sampler.kids" "$T/sampler.gkid" "$T/kill.log"
     set -m; sleep 30 > /dev/null 2>&1 & stranger=$!; set +m
-    WALK_FAILS="$walk" SHMUTANT_KILL_GROUP="$stranger" SAMPLER_KIDS=1 SHMUTANT_SELECT=t_zz_slow bash "$T/suite/test/run.sh" > "$T/stopped.out" 2>&1 & suite=$!
+    strangerid="$(_shmutant_identity "$stranger" 2>/dev/null)" || strangerid=""
+    [ -n "$strangerid" ] || fail_ 'fixture: the start of the process group SHMUTANT_KILL_GROUP names could not be read'
+    KILL_LOG="$T/kill.log" WALK_FAILS="$walk" SHMUTANT_KILL_GROUP="$stranger" SAMPLER_KIDS=1 SHMUTANT_SELECT=t_zz_slow bash "$T/suite/test/run.sh" > "$T/stopped.out" 2>&1 & suite=$!
     for (( i = 0; i < 100; i++ )); do [ "$(command -p grep -c . "$T/sampler.kids" 2>/dev/null)" = 3 ] && break; sleep 0.1; done
     if wait_for "$T/slow.started" && unitpid="$(cat "$T/slow.pid" 2>/dev/null)" && [ -n "$unitpid" ]; then
       wrapper="$(command -p ps -o ppid= -p "$unitpid" 2>/dev/null | tr -d ' ')"
@@ -6172,6 +6189,11 @@ EOF
     rc=0; wait "$suite" 2>/dev/null || rc=$?
     rc_is "$rc" 143 'the suite sent TERM with its sampler stopped ends by TERM'
     [ -z "${sampler:-}" ] || wait_gone "$sampler" '' 1 || { fail_ 'the stopped sampler outlived the suite'; kill -KILL "$sampler" 2>/dev/null; }
+    if [ "$walk" = exits ] && [ -n "${sampler:-}" ]; then
+      [ -s "$T/kill.log" ] || fail_ 'fixture: the suite never killed what its stopped sampler had started'
+      out="$(awk -v s="$sampler" '$2 == s { print }' "$T/kill.log" 2>/dev/null)"
+      eq "$out" '' 'a sampler reaped during the walk of its descendants is not signalled by its number again'
+    fi
     if [ "$(command -p grep -c . "$T/sampler.kids" 2>/dev/null)" = 3 ]; then
       out="$(left_running "$T/sampler.kids")" || fail_ 'fixture: the record of what the sampler started could not be checked'
       if [ "$walk" = all ]; then
@@ -6179,8 +6201,8 @@ EOF
       else eq "$out" '' "no process the stopped sampler had started outlived the suite (walk=[$walk])"; fi
       for pid in $out; do kill -KILL "$pid" 2>/dev/null; done
     else fail_ "fixture: the sampler did not record the three processes it starts (walk=[$walk]): [$(cat "$T/sampler.kids" 2>/dev/null)]"; fi
-    kill -0 "$stranger" 2>/dev/null || fail_ "killing the stopped sampler signalled the process group SHMUTANT_KILL_GROUP named (walk=[$walk])"
-    kill -KILL "$stranger" 2>/dev/null; wait "$stranger" 2>/dev/null
+    _shmutant_alive_since "$stranger" "$strangerid" || fail_ "killing the stopped sampler signalled the process group SHMUTANT_KILL_GROUP named (walk=[$walk])"
+    ! _shmutant_alive_since "$stranger" "$strangerid" || kill -KILL "$stranger" 2>/dev/null; wait "$stranger" 2>/dev/null
   done
   # A unit that kills itself leaves its directory behind for the runner, which removes it.
   out="$(SHMUTANT_SELECT=t_zz_selfkill bash "$T/suite/test/run.sh" 2>&1)"; rc_is $? 1 'a unit that kills itself fails'
@@ -7006,7 +7028,7 @@ suite_job_runs() {
 # one the runner made (unit_dir_remove). Only then does the suite end by the signal, so nothing of the
 # unit outlives it unreported.
 suite_signalled() {
-  local g="" i killed src kids
+  local g="" i killed src kids sid
   local -a kv=()
   trap '' INT TERM HUP
   case "${SWEEP_UNIT:-}" in
@@ -7025,9 +7047,11 @@ suite_signalled() {
   # `sleep` it had started), in one kill: it is still this shell's job, so its number is ours, and
   # it is the walk's root, so the walk comes before the kill that would reparent them. It is in the
   # suite's own process group, so nothing is frozen (D8): a descendant forked between the walk and
-  # the kill escapes it. Its descendants are listed first by a walk that fails when the process
-  # table cannot be read, and killed by identity with the root: one that could not be listed is
-  # reported, never taken for none.
+  # the kill escapes it. Its start is read while it is still this shell's job, and its descendants
+  # are listed by a walk that fails when the process table cannot be read: each is killed by
+  # identity, the sampler only while it still carries its own, and what could not be listed is
+  # reported, never taken for none. One that ended meanwhile is not signalled: its number may be
+  # another's. With no start to hold it to, it is killed by number only while still this shell's job.
   [ -z "${pfd:-}" ] || { printf 'none\n' >&"$pfd"; } 2>/dev/null
   # Its failures are reported as the runner reports them: what it could not sample is unverified.
   if [ -n "${sampler:-}" ]; then
@@ -7035,11 +7059,19 @@ suite_signalled() {
     for (( i = 0; i < 30; i++ )); do suite_job_runs "$sampler" || break; sleep 0.1; done
     if suite_job_runs "$sampler"; then
       killed=1
-      if kids="$(_shmutant_descendants_started "$sampler")"; then
-        [ -z "$kids" ] || mapfile -t kv < <(printf '%s\n' "$kids" | command -p sed 's/ /:/')
+      sid="$(_shmutant_identity "$sampler" 2>/dev/null)" || sid=""
+      if [ -n "$sid" ] && kids="$(_shmutant_descendants_started "$sampler")" \
+        && kids="$(printf '%s\n' "$kids" | command -p sed 's/ /:/')"; then
+        [ -z "$kids" ] || mapfile -t kv <<< "$kids"
       else killed=2; fi
       # No process group of anyone else's: one named in the environment is not the suite's to signal.
-      SHMUTANT_KILL_GROUP="" _shmutant_kill_tree KILL "$sampler" "$sampler:" "${kv[@]}"
+      if [ -n "$sid" ] && _shmutant_alive_since "$sampler" "$sid"; then
+        SHMUTANT_KILL_GROUP="" _shmutant_kill_tree KILL "$sampler" "$sampler:$sid" "${kv[@]}"
+      elif [ -n "$sid" ]; then
+        [ "${#kv[@]}" -eq 0 ] || SHMUTANT_KILL_GROUP="" _shmutant_kill_tree KILL "" "${kv[@]}"
+      elif suite_job_runs "$sampler"; then
+        kill -KILL "$sampler" 2>/dev/null
+      fi
     fi
     wait "$sampler" 2>/dev/null || src=$?
     [ "$killed" != 0 ] || [ "$src" != 0 ] || T_SAMPLED=1

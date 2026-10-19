@@ -201,7 +201,8 @@ swept as any unit is, so a `^C` at the terminal still ends both. The suite makes
 directory and removes it once the unit has ended, but only while that path still names the directory
 it made: a unit that puts another directory there fails, and that directory is left alone. A harness
 failure before the unit's leftovers are swept, or a sweep that cannot show them gone, leaves the
-directory in place and names it.
+directory in place and names it. A process the unit left that detached between two of the sampler's
+looks is never swept, and could still put another directory there.
 
 An agent sandbox is the usual cause: on macOS `/bin/ps` is setuid root, and Claude Code's sandbox
 refuses to execute it. This repository's `.claude/settings.json` lists `bash test/run.sh` in
