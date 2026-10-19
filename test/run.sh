@@ -7055,7 +7055,7 @@ seen_record_held() {
 # runs in main's scope.
 sweep_record() {
   local u="$1" lost taken
-  [ -z "${SEEN_SWEEPING:-}" ] || SEEN_BAD=1
+  [ -z "${SEEN_SWEEPING:-}" ] || { SEEN_BAD=1; T_SWEPT=""; }
   SEEN_SWEEPING=1
   if [ -z "${SEEN_TAKEN:-}" ]; then
     lost="$(command -p cat <&"$lrd" 2>/dev/null)" || SEEN_BAD=1
@@ -7064,9 +7064,11 @@ sweep_record() {
       printf 'FAIL: %s: its sweep record is missing or was replaced, so what the unit left behind is unverified\n' "$u"
       urc=1; SEEN_BAD=1
     fi
-    if taken="$(mktemp "$SWEEP_DIR/taken.XXXXXX")" && command -p cat <&"$sfd" > "$taken" 2>/dev/null; then
-      SWEEP_SEEN="$taken"; SEEN_TAKEN=1
-    else
+    # The copy is named before the descriptor is read, so that an interrupt arriving once it has been
+    # read sweeps that copy: a trap runs only after the read has finished.
+    taken="$(mktemp "$SWEEP_DIR/taken.XXXXXX")" || taken=""
+    if [ -n "$taken" ]; then SWEEP_SEEN="$taken"; SEEN_TAKEN=1; fi
+    if [ -z "$taken" ] || ! command -p cat <&"$sfd" > "$taken" 2>/dev/null; then
       printf 'FAIL: %s: its sweep record could not be read, so what the unit left behind is unverified\n' "$u"
       urc=1; SEEN_BAD=1; return 0
     fi
