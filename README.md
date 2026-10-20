@@ -172,7 +172,7 @@ bash test/run.sh                      # the suite: every `t_*` unit, one at a ti
 bash shmutant.sh run test/mutants.sh  # the suite, mutation-tested by shmutant itself
 bash test/adapters/check.sh bats      # the doc's Bats adapter, on its fixture
 bash test/adapters/check.sh shellspec # the same for ShellSpec
-bash test/release.sh                  # the release driver, against a local origin with gh stubbed
+bash test/release.sh                  # the release driver and bump script, against a local origin with gh stubbed
 ```
 
 The two adapter checks need the framework on `PATH` at the version CI pins (`BATS_VERSION`,
@@ -231,6 +231,9 @@ script exit 0 without running) from reaching the driver, and a run counts as pas
 last line on stdout says so, not on exit 0 alone.
 
 The driver refuses unless a clean `main` at origin's head is green in CI and carries the version
-being cut. It then tags that commit, publishes the GitHub release with `shmutant.sh` and
+being cut. `scripts/bump.sh <X.Y.Z | patch | minor | major>` makes the version bump: it sets
+`SHMUTANT_VERSION`, moves the install URL and the README's example to the new tag, and regenerates
+`CHECKSUMS`. When `main` still carries a released version, `/release` lands that bump as a pull
+request on its own before the cut. The driver then tags `main`'s head, publishes the GitHub release with `shmutant.sh` and
 `CHECKSUMS` attached, and verifies that the install URL in `docs/integrating.md` serves the digest
 in `CHECKSUMS`. The script's header lists every check.

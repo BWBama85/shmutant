@@ -442,7 +442,7 @@ EOF
       ''|*$'\n'*) refuse "shmutant.sh at HEAD does not set SHMUTANT_VERSION on exactly one line" ;;
       *) if ! [[ "$v" =~ $re ]]; then refuse "shmutant.sh at HEAD does not assign SHMUTANT_VERSION a plain version: $vl"
          elif [ "$v" = "$ver" ]; then ok "shmutant.sh sets SHMUTANT_VERSION=$ver"
-         else refuse "version mismatch: shmutant.sh sets SHMUTANT_VERSION=$v, not $ver"
+         else refuse "version mismatch: shmutant.sh sets SHMUTANT_VERSION=$v, not $ver: land scripts/bump.sh $ver in a pull request first"
          fi ;;
     esac
   fi

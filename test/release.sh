@@ -313,7 +313,7 @@ fixture() {
   S="$tmp/$1/stub"; c="$tmp/$1/clone"
   mkdir -p "$S/published" "$c/scripts" "$c/docs" || exit 2
   git init -q --bare -b main "$S/origin.git" && git init -q -b main "$c" || exit 2
-  cp -- "$root/scripts/release.sh" "$c/scripts/" || exit 2
+  cp -- "$root/scripts/release.sh" "$root/scripts/bump.sh" "$c/scripts/" || exit 2
   printf '#!/usr/bin/env bash\nSHMUTANT_VERSION=%s\n' "$VER" > "$c/shmutant.sh" || exit 2
   checksum "$c"
   printf 'curl -fsSL -o scripts/shmutant.sh %s\n' "$URL" > "$c/docs/integrating.md" || exit 2
@@ -1774,6 +1774,108 @@ c_a_signal_the_driver_starts_with_ignored_interrupts_nothing() {
   rc_is "$rc" 0 "a dry run started with TERM ignored, sent TERM during its checks"
   has "$out" "dry run: every precondition holds for $TAG" "goes on to its verdict"
   hasnt "$err" "interrupted" "and says no interrupt"
+}
+
+# --- scripts/bump.sh ---------------------------------------------------------------------------
+
+# bmp <arg>… — scripts/bump.sh in the clone, from its root; sets rc, out and err.
+bmp() {
+  (cd -- "$c" && PATH="$tmp/bin:$PATH" bash scripts/bump.sh "$@") > "$S/out" 2> "$S/err"
+  rc=$?
+  out="$(cat "$S/out")"; err="$(cat "$S/err")"
+}
+# untouched <what> — the clone's work tree is as its last commit left it.
+untouched() { eq "$(git -C "$c" status --porcelain --untracked-files=all)" "" "$1: nothing written"; }
+
+c_bump_makes_the_version_the_dry_run_accepts() {
+  printf 'bash scripts/release.sh --dry-run %s\n' "$VER" > "$c/README.md" || exit 2
+  land "$c" readme
+  rel --dry-run 1.2.4
+  has "$err" "version mismatch: shmutant.sh sets SHMUTANT_VERSION=$VER, not 1.2.4: land scripts/bump.sh 1.2.4 in a pull request first" \
+    "the refusal names the bump"
+  bmp patch
+  rc_is "$rc" 0 "the bump"
+  eq "$out" "bump: $VER -> 1.2.4" "its report"
+  eq "$err" "" "nothing on stderr"
+  eq "$(cat "$c/README.md")" "bash scripts/release.sh --dry-run 1.2.4" "README's example"
+  land "$c" bump
+  rel --dry-run 1.2.4
+  rc_is "$rc" 0 "the dry run after the bump"
+  has "$out" "dry run: every precondition holds for v1.2.4" "the verdict"
+}
+
+c_bump_names_the_next_version() {
+  local a want
+  for a in patch:1.2.4 minor:1.3.0 major:2.0.0 1.10.0:1.10.0 v3.0.0:3.0.0; do
+    want="${a#*:}"
+    bmp "${a%%:*}"
+    rc_is "$rc" 0 "bump ${a%%:*}"
+    eq "$out" "bump: $VER -> $want" "bump ${a%%:*}"
+    eq "$(grep '^SHMUTANT_VERSION=' "$c/shmutant.sh")" "SHMUTANT_VERSION=$want" "bump ${a%%:*}: shmutant.sh"
+    has "$(cat "$c/docs/integrating.md")" "/$SLUG/v$want/shmutant.sh" "bump ${a%%:*}: the doc's URL"
+    eq "$(cat "$c/CHECKSUMS")" "$(sha256 < "$c/shmutant.sh")  shmutant.sh" "bump ${a%%:*}: CHECKSUMS"
+    git -C "$c" checkout -q -- . || exit 2
+  done
+}
+
+c_bump_refuses_and_writes_nothing() {
+  local v
+  for v in "$VER" 1.2.2 0.9.9; do
+    bmp "$v"
+    rc_is "$rc" 1 "bump to $v from $VER"
+    has "$err" "bump: refused: $v is not newer than shmutant.sh's $VER" "bump to $v"
+    untouched "bump to $v"
+  done
+  for v in 1.2 1.02.0 '' -x; do
+    bmp "$v"
+    rc_is "$rc" 2 "bump '$v'"
+    untouched "bump '$v'"
+  done
+  bmp
+  rc_is "$rc" 2 "bump with no argument"
+
+  echo "SHMUTANT_VERSION=$VER" >> "$c/shmutant.sh"; commit "$c" twice
+  bmp patch
+  rc_is "$rc" 1 "two version lines"
+  has "$err" "does not set SHMUTANT_VERSION on exactly one line" "two version lines"
+  untouched "two version lines"
+
+  printf "#!/usr/bin/env bash\nSHMUTANT_VERSION=%s\n" "$VER" > "$c/shmutant.sh" || exit 2
+  echo 'no URL here' > "$c/docs/integrating.md"; commit "$c" no-url
+  bmp patch
+  rc_is "$rc" 1 "a doc with no URL"
+  has "$err" "docs/integrating.md names no raw.githubusercontent.com URL of shmutant.sh" "a doc with no URL"
+  untouched "a doc with no URL"
+
+  printf '%s\n%s\n' "$URL" "https://raw.githubusercontent.com/$SLUG/main/shmutant.sh" > "$c/docs/integrating.md"
+  commit "$c" two-urls
+  bmp patch
+  rc_is "$rc" 1 "a doc with a URL not at a tag"
+  has "$err" "docs/integrating.md names more than one URL of shmutant.sh" "a doc with a URL not at a tag"
+  untouched "a doc with a URL not at a tag"
+  eq "$(cat "$c/shmutant.sh")" "$(printf '#!/usr/bin/env bash\nSHMUTANT_VERSION=%s' "$VER")" "shmutant.sh as it was"
+}
+
+c_bump_moves_the_repositorys_own_files_to_a_version_the_dry_run_accepts() {
+  local real next
+  real="$(sed -n 's/^SHMUTANT_VERSION=//p' "$root/shmutant.sh")"
+  cp -- "$root/shmutant.sh" "$root/CHECKSUMS" "$root/README.md" "$c/" || exit 2
+  sed "s#raw\.githubusercontent\.com/BWBama85/shmutant/#raw.githubusercontent.com/$SLUG/#" \
+    "$root/docs/integrating.md" > "$c/docs/integrating.md" || exit 2
+  land "$c" real-files
+  bmp patch
+  rc_is "$rc" 0 "the bump of the real files"
+  next="${out##* -> }"
+  eq "$out" "bump: $real -> $next" "its report"
+  has "$(cat "$c/docs/integrating.md")" "version      # shmutant $next" "the doc's version comment"
+  hasnt "$(cat "$c/docs/integrating.md")" "# shmutant $real" "no old version comment left"
+  has "$(cat "$c/README.md")" "release.sh --dry-run $next" "README's dry-run example"
+  eq "$(git -C "$c" diff --numstat | awk '{ a += $1; d += $2 } END { print NR, a, d }')" "4 5 5" \
+    "five lines changed, in four files, as a hand bump changes them"
+  land "$c" bump
+  rel --dry-run "$next"
+  rc_is "$rc" 0 "the dry run of the bumped real files"
+  has "$out" "dry run: every precondition holds for v$next" "the verdict"
 }
 
 # --- run ---------------------------------------------------------------------------------------
