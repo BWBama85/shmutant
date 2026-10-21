@@ -681,9 +681,10 @@ _shmutant_proc_table() {
 # value is no bound), a ps that has not ended within that bound is given up on: status 124, nothing
 # printed, so a process table that stalls reads as one that could not be read. The bound is kept by a
 # process substitution of its own, which ends whichever of the ps and its timer is left (only while
-# it lists it as a job it has not seen end: _shmutant_ps_end), so nothing here signals a number that
-# may have been given away. One that does not answer within five seconds more is given up on as well,
-# signalled by nobody. A failed write of the output is a failed call.
+# it lists it as a job it has not seen end: _shmutant_ps_end). One that does not answer within five
+# seconds more is given up on as well, signalled by nobody. A failed write of the output is a failed
+# call. The substitution ends through the builtin exit: inside a run, a function of that name (the
+# run's own, which snapshots what the run left) would be read for it, and would read the table again.
 _shmutant_ps() {
   # Before any local: an unbounded call must not hide a name of its caller's from the ps it runs.
   case "${SHMUTANT_PS_BOUND:-}" in [1-9]|[1-9][0-9]|[1-9][0-9][0-9]) ;; *) command -p ps "$@"; return ;; esac
@@ -696,10 +697,10 @@ _shmutant_ps() {
     t="$(PATH="$(builtin command -p getconf PATH 2>/dev/null)" && builtin type -P sleep)" && \
       case "$t" in /*) "$t" "$b" < /dev/null > /dev/null 2>&1 & t=$! ;; *) t="" ;; esac
     # No timer to be had: the bound is the one the caller keeps, below.
-    case "$t" in ''|*[!0-9]*) wait "$c"; exit "$?" ;; esac
+    case "$t" in ''|*[!0-9]*) wait "$c"; builtin exit "$?" ;; esac
     wait -n -p w "$c" "$t" || s=$?
-    if [ -n "$w" ] && [ "$w" = "$c" ]; then _shmutant_ps_end "$t"; wait "$t"; exit "$s"; fi
-    _shmutant_ps_end "$c"; wait "$c"; exit 124
+    if [ -n "$w" ] && [ "$w" = "$c" ]; then _shmutant_ps_end "$t"; wait "$t"; builtin exit "$s"; fi
+    _shmutant_ps_end "$c"; wait "$c"; builtin exit 124
   ) || { return 1; }
   p=$!
   IFS= read -r -d '' -t "$(( b + 5 ))" -u "$fd" out || st=$?
@@ -712,7 +713,9 @@ _shmutant_ps() {
 }
 
 # _shmutant_ps_end <pid> — KILL <pid> while this shell lists it as a job of its own that it has not
-# seen end, running or stopped: a number it lists is its own unreaped child, which nobody else holds.
+# seen end, running or stopped: a number it lists is its own child, which nobody else holds while it is
+# unreaped. One that ends and is reaped between the listing and the KILL leaves its number free for that
+# instant, as every check before a signal with no stop between them does (#53).
 # The builtin's own kill: a caller's function of that name must not keep the bound from being kept.
 _shmutant_ps_end() {
   local jl
@@ -1343,16 +1346,22 @@ _shmutant_guard_clock_moved() {
   [ $(( gap - guard_gap_ref )) -ge -1 ] && [ $(( gap - guard_gap_ref )) -le 1 ]
 }
 
-# _shmutant_elapsed_gap <pid-a> <pid-b> — print the elapsed seconds of <pid-a> less those of <pid-b>,
-# both from one `ps -o etime=`; fails unless that ps succeeded and listed both.
+# _shmutant_elapsed_gap <pid-a> <pid-b> [<start-a>] — print the elapsed seconds of <pid-a> less those of
+# <pid-b>, both from one `ps -o etime=`; fails unless that ps succeeded and listed both, and, given the
+# elapsed-time start <pid-a> was told with, unless that same read shows <pid-a> with it: a process that
+# took the number since started later.
 _shmutant_elapsed_gap() {
-  local out ea="" eb="" lp le
+  local out ea="" eb="" lp le now
   case "$1$2" in ''|*[!0-9]*) return 1 ;; esac
   out="$(_shmutant_ps -o pid= -o etime= -p "$1,$2" 2>/dev/null)" || return 1
   while IFS=$' \t' read -r lp le _; do
     case "$lp" in "$1") ea="$(_shmutant_etime_secs "$le")" ;; "$2") eb="$(_shmutant_etime_secs "$le")" ;; esac
   done <<< "$out"
   [ -n "$ea" ] && [ -n "$eb" ] || return 1
+  if [ -n "${3:-}" ]; then
+    now="$(_shmutant_now)"
+    _shmutant_same_start "e$(( now / 1000000 - ea ))" "$3" || return 1
+  fi
   printf '%s' "$(( ea - eb ))"
 }
 
@@ -1383,8 +1392,9 @@ _shmutant_guard() {
   set +e
   printf 'ready %s\n' "$BASHPID"
   # With elapsed-time starts, which a clock step moves, the freezing shell tells its start (`f`) as its
-  # first record, and this guard reads, the moment it arrives, how much older that shell is than itself:
-  # what tells a later step of the clock from another process at the freezer's number
+  # first record, and this guard reads, the moment it arrives, how much older that shell is than itself,
+  # taken only from a read that shows the shell with the start it told (another process at the number
+  # gives none): what tells a later step of the clock from another process at the freezer's number
   # (_shmutant_guard_clock_moved).
   local guard_self="$BASHPID" guard_gap_ref=""
   # The freezing shell (`guard_of`, inherited) is gone when its records end, or, should a helper
@@ -1396,7 +1406,7 @@ _shmutant_guard() {
       case "$line" in
         done) return 0 ;;
         k) kept=1 ;;
-        'f '*) case "${line#f }" in e*) guard_gap_ref="$(_shmutant_elapsed_gap "$guard_of" "$guard_self")" || guard_gap_ref="" ;; esac ;;
+        'f '*) case "${line#f }" in e*) guard_gap_ref="$(_shmutant_elapsed_gap "$guard_of" "$guard_self" "${line#f }")" || guard_gap_ref="" ;; esac ;;
         'p '*) recs+=("${line#p }") ;;
         'g '*) line="${line#g }"; pg="${line%% *}"; line="${line#"$pg"}"; line="${line# }"
                ph="${line%% *}"; phid="${line#"$ph"}"; phid="${phid# }" ;;
@@ -1569,6 +1579,11 @@ _shmutant_kill_tree() {
     [ -z "$guarded" ] || [ -z "${holder:-}" ] || [ -n "${stopped[$holder]:-}" ] || hs=1
     if [ "$hs" != 1 ]; then
       targets=(-"$SHMUTANT_KILL_GROUP" "${targets[@]}")
+      # Nor is a member that KILL takes continued after it, by a number the KILL may have freed: a
+      # stop of this call keeps it in the group. With no members read, every one is continued.
+      left=()
+      for p in "${conts[@]}"; do case "$members" in *" $p "*) continue ;; esac; left+=("$p"); done
+      conts=("${left[@]}")
     else
       # A holder not shown to be the holder is not killed, not even through another record of it, and
       # one stopped above is let go. Only what a stop of this call reached is continued: a refused

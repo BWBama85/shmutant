@@ -2212,7 +2212,7 @@ shmutant_mut 'the guard takes a freezer start that moved alone for one the clock
   '  :' \
   't_guard_waits_for_a_freezer_whose_elapsed_start_moved'
 shmutant_mut 'the guard takes the start its freezer tells it for nothing' \
-  '        '"'"'f '"'"'*) case "${line#f }" in e*) guard_gap_ref="$(_shmutant_elapsed_gap "$guard_of" "$guard_self")" || guard_gap_ref="" ;; esac ;;' \
+  '        '"'"'f '"'"'*) case "${line#f }" in e*) guard_gap_ref="$(_shmutant_elapsed_gap "$guard_of" "$guard_self" "${line#f }")" || guard_gap_ref="" ;; esac ;;' \
   '        '"'"'f '"'"'*) : ;;' \
   't_guard_waits_for_a_freezer_whose_elapsed_start_moved'
 shmutant_mut 'the gap between two elapsed times is read from a ps that failed' \
@@ -2338,3 +2338,21 @@ shmutant_mut 'the CLI holder is killed by number after its group' \
   '  kill -KILL -- -"$1" 2>/dev/null' \
   '  kill -KILL -- -"$1" 2>/dev/null; kill -KILL "$hp" 2>/dev/null' \
   't_cli_end_group_checks_the_holder_identity'
+shmutant_mut 'the bounded ps ends an answered read through a function named exit' \
+  '    if [ -n "$w" ] && [ "$w" = "$c" ]; then _shmutant_ps_end "$t"; wait "$t"; builtin exit "$s"; fi' \
+  '    if [ -n "$w" ] && [ "$w" = "$c" ]; then _shmutant_ps_end "$t"; wait "$t"; exit "$s"; fi' \
+  't_guard_gives_up_on_a_process_table_that_stalls'
+shmutant_mut 'the bounded ps ends a stalled read through a function named exit' \
+  '    _shmutant_ps_end "$c"; wait "$c"; builtin exit 124' \
+  '    _shmutant_ps_end "$c"; wait "$c"; exit 124' \
+  't_guard_gives_up_on_a_process_table_that_stalls'
+# (no row on the bounded ps's exit where no timer can be found: a sleep missing from the system's
+# default PATH cannot be arranged from a unit, and that exit is the same builtin as the two above.)
+shmutant_mut 'a member the group KILL takes is continued by number after it' \
+  '      for p in "${conts[@]}"; do case "$members" in *" $p "*) continue ;; esac; left+=("$p"); done' \
+  '      for p in "${conts[@]}"; do left+=("$p"); done' \
+  't_kill_tree_reads_its_checks_last_from_one_table'
+shmutant_mut 'the guard takes its freezer gap from a process its record did not name' \
+  '    _shmutant_same_start "e$(( now / 1000000 - ea ))" "$3" || return 1' \
+  '    :' \
+  't_guard_waits_for_a_freezer_whose_elapsed_start_moved'
