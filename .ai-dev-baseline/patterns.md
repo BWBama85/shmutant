@@ -478,4 +478,6 @@ One line per resolved review thread, newest last.
 - `check-then-act-race` `test/run.sh:7051` `47e5a15` `PRRT_kwDOUT7q9s6uALFb` PR #56 2026-10-19 — an interrupt between consuming the held record and marking it taken re-entered the sweep, which read EOF and could grant removal
 - `check-then-act-race` `test/run.sh:7311` `47e5a15` `PRRT_kwDOUT7q9s6uALFf` PR #56 2026-10-19 — an interrupt after the swept record was removed re-entered the sweep, which read nothing and could grant removal despite a survivor
 - `early-return-skips-cleanup` `test/run.sh:7073` `aa22206` `PRRT_kwDOUT7q9s6uBo2I` PR #56 2026-10-19 — a sweep copy that could not be made returned before sweep_unit ran, so recorded leftovers kept running
+- `check-then-act-race` `shmutant.sh:1600` `69e7549` `PRRT_kwDOUT7q9s6uqr4N` PR #66 2026-10-21 — kill_tree continued by number a member the held-group KILL had just taken
+- `check-then-act-race` `shmutant.sh:1399` `69e7549` `PRRT_kwDOUT7q9s6uqr4S` PR #66 2026-10-21 — guard took its elapsed-gap reference from whatever process held the freezer pid
 <!-- adb:hits:end -->
