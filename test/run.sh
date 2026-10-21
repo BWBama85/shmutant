@@ -4322,9 +4322,10 @@ t_guard_ends_only_what_it_can_verify() {
   printf '%s\n' "$out" | grep -qx -- "kill -CONT -- $b $b" || fail_ "a pid recorded with another start, or with none, is not continued: [$out]"
   if printf '%s\n' "$out" | grep -e '-KILL' | grep -qw -- "$b"; then fail_ "a pid it could not verify was killed: [$out]"; fi
   # A recorded pid not shown to be the process recorded, but in the group it KILLs (m leads a group of
-  # its own and is its verified holder here), is taken by that KILL and never continued after it.
+  # its own; a is its verified holder here, so m is a member and not the holder), is taken by that KILL
+  # and never continued after it.
   out="$( kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*"; fi; }
-          printf 'p %s not-%s\ng %s %s %s\n' "$m" "$mid" "$m" "$m" "$mid" | _shmutant_guard )"
+          printf 'p %s not-%s\ng %s %s %s\n' "$m" "$mid" "$m" "$a" "$aid" | _shmutant_guard )"
   printf '%s\n' "$out" | grep -qx -- "kill -KILL -- -$m" || fail_ "a group whose holder is verified was not killed: [$out]"
   if printf '%s\n' "$out" | grep -e '-CONT' | grep -qw -- "$m"; then fail_ "a member the group KILL took was continued after it: [$out]"; fi
   # ...but only by a listing that succeeded: a table read cut short (ps failing after a line) keeps
@@ -4486,8 +4487,9 @@ t_guard_waits_for_a_freezer_whose_elapsed_start_moved() {
   # its number as a guard starts is then younger than f by more than that second, which an elapsed-time
   # read can tell. One started within the same second as f cannot be told from it by any such read.
   sleep 3
-  for how in step later told; do
-    rm -f "$T/stepped" "$T/reused"
+  # Last, `gone`: the freezing shell is killed and reaped while its records stay open, and the guard acts.
+  for how in step later told blind gone; do
+    rm -f "$T/stepped" "$T/reused" "$T/blind"
     sleep 60 > /dev/null 2>&1 & d=$!
     did="$(SHMUTANT_PROC=0 SHMUTANT_PS_LSTART=0 _shmutant_identity "$d")"
     stop_shown "$d" || fail_ "$how: fixture: what the freezer froze could not be stopped"
@@ -4502,6 +4504,8 @@ t_guard_waits_for_a_freezer_whose_elapsed_start_moved() {
       # Reused, the process at f's number is younger than f was, in every read of elapsed time: as old as
       # the guard, and ageing as it does, as a process that took the number as the guard started would.
       command() {
+        # Blind, no gap can be read at all: a comparison it cannot make is no proof the shell went.
+        if [ -e "$T/blind" ]; then case "$*" in "-p ps -o pid= -o etime= -p $f,"*) return 1 ;; esac; fi
         if [ -e "$T/reused" ] && [ "${1:-}" = -p ] && [ "${2:-}" = ps ]; then
           case "$*" in "-p ps -o pid= -o etime= -p $f,"*) builtin command "$@" | awk -v f="$f" '
             { p[NR] = $1; e[NR] = $2; if ($1 != f) o = $2 }
@@ -4516,8 +4520,11 @@ t_guard_waits_for_a_freezer_whose_elapsed_start_moved() {
     [ "$how" != told ] || : > "$T/reused"
     printf 'f %s %s\np %s %s\n' "$fid" "$gap" "$d" "$did" >&"$w"
     sleep 0.5
-    case "$how" in step) : > "$T/stepped" ;; later) : > "$T/reused" ;; esac
-    if [ "$how" = step ]; then
+    case "$how" in
+      step) : > "$T/stepped" ;; blind) : > "$T/stepped"; : > "$T/blind" ;; later) : > "$T/reused" ;;
+      gone) kill -KILL "$f" 2>/dev/null; wait "$f" 2>/dev/null ;;
+    esac
+    if [ "$how" = step ] || [ "$how" = blind ]; then
       # Two of the guard's looks for its freezer, one a second.
       sleep 2.5
       case "$(command -p ps -o stat= -p "$d" 2>/dev/null)" in

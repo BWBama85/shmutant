@@ -2383,3 +2383,15 @@ shmutant_mut 'the guard lets go a holder it verified through its member record' 
   '      for p in "${conts[@]}"; do [ "$p" = "$ph" ] || left+=("$p"); done' \
   '      for p in "${conts[@]}"; do left+=("$p"); done' \
   't_guard_ends_only_what_it_can_verify'
+shmutant_mut 'the guard takes a freezer gap it cannot read after a step for proof the freezer went' \
+  '  _shmutant_holder_state "$guard_of" "${guard_of_id:-}" || [ "$?" = 2 ] || _shmutant_guard_clock_moved || [ "$?" = 2 ]' \
+  '  _shmutant_holder_state "$guard_of" "${guard_of_id:-}" || [ "$?" = 2 ] || _shmutant_guard_clock_moved' \
+  't_guard_waits_for_a_freezer_whose_elapsed_start_moved'
+shmutant_mut 'the guard cannot tell a freezer number no longer in use from a step' \
+  '  kill -0 "$guard_of" 2>/dev/null || return 1' \
+  '  :' \
+  't_guard_waits_for_a_freezer_whose_elapsed_start_moved'
+shmutant_mut 'the guard cannot tell a reused freezer number from a step outside the elapsed-time form' \
+  '  case "${guard_of_id:-}" in e*) ;; *) return 1 ;; esac' \
+  '  :' \
+  't_guard_takes_neither_a_reused_pid_nor_a_zombie_for_its_freezer'

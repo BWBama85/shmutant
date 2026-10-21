@@ -1334,7 +1334,7 @@ _shmutant_freeze_err() {
 _shmutant_guard_freezer_there() {
   [ -n "${guard_of:-}" ] || return 0
   ! _shmutant_guard_reaped "$guard_of" || return 1
-  _shmutant_holder_state "$guard_of" "${guard_of_id:-}" || [ "$?" = 2 ] || _shmutant_guard_clock_moved
+  _shmutant_holder_state "$guard_of" "${guard_of_id:-}" || [ "$?" = 2 ] || _shmutant_guard_clock_moved || [ "$?" = 2 ]
 }
 
 # _shmutant_guard_clock_moved — true when the freezing shell is still the process that told the guard its
@@ -1342,11 +1342,15 @@ _shmutant_guard_freezer_there() {
 # guard's own, read in one ps (_shmutant_elapsed_gap), is the one that shell read of itself and told
 # (`guard_gap_ref`), within the second etime resolves. Both age alike while both live, whatever the
 # clock does, and one read leaves no instant for a step between them. A process that took the
-# freezer's number since is younger, and the gap moves. False with nothing to compare by.
+# freezer's number since is younger, and the gap moves (1). 1 too for a start not in the elapsed-time
+# form, or a number no longer in use. 2 when it cannot tell: the number is in use, but no gap was told
+# or none can be read now, which the freezer's start is then taken to be, as one unreadable is.
 _shmutant_guard_clock_moved() {
   local gap
-  [ -n "${guard_gap_ref:-}" ] && [ -n "${guard_self:-}" ] || return 1
-  gap="$(_shmutant_elapsed_gap "$guard_of" "$guard_self")" || return 1
+  case "${guard_of_id:-}" in e*) ;; *) return 1 ;; esac
+  kill -0 "$guard_of" 2>/dev/null || return 1
+  [ -n "${guard_gap_ref:-}" ] && [ -n "${guard_self:-}" ] || return 2
+  gap="$(_shmutant_elapsed_gap "$guard_of" "$guard_self")" || return 2
   [ $(( gap - guard_gap_ref )) -ge -1 ] && [ $(( gap - guard_gap_ref )) -le 1 ]
 }
 
