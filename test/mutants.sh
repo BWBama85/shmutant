@@ -2284,8 +2284,9 @@ shmutant_mut 'a bounded ps swallows a failed write of its output' \
   '  printf '"'"'%s'"'"' "$out"' \
   't_guard_gives_up_on_a_process_table_that_stalls'
 # (no row on the bounded ps giving up five seconds after its bound: that only ends a wait on a process
-# substitution whose own timer could not end the ps, one the kernel will not let die; a unit can make no
-# process unkillable, and the timer is the system's sleep, run by its path, which no stub replaces)
+# substitution that has not answered, one stopped from outside or one whose ps the kernel will not let
+# die. The substitution is then left as it is, never signalled by number; a unit that stopped it would
+# witness only that the wait ends, which the stall cases above already do.)
 shmutant_mut 'the kill checks a victim by a read of its own before the walk' \
   '    elif [ -n "${SHMUTANT_START[${p%%:*}]:-}" ] && _shmutant_same_start "${SHMUTANT_START[${p%%:*}]}" "${p#*:}"' \
   '    elif _shmutant_alive_since "${p%%:*}" "${p#*:}"' \
