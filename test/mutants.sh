@@ -2211,21 +2211,53 @@ shmutant_mut 'the guard takes a freezer start that moved alone for one the clock
   '  [ "$d" -ge -2 ] && [ "$d" -le 2 ]' \
   '  :' \
   't_guard_waits_for_a_freezer_whose_elapsed_start_moved'
-shmutant_mut 'the guard takes its reference for the freezer from whatever is at its number' \
-  '    e*) if guard_of_ref="$(_shmutant_identity "$guard_of")" && _shmutant_same_start "$guard_of_ref" "$guard_of_id"; then' \
-  '    e*) if guard_of_ref="$(_shmutant_identity "$guard_of")"; then' \
+shmutant_mut 'the guard leaves stopped the group of a kept holder it cannot read at all' \
+  '    if [ "$hs" = 2 ] && [ -n "$kept" ] && ! _shmutant_ps -o stat= -p "$ph" > /dev/null 2>&1; then hs=3; fi' \
+  '    :' \
+  't_guard_ends_only_what_it_can_verify'
+shmutant_mut 'the guard takes the start its freezer tells it for nothing' \
+  '        '"'"'f '"'"'*) case "${line#f }" in e*) guard_of_ref="${line#f }"; guard_self_ref="$(_shmutant_identity "$guard_self")" || guard_of_ref="" ;; esac ;;' \
+  '        '"'"'f '"'"'*) : ;;' \
   't_guard_waits_for_a_freezer_whose_elapsed_start_moved'
+shmutant_mut 'the freezer does not tell its guard its own start' \
+  '    [ -z "$fid_now" ] || _shmutant_guard_tell "f $fid_now"' \
+  '    :' \
+  't_freeze_tells_its_guard_its_own_start'
+shmutant_mut 'the kill counts a stop that did not take' \
+  '    for p in "${cands[@]}"; do ! kill -STOP "${p%% *}" 2>/dev/null || stopped["${p%% *}"]=1; done' \
+  '    for p in "${cands[@]}"; do kill -STOP "${p%% *}" 2>/dev/null; stopped["${p%% *}"]=1; done' \
+  't_kill_tree_reads_its_checks_last_from_one_table'
+shmutant_mut 'the kill leaves what it stopped and could not show stopped' \
+  '  [ "${#conts[@]}" = 0 ] || kill -CONT -- "${conts[@]}" 2>/dev/null' \
+  '  :' \
+  't_kill_tree_reads_its_checks_last_from_one_table'
+shmutant_mut 'the kill continues a target another record named' \
+  '      want=1; for out in "${targets[@]}"; do [ "$out" != "$p" ] || want=""; done' \
+  '      want=1' \
+  't_kill_tree_reads_its_checks_last_from_one_table'
+shmutant_mut 'the kill kills a holder it rejects through another record of it' \
+  '      for p in "${targets[@]}"; do [ "$p" = "${holder:-}" ] || left+=("$p"); done' \
+  '      for p in "${targets[@]}"; do left+=("$p"); done' \
+  't_kill_tree_reads_its_checks_last_from_one_table'
+shmutant_mut 'a caller function named sleep keeps the bound' \
+  'PATH="$(builtin command -p getconf PATH 2>/dev/null)" && builtin type -P sleep' \
+  'builtin command -p -v sleep' \
+  't_guard_gives_up_on_a_process_table_that_stalls'
+shmutant_mut 'a caller function named jobs keeps a stall from being ended' \
+  '  jl="$(builtin jobs -rp; builtin jobs -sp)"' \
+  '  jl="$(jobs -rp; jobs -sp)"' \
+  't_guard_gives_up_on_a_process_table_that_stalls'
 shmutant_mut 'the guard reads its process table without a bound' \
   '  local SHMUTANT_PS_BOUND=10' \
   '  local SHMUTANT_PS_BOUND=' \
   't_guard_gives_up_on_a_process_table_that_stalls'
 shmutant_mut 'a bounded ps that stalls is left running' \
-  '  jl="$(jobs -rp; jobs -sp)"' \
+  '  jl="$(builtin jobs -rp; builtin jobs -sp)"' \
   '  jl=""' \
   't_guard_gives_up_on_a_process_table_that_stalls'
 shmutant_mut 'a bounded ps that stalls is waited out' \
-  '    t="$(builtin command -p -v sleep)" && [ -n "$t" ] && { "$t" "$b" < /dev/null > /dev/null 2>&1 & t=$!; }' \
-  '    t="$(builtin command -p -v sleep)" && [ -n "$t" ] && { "$t" 3600 < /dev/null > /dev/null 2>&1 & t=$!; }' \
+  '      case "$t" in /*) "$t" "$b" < /dev/null > /dev/null 2>&1 & t=$! ;; *) t="" ;; esac' \
+  '      case "$t" in /*) "$t" 3600 < /dev/null > /dev/null 2>&1 & t=$! ;; *) t="" ;; esac' \
   't_guard_gives_up_on_a_process_table_that_stalls'
 shmutant_mut 'a bounded ps takes a bound that is not a number' \
   '  case "${SHMUTANT_PS_BOUND:-}" in [1-9]|[1-9][0-9]|[1-9][0-9][0-9]) ;; *) command -p ps "$@"; return ;; esac' \
@@ -2243,11 +2275,12 @@ shmutant_mut 'a bounded ps swallows a failed write of its output' \
   '  printf '"'"'%s'"'"' "$out" || return 1' \
   '  printf '"'"'%s'"'"' "$out"' \
   't_guard_gives_up_on_a_process_table_that_stalls'
-# (no row on the bounded ps giving up five seconds after its bound: that wait only ends a process
-# substitution that did not keep its own bound, which no unit can make happen)
+# (no row on the bounded ps giving up five seconds after its bound: that only ends a wait on a process
+# substitution whose own timer could not end the ps, one the kernel will not let die; a unit can make no
+# process unkillable, and the timer is the system's sleep, run by its path, which no stub replaces)
 shmutant_mut 'the kill checks a victim by a read of its own before the walk' \
-  '    elif [ -n "${SHMUTANT_START[${p%%:*}]:-}" ] && _shmutant_same_start "${SHMUTANT_START[${p%%:*}]}" "${p#*:}"; then targets+=("${p%%:*}")' \
-  '    elif _shmutant_alive_since "${p%%:*}" "${p#*:}"; then targets+=("${p%%:*}")' \
+  '    elif [ -n "${SHMUTANT_START[${p%%:*}]:-}" ] && _shmutant_same_start "${SHMUTANT_START[${p%%:*}]}" "${p#*:}"' \
+  '    elif _shmutant_alive_since "${p%%:*}" "${p#*:}"' \
   't_kill_tree_reads_its_checks_last_from_one_table'
 shmutant_mut 'the kill checks the holder by a read of its own after the table' \
   '    [ -z "${holder:-}" ] || _shmutant_table_state "$holder" "${holderid:-}" || hs=$?' \
@@ -2258,8 +2291,8 @@ shmutant_mut 'the kill ends a caller with errexit on at a holder it rejects' \
   '    [ -z "${holder:-}" ] || { _shmutant_table_state "$holder" "${holderid:-}"; hs=$?; }' \
   't_kill_tree_reads_its_checks_last_from_one_table'
 shmutant_mut 'the kill signals a find of the walk whatever start the table shows' \
-  '    if [ -n "${SHMUTANT_START[${p%% *}]:-}" ] && _shmutant_same_start "${SHMUTANT_START[${p%% *}]}" "${p#* }"; then targets+=("${p%% *}")' \
-  '    if [ -n "$p" ]; then targets+=("${p%% *}")' \
+  '    if [ -n "${SHMUTANT_START[${p%% *}]:-}" ] && _shmutant_same_start "${SHMUTANT_START[${p%% *}]}" "${p#* }"' \
+  '    if [ -n "$p" ]' \
   't_kill_tree_reads_its_checks_last_from_one_table'
 shmutant_mut 'the kill stops nothing under a guard' \
   '  [ -z "${guard_w:-}" ] || [ "${guard_lost:-0}" != 0 ] || guarded=1' \
@@ -2270,15 +2303,15 @@ shmutant_mut 'the kill stops what it checks without telling the guard first' \
   '    :' \
   't_kill_tree_reads_its_checks_last_from_one_table'
 shmutant_mut 'the kill leaves the holder running under a guard' \
-  '    [ -z "${SHMUTANT_KILL_GROUP:-}" ] || [ -z "${holder:-}" ] || kill -STOP "$holder" 2>/dev/null' \
+  '    [ -z "${SHMUTANT_KILL_GROUP:-}" ] || [ -z "${holder:-}" ] || ! kill -STOP "$holder" 2>/dev/null || stopped["$holder"]=1' \
   '    :' \
   't_kill_tree_reads_its_checks_last_from_one_table'
 shmutant_mut 'the kill leaves a find it stopped and could not show stopped' \
-  '    elif [ -n "$guarded" ]; then kill -CONT "${p%% *}" 2>/dev/null' \
+  '    elif [ -n "$guarded" ]; then conts+=("${p%% *}")' \
   '    elif false; then :' \
   't_kill_tree_reads_its_checks_last_from_one_table'
 shmutant_mut 'the kill leaves a holder it stopped and rejects stopped' \
-  '      [ -z "$guarded" ] || kill -CONT "$holder" 2>/dev/null' \
+  '      [ -z "$guarded" ] || [ -z "${holder:-}" ] || conts+=("$holder")' \
   '      :' \
   't_kill_tree_reads_its_checks_last_from_one_table'
 shmutant_mut 'the kill takes a holder gone since its table for the holder' \
