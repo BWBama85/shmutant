@@ -1467,6 +1467,14 @@ _shmutant_guard() {
     if [ "$hs" = 0 ]; then kills=(-"$pg" "${kills[@]}")
     elif [ "$hs" = 2 ] || _shmutant_group_has "$pg" "${kills[@]}"; then gcont="$pg"
     fi
+    # A holder shown to be the holder is never let go, whatever a record of it as a member said: it is
+    # in the group the KILL takes, and continued before that KILL it could end and give the group's
+    # number away first.
+    case "$hs" in 0)
+      left=()
+      for p in "${conts[@]}"; do [ "$p" = "$ph" ] || left+=("$p"); done
+      conts=("${left[@]}") ;;
+    esac
   fi
   # ...unless it is a pid this guard kills: one is never continued after its KILL, whatever other
   # record named it (told twice, once with a start a clock step has moved; the holder, recorded).
@@ -1582,8 +1590,10 @@ _shmutant_kill_tree() {
       # stop of this call keeps it in the group. With no members read, any of them may be one, and what
       # is let go is let go before the KILL, while the stop still keeps each number its own.
       if [ -z "$members" ]; then cont_first=1; fi
+      # The holder above all: shown to be the holder, it is never let go, whatever a record of it as a
+      # victim or a find said, since continued before the KILL it could end and free the group's number.
       left=()
-      for p in "${conts[@]}"; do case "$members" in *" $p "*) continue ;; esac; left+=("$p"); done
+      for p in "${conts[@]}"; do case "$members" in *" $p "*) continue ;; esac; [ "$p" = "${holder:-}" ] || left+=("$p"); done
       conts=("${left[@]}")
     else
       # A holder not shown to be the holder is not killed, not even through another record of it, and

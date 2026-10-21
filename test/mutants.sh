@@ -2349,8 +2349,8 @@ shmutant_mut 'the bounded ps ends a stalled read through a function named exit' 
 # (no row on the bounded ps's exit where no timer can be found: a sleep missing from the system's
 # default PATH cannot be arranged from a unit, and that exit is the same builtin as the two above.)
 shmutant_mut 'a member the group KILL takes is continued by number after it' \
-  '      for p in "${conts[@]}"; do case "$members" in *" $p "*) continue ;; esac; left+=("$p"); done' \
-  '      for p in "${conts[@]}"; do left+=("$p"); done' \
+  '      for p in "${conts[@]}"; do case "$members" in *" $p "*) continue ;; esac; [ "$p" = "${holder:-}" ] || left+=("$p"); done' \
+  '      for p in "${conts[@]}"; do [ "$p" = "${holder:-}" ] || left+=("$p"); done' \
   't_kill_tree_reads_its_checks_last_from_one_table'
 shmutant_mut 'the guard reads its freezer gap of whatever holds the number instead of the one told' \
   '        '"'"'f '"'"'*) case "${line#f }" in e*'"'"' '"'"'*) guard_gap_ref="${line##* }"; case "${guard_gap_ref#-}" in '"'"''"'"'|*[!0-9]*) guard_gap_ref="" ;; esac ;; esac ;;' \
@@ -2373,4 +2373,12 @@ shmutant_mut 'an empty elapsed-time table read fails its caller' \
 shmutant_mut 'the guard lets go after the group KILL what it could not list the members for' \
   '    else cfirst=1; fi' \
   '    else :; fi' \
+  't_guard_ends_only_what_it_can_verify'
+shmutant_mut 'the kill lets go before its group KILL a holder it verified' \
+  '      for p in "${conts[@]}"; do case "$members" in *" $p "*) continue ;; esac; [ "$p" = "${holder:-}" ] || left+=("$p"); done' \
+  '      for p in "${conts[@]}"; do case "$members" in *" $p "*) continue ;; esac; left+=("$p"); done' \
+  't_kill_tree_reads_its_checks_last_from_one_table'
+shmutant_mut 'the guard lets go a holder it verified through its member record' \
+  '      for p in "${conts[@]}"; do [ "$p" = "$ph" ] || left+=("$p"); done' \
+  '      for p in "${conts[@]}"; do left+=("$p"); done' \
   't_guard_ends_only_what_it_can_verify'

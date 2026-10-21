@@ -4328,13 +4328,18 @@ t_guard_ends_only_what_it_can_verify() {
   printf '%s\n' "$out" | grep -qx -- "kill -KILL -- -$m" || fail_ "a group whose holder is verified was not killed: [$out]"
   if printf '%s\n' "$out" | grep -e '-CONT' | grep -qw -- "$m"; then fail_ "a member the group KILL took was continued after it: [$out]"; fi
   # ...but only by a listing that succeeded: a table read cut short (ps failing after a line) keeps
-  # every CONT, sent before the group KILL, while the stop keeps the number its own.
+  # every other CONT (here b's), sent before the group KILL, while the stop keeps the number its own. The
+  # holder it verified is never among them, whatever its member record said: let go before the KILL, it
+  # could end and give the group's number away first.
   out="$( kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*"; fi; }
           command() { if [ "$*" = "-p ps -A -o pid= -o pgid=" ]; then printf '%s %s\n' "$m" "$m"; return 1; fi; builtin command "$@"; }
-          printf 'p %s not-%s\ng %s %s %s\n' "$m" "$mid" "$m" "$m" "$mid" | _shmutant_guard )"
-  printf '%s\n' "$out" | grep -qx -- "kill -CONT -- $m" || fail_ "a group listing that failed kept a pid from its CONT: [$out]"
-  printf '%s\n' "$out" | awk -v c="kill -CONT -- $m" -v k="kill -KILL -- -$m" '$0 == c && !ci { ci = NR } $0 == k && !ki { ki = NR } END { exit !(ci && ki && ci < ki) }' \
+          printf 'p %s not-%s\np %s not-%s\ng %s %s %s\n' "$m" "$mid" "$b" "$bid" "$m" "$m" "$mid" | _shmutant_guard )"
+  printf '%s\n' "$out" | grep -qx -- "kill -CONT -- $b" || fail_ "a group listing that failed kept a pid from its CONT: [$out]"
+  printf '%s\n' "$out" | awk -v c="kill -CONT -- $b" -v k="kill -KILL -- -$m" '$0 == c && !ci { ci = NR } $0 == k && !ki { ki = NR } END { exit !(ci && ki && ci < ki) }' \
     || fail_ "with the group listing failed, a pid was continued after the group KILL rather than before: [$out]"
+  if printf '%s\n' "$out" | awk -v p="$m" '$2 == "-CONT" { for (i = 3; i <= NF; i++) if ($i == p) f = 1 } END { exit !f }'; then
+    fail_ "with the group listing failed, the verified holder was continued: [$out]"
+  fi
   # A pid told twice, once with a start that no longer shows (a clock step between two listings), is
   # killed by the record that verifies, and never continued after.
   out="$( kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*"; fi; }
@@ -4703,6 +4708,20 @@ t_kill_tree_reads_its_checks_last_from_one_table() {
   rm -f "$T/log" "$T/told"; kill_logged - guarded refused
   if awk -v p="$v" '$2 == "-KILL" || $2 == "-CONT" { for (i = 3; i <= NF; i++) if ($i == p) f = 1 } END { exit !f }' "$T/log" 2>/dev/null; then
     fail_ "under a guard, a victim whose stop was refused was signalled: [$(cat "$T/log")]"
+  fi
+  # A holder the table verifies is never let go, though a record of it as a victim carries another start
+  # and the group's members cannot be listed: let go before the group KILL, it could end and free the
+  # group's number first.
+  rm -f "$T/log" "$T/told"
+  ( SHMUTANT_PROC=0 SHMUTANT_PS_LSTART=0; holder="$root"; holderid="$(_shmutant_identity "$root")"; SHMUTANT_KILL_GROUP="$root"
+    exec {guard_w}>"$T/told"; guard_lost=0
+    kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*" >> "$T/log"; fi; }
+    command() { if [ "$*" = "-p ps -A -o pid= -o pgid=" ]; then return 1; fi; builtin command "$@"; }
+    _shmutant_kill_tree KILL "" "$root:e1" )
+  awk -v g="-$root" '$2 == "-KILL" { for (i = 3; i <= NF; i++) if ($i == g) f = 1 } END { exit !f }' "$T/log" 2>/dev/null \
+    || fail_ "fixture: the group of a verified holder was not killed: [$(cat "$T/log" 2>/dev/null)]"
+  if awk -v p="$root" '$2 == "-CONT" { for (i = 3; i <= NF; i++) if ($i == p) f = 1 } END { exit !f }' "$T/log" 2>/dev/null; then
+    fail_ "a verified holder named as a victim with another start was continued: [$(cat "$T/log")]"
   fi
   # A pid named twice, once with a start the table shows and once with another, is killed and never
   # continued before or after its KILL.
