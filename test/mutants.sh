@@ -2208,17 +2208,21 @@ shmutant_mut 'the guard takes a freezer whose start moved with the clock for gon
   '[ "$?" = 2 ]' \
   't_guard_waits_for_a_freezer_whose_elapsed_start_moved'
 shmutant_mut 'the guard takes a freezer start that moved alone for one the clock moved' \
-  '  [ "$d" -ge -2 ] && [ "$d" -le 2 ]' \
+  '  [ $(( gap - guard_gap_ref )) -ge -1 ] && [ $(( gap - guard_gap_ref )) -le 1 ]' \
   '  :' \
   't_guard_waits_for_a_freezer_whose_elapsed_start_moved'
-shmutant_mut 'the guard leaves stopped the group of a kept holder it cannot read at all' \
-  '    if [ "$hs" = 2 ] && [ -n "$kept" ] && ! _shmutant_ps -o stat= -p "$ph" > /dev/null 2>&1; then hs=3; fi' \
-  '    :' \
-  't_guard_ends_only_what_it_can_verify'
 shmutant_mut 'the guard takes the start its freezer tells it for nothing' \
-  '        '"'"'f '"'"'*) case "${line#f }" in e*) guard_of_ref="${line#f }"; guard_self_ref="$(_shmutant_identity "$guard_self")" || guard_of_ref="" ;; esac ;;' \
+  '        '"'"'f '"'"'*) case "${line#f }" in e*) guard_gap_ref="$(_shmutant_elapsed_gap "$guard_of" "$guard_self")" || guard_gap_ref="" ;; esac ;;' \
   '        '"'"'f '"'"'*) : ;;' \
   't_guard_waits_for_a_freezer_whose_elapsed_start_moved'
+shmutant_mut 'the gap between two elapsed times is read from a ps that failed' \
+  '  out="$(_shmutant_ps -o pid= -o etime= -p "$1,$2" 2>/dev/null)" || return 1' \
+  '  out="$(_shmutant_ps -o pid= -o etime= -p "$1,$2" 2>/dev/null)"' \
+  't_process_state_reads_take_a_failed_ps_as_no_state'
+shmutant_mut 'a table of starts is taken from a ps that failed' \
+  '    }'"'"')" || return 0' \
+  '    }'"'"')"' \
+  't_process_state_reads_take_a_failed_ps_as_no_state'
 shmutant_mut 'the freezer does not tell its guard its own start' \
   '    [ -z "$fid_now" ] || _shmutant_guard_tell "f $fid_now"' \
   '    :' \
@@ -2230,6 +2234,10 @@ shmutant_mut 'the kill counts a stop that did not take' \
 shmutant_mut 'the kill leaves what it stopped and could not show stopped' \
   '  [ "${#conts[@]}" = 0 ] || kill -CONT -- "${conts[@]}" 2>/dev/null' \
   '  :' \
+  't_kill_tree_reads_its_checks_last_from_one_table'
+shmutant_mut 'the kill continues a pid its stop never reached' \
+  '    elif [ -n "${stopped[${p%%:*}]:-}" ]; then conts+=("${p%%:*}")' \
+  '    elif [ -n "$guarded" ]; then conts+=("${p%%:*}")' \
   't_kill_tree_reads_its_checks_last_from_one_table'
 shmutant_mut 'the kill continues a target another record named' \
   '      want=1; for out in "${targets[@]}"; do [ "$out" != "$p" ] || want=""; done' \
@@ -2307,11 +2315,11 @@ shmutant_mut 'the kill leaves the holder running under a guard' \
   '    :' \
   't_kill_tree_reads_its_checks_last_from_one_table'
 shmutant_mut 'the kill leaves a find it stopped and could not show stopped' \
-  '    elif [ -n "$guarded" ]; then conts+=("${p%% *}")' \
+  '    elif [ -n "${stopped[${p%% *}]:-}" ]; then conts+=("${p%% *}")' \
   '    elif false; then :' \
   't_kill_tree_reads_its_checks_last_from_one_table'
 shmutant_mut 'the kill leaves a holder it stopped and rejects stopped' \
-  '      [ -z "$guarded" ] || [ -z "${holder:-}" ] || conts+=("$holder")' \
+  '      [ -z "${holder:-}" ] || [ -z "${stopped[$holder]:-}" ] || conts+=("$holder")' \
   '      :' \
   't_kill_tree_reads_its_checks_last_from_one_table'
 shmutant_mut 'the kill takes a holder gone since its table for the holder' \

@@ -812,13 +812,13 @@ _shmutant_identity() {
   # asking about this process ($BASHPID: the top-level shell, $$, may be gone by then, as it is when
   # a freeze's guard acts), the elapsed-time form remains.
   if [ "${SHMUTANT_PS_LSTART:-}" != 0 ]; then
-    lstart="$(_shmutant_ps -o lstart= -p "$1" 2>/dev/null | command -p awk 'NF { $1 = $1; print; exit }')"
+    lstart="$(set -o pipefail; _shmutant_ps -o lstart= -p "$1" 2>/dev/null | command -p awk 'NF { $1 = $1; print; exit }')" || lstart=""
     if [ -n "$lstart" ]; then SHMUTANT_PS_LSTART=1; printf '%s' "$lstart"; return 0; fi
     if [ "${SHMUTANT_PS_LSTART:-}" = 1 ]; then return 1; fi
     if [ -n "$(_shmutant_ps -o lstart= -p "$BASHPID" 2>/dev/null)" ]; then SHMUTANT_PS_LSTART=1; return 1; fi
     SHMUTANT_PS_LSTART=0
   fi
-  etime="$(_shmutant_ps -o etime= -p "$1" 2>/dev/null | command -p tr -d ' ')" || return 1
+  etime="$(set -o pipefail; _shmutant_ps -o etime= -p "$1" 2>/dev/null | command -p tr -d ' ')" || return 1
   [ -n "$etime" ] || return 1
   now="$(_shmutant_now)"
   printf 'e%s' "$(( now / 1000000 - $(_shmutant_etime_secs "$etime") ))"
@@ -837,20 +837,21 @@ _shmutant_identity_table() {
     done < <(_shmutant_proc_table | command -p awk '{ print $1, $3 }')
     return 0
   fi
+  # The ps tables are read whole, and taken only from a read that succeeded at every stage: a ps that
+  # failed, whatever it printed first, gives no table at all, never part of one.
+  local tbl
   if [ "${SHMUTANT_PS_LSTART:-}" != 0 ] && _shmutant_identity "$BASHPID" > /dev/null && [ "${SHMUTANT_PS_LSTART:-}" = 1 ]; then
+    tbl="$(set -o pipefail; _shmutant_ps -A -o pid= -o lstart= 2>/dev/null | command -p awk 'NF > 1 && $1 ~ /^[0-9]+$/ { pid = $1; $1 = ""; sub(/^ +/, ""); print pid, $0 }')" || return 0
     while IFS= read -r line; do
       # shellcheck disable=SC2034
       [ -n "$line" ] && SHMUTANT_START["${line%% *}"]="${line#* }"
-    done < <(_shmutant_ps -A -o pid= -o lstart= 2>/dev/null | command -p awk 'NF > 1 && $1 ~ /^[0-9]+$/ { pid = $1; $1 = ""; sub(/^ +/, ""); print pid, $0 }')
+    done <<< "$tbl"
     return 0
   fi
   now="$(_shmutant_now)"; now=$(( now / 1000000 ))
   # awk does the etime arithmetic for every row at once; a bash loop over the whole process
   # table took longer than the tree being frozen had left to live.
-  while IFS= read -r line; do
-    # shellcheck disable=SC2034
-    [ -n "$line" ] && SHMUTANT_START["${line%% *}"]="${line#* }"
-  done < <(_shmutant_ps -A -o pid= -o etime= 2>/dev/null | command -p awk -v now="$now" '
+  tbl="$(set -o pipefail; _shmutant_ps -A -o pid= -o etime= 2>/dev/null | command -p awk -v now="$now" '
     NF == 2 && $1 ~ /^[0-9]+$/ {
       e = $2; d = 0
       if (e ~ /-/) { split(e, a, "-"); d = a[1]; e = a[2] }
@@ -859,7 +860,11 @@ _shmutant_identity_table() {
       else if (n == 2) s = t[1] * 60 + t[2]
       else s = t[1]
       print $1, "e" (now - (d * 86400 + s))
-    }')
+    }')" || return 0
+  while IFS= read -r line; do
+    # shellcheck disable=SC2034
+    [ -n "$line" ] && SHMUTANT_START["${line%% *}"]="${line#* }"
+  done <<< "$tbl"
 }
 
 # _shmutant_alive_since <pid> <start-seen> — true when <pid> still started when <start-seen>
@@ -1325,20 +1330,30 @@ _shmutant_guard_freezer_there() {
   _shmutant_holder_state "$guard_of" "${guard_of_id:-}" || [ "$?" = 2 ] || _shmutant_guard_clock_moved
 }
 
-# _shmutant_guard_clock_moved — true when the freezing shell's elapsed-time start, read now, has moved
-# from the one it told the guard (`guard_of_ref`, its `f` record) by as much as the guard's own has
-# since that record arrived (`guard_self`, `guard_self_ref`): neither can have been replaced in between
-# (the freezer read its own start, the guard is this process), so a move they share is the clock's, and
-# only a step in the instant between the two reads could pass for none. A start that moved alone is
-# another process at that number. False with no reference to compare by.
+# _shmutant_guard_clock_moved — true when the freezing shell is still the process that told the guard its
+# start (`f`), though its elapsed-time start no longer matches: the gap between its elapsed time and the
+# guard's own, read in one ps (_shmutant_elapsed_gap), is the one read as that record arrived
+# (`guard_gap_ref`), within the second etime resolves. Both age alike while both live, whatever the
+# clock does, and one read leaves no instant for a step between them. A process that took the
+# freezer's number since is younger, and the gap moves. False with nothing to compare by.
 _shmutant_guard_clock_moved() {
-  local of self d
-  [ -n "${guard_of_ref:-}" ] && [ -n "${guard_self_ref:-}" ] && [ -n "${guard_self:-}" ] || return 1
-  of="$(_shmutant_identity "$guard_of")" && self="$(_shmutant_identity "$guard_self")" || return 1
-  case "$of $self $guard_of_ref $guard_self_ref" in e*' 'e*' 'e*' 'e*) ;; *) return 1 ;; esac
-  case "${of#e}${self#e}${guard_of_ref#e}${guard_self_ref#e}" in ''|*[!0-9]*) return 1 ;; esac
-  d=$(( (${of#e} - ${guard_of_ref#e}) - (${self#e} - ${guard_self_ref#e}) ))
-  [ "$d" -ge -2 ] && [ "$d" -le 2 ]
+  local gap
+  [ -n "${guard_gap_ref:-}" ] && [ -n "${guard_self:-}" ] || return 1
+  gap="$(_shmutant_elapsed_gap "$guard_of" "$guard_self")" || return 1
+  [ $(( gap - guard_gap_ref )) -ge -1 ] && [ $(( gap - guard_gap_ref )) -le 1 ]
+}
+
+# _shmutant_elapsed_gap <pid-a> <pid-b> — print the elapsed seconds of <pid-a> less those of <pid-b>,
+# both from one `ps -o etime=`; fails unless that ps succeeded and listed both.
+_shmutant_elapsed_gap() {
+  local out ea="" eb="" lp le
+  case "$1$2" in ''|*[!0-9]*) return 1 ;; esac
+  out="$(_shmutant_ps -o pid= -o etime= -p "$1,$2" 2>/dev/null)" || return 1
+  while IFS=$' \t' read -r lp le _; do
+    case "$lp" in "$1") ea="$(_shmutant_etime_secs "$le")" ;; "$2") eb="$(_shmutant_etime_secs "$le")" ;; esac
+  done <<< "$out"
+  [ -n "$ea" ] && [ -n "$eb" ] || return 1
+  printf '%s' "$(( ea - eb ))"
 }
 
 # _shmutant_guard — the guard of one freeze. Says `ready <its pid>`, then reads on stdin what the
@@ -1367,10 +1382,11 @@ _shmutant_guard() {
   # Its own process: the caller's errexit would end it at the first refused signal or failed write.
   set +e
   printf 'ready %s\n' "$BASHPID"
-  # With elapsed-time starts, which a clock step moves, the freezing shell tells its own start (`f`) as
-  # its first record, and this guard reads its own the moment it arrives: the pair tells a later step of
-  # the clock from another process at the freezer's number (_shmutant_guard_clock_moved).
-  local guard_self="$BASHPID" guard_of_ref="" guard_self_ref=""
+  # With elapsed-time starts, which a clock step moves, the freezing shell tells its start (`f`) as its
+  # first record, and this guard reads, the moment it arrives, how much older that shell is than itself:
+  # what tells a later step of the clock from another process at the freezer's number
+  # (_shmutant_guard_clock_moved).
+  local guard_self="$BASHPID" guard_gap_ref=""
   # The freezing shell (`guard_of`, inherited) is gone when its records end, or, should a helper
   # subshell of its own still hold them open, when it is no longer there (_shmutant_guard_freezer_there):
   # looked at between reads, once a second. A read cut short by that second keeps what it got.
@@ -1380,7 +1396,7 @@ _shmutant_guard() {
       case "$line" in
         done) return 0 ;;
         k) kept=1 ;;
-        'f '*) case "${line#f }" in e*) guard_of_ref="${line#f }"; guard_self_ref="$(_shmutant_identity "$guard_self")" || guard_of_ref="" ;; esac ;;
+        'f '*) case "${line#f }" in e*) guard_gap_ref="$(_shmutant_elapsed_gap "$guard_of" "$guard_self")" || guard_gap_ref="" ;; esac ;;
         'p '*) recs+=("${line#p }") ;;
         'g '*) line="${line#g }"; pg="${line%% *}"; line="${line#"$pg"}"; line="${line# }"
                ph="${line%% *}"; phid="${line#"$ph"}"; phid="${phid# }" ;;
@@ -1429,10 +1445,6 @@ _shmutant_guard() {
     # and in the group: stopped, it cannot end and give its number away, and a process at its number in
     # another group is not it. One the stop above did not reach (not a process this guard may signal)
     # proves nothing.
-    # A holder the freeze kept stopped (`k`) whose state cannot be read at all, though it is still there:
-    # nothing can show its group is the run's, and nothing can show it is another's. Its group is then
-    # continued, never killed, so a member reached only through it is not left stopped (3).
-    if [ "$hs" = 2 ] && [ -n "$kept" ] && ! _shmutant_ps -o stat= -p "$ph" > /dev/null 2>&1; then hs=3; fi
     [ "$hs" != 2 ] || { _shmutant_proc_stopped "$ph" && _shmutant_group_has "$pg" "$ph"; } || hs=1
     # One the freeze kept stopped (`k`) and still shown so is the holder: no start is needed to tell
     # it, as for a frozen pid.
@@ -1447,7 +1459,7 @@ _shmutant_guard() {
       kills=("${left[@]}")
     fi
     if [ "$hs" = 0 ]; then kills=(-"$pg" "${kills[@]}")
-    elif [ "$hs" = 2 ] || [ "$hs" = 3 ] || _shmutant_group_has "$pg" "${kills[@]}"; then gcont="$pg"
+    elif [ "$hs" = 2 ] || _shmutant_group_has "$pg" "${kills[@]}"; then gcont="$pg"
     fi
   fi
   # ...unless it is a pid this guard kills: one is never continued after its KILL, whatever other
@@ -1536,14 +1548,14 @@ _shmutant_kill_tree() {
     if [ -z "${p#*:}" ]; then targets+=("${p%%:*}")
     elif [ -n "${SHMUTANT_START[${p%%:*}]:-}" ] && _shmutant_same_start "${SHMUTANT_START[${p%%:*}]}" "${p#*:}" && \
          { [ -z "$guarded" ] || [ -n "${stopped[${p%%:*}]:-}" ]; }; then targets+=("${p%%:*}")
-    elif [ -n "$guarded" ]; then conts+=("${p%%:*}")
+    elif [ -n "${stopped[${p%%:*}]:-}" ]; then conts+=("${p%%:*}")
     fi
   done
   for p in "${found[@]}"; do
     [ -n "$p" ] || continue
     if [ -n "${SHMUTANT_START[${p%% *}]:-}" ] && _shmutant_same_start "${SHMUTANT_START[${p%% *}]}" "${p#* }" && \
        { [ -z "$guarded" ] || [ -n "${stopped[${p%% *}]:-}" ]; }; then targets+=("${p%% *}")
-    elif [ -n "$guarded" ]; then conts+=("${p%% *}")
+    elif [ -n "${stopped[${p%% *}]:-}" ]; then conts+=("${p%% *}")
     fi
   done
   # The group is the run's only while its holder lives. Checked again here: a holder continued after
@@ -1559,11 +1571,12 @@ _shmutant_kill_tree() {
       targets=(-"$SHMUTANT_KILL_GROUP" "${targets[@]}")
     else
       # A holder not shown to be the holder is not killed, not even through another record of it, and
-      # one stopped above is let go.
+      # one stopped above is let go. Only what a stop of this call reached is continued: a refused
+      # stop, or one sent to a number that had gone, stopped nothing to let go.
       left=()
       for p in "${targets[@]}"; do [ "$p" = "${holder:-}" ] || left+=("$p"); done
       targets=("${left[@]}")
-      [ -z "$guarded" ] || [ -z "${holder:-}" ] || conts+=("$holder")
+      [ -z "${holder:-}" ] || [ -z "${stopped[$holder]:-}" ] || conts+=("$holder")
       # The holder has gone. The number is the run's only while a process this kill targets is still
       # in the group; the group is then continued, which lets go a member the freeze stopped there.
       # With none, it may be anyone's by now, and nothing is sent to it.
@@ -2687,7 +2700,7 @@ _shmutant_pool_locals_writable() {
     _shmutant_bo _shmutant_so _shmutant_o _shmutant_n _shmutant_pc _shmutant_wrap_left \
     a budget dog e elapsed last leftovers linked lstart old rrc s tampered tmpd tnow victims wroot \
     b chunk conts g gcont gone_group guard_id guard_lost guard_of guard_of_id guard_pid guard_r guard_up guard_w hs kept kills members out pairs part pg ph phid recs rid rootid_pre seen_ck unfrozen w want \
-    SHMUTANT_GUARD SHMUTANT_GUARD_PID SHMUTANT_PS_LSTART SHMUTANT_PS_BOUND c guard_self guard_of_ref guard_self_ref of self cands guarded jl w fid_now stopped
+    SHMUTANT_GUARD SHMUTANT_GUARD_PID SHMUTANT_PS_LSTART SHMUTANT_PS_BOUND c guard_self guard_gap_ref gap ea eb lp le tbl cands guarded jl w fid_now stopped
 }
 
 # _shmutant_decl_writable <label> — the table's own names, checked by each declaration entry

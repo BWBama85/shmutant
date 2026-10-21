@@ -4256,6 +4256,28 @@ t_process_state_reads_take_a_failed_ps_as_no_state() {
       if [ "$how" = T ]; then ! _shmutant_proc_stopped "$BASHPID"; else ! _shmutant_guard_reaped "$BASHPID"; fi ) \
       || fail_ "a ps that printed $how and then failed was believed"
   done
+  # #51: nor is a table of starts, in either ps form, nor one process's start: a row a failed ps printed
+  # would otherwise let a pid be killed as verified.
+  local form n
+  for form in etime lstart; do
+    n="$( SHMUTANT_PROC=0; if [ "$form" = etime ]; then SHMUTANT_PS_LSTART=0; else SHMUTANT_PS_LSTART=1; fi
+          declare -A SHMUTANT_START=()
+          command() {
+            case "$*" in
+              '-p ps -A -o pid= -o etime=') printf '4242 00:00\n'; return 1 ;;
+              '-p ps -A -o pid= -o lstart=') printf '4242 Thu Jan  1 00:00:00 1970\n'; return 1 ;;
+            esac
+            builtin command "$@"; }
+          _shmutant_identity_table; printf '%s' "${#SHMUTANT_START[@]}" )"
+    eq "$n" 0 "$form: a table of starts a failed ps printed was taken"
+  done
+  ( SHMUTANT_PROC=0; SHMUTANT_PS_LSTART=1; me=$BASHPID
+    command() { case "$*" in "-p ps -o lstart= -p $me") printf 'Thu Jan  1 00:00:00 1970\n'; return 1 ;; esac; builtin command "$@"; }
+    ! _shmutant_identity "$me" > /dev/null ) || fail_ 'a start a failed ps printed was taken'
+  # Nor the gap between two processes' elapsed times that the guard tells a clock step by.
+  ( me=$BASHPID
+    command() { case "$*" in "-p ps -o pid= -o etime= -p $me,1") printf '%s 00:05\n1 00:09\n' "$me"; return 1 ;; esac; builtin command "$@"; }
+    ! _shmutant_elapsed_gap "$me" 1 > /dev/null ) || fail_ 'a gap of elapsed times a failed ps printed was taken'
   # ...and one that succeeded is: this shell runs.
   _shmutant_proc_stopped "$BASHPID" && fail_ 'a running shell was read as stopped'
   _shmutant_guard_reaped "$BASHPID" && fail_ 'a running shell was read as a zombie'
@@ -4368,20 +4390,13 @@ t_guard_ends_only_what_it_can_verify() {
   case "$out" in *" -$m"*) fail_ "a group whose kept holder runs again was signalled: [$out]" ;; esac
   out="$(guard_unidentified "g $m $sh $aid" k)"
   case "$out" in *" -$m"*) fail_ "a group whose kept holder is now one stopped in another group was signalled: [$out]" ;; esac
-  # #51: one the freeze kept stopped that is still there, but whose state cannot be read at all: nothing
-  # shows its group is another's, so the group is continued, never killed, and no member reached only
-  # through it is left stopped. Not kept, it proves nothing, and the group is sent nothing.
-  guard_unread() {
-    ( kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*"; fi; }
-      _shmutant_identity() { return 1; }; _shmutant_identity_table() { SHMUTANT_START=(); }
-      _shmutant_ps() { case "$*" in *stat=*) return 1 ;; esac; command -p ps "$@"; }
-      printf '%s\n' "$@" | _shmutant_guard )
-  }
-  out="$(guard_unread "g $m $m $aid" k)"
-  printf '%s\n' "$out" | grep -qx -- "kill -CONT -- -$m" || fail_ "a group whose kept holder cannot be read at all was not continued: [$out]"
-  if printf '%s\n' "$out" | grep -e '-KILL' | grep -qw -- "-$m"; then fail_ "a group whose kept holder cannot be read at all was killed: [$out]"; fi
-  out="$(guard_unread "g $m $m $aid")"
-  case "$out" in *" -$m"*) fail_ "a group whose holder, not kept, cannot be read at all was signalled: [$out]" ;; esac
+  # #51: one the freeze kept stopped whose state cannot be read at all proves nothing either: a group is
+  # never signalled without a proof it is the run's, so this one is sent nothing.
+  out="$( kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*"; fi; }
+          _shmutant_identity() { return 1; }; _shmutant_identity_table() { SHMUTANT_START=(); }
+          _shmutant_ps() { case "$*" in *stat=*) return 1 ;; esac; command -p ps "$@"; }
+          printf '%s\n' "g $m $m $aid" k | _shmutant_guard )"
+  case "$out" in *" -$m"*) fail_ "a group whose kept holder cannot be read at all was signalled: [$out]" ;; esac
   kill -KILL "$sh" 2>/dev/null; wait "$sh" 2>/dev/null
   # The membership test does not depend on the caller's IFS.
   ( IFS=:; _shmutant_group_has "$m" 1 "$m" ) || fail_ 'a member was missed with IFS set to a colon'
@@ -4431,10 +4446,10 @@ t_guard_reads_a_moved_elapsed_start_as_a_holder_it_cannot_check() {
 t_guard_waits_for_a_freezer_whose_elapsed_start_moved() {
   # #48, #51: while a helper of its freezing shell holds the guard's records open, the guard looks for
   # that shell by pid and start. In the elapsed-time form a clock step moves the start of a shell still
-  # freezing: moved since the start that shell told it (`f`, its first record) as far as the guard's own
-  # since then, it is the clock's, and the guard goes on waiting rather than let go what that shell is
-  # about to KILL by number; it acts once the records end. A start that moved alone (`later`) is another
-  # process at that number: the guard acts, and ends the victim it was told of. f stands in for the
+  # freezing: while that shell is as much older than the guard as it was when it told the guard its start
+  # (`f`, its first record), the move is the clock's, and the guard goes on waiting rather than let go
+  # what that shell is about to KILL by number; it acts once the records end. A process at that number
+  # that is younger (`later`) is another: the guard acts, and ends the victim it was told of. f stands in for the
   # freezing shell, d for what it froze; the clock steps ten seconds forward once the guard runs.
   local how f d fid did w g left
   sleep 60 > /dev/null 2>&1 & f=$!
@@ -4454,6 +4469,12 @@ t_guard_waits_for_a_freezer_whose_elapsed_start_moved() {
         if [ "$1" = "$f" ] && [ -e "$T/reused" ]; then printf 'e%s' "$(( ${fid#e} + 50 ))"; return 0; fi
         _shmutant_identity_real "$@"
       }
+      # Reused, the process at f's number is younger than f was, in every read of elapsed time.
+      command() {
+        if [ -e "$T/reused" ] && [ "${1:-}" = -p ] && [ "${2:-}" = ps ]; then
+          case "$*" in "-p ps -o pid= -o etime= -p $f,"*) builtin command "$@" | awk -v f="$f" '$1 == f { $2 = "00:00" } { print }'; return ;; esac
+        fi
+        builtin command "$@"; }
       _shmutant_now() { local t="$EPOCHREALTIME"; t="${t//[!0-9]/}"; [ ! -e "$T/stepped" ] || t=$(( t + 10000000 )); printf '%s' "$t"; }
       _shmutant_guard < "$T/rec" > /dev/null 2>&1 ) & g=$!
     printf 'f %s\np %s %s\n' "$fid" "$d" "$did" >&"$w"
@@ -4499,7 +4520,7 @@ t_guard_gives_up_on_a_process_table_that_stalls() {
   eq "$rc" "$want" 'a bounded ps that fails keeps its status'
   # The end of its output does not end a caller that has errexit on. A shell of its own: a unit runs on
   # the left of `||`, where bash ignores errexit, `set -e` included.
-  SHMUTANT="$SHMUTANT" D="$d" bash -c '. "$SHMUTANT" || exit 9; set -e; SHMUTANT_PS_BOUND=5 _shmutant_ps -o pid= -p "$D" > /dev/null; printf returned' > "$T/eps" 2>/dev/null
+  SHMUTANT="$SHMUTANT" D="$d" "$BASH" -c '. "$SHMUTANT" || exit 9; set -e; SHMUTANT_PS_BOUND=5 _shmutant_ps -o pid= -p "$D" > /dev/null; printf returned' > "$T/eps" 2>/dev/null
   eq "$(cat "$T/eps" 2>/dev/null)" returned 'a bounded ps returns to a caller with errexit on'
   # A bound that is not a whole number of seconds from 1 to 999 is no bound, never a read that fails.
   for want in soon 00 1000; do
@@ -4602,6 +4623,9 @@ t_kill_tree_reads_its_checks_last_from_one_table() {
   # Fields compared whole: `-<root>` names its group, not the holder.
   awk -v p="$root" '$2 == "-CONT" { for (i = 3; i <= NF; i++) if ($i == p) f = 1 } END { exit !f }' "$T/log" 2>/dev/null \
     || fail_ "under a guard, a stopped holder the table rejects was not let go: [$(cat "$T/log" 2>/dev/null)]"
+  if awk -v g="-$root" '$2 == "-KILL" { for (i = 3; i <= NF; i++) if ($i == g) f = 1 } END { exit !f }' "$T/log" 2>/dev/null; then
+    fail_ "under a guard, the group of a holder the table rejects was killed: [$(cat "$T/log")]"
+  fi
   # A holder the table rejects is not killed through another record of it either (here: as a victim
   # whose own start the table shows).
   rm -f "$T/log"
@@ -4611,10 +4635,12 @@ t_kill_tree_reads_its_checks_last_from_one_table() {
   if awk -v p="$root" '$2 == "-KILL" { for (i = 3; i <= NF; i++) if ($i == p) f = 1 } END { exit !f }' "$T/log" 2>/dev/null; then
     fail_ "a holder the table rejects was killed through its record as a victim: [$(cat "$T/log")]"
   fi
-  if grep -e '^kill -KILL' "$T/log" 2>/dev/null | grep -qw -- "-$root"; then fail_ "under a guard, the group of a holder the table rejects was killed: [$(cat "$T/log")]"; fi
-  # A victim whose stop was refused is not killed (it ran on, and may have ended since), nor continued.
+  # A victim whose stop was refused is not killed (it ran on, and may have ended since), nor continued:
+  # nothing of this call stopped it, and the number may be another's by now.
   rm -f "$T/log" "$T/told"; kill_logged - guarded refused
-  if grep -e '^kill -KILL' "$T/log" 2>/dev/null | grep -qw -- "$v"; then fail_ "under a guard, a victim whose stop was refused was killed: [$(cat "$T/log")]"; fi
+  if awk -v p="$v" '$2 == "-KILL" || $2 == "-CONT" { for (i = 3; i <= NF; i++) if ($i == p) f = 1 } END { exit !f }' "$T/log" 2>/dev/null; then
+    fail_ "under a guard, a victim whose stop was refused was signalled: [$(cat "$T/log")]"
+  fi
   # A pid named twice, once with a start the table shows and once with another, is killed and never
   # continued before or after its KILL.
   rm -f "$T/log"
@@ -4646,7 +4672,7 @@ t_kill_tree_reads_its_checks_last_from_one_table() {
   done
   # A holder it rejects does not end a caller that has errexit on before its kill: a shell of its own, as
   # a unit runs where bash ignores errexit.
-  out="$(SHMUTANT="$SHMUTANT" V="$v" G="$gone" bash -c '. "$SHMUTANT" || exit 9; set -e
+  out="$(SHMUTANT="$SHMUTANT" V="$v" G="$gone" "$BASH" -c '. "$SHMUTANT" || exit 9; set -e
     holder="$G"; holderid=e1; SHMUTANT_KILL_GROUP="$G"
     kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf "kill %s\n" "$*"; fi; }
     _shmutant_kill_tree KILL "" "$V:"; printf returned' 2>/dev/null)"
