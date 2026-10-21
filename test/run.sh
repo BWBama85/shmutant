@@ -4328,11 +4328,13 @@ t_guard_ends_only_what_it_can_verify() {
   printf '%s\n' "$out" | grep -qx -- "kill -KILL -- -$m" || fail_ "a group whose holder is verified was not killed: [$out]"
   if printf '%s\n' "$out" | grep -e '-CONT' | grep -qw -- "$m"; then fail_ "a member the group KILL took was continued after it: [$out]"; fi
   # ...but only by a listing that succeeded: a table read cut short (ps failing after a line) keeps
-  # every CONT.
+  # every CONT, sent before the group KILL, while the stop keeps the number its own.
   out="$( kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*"; fi; }
           command() { if [ "$*" = "-p ps -A -o pid= -o pgid=" ]; then printf '%s %s\n' "$m" "$m"; return 1; fi; builtin command "$@"; }
           printf 'p %s not-%s\ng %s %s %s\n' "$m" "$mid" "$m" "$m" "$mid" | _shmutant_guard )"
   printf '%s\n' "$out" | grep -qx -- "kill -CONT -- $m" || fail_ "a group listing that failed kept a pid from its CONT: [$out]"
+  printf '%s\n' "$out" | awk -v c="kill -CONT -- $m" -v k="kill -KILL -- -$m" '$0 == c && !ci { ci = NR } $0 == k && !ki { ki = NR } END { exit !(ci && ki && ci < ki) }' \
+    || fail_ "with the group listing failed, a pid was continued after the group KILL rather than before: [$out]"
   # A pid told twice, once with a start that no longer shows (a clock step between two listings), is
   # killed by the record that verifies, and never continued after.
   out="$( kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*"; fi; }
@@ -4475,6 +4477,10 @@ t_guard_waits_for_a_freezer_whose_elapsed_start_moved() {
   fid="$(SHMUTANT_PROC=0 SHMUTANT_PS_LSTART=0 _shmutant_identity "$f")"
   case "$fid" in e*) ;; *) fail_ "fixture: no elapsed-time start could be read: [$fid]"; kill -KILL "$f" 2>/dev/null; wait "$f" 2>/dev/null; return ;; esac
   command -p mkfifo "$T/rec" || { fail_ 'fixture: no FIFO'; kill -KILL "$f" 2>/dev/null; wait "$f" 2>/dev/null; return; }
+  # f is aged well past the second etime resolves first, whichever case runs first: a process that takes
+  # its number as a guard starts is then younger than f by more than that second, which an elapsed-time
+  # read can tell. One started within the same second as f cannot be told from it by any such read.
+  sleep 3
   for how in step later told; do
     rm -f "$T/stepped" "$T/reused"
     sleep 60 > /dev/null 2>&1 & d=$!

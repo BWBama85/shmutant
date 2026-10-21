@@ -693,8 +693,8 @@ _shmutant_ps() {
     set +e; c=""; t=""; w=""; s=0
     command -p ps "$@" & c=$!
     # The timer by its path, run directly: the job is then the sleep itself, which ending ends. The path
-    # is the executable's on the system's default PATH, never a function or alias of the caller's.
-    t="$(PATH="$(builtin command -p getconf PATH 2>/dev/null)" && builtin type -P sleep)" && \
+    # is the executable's on the standard utility path, never a function or alias of the caller's.
+    t="$(_shmutant_std_bin sleep)" && \
       case "$t" in /*) "$t" "$b" < /dev/null > /dev/null 2>&1 & t=$! ;; *) t="" ;; esac
     # No timer to be had: the bound is the one the caller keeps, below.
     case "$t" in ''|*[!0-9]*) wait "$c"; builtin exit "$?" ;; esac
@@ -1379,7 +1379,7 @@ _shmutant_elapsed_gap() {
 # uses no freeze step and no _shmutant_kill_tree, which a freezing shell killed in them may have left
 # half-done.
 _shmutant_guard() {
-  local line chunk part="" pg="" ph="" phid="" p pid st gcont="" hs="" kept="" want members
+  local line chunk part="" pg="" ph="" phid="" p pid st gcont="" hs="" kept="" want members cfirst=""
   local -a recs=() kills=() conts=() stops=() left=()
   local -A SHMUTANT_START=()
   # Every process-table read it makes gives up after ten seconds (_shmutant_ps), and reads as one that
@@ -1479,19 +1479,22 @@ _shmutant_guard() {
     conts=("${left[@]}")
   fi
   # Nor one the group KILL takes: a member of that group, which the stop above keeps in it. Read in
-  # one table, whole; with none read, every one is continued, as before.
-  if [ "$hs" = 0 ] && [ "${#conts[@]}" -gt 0 ] && \
-     members=" $(set -o pipefail; _shmutant_ps -A -o pid= -o pgid= 2>/dev/null | command -p awk -v g="$pg" '$2 == g { printf "%s ", $1 }')"; then
-    left=()
-    for p in "${conts[@]}"; do case "$members" in *" $p "*) ;; *) left+=("$p") ;; esac; done
-    conts=("${left[@]}")
+  # one table, whole; with none read, any may be one, and every one is continued before that KILL,
+  # while its stop keeps its number its own, rather than after it, by a number the KILL may have freed.
+  if [ "$hs" = 0 ] && [ "${#conts[@]}" -gt 0 ]; then
+    if members=" $(set -o pipefail; _shmutant_ps -A -o pid= -o pgid= 2>/dev/null | command -p awk -v g="$pg" '$2 == g { printf "%s ", $1 }')"; then
+      left=()
+      for p in "${conts[@]}"; do case "$members" in *" $p "*) ;; *) left+=("$p") ;; esac; done
+      conts=("${left[@]}")
+    else cfirst=1; fi
   fi
   # The KILL first, while what it names is still stopped: continued first, a process could end and its
   # number go to another before its KILL. The group's CONT comes after, which at worst reaches a group
   # its number has passed to since, where a KILL reaching another's process ends it.
+  [ -z "$cfirst" ] || kill -CONT -- "${conts[@]}" 2>/dev/null
   [ "${#kills[@]}" -eq 0 ] || kill -KILL -- "${kills[@]}" 2>/dev/null
   [ -z "$gcont" ] || kill -CONT -- -"$gcont" 2>/dev/null
-  [ "${#conts[@]}" -eq 0 ] || kill -CONT -- "${conts[@]}" 2>/dev/null
+  [ -n "$cfirst" ] || [ "${#conts[@]}" -eq 0 ] || kill -CONT -- "${conts[@]}" 2>/dev/null
   return 0
 }
 
@@ -2714,7 +2717,7 @@ _shmutant_pool_locals_writable() {
     _shmutant_bo _shmutant_so _shmutant_o _shmutant_n _shmutant_pc _shmutant_wrap_left \
     a budget dog e elapsed last leftovers linked lstart old rrc s tampered tmpd tnow victims wroot \
     b chunk conts g gcont gone_group guard_id guard_lost guard_of guard_of_id guard_pid guard_r guard_up guard_w hs kept kills members out pairs part pg ph phid recs rid rootid_pre seen_ck unfrozen w want \
-    SHMUTANT_GUARD SHMUTANT_GUARD_PID SHMUTANT_PS_LSTART SHMUTANT_PS_BOUND c guard_self guard_gap_ref gap ea eb lp le tbl cands guarded jl w fid_now stopped fgap cont_first
+    SHMUTANT_GUARD SHMUTANT_GUARD_PID SHMUTANT_PS_LSTART SHMUTANT_PS_BOUND c guard_self guard_gap_ref gap ea eb lp le tbl cands guarded jl w fid_now stopped fgap cont_first cfirst
 }
 
 # _shmutant_decl_writable <label> — the table's own names, checked by each declaration entry

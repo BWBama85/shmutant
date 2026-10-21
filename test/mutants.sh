@@ -2069,7 +2069,7 @@ shmutant_mut 'a group whose holder went is continued with no target in it' \
   '      gone_group="$SHMUTANT_KILL_GROUP"' \
   't_group_kill_checks_the_holder_identity'
 shmutant_mut 'the guard leaves what it could not verify stopped' \
-  '  [ "${#conts[@]}" -eq 0 ] || kill -CONT -- "${conts[@]}" 2>/dev/null' \
+  '  [ -n "$cfirst" ] || [ "${#conts[@]}" -eq 0 ] || kill -CONT -- "${conts[@]}" 2>/dev/null' \
   '  :' \
   't_guard_ends_only_what_it_can_verify'
 shmutant_mut 'done does not stand the guard down' \
@@ -2159,8 +2159,8 @@ shmutant_mut 'a ps that failed is read as a zombie' \
   '"; case "$st" in *Z*) return 0 ;; esac' \
   't_process_state_reads_take_a_failed_ps_as_no_state'
 shmutant_mut 'a group listing that failed keeps the guard from continuing a pid' \
-  '     members=" $(set -o pipefail; _shmutant_ps -A -o pid= -o pgid=' \
-  '     members=" $(_shmutant_ps -A -o pid= -o pgid=' \
+  '    if members=" $(set -o pipefail; _shmutant_ps -A -o pid= -o pgid=' \
+  '    if members=" $(_shmutant_ps -A -o pid= -o pgid=' \
   't_guard_ends_only_what_it_can_verify'
 # (no row on the end of a freeze looking, for a moment, for a guard that stood down to be gone or a
 # zombie before deciding to kill it: that moment is the guard's own exit, which no unit can time)
@@ -2248,8 +2248,8 @@ shmutant_mut 'the kill kills a holder it rejects through another record of it' \
   '      for p in "${targets[@]}"; do left+=("$p"); done' \
   't_kill_tree_reads_its_checks_last_from_one_table'
 shmutant_mut 'a caller function named sleep keeps the bound' \
-  'PATH="$(builtin command -p getconf PATH 2>/dev/null)" && builtin type -P sleep' \
-  'builtin command -p -v sleep' \
+  '    t="$(_shmutant_std_bin sleep)" && \' \
+  '    t="$(builtin command -p -v sleep)" && \' \
   't_guard_gives_up_on_a_process_table_that_stalls'
 shmutant_mut 'a caller function named jobs keeps a stall from being ended' \
   '  jl="$(builtin jobs -rp; builtin jobs -sp)"' \
@@ -2370,3 +2370,7 @@ shmutant_mut 'an empty elapsed-time table read fails its caller' \
   '    [ -z "$line" ] || SHMUTANT_START["${line%% *}"]="${line#* }"' \
   '    [ -n "$line" ] && SHMUTANT_START["${line%% *}"]="${line#* }"' \
   't_process_state_reads_take_a_failed_ps_as_no_state'
+shmutant_mut 'the guard lets go after the group KILL what it could not list the members for' \
+  '    else cfirst=1; fi' \
+  '    else :; fi' \
+  't_guard_ends_only_what_it_can_verify'
