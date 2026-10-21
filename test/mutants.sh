@@ -1617,7 +1617,7 @@ shmutant_mut 'the CLI sampler keeps the pid of a sleep it already reaped' \
 shmutant_mut 'the group is signalled after its holder has gone' \
   '  kill -0 "$1" 2>/dev/null || return 1' \
   '  :' \
-  't_group_kill_skips_a_group_its_holder_no_longer_holds'
+  't_cli_end_group_checks_the_holder_identity'
 shmutant_mut 'an unreadable listing in a freeze passes for a settled one' \
   '        _shmutant_can_list && SHMUTANT_FREEZE_UNSETTLED=1' \
   '        :' \
@@ -1629,7 +1629,7 @@ shmutant_mut 'a host with no process listing counts every freeze as unsettled' \
 shmutant_mut 'the group kill takes any live pid at the holder number for the holder' \
   '  if ! _shmutant_same_start "$now" "$2"; then return 1; fi' \
   '  :' \
-  't_group_kill_checks_the_holder_identity'
+  't_cli_end_group_checks_the_holder_identity'
 shmutant_mut 'an unreadable /proc table lists no descendants and succeeds' \
   '    table="$(_shmutant_proc_table)"; [ -n "$table" ] || return 1' \
   '    table="$(_shmutant_proc_table)"' \
@@ -2065,8 +2065,8 @@ shmutant_mut 'a group whose holder went is continued before its target is signal
   '  [ -z "$gone_group" ] || kill -CONT -- -"$gone_group" 2>/dev/null; [ "${#targets[@]}" -eq 0 ] || kill "-$sig" -- "${targets[@]}" 2>/dev/null' \
   't_group_kill_checks_the_holder_identity'
 shmutant_mut 'a group whose holder went is continued with no target in it' \
-  '      _shmutant_group_has "$SHMUTANT_KILL_GROUP" "${targets[@]}" && gone_group=' \
-  '      : && gone_group=' \
+  '      for p in "${targets[@]}"; do case "$members" in *" $p "*) gone_group="$SHMUTANT_KILL_GROUP"; break ;; esac; done' \
+  '      gone_group="$SHMUTANT_KILL_GROUP"' \
   't_group_kill_checks_the_holder_identity'
 shmutant_mut 'the guard leaves what it could not verify stopped' \
   '  [ "${#conts[@]}" -eq 0 ] || kill -CONT -- "${conts[@]}" 2>/dev/null' \
@@ -2122,8 +2122,6 @@ shmutant_mut 'the guard is ended by INT, TERM or HUP' \
 # through them fails while errexit is on, so a row would pass or fail by chance)
 # (no row on the guard keeping a read cut short by its one-second look: every record is one short
 # write, so no witness can split one across that second, and a row would pass)
-# (no row on _shmutant_kill_tree walking the root's descendants after the group's reads rather than
-# before: the fix is the order of two blocks, and the window it closes is one no unit can time)
 shmutant_mut 'the guard reads starts before it stops what it may kill' \
   '  [ "${#stops[@]}" -eq 0 ] || kill -STOP -- "${stops[@]}" 2>/dev/null' \
   '  :' \
@@ -2133,8 +2131,8 @@ shmutant_mut 'the guard does not stop the holder before checking it' \
   '  for p in "${recs[@]}"; do' \
   't_guard_ends_only_what_it_can_verify'
 shmutant_mut 'a holder the guard stopped and did not take for the holder is left stopped' \
-  '    [ "$hs" = 0 ] || [ -z "$ph" ] || conts+=("$ph")' \
-  '    :' \
+  '      conts+=("$ph")' \
+  '      :' \
   't_guard_ends_only_what_it_can_verify'
 shmutant_mut 'a pid the guard kills is continued after, when another record named it' \
   '      want=1; for pid in "${kills[@]}"; do [ "$pid" != "$p" ] || want=""; done' \
@@ -2161,8 +2159,8 @@ shmutant_mut 'a ps that failed is read as a zombie' \
   '"; case "$st" in *Z*) return 0 ;; esac' \
   't_process_state_reads_take_a_failed_ps_as_no_state'
 shmutant_mut 'a group listing that failed keeps the guard from continuing a pid' \
-  '     members=" $(set -o pipefail; command -p ps -A -o pid= -o pgid=' \
-  '     members=" $(command -p ps -A -o pid= -o pgid=' \
+  '     members=" $(set -o pipefail; _shmutant_ps -A -o pid= -o pgid=' \
+  '     members=" $(_shmutant_ps -A -o pid= -o pgid=' \
   't_guard_ends_only_what_it_can_verify'
 # (no row on the end of a freeze looking, for a moment, for a guard that stood down to be gone or a
 # zombie before deciding to kill it: that moment is the guard's own exit, which no unit can time)
@@ -2195,3 +2193,73 @@ shmutant_mut 'a bare root is not checked after the guard starts' \
 # red on the commit before it)
 # (no row on the identity probe asking about $BASHPID rather than $$: its witness can fail only where
 # /proc is absent, and a row that survives on Linux would read as a defect endured)
+
+# --- guards added for #48, #49, #51 and #53 ---
+shmutant_mut 'the guard takes a holder whose elapsed start a clock step moved for another process' \
+  '    [ "$hs" != 1 ] || case "$phid" in e*) ! kill -0 "$ph" 2>/dev/null || hs=2 ;; esac' \
+  '    :' \
+  't_guard_reads_a_moved_elapsed_start_as_a_holder_it_cannot_check'
+shmutant_mut 'the guard kills a holder its group record rejects through its member record' \
+  '      for p in "${kills[@]}"; do [ "$p" = "$ph" ] || left+=("$p"); done' \
+  '      for p in "${kills[@]}"; do left+=("$p"); done' \
+  't_guard_ends_only_what_it_can_verify'
+shmutant_mut 'the guard takes a freezer whose elapsed start a clock step moved for gone' \
+  '    case "${guard_of_id:-}" in e*) kill -0 "$guard_of" 2>/dev/null ;; *) false ;; esac' \
+  '    false' \
+  't_guard_waits_for_a_freezer_whose_elapsed_start_moved'
+shmutant_mut 'the guard reads its process table without a bound' \
+  '  local SHMUTANT_PS_BOUND=10' \
+  '  local SHMUTANT_PS_BOUND=' \
+  't_guard_gives_up_on_a_process_table_that_stalls'
+shmutant_mut 'a bounded ps that stalls is left running' \
+  '  if [ "$rc" -gt 128 ]; then kill -USR1 "$p" 2>/dev/null; return 124; fi' \
+  '  if [ "$rc" -gt 128 ]; then return 124; fi' \
+  't_guard_gives_up_on_a_process_table_that_stalls'
+shmutant_mut 'a bounded ps that stalls is waited out' \
+  '  IFS= read -r -d '"'"''"'"' -t "$SHMUTANT_PS_BOUND" -u "$fd" out || rc=$?' \
+  '  IFS= read -r -d '"'"''"'"' -u "$fd" out || rc=$?' \
+  't_guard_gives_up_on_a_process_table_that_stalls'
+shmutant_mut 'a bounded ps takes a bound that is not a number' \
+  '  case "${SHMUTANT_PS_BOUND:-}" in '"'"''"'"'|0|*[!0-9]*) command -p ps "$@"; return ;; esac' \
+  '  case "${SHMUTANT_PS_BOUND:-}" in '"'"''"'"') command -p ps "$@"; return ;; esac' \
+  't_guard_gives_up_on_a_process_table_that_stalls'
+shmutant_mut 'a bounded ps ends a caller with errexit on at the end of its output' \
+  '  IFS= read -r -d '"'"''"'"' -t "$SHMUTANT_PS_BOUND" -u "$fd" out || rc=$?' \
+  '  IFS= read -r -d '"'"''"'"' -t "$SHMUTANT_PS_BOUND" -u "$fd" out; rc=$?' \
+  't_guard_gives_up_on_a_process_table_that_stalls'
+shmutant_mut 'the kill ends a caller with errexit on at a holder it rejects' \
+  '    [ -z "${holder:-}" ] || _shmutant_table_state "$holder" "${holderid:-}" || hs=$?' \
+  '    [ -z "${holder:-}" ] || { _shmutant_table_state "$holder" "${holderid:-}"; hs=$?; }' \
+  't_kill_tree_reads_its_checks_last_from_one_table'
+shmutant_mut 'a bounded ps loses the status of the ps' \
+  '  wait "$p"' \
+  '  wait "$p"; return 0' \
+  't_guard_gives_up_on_a_process_table_that_stalls'
+shmutant_mut 'the kill checks a victim by a read of its own before the walk' \
+  '    elif [ -n "${SHMUTANT_START[${p%%:*}]:-}" ] && _shmutant_same_start "${SHMUTANT_START[${p%%:*}]}" "${p#*:}"; then targets+=("${p%%:*}")' \
+  '    elif _shmutant_alive_since "${p%%:*}" "${p#*:}"; then targets+=("${p%%:*}")' \
+  't_kill_tree_reads_its_checks_last_from_one_table'
+shmutant_mut 'the kill checks the holder by a read of its own after the table' \
+  '    [ -z "${holder:-}" ] || _shmutant_table_state "$holder" "${holderid:-}" || hs=$?' \
+  '    [ -z "${holder:-}" ] || _shmutant_holder_state "$holder" "${holderid:-}" || hs=$?' \
+  't_kill_tree_reads_its_checks_last_from_one_table'
+shmutant_mut 'the kill signals a find of the walk whatever start the table shows' \
+  '    [ -n "$p" ] && [ -n "${SHMUTANT_START[${p%% *}]:-}" ] && _shmutant_same_start "${SHMUTANT_START[${p%% *}]}" "${p#* }" && targets+=("${p%% *}")' \
+  '    [ -n "$p" ] && targets+=("${p%% *}")' \
+  't_kill_tree_reads_its_checks_last_from_one_table'
+shmutant_mut 'the kill takes a holder gone since its table for the holder' \
+  '  if ! kill -0 "$1" 2>/dev/null; then return 1; fi' \
+  '  :' \
+  't_kill_tree_reads_its_checks_last_from_one_table'
+shmutant_mut 'the kill takes a holder missing from the table it read for one it cannot check' \
+  '    [ "${#SHMUTANT_START[@]}" -gt 0 ] || return 2' \
+  '    return 2' \
+  't_kill_tree_reads_its_checks_last_from_one_table'
+shmutant_mut 'the kill takes a holder with another start for the holder' \
+  '  _shmutant_same_start "${SHMUTANT_START[$1]}" "$2" || return 1' \
+  '  :' \
+  't_group_kill_checks_the_holder_identity'
+shmutant_mut 'the CLI holder is killed by number after its group' \
+  '  kill -KILL -- -"$1" 2>/dev/null' \
+  '  kill -KILL -- -"$1" 2>/dev/null; kill -KILL "$hp" 2>/dev/null' \
+  't_cli_end_group_checks_the_holder_identity'
