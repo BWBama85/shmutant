@@ -2212,7 +2212,7 @@ shmutant_mut 'the guard takes a freezer start that moved alone for one the clock
   '  :' \
   't_guard_waits_for_a_freezer_whose_elapsed_start_moved'
 shmutant_mut 'the guard takes the start its freezer tells it for nothing' \
-  '        '"'"'f '"'"'*) case "${line#f }" in e*) guard_gap_ref="$(_shmutant_elapsed_gap "$guard_of" "$guard_self" "${line#f }")" || guard_gap_ref="" ;; esac ;;' \
+  '        '"'"'f '"'"'*) case "${line#f }" in e*'"'"' '"'"'*) guard_gap_ref="${line##* }"; case "${guard_gap_ref#-}" in '"'"''"'"'|*[!0-9]*) guard_gap_ref="" ;; esac ;; esac ;;' \
   '        '"'"'f '"'"'*) : ;;' \
   't_guard_waits_for_a_freezer_whose_elapsed_start_moved'
 shmutant_mut 'the gap between two elapsed times is read from a ps that failed' \
@@ -2224,7 +2224,7 @@ shmutant_mut 'a table of starts is taken from a ps that failed' \
   '    }'"'"')"' \
   't_process_state_reads_take_a_failed_ps_as_no_state'
 shmutant_mut 'the freezer does not tell its guard its own start' \
-  '    [ -z "$fid_now" ] || _shmutant_guard_tell "f $fid_now"' \
+  '    [ -z "$fid_now" ] || _shmutant_guard_tell "f $fid_now${fgap:+ $fgap}"' \
   '    :' \
   't_freeze_tells_its_guard_its_own_start'
 shmutant_mut 'the kill counts a stop that did not take' \
@@ -2232,7 +2232,7 @@ shmutant_mut 'the kill counts a stop that did not take' \
   '    for p in "${cands[@]}"; do kill -STOP "${p%% *}" 2>/dev/null; stopped["${p%% *}"]=1; done' \
   't_kill_tree_reads_its_checks_last_from_one_table'
 shmutant_mut 'the kill leaves what it stopped and could not show stopped' \
-  '  [ "${#conts[@]}" = 0 ] || kill -CONT -- "${conts[@]}" 2>/dev/null' \
+  '  [ -n "$cont_first" ] || [ "${#conts[@]}" = 0 ] || kill -CONT -- "${conts[@]}" 2>/dev/null' \
   '  :' \
   't_kill_tree_reads_its_checks_last_from_one_table'
 shmutant_mut 'the kill continues a pid its stop never reached' \
@@ -2352,7 +2352,21 @@ shmutant_mut 'a member the group KILL takes is continued by number after it' \
   '      for p in "${conts[@]}"; do case "$members" in *" $p "*) continue ;; esac; left+=("$p"); done' \
   '      for p in "${conts[@]}"; do left+=("$p"); done' \
   't_kill_tree_reads_its_checks_last_from_one_table'
-shmutant_mut 'the guard takes its freezer gap from a process its record did not name' \
-  '    _shmutant_same_start "e$(( now / 1000000 - ea ))" "$3" || return 1' \
-  '    :' \
+shmutant_mut 'the guard reads its freezer gap of whatever holds the number instead of the one told' \
+  '        '"'"'f '"'"'*) case "${line#f }" in e*'"'"' '"'"'*) guard_gap_ref="${line##* }"; case "${guard_gap_ref#-}" in '"'"''"'"'|*[!0-9]*) guard_gap_ref="" ;; esac ;; esac ;;' \
+  '        '"'"'f '"'"'*) case "${line#f }" in e*'"'"' '"'"'*) guard_gap_ref="$(_shmutant_elapsed_gap "$guard_of" "$guard_self")" || guard_gap_ref="" ;; esac ;;' \
   't_guard_waits_for_a_freezer_whose_elapsed_start_moved'
+shmutant_mut 'the freezing shell tells its elapsed-time start without the gap it read' \
+  '    [ -z "$fid_now" ] || _shmutant_guard_tell "f $fid_now${fgap:+ $fgap}"' \
+  '    [ -z "$fid_now" ] || _shmutant_guard_tell "f $fid_now"' \
+  't_freeze_tells_its_guard_its_own_start'
+# (no row on the told gap being checked for a number: the records come from the freezing shell alone,
+# which tells a number read by _shmutant_elapsed_gap or none.)
+shmutant_mut 'what the kill lets go is let go after a group KILL whose members it could not read' \
+  '      if [ -z "$members" ]; then cont_first=1; fi' \
+  '      :' \
+  't_kill_tree_reads_its_checks_last_from_one_table'
+shmutant_mut 'an empty elapsed-time table read fails its caller' \
+  '    [ -z "$line" ] || SHMUTANT_START["${line%% *}"]="${line#* }"' \
+  '    [ -n "$line" ] && SHMUTANT_START["${line%% *}"]="${line#* }"' \
+  't_process_state_reads_take_a_failed_ps_as_no_state'

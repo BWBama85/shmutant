@@ -3902,7 +3902,8 @@ t_guard_acts_while_a_helper_of_its_freezer_holds_the_records() {
   # #47, #48: a helper subshell of the freezing shell (a process listing in a command substitution)
   # inherits the guard's records and keeps them open after the freezing shell is killed, so their end
   # never comes while it runs. The guard also looks for the freezing shell itself, and ends what was
-  # stopped within seconds, whatever the helper does. The helper here blocks until the unit ends it.
+  # stopped within seconds, whatever the helper does. The helper here is stopped, and stays so until the
+  # unit ends it.
   local root i fz hp
   local -a kids=() known=()
   set -m; sh -c 'sleep 60 & sleep 60 & wait' < /dev/null > /dev/null 2>&1 & root=$!; set +m
@@ -3920,6 +3921,7 @@ t_guard_acts_while_a_helper_of_its_freezer_holds_the_records() {
   wait_for "$T/helper.pid" || fail_ 'fixture: the helper never started'
   fz="$(cat "$T/freezer.pid" 2>/dev/null)"; hp="$(cat "$T/helper.pid" 2>/dev/null)"
   case "$(command -p ps -o stat= -p "$root" 2>/dev/null)" in *T*) ;; *) fail_ 'fixture: the root was not stopped before the helper blocked' ;; esac
+  if [ -z "$hp" ] || ! stop_shown "$hp"; then fail_ 'fixture: the helper could not be stopped'; fi
   [ -z "$fz" ] || kill -KILL "$fz" 2>/dev/null
   wait_gone "$root" "" 50 || fail_ "the root stayed $(command -p ps -o stat= -p "$root" 2>/dev/null | tr -d ' ') while a helper of its killed freezer held the guard's records"
   # the helper and its sleep, then the rest
@@ -4048,6 +4050,15 @@ t_freeze_tells_its_guard_its_own_start() {
   read -r of ofid < "$T/of" 2>/dev/null || { fail_ 'fixture: the freeze never reached its walk'; return; }
   eq "$ofid" "id-of-$of" 'the start the guard is given is its freezing shell'"'"'s'
   eq "$(head -n 1 "$T/records" 2>/dev/null)" "f id-of-$of" 'the first record the guard is told is its freezing shell'"'"'s start'
+  # In the elapsed-time form the record carries how much older the freezing shell is than the guard, as
+  # that shell read it of itself and the guard's pid.
+  rm -f "$T/records"
+  ( _shmutant_identity() { printf 'e100'; }
+    _shmutant_elapsed_gap() { if [ "$1" = "$guard_of" ] && [ "$2" = "${guard_pid:-}" ]; then printf '7'; else return 1; fi; }
+    _shmutant_guard() { printf 'ready %s\n' "$BASHPID"; command -p cat > "$T/records"; }
+    _shmutant_freeze_from() { :; }
+    _shmutant_kill_tree_twice 2000000000 ) > /dev/null 2>&1
+  eq "$(head -n 1 "$T/records" 2>/dev/null)" "f e100 7" 'an elapsed-time start is told with the gap its shell read of itself and the guard'
 }
 
 # shellcheck disable=SC2034
@@ -4247,6 +4258,11 @@ t_guard_verifies_with_its_top_shell_gone() {
 }
 
 t_process_state_reads_take_a_failed_ps_as_no_state() {
+  # A table read whole that lists nothing fills nothing and still returns, to a caller with errexit on:
+  # a shell of its own, as a unit runs where bash ignores errexit.
+  eq "$(SHMUTANT="$SHMUTANT" "$BASH" -c '. "$SHMUTANT" || exit 9; set -e; SHMUTANT_PROC=0 SHMUTANT_PS_LSTART=0
+    _shmutant_ps() { return 0; }; _shmutant_identity_table; printf "returned %s" "${#SHMUTANT_START[@]}"' 2>/dev/null)" 'returned 0' \
+    'an empty table read returns to a caller with errexit on'
   # #47: a process's state read through a ps that failed is no state, whatever that ps printed: never
   # "stopped", which lets the guard take a holder it cannot identify for the run's, nor "a zombie",
   # which takes a freezing shell for gone.
@@ -4449,10 +4465,11 @@ t_guard_waits_for_a_freezer_whose_elapsed_start_moved() {
   # freezing: while that shell is as much older than the guard as it was when it told the guard its start
   # (`f`, its first record), the move is the clock's, and the guard goes on waiting rather than let go
   # what that shell is about to KILL by number; it acts once the records end. A process at that number
-  # that is younger (`later`) is another: the guard acts, and ends the victim it was told of. So is a
-  # shell the guard's first read does not show with the start it told (`told`): no gap is taken from it,
-  # and after the step the guard acts. f stands in for the freezing shell, d for what it froze; the clock
-  # steps ten seconds forward once the guard runs.
+  # that is younger (`later`) is another: the guard acts, and ends the victim it was told of. So it is when
+  # the number was given away before the guard read its first record (`told`): the gap it compares by is
+  # the one the freezing shell told, never one the guard read of what then held the number. f stands in
+  # for the freezing shell, d for what it froze; the clock steps ten seconds forward once the guard runs.
+  local gap
   local how f d fid did w g left
   sleep 60 > /dev/null 2>&1 & f=$!
   fid="$(SHMUTANT_PROC=0 SHMUTANT_PS_LSTART=0 _shmutant_identity "$f")"
@@ -4471,23 +4488,25 @@ t_guard_waits_for_a_freezer_whose_elapsed_start_moved() {
         if [ "$1" = "$f" ] && [ -e "$T/reused" ]; then printf 'e%s' "$(( ${fid#e} + 50 ))"; return 0; fi
         _shmutant_identity_real "$@"
       }
-      # Reused, the process at f's number is younger than f was, in every read of elapsed time.
+      # Reused, the process at f's number is younger than f was, in every read of elapsed time: as old as
+      # the guard, and ageing as it does, as a process that took the number as the guard started would.
       command() {
         if [ -e "$T/reused" ] && [ "${1:-}" = -p ] && [ "${2:-}" = ps ]; then
-          case "$*" in "-p ps -o pid= -o etime= -p $f,"*) builtin command "$@" | awk -v f="$f" '$1 == f { $2 = "00:00" } { print }'; return ;; esac
+          case "$*" in "-p ps -o pid= -o etime= -p $f,"*) builtin command "$@" | awk -v f="$f" '
+            { p[NR] = $1; e[NR] = $2; if ($1 != f) o = $2 }
+            END { for (i = 1; i <= NR; i++) print p[i], ((p[i] == f && o != "") ? o : e[i]) }'; return ;; esac
         fi
         builtin command "$@"; }
       _shmutant_now() { local t="$EPOCHREALTIME"; t="${t//[!0-9]/}"; [ ! -e "$T/stepped" ] || t=$(( t + 10000000 )); printf '%s' "$t"; }
       _shmutant_guard < "$T/rec" > /dev/null 2>&1 ) & g=$!
-    if [ "$how" = told ]; then printf 'f e1\np %s %s\n' "$d" "$did" >&"$w"; else printf 'f %s\np %s %s\n' "$fid" "$d" "$did" >&"$w"; fi
+    # The gap as f's shell would read it of itself and the guard (g runs _shmutant_guard as itself).
+    gap="$(_shmutant_elapsed_gap "$f" "$g")" || gap=""
+    [ -n "$gap" ] || fail_ "$how: fixture: no gap could be read"
+    [ "$how" != told ] || : > "$T/reused"
+    printf 'f %s %s\np %s %s\n' "$fid" "$gap" "$d" "$did" >&"$w"
     sleep 0.5
-    case "$how" in step|told) : > "$T/stepped" ;; later) : > "$T/reused" ;; esac
-    if [ "$how" = told ]; then
-      # With its records still open: what it acts on is its freezer's start, moved and unexplained.
-      wait_gone "$g" "" 50 || fail_ "$how: the guard took the gap of a process its freezer's record did not name, and waited on a moved start"
-      left="$(none_stopped 50 "$d")" || fail_ "$how: the guard left [$left] stopped"
-      exec {w}>&-
-    elif [ "$how" = step ]; then
+    case "$how" in step) : > "$T/stepped" ;; later) : > "$T/reused" ;; esac
+    if [ "$how" = step ]; then
       # Two of the guard's looks for its freezer, one a second.
       sleep 2.5
       case "$(command -p ps -o stat= -p "$d" 2>/dev/null)" in
@@ -4553,6 +4572,14 @@ t_guard_gives_up_on_a_process_table_that_stalls() {
   [ ! -e "$T/exit-fn" ] || fail_ "a function named exit ended the bounded read's helper: [$(tr '\n' ' ' < "$T/exit-fn")]"
   sp="$(cat "$T/stalled.pid" 2>/dev/null)"
   if [ -n "$sp" ] && ! wait_gone "$sp" "" 30; then fail_ 'a caller function named jobs kept a ps that stalled from being ended'; kill -KILL "$sp" 2>/dev/null; fi
+  # A caller with job control on does not keep a stall from being ended.
+  rm -f "$T/stalled.pid"
+  ( set -m
+    command() { if [ "${1:-}" = -p ] && [ "${2:-}" = ps ]; then printf '%s\n' "$BASHPID" > "$T/stalled.pid"; exec /bin/sleep 30; fi; builtin command "$@"; }
+    SHMUTANT_PS_BOUND=1 _shmutant_ps -A > /dev/null ) > /dev/null 2>&1
+  sp="$(cat "$T/stalled.pid" 2>/dev/null)"
+  if [ -z "$sp" ]; then fail_ 'fixture: the stalled ps under job control never started'
+  elif ! wait_gone "$sp" "" 30; then fail_ 'with job control on, a ps that stalled was left running'; kill -KILL "$sp" 2>/dev/null; fi
   # Output that cannot be written is a failed call, as it is for the ps it wraps.
   rc=0; SHMUTANT_PS_BOUND=5 _shmutant_ps -o pid= -p "$d" >&- 2>/dev/null || rc=$?
   [ "$rc" != 0 ] || fail_ 'a bounded ps whose output could not be written succeeded'
@@ -4609,6 +4636,10 @@ t_kill_tree_reads_its_checks_last_from_one_table() {
       kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*" >> "$T/log"; fi; }
       # A stop that does not take (here: refused for the victim) leaves nothing it can license.
       [ "${3:-}" != refused ] || kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*" >> "$T/log"; [ "$*" != "-STOP $v" ]; fi; }
+      # The group's members cannot be listed.
+      [ "${3:-}" != nomembers ] || command() {
+        if [ "${1:-}" = -p ] && [ "${2:-}" = ps ]; then printf 'ps %s\n' "${*:3}" >> "$T/log"; [ "$*" != "-p ps -A -o pid= -o pgid=" ] || return 1; fi
+        builtin command "$@"; }
       _shmutant_kill_tree KILL "$root" "$v:$vid" )
   }
   rm -f "$T/log"; kill_logged
@@ -4636,6 +4667,14 @@ t_kill_tree_reads_its_checks_last_from_one_table() {
   rm -f "$T/log" "$T/told"; kill_logged moved guarded rejected
   awk -v p="$kid" '$2 == "-CONT" { for (i = 3; i <= NF; i++) if ($i == p) f = 1 } END { exit !f }' "$T/log" 2>/dev/null \
     || fail_ "under a guard, a stopped find the table does not show, in no group that is killed, was not let go: [$(cat "$T/log" 2>/dev/null)]"
+  # With the group's members unreadable, any find it let go may be one the group KILL takes: it is let go
+  # before that KILL, while its stop keeps its number its own, never after it.
+  rm -f "$T/log" "$T/told"; kill_logged moved guarded nomembers
+  awk -v p="$kid" -v g="-$root" '
+    $2 == "-CONT" { for (i = 3; i <= NF; i++) if ($i == p && !c) c = NR }
+    $2 == "-KILL" { for (i = 3; i <= NF; i++) if ($i == g && !k) k = NR }
+    END { exit !(c && k && c < k) }' "$T/log" 2>/dev/null \
+    || fail_ "with the group's members unreadable, a find let go was not let go before the group KILL: [$(cat "$T/log" 2>/dev/null)]"
   # ...and so is a holder it stopped that the table shows with another start; its group is not killed.
   rm -f "$T/log" "$T/told"; kill_logged - guarded rejected
   # Fields compared whole: `-<root>` names its group, not the holder.
