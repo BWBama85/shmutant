@@ -2087,8 +2087,10 @@ t_cli_end_sampled_reports_a_freeze_with_no_guard() {
     _shmutant_guard_open() { return 1; }
     _shmutant_cli_end_sampled "0:" ) 2> "$T/sampled-err"
   has "$(cat "$T/sampled-err" 2>/dev/null)" 'the guard of a freeze could not be started' 'a sampled freeze with no guard is not reported'
-  wait_gone "$v" "$vid" 30 || fail_ 'with no guard, the sampled process was not killed'
-  kill -KILL "$v" 2>/dev/null; wait "$v" 2>/dev/null; true
+  # Ended by the identity recorded at its start, and only if it outlived the cleanup: once gone, its
+  # number may be another's.
+  if ! wait_gone "$v" "$vid" 30; then fail_ 'with no guard, the sampled process was not killed'; _shmutant_kill_tree_twice 0: "$v:$vid" 2>/dev/null; fi
+  wait "$v" 2>/dev/null; true
 }
 
 t_cli_end_group_checks_the_holder_identity() {
@@ -4506,7 +4508,7 @@ t_guard_ends_only_what_it_can_verify() {
   out="$( kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*"; fi; }; _shmutant_guard < /dev/null )"
   [[ "$out" =~ ^ready\ [0-9]+$ ]] || fail_ "an end with nothing recorded signalled something: [$out]"
   end_group "$m" "$m:$mid" "$mc:$mcid"
-  kill -KILL "$a" "$b" 2>/dev/null; wait "$a" "$b" "$m" 2>/dev/null
+  _shmutant_kill_tree_twice 0: "$a:$aid" "$b:$bid" 2>/dev/null; wait "$a" "$b" "$m" 2>/dev/null
 }
 
 # shellcheck disable=SC2034
@@ -7341,9 +7343,13 @@ t_group_kill_checks_the_holder_identity() {
   rm -f "$T/mc"
   set -m; sh -c 'sleep 30 & echo "$!" > "$1"; wait' _ "$T/mc" < /dev/null > /dev/null 2>&1 & local m=$!; set +m
   local mc="" i
+  local -a known=()
+  # Identities read now, at the start: the cleanup below ends only the processes these still name.
+  mapfile -t known < <(pairs_of "$m" "$stranger")
   for (( i = 0; i < 50; i++ )); do [ -s "$T/mc" ] && break; sleep 0.1; done
   mc="$(cat "$T/mc" 2>/dev/null)"
-  case "$mc" in ''|*[!0-9]*) fail_ 'fixture: the member of the group never started'; end_group "$m" "$(pairs_of "$m")"; kill -KILL "$stranger" 2>/dev/null; wait "$stranger" "$m" 2>/dev/null; return ;; esac
+  case "$mc" in ''|*[!0-9]*) fail_ 'fixture: the member of the group never started'; end_group "$m" "${known[@]}"; _shmutant_kill_tree_twice 0: "${known[@]}" 2>/dev/null; wait "$stranger" "$m" 2>/dev/null; return ;; esac
+  mapfile -t -O "${#known[@]}" known < <(pairs_of "$mc")
   ( holder="$stranger"; holderid="not-the-holders-start"; SHMUTANT_KILL_GROUP=99999
     kill() { case " $* " in *" -KILL "*" -99999 "*) printf 'x\n' >> "$T/group-killed" ;; *" -CONT -- -99999 "*) printf 'x\n' >> "$T/group-continued" ;; esac; }
     _shmutant_kill_tree KILL "" )
@@ -7356,8 +7362,9 @@ t_group_kill_checks_the_holder_identity() {
   [ -e "$T/m-continued" ] || fail_ 'a group a target of the kill is still in was not continued when its holder no longer matched'
   # continued only after the target that showed it to be the run's is killed, while still stopped
   eq "$(tr '\n' ' ' < "$T/m-order" 2>/dev/null)" 'kill cont ' 'the group is continued after its member is killed'
-  end_group "$m" "$(pairs_of "$m" "$mc" | head -n 1)"; wait "$m" 2>/dev/null
-  kill -KILL "$stranger" 2>/dev/null; wait "$stranger" 2>/dev/null
+  end_group "$m" "${known[@]}"; wait "$m" 2>/dev/null
+  # The stranger by the identity it started with, never by its number alone.
+  _shmutant_kill_tree_twice 0: "${known[@]}" 2>/dev/null; wait "$stranger" 2>/dev/null
 }
 
 t_freeze_treats_an_unreadable_table_as_unsettled() {
