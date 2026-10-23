@@ -1488,7 +1488,7 @@ _shmutant_guard() {
     # is reached. The holder's stop keeps it in the group, and the group's number its own, until then.
     if [ "$hs" = 0 ]; then
       left=()
-      for p in "${kills[@]}"; do [ "$p" = "$ph" ] || left+=("$p"); done
+      for pid in "${kills[@]}"; do [ "$pid" = "$ph" ] || left+=("$pid"); done
       kills=("${left[@]}" -"$pg")
     elif [ "$hs" = 2 ] || _shmutant_group_has "$pg" "${kills[@]}"; then gcont="$pg"
     fi
@@ -1623,7 +1623,7 @@ _shmutant_kill_tree() {
       # number before the group could be reaped and leave the group's number free by the time the
       # group is reached, and the holder is what keeps it the run's until then.
       left=()
-      for p in "${targets[@]}"; do [ "$p" = "${holder:-}" ] || left+=("$p"); done
+      for out in "${targets[@]}"; do [ "$out" = "${holder:-}" ] || left+=("$out"); done
       targets=("${left[@]}" -"$SHMUTANT_KILL_GROUP")
       # Nor is a member that KILL takes continued after it, by a number the KILL may have freed: a
       # stop of this call keeps it in the group. With no members read, any of them may be one, and what
