@@ -4886,7 +4886,9 @@ t_kill_tree_reads_its_checks_last_from_one_table() {
     ( holder="$root"; holderid="$(_shmutant_identity "$root")"; SHMUTANT_KILL_GROUP="$root"
       case "$out" in
         absent) _shmutant_identity_table() { SHMUTANT_START=([1]=x); } ;;
-        gone)   holder="$gone"; holderid=e1; _shmutant_identity_table() { SHMUTANT_START=(["$gone"]=e1); } ;;
+        # The tables were read while it was still there, a member of the group: it has gone since.
+        gone)   holder="$gone"; holderid=e1; _shmutant_identity_table() { SHMUTANT_START=(["$gone"]=e1); }
+                _shmutant_ps() { if [ "$*" = "-A -o pid= -o pgid=" ]; then printf '%s %s\n' "$gone" "$root"; return 0; fi; command -p ps "$@"; } ;;
         none)   _shmutant_identity_table() { SHMUTANT_START=(); } ;;
       esac
       kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*" >> "$T/log"; fi; }
@@ -7334,20 +7336,27 @@ t_group_kill_checks_the_holder_identity() {
   # continued (#47), letting go a member a freeze stopped there, only while a process the kill
   # targets is still in it; with none, nothing is sent to it.
   sleep 30 > /dev/null 2>&1 & local stranger=$!
-  set -m; sleep 30 > /dev/null 2>&1 & local m=$!; set +m
+  # m leads a group of its own, and mc, its child, is in it: the stranger at the holder's number, below,
+  # is a member of the group, so only its identity tells it from the holder.
+  rm -f "$T/mc"
+  set -m; sh -c 'sleep 30 & echo "$!" > "$1"; wait' _ "$T/mc" < /dev/null > /dev/null 2>&1 & local m=$!; set +m
+  local mc="" i
+  for (( i = 0; i < 50; i++ )); do [ -s "$T/mc" ] && break; sleep 0.1; done
+  mc="$(cat "$T/mc" 2>/dev/null)"
+  case "$mc" in ''|*[!0-9]*) fail_ 'fixture: the member of the group never started'; end_group "$m" "$(pairs_of "$m")"; kill -KILL "$stranger" 2>/dev/null; wait "$stranger" "$m" 2>/dev/null; return ;; esac
   ( holder="$stranger"; holderid="not-the-holders-start"; SHMUTANT_KILL_GROUP=99999
     kill() { case " $* " in *" -KILL "*" -99999 "*) printf 'x\n' >> "$T/group-killed" ;; *" -CONT -- -99999 "*) printf 'x\n' >> "$T/group-continued" ;; esac; }
     _shmutant_kill_tree KILL "" )
   if [ -e "$T/group-killed" ]; then fail_ 'the group was killed for a holder whose identity no longer matches'; fi
   if [ -e "$T/group-continued" ]; then fail_ 'a group with no target of the kill in it was continued'; fi
-  ( holder="$stranger"; holderid="not-the-holders-start"; SHMUTANT_KILL_GROUP="$m"
+  ( holder="$mc"; holderid="not-the-holders-start"; SHMUTANT_KILL_GROUP="$m"
     kill() { case " $* " in *" -KILL "*" -$m "*) printf 'x\n' >> "$T/m-killed" ;; *" -CONT -- -$m "*) printf 'cont\n' >> "$T/m-order"; printf 'x\n' >> "$T/m-continued" ;; *" -KILL "*" $m "*) printf 'kill\n' >> "$T/m-order" ;; esac; }
     _shmutant_kill_tree KILL "" "$m:" )
   if [ -e "$T/m-killed" ]; then fail_ 'the group of a holder whose identity no longer matches was killed'; fi
   [ -e "$T/m-continued" ] || fail_ 'a group a target of the kill is still in was not continued when its holder no longer matched'
   # continued only after the target that showed it to be the run's is killed, while still stopped
   eq "$(tr '\n' ' ' < "$T/m-order" 2>/dev/null)" 'kill cont ' 'the group is continued after its member is killed'
-  kill -KILL "$m" 2>/dev/null; wait "$m" 2>/dev/null
+  end_group "$m" "$(pairs_of "$m" "$mc" | head -n 1)"; wait "$m" 2>/dev/null
   kill -KILL "$stranger" 2>/dev/null; wait "$stranger" 2>/dev/null
 }
 
