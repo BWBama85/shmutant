@@ -2072,6 +2072,25 @@ t_library_refuses_a_readonly_name_it_assigns_when_sourced() {
   eq "$out" 'rc=0 n=0' 'a writable table array of the caller is simply reset, as before'
 }
 
+# shellcheck disable=SC2034  # the sampler and its descriptors are read by _shmutant_cli_end_sampled
+t_cli_end_sampled_reports_a_freeze_with_no_guard() {
+  # #53: the end of a CLI run freezes and KILLs every descendant its sampler saw that is still the
+  # process seen. With no guard to be had, that freeze kills what it reaches as it stands, and the CLI
+  # says so on its stderr rather than ending as though it had frozen the tree first. A stand-in sampler
+  # and a sample written ahead stand for the run's.
+  local v vid
+  sleep 60 > /dev/null 2>&1 & v=$!
+  vid="$(_shmutant_identity "$v")" || { kill -KILL "$v" 2>/dev/null; wait "$v" 2>/dev/null; fail_ 'fixture: no identity readable for the sampled process'; return; }
+  printf '%s:%s\n' "$v" "$vid" > "$T/seen"
+  ( sleep 30 & SHMUTANT_CLI_SAMPLER=$!
+    exec {SHMUTANT_CLI_SEEN_W}>>"$T/seen" {SHMUTANT_CLI_SEEN_R}<"$T/seen"
+    _shmutant_guard_open() { return 1; }
+    _shmutant_cli_end_sampled "0:" ) 2> "$T/sampled-err"
+  has "$(cat "$T/sampled-err" 2>/dev/null)" 'the guard of a freeze could not be started' 'a sampled freeze with no guard is not reported'
+  wait_gone "$v" "$vid" 30 || fail_ 'with no guard, the sampled process was not killed'
+  kill -KILL "$v" 2>/dev/null; wait "$v" 2>/dev/null; true
+}
+
 t_cli_end_group_checks_the_holder_identity() {
   # the holder published by the plan subshell carries its identity: a stranger at a reused
   # number is not killed on the holder's behalf, and the group is not signalled for it
@@ -4271,7 +4290,8 @@ t_guard_verifies_with_its_top_shell_gone() {
   SHMUTANT="$SHMUTANT" A="$a" AID="$aid" D="$T" WAIT_FOR="$(declare -f wait_for)" bash -c '
     . "$SHMUTANT" || exit 9
     eval "$WAIT_FOR"
-    ( printf "%s\n" "$BASHPID" > "$D/guard.pid"
+    # Published by a rename, so the name appears only once its content is whole.
+    ( { printf "%s\n" "$BASHPID" > "$D/guard.pid.tmp" && mv "$D/guard.pid.tmp" "$D/guard.pid"; } || exit 1
       i=0; while kill -0 "$$" 2>/dev/null; do i=$((i + 1)); [ "$i" -lt 200 ] || exit 1; sleep 0.05; done
       kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf "kill %s\n" "$*" >> "$D/kills"; fi; }
       printf "p %s %s\n" "$A" "$AID" | _shmutant_guard > /dev/null ) > /dev/null 2>&1 &

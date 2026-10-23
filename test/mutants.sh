@@ -2441,6 +2441,7 @@ shmutant_mut 'a CLI freeze with no guard ends the group in silence' \
   '  local holder="${2%% *}" holderid="" err_fd=2' \
   '  local holder="${2%% *}" holderid="" err_fd=' \
   't_cli_end_group_checks_the_holder_identity'
-# (no row on _shmutant_cli_end_sampled's `local err_fd=2`: its freeze runs only once a sampler has seen
-# a descendant, and no unit can take a guard's start from it there without also replacing the sampler;
-# the line is the one _shmutant_cli_end_group's row above witnesses)
+shmutant_mut 'a sampled CLI freeze with no guard ends what it saw in silence' \
+  '  local err_fd=2' \
+  '  local err_fd=' \
+  't_cli_end_sampled_reports_a_freeze_with_no_guard'
