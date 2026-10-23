@@ -4610,9 +4610,10 @@ t_ps_end_signals_a_job_only_through_bash_s_record() {
   # step, so a job reaped between them is sent nothing, where a KILL by number could reach a process
   # given that number. Witnessed by a trace of the call, in a shell made as the bounded read makes its
   # own (job control on and off again first). A pid that is not one of its jobs is sent nothing. A job
-  # that ends and is reaped between the listing and the signal is not staged here: bash reaps in its own
-  # SIGCHLD handler, at an instant no unit can choose. That bash then sends nothing is its source's
-  # (`jobs.c` `kill_pid`, D9); what this unit shows is that the signal goes that way.
+  # killed and reaped between the listing and the signal (staged by a DEBUG trap on that line) leaves
+  # the call to return as usual. Nothing there can show what was sent: the number is free, and no
+  # process holds it to be reached. That bash sends nothing then is its source's (`jobs.c` `kill_pid`,
+  # D9); what this unit shows is that the signal goes that way.
   local out
   out="$( ( builtin set -m; builtin set +m
             sleep 30 & a=$!
@@ -4624,6 +4625,15 @@ t_ps_end_signals_a_job_only_through_bash_s_record() {
   grep -Eq '^\++ builtin kill -KILL %[1-9][0-9]*$' "$T/trace" 2>/dev/null || fail_ "the job was not signalled through its job: [$(grep kill "$T/trace" 2>/dev/null | tr '\n' ';')]"
   if grep -E '^\++ builtin kill' "$T/trace" 2>/dev/null | grep -Evq '%[1-9][0-9]*$'; then fail_ "a signal was sent by number: [$(grep kill "$T/trace" | tr '\n' ';')]"; fi
   [ "$(grep -Ec '^\++ builtin kill' "$T/trace" 2>/dev/null)" = 1 ] || fail_ "a pid that is no job of the shell was signalled: [$(grep kill "$T/trace" 2>/dev/null | tr '\n' ';')]"
+  # The reap staged just before the signal: the call still returns, with status 0.
+  out="$( ( builtin set -m; builtin set +m
+            sleep 30 & a=$!
+            set -T
+            trap 'case "$BASH_COMMAND" in "builtin kill -KILL"*) trap - DEBUG; builtin kill -KILL "$a"; wait "$a" 2>/dev/null; printf staged ;; esac' DEBUG
+            _shmutant_ps_end "$a"; rc=$?
+            trap - DEBUG; set +T
+            printf ' %s' "$rc" ) 2>/dev/null )"
+  eq "$out" 'staged 0' 'a job reaped between its listing and its signal'
 }
 
 t_guard_gives_up_on_a_process_table_that_stalls() {
