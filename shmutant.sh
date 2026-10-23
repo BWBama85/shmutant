@@ -3470,13 +3470,14 @@ _shmutant_cli_wd_is_ours() {
 # <holder> is `pid identity` as the plan subshell published it: a holder that went (a plan
 # killed it) and a stranger now at its number are told apart, as for a run's holder; with no
 # identity readable now the holder is taken as it was, as with no ps at all.
-# The group is ended by a freeze of it (_shmutant_kill_tree_twice -g), the plan subshell, reaped by
-# now, its root by number only: under the freeze's guard the holder is stopped before the check
-# that licenses the group's KILL, a stop that reached a process given its number since is undone,
-# and the holder is ended through its group, never by number. A holder already gone here starts
-# no freeze.
+# The group is ended by a freeze of it (_shmutant_kill_tree_twice -g). The plan subshell, reaped by
+# now, is named as reaped (`<pgid>:`), so neither its number nor anything beneath it is touched:
+# only the group is frozen and killed. Under the freeze's guard the holder is stopped before the
+# check that licenses the group's KILL, a stop that reached a process given its number since is
+# undone, and the holder is ended through its group, never by number. A holder already gone here
+# starts no freeze. A freeze with no guard to be had says so on the CLI's stderr.
 _shmutant_cli_end_group() {
-  local holder="${2%% *}" holderid=""
+  local holder="${2%% *}" holderid="" err_fd=2
   case "$2" in *" "*) holderid="${2#* }" ;; esac
   [ -n "$holder" ] || return 0
   _shmutant_holder_state "$holder" "$holderid" || [ "$?" = 2 ] || return 0
@@ -3501,6 +3502,8 @@ _shmutant_cli_end_sampled() {
   done
   exec {SHMUTANT_CLI_SEEN_R}<&-; unset SHMUTANT_CLI_SEEN_R SHMUTANT_CLI_SEEN_W
   [ "${#sampled[@]}" -gt 0 ] || return 0
+  # Its reports (a freeze with no guard, one that did not settle) on the CLI's stderr.
+  local err_fd=2
   _shmutant_kill_tree_twice "$1" "${sampled[@]}"
   return 0
 }

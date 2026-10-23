@@ -2437,3 +2437,10 @@ shmutant_mut 'the bounded read keeps the process group its substitution inherite
   'set +e; builtin set -m; builtin set +m; c=""' \
   'set +e; c=""' \
   't_guard_gives_up_on_a_process_table_that_stalls'
+shmutant_mut 'a CLI freeze with no guard ends the group in silence' \
+  '  local holder="${2%% *}" holderid="" err_fd=2' \
+  '  local holder="${2%% *}" holderid="" err_fd=' \
+  't_cli_end_group_checks_the_holder_identity'
+# (no row on _shmutant_cli_end_sampled's `local err_fd=2`: its freeze runs only once a sampler has seen
+# a descendant, and no unit can take a guard's start from it there without also replacing the sampler;
+# the line is the one _shmutant_cli_end_group's row above witnesses)

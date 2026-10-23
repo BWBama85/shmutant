@@ -2111,7 +2111,15 @@ t_cli_end_group_checks_the_holder_identity() {
   _shmutant_cli_end_group "$hp" "$hp $hid"
   local i=0; while kill -0 "$hp" 2>/dev/null && [ "$i" -lt 30 ]; do i=$((i + 1)); sleep 0.1; done
   kill -0 "$hp" 2>/dev/null && { kill -KILL "$hp" 2>/dev/null; fail_ 'the holder with its own identity was not ended'; }
-  wait "$hp" 2>/dev/null; true
+  wait "$hp" 2>/dev/null
+  # With no guard to be had, the group is still killed, as it stands, and the CLI says so on its stderr
+  # rather than ending its run as though the group had been frozen first.
+  set -m; sleep 30 & local np=$!; set +m
+  local nid; nid="$(_shmutant_identity "$np")"
+  ( _shmutant_guard_open() { return 1; }; _shmutant_cli_end_group "$np" "$np $nid" ) 2> "$T/noguard-err"
+  has "$(cat "$T/noguard-err" 2>/dev/null)" 'the guard of a freeze could not be started' 'a CLI freeze with no guard is not reported'
+  wait_gone "$np" "$nid" 30 || { fail_ 'with no guard, the group was not killed'; end_group "$np" "$np:$nid"; }
+  wait "$np" 2>/dev/null; true
 }
 
 t_stream_prefix_overwritten_in_place_is_noticed() {
@@ -4260,13 +4268,14 @@ t_guard_verifies_with_its_top_shell_gone() {
   sleep 60 > /dev/null 2>&1 & local a=$!
   local aid g=""
   aid="$(_shmutant_identity "$a")"
-  SHMUTANT="$SHMUTANT" A="$a" AID="$aid" D="$T" bash -c '
+  SHMUTANT="$SHMUTANT" A="$a" AID="$aid" D="$T" WAIT_FOR="$(declare -f wait_for)" bash -c '
     . "$SHMUTANT" || exit 9
+    eval "$WAIT_FOR"
     ( printf "%s\n" "$BASHPID" > "$D/guard.pid"
       i=0; while kill -0 "$$" 2>/dev/null; do i=$((i + 1)); [ "$i" -lt 200 ] || exit 1; sleep 0.05; done
       kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf "kill %s\n" "$*" >> "$D/kills"; fi; }
       printf "p %s %s\n" "$A" "$AID" | _shmutant_guard > /dev/null ) > /dev/null 2>&1 &
-    i=0; until [ -s "$D/guard.pid" ]; do i=$((i + 1)); [ "$i" -lt 200 ] || exit 1; sleep 0.05; done' < /dev/null \
+    wait_for "$D/guard.pid" || exit 1' < /dev/null \
     || fail_ 'fixture: the stand-in guard never started'
   [ -s "$T/guard.pid" ] || fail_ 'fixture: the stand-in guard recorded no pid'
   wait_for "$T/guard.pid" && g="$(cat "$T/guard.pid")"
@@ -4580,7 +4589,10 @@ t_ps_end_signals_a_job_only_through_bash_s_record() {
   # with SIGCHLD blocked and only while its record shows the process alive: a check and a signal in one
   # step, so a job reaped between them is sent nothing, where a KILL by number could reach a process
   # given that number. Witnessed by a trace of the call, in a shell made as the bounded read makes its
-  # own (job control on and off again first). A pid that is not one of its jobs is sent nothing.
+  # own (job control on and off again first). A pid that is not one of its jobs is sent nothing. A job
+  # that ends and is reaped between the listing and the signal is not staged here: bash reaps in its own
+  # SIGCHLD handler, at an instant no unit can choose. That bash then sends nothing is its source's
+  # (`jobs.c` `kill_pid`, D9); what this unit shows is that the signal goes that way.
   local out
   out="$( ( builtin set -m; builtin set +m
             sleep 30 & a=$!
