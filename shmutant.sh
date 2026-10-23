@@ -1399,7 +1399,7 @@ _shmutant_elapsed_gap() {
 # uses no freeze step and no _shmutant_kill_tree, which a freezing shell killed in them may have left
 # half-done.
 _shmutant_guard() {
-  local line chunk part="" pg="" ph="" phid="" p pid st gcont="" hs="" kept="" want members cfirst="" inpg=""
+  local line chunk part="" pg="" ph="" phid="" p pid st gcont="" hs="" kept="" want members cfirst=""
   local -a recs=() kills=() conts=() stops=() left=()
   local -A SHMUTANT_START=() killing=()
   # Every process-table read it makes gives up after ten seconds (_shmutant_ps), and reads as one that
@@ -1480,12 +1480,11 @@ _shmutant_guard() {
     [ -z "$kept" ] || [ "$hs" != 2 ] || hs=0
     # A holder shown to be the holder is the group's only while it is in the group, where the group's
     # members can be read: it is ended through the group's KILL alone, and one outside it would be left
-    # stopped. One that is not in it is let go, as a holder not shown is. Where they cannot be read, it is
-    # killed by its number too, before the group (`inpg` stays empty): never left stopped, at the cost of
-    # the instant in which, ended first, it could be reaped before the group is reached.
-    inpg=""
+    # stopped. One that is not in it is let go, as a holder not shown is. Where they cannot be read it is
+    # taken to be in it, as it is by construction (a run's holder is started in its group and never
+    # leaves it): killed by its number as well, it could be reaped before the group is reached.
     if [ "$hs" = 0 ] && [ -n "$ph" ] && members=" $(set -o pipefail; _shmutant_ps -A -o pid= -o pgid= 2>/dev/null | command -p awk -v g="$pg" '$2 == g { printf "%s ", $1 }')"; then
-      case "$members" in *" $ph "*) inpg=1 ;; *) hs=1 ;; esac
+      case "$members" in *" $ph "*) ;; *) hs=1 ;; esac
     fi
     # A holder not taken for the holder was stopped above all the same, and is let go: never killed, nor
     # taken for a verified member of its group, even when a record of it as a member verified (the
@@ -1502,7 +1501,6 @@ _shmutant_guard() {
     if [ "$hs" = 0 ]; then
       left=()
       for pid in "${kills[@]}"; do [ "$pid" = "$ph" ] || left+=("$pid"); done
-      [ -n "$inpg" ] || [ -z "$ph" ] || left+=("$ph")
       kills=("${left[@]}" -"$pg")
     elif [ "$hs" = 2 ] || _shmutant_group_has "$pg" "${kills[@]}"; then gcont="$pg"
     fi
@@ -1633,7 +1631,9 @@ _shmutant_kill_tree() {
     # Under a guard the group is killed by a holder its stop reached, which cannot have ended since.
     [ -z "$guarded" ] || [ -z "${holder:-}" ] || [ -n "${stopped[$holder]:-}" ] || hs=1
     # And only while the holder is in it, where its members could be read: the holder is ended through
-    # the group's KILL alone, so one outside it would be left as this call found it, stopped.
+    # the group's KILL alone, so one outside it would be left as this call found it, stopped. Where they
+    # could not be read it is taken to be in it, as it is by construction: killed by its number as well,
+    # it could be reaped, and the group's number freed, before the group is reached.
     [ -z "${holder:-}" ] || [ -z "$members" ] || case "$members" in *" $holder "*) ;; *) hs=1 ;; esac
     if [ "$hs" != 1 ]; then
       # The group is named last, after every pid, and the holder only through it: a member killed by
@@ -1641,10 +1641,6 @@ _shmutant_kill_tree() {
       # group is reached, and the holder is what keeps it the run's until then.
       left=()
       for out in "${targets[@]}"; do [ "$out" = "${holder:-}" ] || left+=("$out"); done
-      # Where the members could not be read, a holder this call stopped is killed by its number too,
-      # before the group: it may be outside it, and would be left stopped. That leaves the instant in
-      # which, ended first, it could be reaped before the group is reached, which only a read closes.
-      [ -n "$members" ] || [ -z "${holder:-}" ] || [ -z "${stopped[$holder]:-}" ] || left+=("$holder")
       targets=("${left[@]}" -"$SHMUTANT_KILL_GROUP")
       # Nor is a member that KILL takes continued after it, by a number the KILL may have freed: a
       # stop of this call keeps it in the group. With no members read, any of them may be one, and what
@@ -2761,7 +2757,7 @@ _shmutant_pool_locals_writable() {
     _shmutant_pool_t0 _shmutant_pool_wd after_ck ambiguous base base_sel base_verdict base_why cap cksum_bin clone_id comp copy counts counts_bad counts_end counts_got counts_r counts_w cwhy d \
     dbg depth detail dir dirmode done_pid err_fd errexit_before etime f fd fifo \
     fired fmt found frozen go got grp h have held helpers here \
-    hms hold hold_r holder holderid hp i id inpg intact jobs jp js k kept key \
+    hms hold hold_r holder holderid hp i id intact jobs jp js k kept key \
     killed killing kind kinds l label left left_r left_w line ls_bin m mark \
     mode ms mutate_aliases n named new nl now out out_r out_r2 out_w outf \
     p parent path pending phys pid pids pool_aliases pout pout_r pout_w prc \

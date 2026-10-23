@@ -2450,18 +2450,10 @@ shmutant_mut 'the bounded read lets a caller'"'"'s handler run between a job'"'"
   '    :' \
   't_ps_end_signals_a_job_only_through_bash_s_record'
 shmutant_mut 'the guard ends a holder outside its group through that group' \
-  '      case "$members" in *" $ph "*) inpg=1 ;; *) hs=1 ;; esac' \
-  '      case "$members" in *" $ph "*) inpg=1 ;; *) inpg=1 ;; esac' \
+  '      case "$members" in *" $ph "*) ;; *) hs=1 ;; esac' \
+  '      :' \
   't_guard_ends_only_what_it_can_verify'
 shmutant_mut 'the kill ends a holder outside its group through that group' \
   'case "$members" in *" $holder "*) ;; *) hs=1 ;; esac' \
   ':' \
-  't_kill_tree_reads_its_checks_last_from_one_table'
-shmutant_mut 'the guard leaves a holder stopped when its group'"'"'s members cannot be read' \
-  '      [ -n "$inpg" ] || [ -z "$ph" ] || left+=("$ph")' \
-  '      :' \
-  't_guard_ends_only_what_it_can_verify'
-shmutant_mut 'the kill leaves a holder stopped when its group'"'"'s members cannot be read' \
-  '      [ -n "$members" ] || [ -z "${holder:-}" ] || [ -z "${stopped[$holder]:-}" ] || left+=("$holder")' \
-  '      :' \
   't_kill_tree_reads_its_checks_last_from_one_table'
