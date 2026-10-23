@@ -1478,6 +1478,12 @@ _shmutant_guard() {
     # One the freeze kept stopped (`k`) and still shown so is the holder: no start is needed to tell
     # it, as for a frozen pid.
     [ -z "$kept" ] || [ "$hs" != 2 ] || hs=0
+    # A holder shown to be the holder is the group's only while it is in the group, where the group's
+    # members can be read: it is ended through the group's KILL alone, and one outside it would be left
+    # stopped. One that is not in it is let go, as a holder not shown is.
+    if [ "$hs" = 0 ] && [ -n "$ph" ] && members=" $(set -o pipefail; _shmutant_ps -A -o pid= -o pgid= 2>/dev/null | command -p awk -v g="$pg" '$2 == g { printf "%s ", $1 }')"; then
+      case "$members" in *" $ph "*) ;; *) hs=1 ;; esac
+    fi
     # A holder not taken for the holder was stopped above all the same, and is let go: never killed, nor
     # taken for a verified member of its group, even when a record of it as a member verified (the
     # members told include the holder), since the two reads then disagree about one process.
@@ -1622,6 +1628,9 @@ _shmutant_kill_tree() {
     [ -z "${holder:-}" ] || _shmutant_table_state "$holder" "${holderid:-}" || hs=$?
     # Under a guard the group is killed by a holder its stop reached, which cannot have ended since.
     [ -z "$guarded" ] || [ -z "${holder:-}" ] || [ -n "${stopped[$holder]:-}" ] || hs=1
+    # And only while the holder is in it, where its members could be read: the holder is ended through
+    # the group's KILL alone, so one outside it would be left as this call found it, stopped.
+    [ -z "${holder:-}" ] || [ -z "$members" ] || case "$members" in *" $holder "*) ;; *) hs=1 ;; esac
     if [ "$hs" != 1 ]; then
       # The group is named last, after every pid, and the holder only through it: a member killed by
       # number before the group could be reaped and leave the group's number free by the time the

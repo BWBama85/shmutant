@@ -4361,24 +4361,35 @@ t_guard_ends_only_what_it_can_verify() {
   # probe stubbed.
   sleep 60 > /dev/null 2>&1 & local a=$!
   sleep 60 > /dev/null 2>&1 & local b=$!
-  set -m; sleep 60 > /dev/null 2>&1 & local m=$!; set +m
-  local aid bid mid out how
-  aid="$(_shmutant_identity "$a")"; bid="$(_shmutant_identity "$b")"; mid="$(_shmutant_identity "$m")"
+  # m leads a group of its own, and mc, its child, is in it: m is the holder of group m.
+  rm -f "$T/mc"
+  set -m; sh -c 'sleep 60 & echo "$!" > "$1"; wait' _ "$T/mc" < /dev/null > /dev/null 2>&1 & local m=$!; set +m
+  local aid bid mid mc="" mcid out how i
+  for (( i = 0; i < 50; i++ )); do [ -s "$T/mc" ] && break; sleep 0.1; done
+  mc="$(cat "$T/mc" 2>/dev/null)"
+  case "$mc" in ''|*[!0-9]*) fail_ 'fixture: the member of the group never started'; end_group "$m" "$(pairs_of "$m")"; kill -KILL "$a" "$b" 2>/dev/null; wait "$a" "$b" "$m" 2>/dev/null; return ;; esac
+  aid="$(_shmutant_identity "$a")"; bid="$(_shmutant_identity "$b")"; mid="$(_shmutant_identity "$m")"; mcid="$(_shmutant_identity "$mc")"
   out="$( kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*"; fi; }
           { printf 'p %s %s\n' "$a" "$aid"; printf 'p %s not-%s\n' "$b" "$bid"; printf 'p %s \n' "$b"
-            printf 'g 99999 %s %s\n' "$a" "$aid"; } | _shmutant_guard )"
-  # #53: the holder, recorded as a member too, is killed only through its group: by number first, it
-  # could end and leave the group's number free before the group is reached.
-  printf '%s\n' "$out" | grep -qx -- "kill -KILL -- -99999" || fail_ "a group whose holder is verified is not killed, the holder through it alone: [$out]"
+            printf 'p %s %s\n' "$m" "$mid"; printf 'g %s %s %s\n' "$m" "$m" "$mid"; } | _shmutant_guard )"
+  # #53: the holder, recorded as a member too, is killed only through its group, named after every
+  # pid: by number first, it could end and leave the group's number free before the group is reached.
+  printf '%s\n' "$out" | grep -qx -- "kill -KILL -- $a -$m" || fail_ "a verified pid and a group whose holder is verified are not killed in one kill, the group last and the holder through it alone: [$out]"
   printf '%s\n' "$out" | grep -qx -- "kill -CONT -- $b $b" || fail_ "a pid recorded with another start, or with none, is not continued: [$out]"
-  if printf '%s\n' "$out" | grep -e '-KILL' | grep -qw -- "$b"; then fail_ "a pid it could not verify was killed: [$out]"; fi
-  # A recorded pid not shown to be the process recorded, but in the group it KILLs (m leads a group of
-  # its own; a is its verified holder here, so m is a member and not the holder), is taken by that KILL
-  # and never continued after it.
+  # ...and only while the holder is in the group: one outside it (a, verified, against group m) would be
+  # left stopped by a KILL that cannot reach it. It is let go, and the group is not killed.
   out="$( kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*"; fi; }
-          printf 'p %s not-%s\ng %s %s %s\n' "$m" "$mid" "$m" "$a" "$aid" | _shmutant_guard )"
+          printf 'p %s %s\ng %s %s %s\n' "$a" "$aid" "$m" "$a" "$aid" | _shmutant_guard )"
+  case "$out" in *"-KILL -- -$m"*) fail_ "a group its verified holder is not in was killed: [$out]" ;; esac
+  if printf '%s\n' "$out" | grep -e '-KILL' | grep -qw -- "$a"; then fail_ "a holder outside its group was killed: [$out]"; fi
+  printf '%s\n' "$out" | grep -qx -- "kill -CONT -- $a" || fail_ "a holder outside its group was not let go: [$out]"
+  if printf '%s\n' "$out" | grep -e '-KILL' | grep -qw -- "$b"; then fail_ "a pid it could not verify was killed: [$out]"; fi
+  # A recorded pid not shown to be the process recorded, but in the group it KILLs (mc, in group m,
+  # whose holder m verifies), is taken by that KILL and never continued after it.
+  out="$( kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*"; fi; }
+          printf 'p %s not-%s\ng %s %s %s\n' "$mc" "$mcid" "$m" "$m" "$mid" | _shmutant_guard )"
   printf '%s\n' "$out" | grep -qx -- "kill -KILL -- -$m" || fail_ "a group whose holder is verified was not killed: [$out]"
-  if printf '%s\n' "$out" | grep -e '-CONT' | grep -qw -- "$m"; then fail_ "a member the group KILL took was continued after it: [$out]"; fi
+  if printf '%s\n' "$out" | grep -e '-CONT' | grep -qw -- "$mc"; then fail_ "a member the group KILL took was continued after it: [$out]"; fi
   # ...but only by a listing that succeeded: a table read cut short (ps failing after a line) keeps
   # every other CONT (here b's), sent before the group KILL, while the stop keeps the number its own. The
   # holder it verified is never among them, whatever its member record said: let go before the KILL, it
@@ -4400,10 +4411,10 @@ t_guard_ends_only_what_it_can_verify() {
   if printf '%s\n' "$out" | grep -e '-CONT' | grep -qw -- "$a"; then fail_ "a pid told twice was continued after its KILL: [$out]"; fi
   # #53: a pid told twice and verified twice is named once: a second KILL by the number the first freed
   # could reach a process given it in between. And the group comes after every pid in the one KILL
-  # (b verifies; a is the verified holder, killed through the group alone).
+  # (b verifies; m is the verified holder, in its group, killed through it alone).
   out="$( kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*"; fi; }
-          printf 'p %s %s\np %s %s\np %s %s\ng 99999 %s %s\n' "$b" "$bid" "$b" "$bid" "$a" "$aid" "$a" "$aid" | _shmutant_guard )"
-  printf '%s\n' "$out" | grep -qx -- "kill -KILL -- $b -99999" || fail_ "a pid verified twice is not named once, with the group after it: [$out]"
+          printf 'p %s %s\np %s %s\np %s %s\ng %s %s %s\n' "$b" "$bid" "$b" "$bid" "$m" "$mid" "$m" "$m" "$mid" | _shmutant_guard )"
+  printf '%s\n' "$out" | grep -qx -- "kill -KILL -- $b -$m" || fail_ "a pid verified twice is not named once, with the group after it: [$out]"
   # Everything it may KILL, the holder included, is stopped before any start is read: a process the
   # freezing shell had not stopped yet could otherwise end, and its number go to another, before the
   # KILL.
@@ -4486,7 +4497,8 @@ t_guard_ends_only_what_it_can_verify() {
   [[ "$out" =~ ^ready\ [0-9]+$ ]] || fail_ "\`done\` did not stand the guard down with nothing signalled: [$out]"
   out="$( kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*"; fi; }; _shmutant_guard < /dev/null )"
   [[ "$out" =~ ^ready\ [0-9]+$ ]] || fail_ "an end with nothing recorded signalled something: [$out]"
-  kill -KILL "$a" "$b" "$m" 2>/dev/null; wait "$a" "$b" "$m" 2>/dev/null
+  end_group "$m" "$m:$mid" "$mc:$mcid"
+  kill -KILL "$a" "$b" 2>/dev/null; wait "$a" "$b" "$m" 2>/dev/null
 }
 
 # shellcheck disable=SC2034
@@ -4748,6 +4760,8 @@ t_kill_tree_reads_its_checks_last_from_one_table() {
       [ "${1:-}" != moved ] || _shmutant_descendants_started() { printf '%s e1\n' "$kid"; }
       if [ "${2:-}" = guarded ]; then exec {guard_w}>"$T/told"; guard_lost=0; fi
       [ "${3:-}" != rejected ] || holderid=e1
+      # The holder is a process outside the group (v, the victim, which root's group does not hold).
+      [ "${3:-}" != outside ] || { holder="$v"; holderid="$vid"; }
       command() { if [ "${1:-}" = -p ] && [ "${2:-}" = ps ]; then printf 'ps %s\n' "${*:3}" >> "$T/log"; fi; builtin command "$@"; }
       kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*" >> "$T/log"; fi; }
       # A stop that does not take (here: refused for the victim) leaves nothing it can license.
@@ -4773,6 +4787,11 @@ t_kill_tree_reads_its_checks_last_from_one_table() {
   rm -f "$T/log"; kill_logged - - twice
   out="$(grep '^kill' "$T/log" 2>/dev/null)"
   eq "$out" "kill -KILL -- $v $kid -$root" 'a pid chosen twice is named once, and the holder only through its group'
+  # #53: and only while the holder is in the group: one outside it would be left stopped by a group KILL
+  # that cannot reach it. Under a guard it is let go, never killed, and the group is not killed.
+  rm -f "$T/log" "$T/told"; kill_logged - guarded outside
+  if grep '^kill -KILL' "$T/log" 2>/dev/null | grep -qw -e "-$root" -e "$v"; then fail_ "a holder outside its group, or that group, was killed: [$(tr '\n' ';' < "$T/log")]"; fi
+  grep -qx -- "kill -CONT -- $v" "$T/log" 2>/dev/null || fail_ "a holder outside its group was not let go: [$(tr '\n' ';' < "$T/log" 2>/dev/null)]"
   # Under a guard: told, then stopped (the victim, the find, the holder), then the reads, then the kill.
   rm -f "$T/log" "$T/told"; kill_logged - guarded
   out="$(cat "$T/log" 2>/dev/null)"
