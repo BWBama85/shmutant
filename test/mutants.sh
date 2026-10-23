@@ -1482,9 +1482,9 @@ shmutant_mut 'a readonly name is assigned when the file is sourced' \
 # (row 'the source-time readonly probe fails a caller under errexit' dropped: the probe's substitution is now a function argument, which a caller's errexit does not act on; nothing is left to observe)
 
 # --- guards added for the forty-sixth review round ---
-shmutant_mut 'the CLI holder is killed by number alone' \
-  '  _shmutant_holder_state "$hp" "$hid" || [ "$?" = 2 ] || return 0' \
-  '  kill -0 "$hp" 2>/dev/null || return 0' \
+shmutant_mut 'the CLI freezes a group whose holder does not verify' \
+  '  _shmutant_holder_state "$holder" "$holderid" || [ "$?" = 2 ] || return 0' \
+  '  kill -0 "$holder" 2>/dev/null || return 0' \
   't_cli_end_group_checks_the_holder_identity'
 shmutant_mut 'the line terminator prepare printed is part of the root' \
   '  root="${root%$'"'"'\n'"'"'}"' \
@@ -1961,16 +1961,16 @@ shmutant_mut 'the guard does nothing when its freezing shell is killed' \
   '  return 0' \
   't_freeze_killed_before_its_kill_leaves_nothing_stopped'
 shmutant_mut 'the guard continues the processes it verified' \
-  'then kills+=("$pid")' \
-  'then conts+=("$pid")' \
+  'killing["$pid"]=1; kills+=("$pid"); }' \
+  'killing["$pid"]=1; conts+=("$pid"); }' \
   't_guard_ends_only_what_it_can_verify'
 shmutant_mut 'the guard kills a pid whose start no longer matches' \
   '&& _shmutant_same_start "${SHMUTANT_START[$pid]}" "$st"; then' \
   '; then' \
   't_guard_ends_only_what_it_can_verify'
 shmutant_mut 'the guard kills the group without checking its holder' \
-  '    if [ "$hs" = 0 ]; then kills=(-"$pg" "${kills[@]}")' \
-  '    if :; then kills=(-"$pg" "${kills[@]}")' \
+  '    if [ "$hs" = 0 ]; then' \
+  '    if :; then' \
   't_guard_ends_only_what_it_can_verify'
 shmutant_mut 'the guard kills a group whose holder cannot be checked' \
   '    if [ "$hs" = 0 ]; then' \
@@ -1989,8 +1989,8 @@ shmutant_mut 'the guard takes a stopped process in another group for a holder it
   '{ _shmutant_proc_stopped "$ph"; } || hs=1' \
   't_guard_ends_only_what_it_can_verify'
 shmutant_mut 'the guard does not kill the group' \
-  'then kills=(-"$pg" "${kills[@]}")' \
-  'then :' \
+  'kills=("${left[@]}" -"$pg")' \
+  'kills=("${left[@]}")' \
   't_guard_ends_only_what_it_can_verify'
 shmutant_mut 'the guard leaves a group shown to be the run'"'"'s stopped' \
   '  [ -z "$gcont" ] || kill -CONT -- -"$gcont" 2>/dev/null' \
@@ -2077,11 +2077,11 @@ shmutant_mut 'done does not stand the guard down' \
   '      done) ;;' \
   't_guard_ends_only_what_it_can_verify'
 shmutant_mut 'the freeze returns with its guard still running' \
-  '      kill -KILL -- -"$guard_pid" "$guard_pid" 2>/dev/null' \
+  '      kill -KILL -- -"$guard_pid" 2>/dev/null' \
   '      :' \
   't_freeze_guard_not_seen_to_end_is_killed'
 shmutant_mut 'a guard is killed without what it waits on' \
-  '      kill -KILL -- -"$guard_pid" "$guard_pid" 2>/dev/null' \
+  '      kill -KILL -- -"$guard_pid" 2>/dev/null' \
   '      kill -KILL -- "$guard_pid" 2>/dev/null' \
   't_freeze_guard_not_seen_to_end_is_killed'
 shmutant_mut 'the guard'"'"'s identity is not kept for the end of the freeze' \
@@ -2252,16 +2252,16 @@ shmutant_mut 'a caller function named sleep keeps the bound' \
   '    t="$(builtin command -p -v sleep)" && \' \
   't_guard_gives_up_on_a_process_table_that_stalls'
 shmutant_mut 'a caller function named jobs keeps a stall from being ended' \
-  '  jl="$(builtin jobs -rp; builtin jobs -sp)"' \
-  '  jl="$(jobs -rp; jobs -sp)"' \
+  '  done <<< "$(builtin jobs -l)"' \
+  '  done <<< "$(jobs -l)"' \
   't_guard_gives_up_on_a_process_table_that_stalls'
 shmutant_mut 'the guard reads its process table without a bound' \
   '  local SHMUTANT_PS_BOUND=10' \
   '  local SHMUTANT_PS_BOUND=' \
   't_guard_gives_up_on_a_process_table_that_stalls'
 shmutant_mut 'a bounded ps that stalls is left running' \
-  '  jl="$(builtin jobs -rp; builtin jobs -sp)"' \
-  '  jl=""' \
+  '    builtin kill -KILL "%$js" 2>/dev/null' \
+  '    :' \
   't_guard_gives_up_on_a_process_table_that_stalls'
 shmutant_mut 'a bounded ps that stalls is waited out' \
   '      case "$t" in /*) "$t" "$b" < /dev/null > /dev/null 2>&1 & t=$! ;; *) t="" ;; esac' \
@@ -2336,8 +2336,8 @@ shmutant_mut 'the kill takes a holder with another start for the holder' \
   '  :' \
   't_group_kill_checks_the_holder_identity'
 shmutant_mut 'the CLI holder is killed by number after its group' \
-  '  kill -KILL -- -"$1" 2>/dev/null' \
-  '  kill -KILL -- -"$1" 2>/dev/null; kill -KILL "$hp" 2>/dev/null' \
+  '  _shmutant_kill_tree_twice -g "$1" "$1:"' \
+  '  _shmutant_kill_tree_twice -g "$1" "$1:"; kill -KILL "$holder" 2>/dev/null' \
   't_cli_end_group_checks_the_holder_identity'
 shmutant_mut 'the bounded ps ends an answered read through a function named exit' \
   '    if [ -n "$w" ] && [ "$w" = "$c" ]; then _shmutant_ps_end "$t"; wait "$t"; builtin exit "$s"; fi' \
@@ -2395,3 +2395,45 @@ shmutant_mut 'the guard cannot tell a reused freezer number from a step outside 
   '  case "${guard_of_id:-}" in e*) ;; *) return 1 ;; esac' \
   '  :' \
   't_guard_takes_neither_a_reused_pid_nor_a_zombie_for_its_freezer'
+
+# --- a check and its signal kept together (#49 and #53, the rest) ---
+shmutant_mut 'the guard names a pid verified twice twice' \
+  '      [ -n "${killing[$pid]:-}" ] || { killing' \
+  '      true && { killing' \
+  't_guard_ends_only_what_it_can_verify'
+shmutant_mut 'the guard names its group before the pids' \
+  'kills=("${left[@]}" -"$pg")' \
+  'kills=(-"$pg" "${left[@]}")' \
+  't_guard_ends_only_what_it_can_verify'
+shmutant_mut 'the guard kills the holder by number before its group' \
+  'kills=("${left[@]}" -"$pg")' \
+  'kills=("${kills[@]}" -"$pg")' \
+  't_guard_ends_only_what_it_can_verify'
+shmutant_mut 'the kill names a pid two records chose twice' \
+  'do [ -n "${named[$p]:-}" ] || { named["$p"]=1; left+=("$p"); }; done' \
+  'do left+=("$p"); done' \
+  't_kill_tree_reads_its_checks_last_from_one_table'
+shmutant_mut 'the kill names its group before the pids' \
+  '      targets=("${left[@]}" -"$SHMUTANT_KILL_GROUP")' \
+  '      targets=(-"$SHMUTANT_KILL_GROUP" "${left[@]}")' \
+  't_kill_tree_reads_its_checks_last_from_one_table'
+shmutant_mut 'the kill names the holder by number before its group' \
+  '      targets=("${left[@]}" -"$SHMUTANT_KILL_GROUP")' \
+  '      targets=("${targets[@]}" -"$SHMUTANT_KILL_GROUP")' \
+  't_kill_tree_reads_its_checks_last_from_one_table'
+shmutant_mut 'the guard is killed by number after its group' \
+  '      kill -KILL -- -"$guard_pid" 2>/dev/null' \
+  '      kill -KILL -- -"$guard_pid" "$guard_pid" 2>/dev/null' \
+  't_freeze_guard_not_seen_to_end_is_killed'
+shmutant_mut 'the CLI kills its group on a check with nothing stopped' \
+  '  _shmutant_kill_tree_twice -g "$1" "$1:"' \
+  '  kill -KILL -- -"$1" 2>/dev/null' \
+  't_cli_end_group_checks_the_holder_identity'
+shmutant_mut 'the bounded ps ends its job by number' \
+  '    builtin kill -KILL "%$js" 2>/dev/null' \
+  '    builtin kill -KILL "$1" 2>/dev/null' \
+  't_ps_end_signals_a_job_only_through_bash_s_record'
+shmutant_mut 'the bounded read keeps the process group its substitution inherited' \
+  'set +e; builtin set -m; builtin set +m; c=""' \
+  'set +e; c=""' \
+  't_guard_gives_up_on_a_process_table_that_stalls'

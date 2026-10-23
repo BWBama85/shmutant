@@ -2081,12 +2081,27 @@ t_cli_end_group_checks_the_holder_identity() {
   local hid; hid="$(_shmutant_identity "$hp")" || { kill -KILL "$hp" 2>/dev/null; wait "$hp" 2>/dev/null; echo "note: $_unit: no identity readable here; skipped"; return; }
   _shmutant_cli_end_group "$hp" "$hp not-${hid}-really"
   sleep 0.2; kill -0 "$hp" 2>/dev/null || fail_ 'a holder whose identity does not match was killed anyway'
-  # #53: the holder is a member of the group, and ends with it in the one KILL sent the moment after its
-  # check: never by number after the group's, which may already have ended it and freed its number.
+  # Nor does it start a freeze, with its guard, for a group it will not signal.
+  rm -f "$T/froze"
+  ( _shmutant_kill_tree_twice() { printf 'froze\n' >> "$T/froze"; }; _shmutant_cli_end_group "$hp" "$hp not-${hid}-really" )
+  [ ! -e "$T/froze" ] || fail_ 'a holder whose identity does not match started a freeze of its group'
+  # #53: the holder is a member of the group, and ends with it, by a freeze of the group: stopped before
+  # the identity read that licenses the group's KILL, so it cannot end and free the number in between,
+  # and never killed by number. Witnessed by a log of every signal but the liveness probe, and of every
+  # ps, in the elapsed-time form, which reads its starts through ps.
   rm -f "$T/end-kills"
-  ( kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf '%s\n' "$*" >> "$T/end-kills"; fi; }
-    _shmutant_cli_end_group "$hp" "$hp $hid" )
-  eq "$(cat "$T/end-kills" 2>/dev/null)" "-KILL -- -$hp" 'the holder is ended by the group KILL alone'
+  ( SHMUTANT_PROC=0 SHMUTANT_PS_LSTART=0
+    kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf '%s\n' "$*" >> "$T/end-kills"; fi; }
+    eid="$(_shmutant_identity "$hp")"
+    command() { if [ "${1:-}" = -p ] && [ "${2:-}" = ps ]; then printf 'ps %s\n' "${*:3}" >> "$T/end-kills"; fi; builtin command "$@"; }
+    _shmutant_cli_end_group "$hp" "$hp $eid" ) > /dev/null 2>&1
+  grep -e '-KILL' "$T/end-kills" 2>/dev/null | grep -qvx -- "-KILL -- -$hp" && fail_ "the holder was killed other than by its group KILL: [$(tr '\n' ';' < "$T/end-kills")]"
+  awk -v k="-KILL -- -$hp" -v s1="-STOP $hp" -v s2="-STOP -- -$hp" '
+      $0 == s1 || $0 == s2 { st = NR; rd = 0 }
+      st && /^ps -A -o pid= -o etime=$/ { rd = 1 }
+      $0 == k { ok = (st && rd); exit }
+      END { exit !ok }' "$T/end-kills" 2>/dev/null \
+    || fail_ "the group was not killed after a stop of its holder and the identity read that followed it: [$(tr '\n' ';' < "$T/end-kills" 2>/dev/null)]"
   # A holder that has gone (here: reaped) leaves its group unsignalled, whatever its identity.
   sleep 0 & local gone=$!; wait "$gone"
   rm -f "$T/end-kills"
@@ -3614,20 +3629,13 @@ t_pool_killed_while_its_abort_freezes_leaves_nothing_stopped() {
   local -a orphans=() grps=() opairs=()
   # The caller's KILL: the tree the pool started, then its group, through the pool itself (#49). The
   # pool is stopped and shown to be the process started before its tree is walked or its group
-  # signalled (end_group), or, with no start to tell it by, both are reached only while bash still
-  # lists it as a job of this shell. A pool that ended and was reaped (bash reaps a background job by
-  # itself, waited for or not) may have given its number away: then nothing is sent by it, and a
-  # stop that reached another process at it is let go.
+  # signalled (end_group). A pool that ended and was reaped (bash reaps a background job by itself,
+  # waited for or not) may have given its number away: then nothing is sent by it, and a stop that
+  # reached another process at it is let go.
   caller_kill() {
-    if [ -n "$ppid" ]; then
-      if kill -STOP "$pp" 2>/dev/null && _shmutant_alive_since "$pp" "$ppid"; then
-        _shmutant_kill_tree KILL "$pp"; end_group "$pp" "$pp:$ppid"
-      else kill -CONT "$pp" 2>/dev/null
-      fi
-    elif suite_job_runs "$pp" && kill -STOP "$pp" 2>/dev/null; then
-      # Stopped while still a job of this shell, so it cannot end during the walk; listed again after it.
-      _shmutant_kill_tree KILL "$pp"
-      if suite_job_runs "$pp"; then kill -KILL -- -"$pp" 2>/dev/null; fi
+    if kill -STOP "$pp" 2>/dev/null && _shmutant_alive_since "$pp" "$ppid"; then
+      _shmutant_kill_tree KILL "$pp"; end_group "$pp" "$pp:$ppid"
+    else kill -CONT "$pp" 2>/dev/null
     fi
     wait "$pp" 2>/dev/null
   }
@@ -3640,7 +3648,11 @@ t_pool_killed_while_its_abort_freezes_leaves_nothing_stopped() {
     SHMUTANT_JOBS=2 SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=0 shmutant_pool lbl "$T/wd" toy_prepare orphan_run ) < /dev/null > /dev/null 2>&1 & pp=$!
   set +m
   ppid="$(_shmutant_identity "$pp" 2>/dev/null)" || ppid=""
-  [ -n "$ppid" ] || fail_ 'fixture: the start of the pool could not be read, so its group cannot be signalled by its number'
+  # With no start to tell the pool by, nothing is sent by its number or to its group: a check of bash's
+  # job table with a signal after it leaves an instant in which it could be reaped and its number given
+  # away (#49). What it leaves is the suite's sweep's, which ends each leftover by the identity it was
+  # seen with.
+  [ -n "$ppid" ] || { fail_ 'fixture: the start of the pool could not be read, so nothing can be sent to it or its group'; return; }
   for (( i = 0; i < 100; i++ )); do [ "$(wc -l < "$T/started")" -ge 2 ] && { ok=1; break; }; sleep 0.1; done
   mapfile -t orphans < "$T/orphans" 2>/dev/null
   mapfile -t opairs < <(pairs_of "${orphans[@]}")
@@ -3802,7 +3814,7 @@ t_freeze_guard_not_seen_to_end_is_killed() {
   local how root i g gid gh st e
   local -a kids=() helpers=() known=()
   for how in closed timeout unidentified; do
-    rm -f "$T/guard.pid" "$T/guard.helper" "$T/err"; helpers=()
+    rm -f "$T/guard.pid" "$T/guard.helper" "$T/err" "$T/kills"; helpers=()
     set -m; sh -c 'sleep 60 & sleep 60 & wait' < /dev/null > /dev/null 2>&1 & root=$!; set +m
     disown "$root"
     for (( i = 0; i < 50; i++ )); do mapfile -t kids < <(_shmutant_descendants "$root"); [ "${#kids[@]}" -lt 2 ] || break; sleep 0.1; done
@@ -3823,6 +3835,8 @@ t_freeze_guard_not_seen_to_end_is_killed() {
         sleep 5 & printf '%s\n' "$!" >> "$T/guard.helper"
         _shmutant_guard_real
         local n; for (( n = 0; n < 100; n++ )); do sleep 5 & printf '%s\n' "$!" >> "$T/guard.helper"; sleep 0.05; done; }
+      # Every KILL sent is logged, and sent.
+      kill() { [ "${1:-}" != -KILL ] || printf '%s\n' "$*" >> "$T/kills"; builtin kill "$@"; }
       if [ "$how" = closed ]; then
         # shellcheck disable=SC2154  # guard_r is the freeze's own, by dynamic scope
         _shmutant_guard_close() { exec {guard_r}<&-; RUN_OUT=1 _shmutant_guard_close_real; }
@@ -3844,6 +3858,12 @@ t_freeze_guard_not_seen_to_end_is_killed() {
     else
       st="$(command -p ps -o stat= -p "$g" 2>/dev/null)"
       case "$st" in ''|*Z*) ;; *) fail_ "$how: the guard was still running when the freeze returned ($st)"; kill -KILL "$g" 2>/dev/null ;; esac
+      # #53: through the group it leads, never by its number as well: that KILL may already have ended it
+      # and freed the number for another process.
+      grep -qx -- "-KILL -- -$g" "$T/kills" 2>/dev/null || fail_ "$how: the guard was not killed through its group: [$(tr '\n' ';' < "$T/kills" 2>/dev/null)]"
+      if awk -v g="$g" '$1 == "-KILL" { for (i = 2; i <= NF; i++) if ($i == g) f = 1 } END { exit !f }' "$T/kills" 2>/dev/null; then
+        fail_ "$how: the guard was killed by its number: [$(tr '\n' ';' < "$T/kills")]"
+      fi
       if [ "${#helpers[@]}" -eq 0 ]; then fail_ "$how: fixture: the guard started no child"
       else
         for gh in "${helpers[@]}"; do
@@ -4318,7 +4338,9 @@ t_guard_ends_only_what_it_can_verify() {
   out="$( kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*"; fi; }
           { printf 'p %s %s\n' "$a" "$aid"; printf 'p %s not-%s\n' "$b" "$bid"; printf 'p %s \n' "$b"
             printf 'g 99999 %s %s\n' "$a" "$aid"; } | _shmutant_guard )"
-  printf '%s\n' "$out" | grep -qx -- "kill -KILL -- -99999 $a" || fail_ "a verified pid and a group whose holder is verified are not killed in one kill: [$out]"
+  # #53: the holder, recorded as a member too, is killed only through its group: by number first, it
+  # could end and leave the group's number free before the group is reached.
+  printf '%s\n' "$out" | grep -qx -- "kill -KILL -- -99999" || fail_ "a group whose holder is verified is not killed, the holder through it alone: [$out]"
   printf '%s\n' "$out" | grep -qx -- "kill -CONT -- $b $b" || fail_ "a pid recorded with another start, or with none, is not continued: [$out]"
   if printf '%s\n' "$out" | grep -e '-KILL' | grep -qw -- "$b"; then fail_ "a pid it could not verify was killed: [$out]"; fi
   # A recorded pid not shown to be the process recorded, but in the group it KILLs (m leads a group of
@@ -4347,6 +4369,12 @@ t_guard_ends_only_what_it_can_verify() {
           printf 'p %s not-%s\np %s %s\n' "$a" "$aid" "$a" "$aid" | _shmutant_guard )"
   printf '%s\n' "$out" | grep -qx -- "kill -KILL -- $a" || fail_ "a pid told twice, verified once, was not killed: [$out]"
   if printf '%s\n' "$out" | grep -e '-CONT' | grep -qw -- "$a"; then fail_ "a pid told twice was continued after its KILL: [$out]"; fi
+  # #53: a pid told twice and verified twice is named once: a second KILL by the number the first freed
+  # could reach a process given it in between. And the group comes after every pid in the one KILL
+  # (b verifies; a is the verified holder, killed through the group alone).
+  out="$( kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*"; fi; }
+          printf 'p %s %s\np %s %s\np %s %s\ng 99999 %s %s\n' "$b" "$bid" "$b" "$bid" "$a" "$aid" "$a" "$aid" | _shmutant_guard )"
+  printf '%s\n' "$out" | grep -qx -- "kill -KILL -- $b -99999" || fail_ "a pid verified twice is not named once, with the group after it: [$out]"
   # Everything it may KILL, the holder included, is stopped before any start is read: a process the
   # freezing shell had not stopped yet could otherwise end, and its number go to another, before the
   # KILL.
@@ -4547,6 +4575,25 @@ t_guard_waits_for_a_freezer_whose_elapsed_start_moved() {
 }
 
 # shellcheck disable=SC2034
+t_ps_end_signals_a_job_only_through_bash_s_record() {
+  # #53: the bounded read ends its ps or its timer through the job (`kill %<job>`), which bash signals
+  # with SIGCHLD blocked and only while its record shows the process alive: a check and a signal in one
+  # step, so a job reaped between them is sent nothing, where a KILL by number could reach a process
+  # given that number. Witnessed by a trace of the call, in a shell made as the bounded read makes its
+  # own (job control on and off again first). A pid that is not one of its jobs is sent nothing.
+  local out
+  out="$( ( builtin set -m; builtin set +m
+            sleep 30 & a=$!
+            PS4='+ '; exec {x}>"$T/trace"; BASH_XTRACEFD=$x; set -x
+            _shmutant_ps_end "$a"; _shmutant_ps_end 2147483000
+            set +x; exec {x}>&-
+            wait "$a"; printf '%s' "$?" ) 2>/dev/null )"
+  eq "$out" 137 'the job was ended by its KILL'
+  grep -Eq '^\++ builtin kill -KILL %[1-9][0-9]*$' "$T/trace" 2>/dev/null || fail_ "the job was not signalled through its job: [$(grep kill "$T/trace" 2>/dev/null | tr '\n' ';')]"
+  if grep -E '^\++ builtin kill' "$T/trace" 2>/dev/null | grep -Evq '%[1-9][0-9]*$'; then fail_ "a signal was sent by number: [$(grep kill "$T/trace" | tr '\n' ';')]"; fi
+  [ "$(grep -Ec '^\++ builtin kill' "$T/trace" 2>/dev/null)" = 1 ] || fail_ "a pid that is no job of the shell was signalled: [$(grep kill "$T/trace" 2>/dev/null | tr '\n' ';')]"
+}
+
 t_guard_gives_up_on_a_process_table_that_stalls() {
   # #51: once its freezing shell is gone, nothing but the guard bounds its own process-table reads, so
   # each gives up after its bound (_shmutant_ps) and reads as a table that could not be read: what the
@@ -4658,19 +4705,27 @@ t_kill_tree_reads_its_checks_last_from_one_table() {
       [ "${3:-}" != nomembers ] || command() {
         if [ "${1:-}" = -p ] && [ "${2:-}" = ps ]; then printf 'ps %s\n' "${*:3}" >> "$T/log"; [ "$*" != "-p ps -A -o pid= -o pgid=" ] || return 1; fi
         builtin command "$@"; }
-      _shmutant_kill_tree KILL "$root" "$v:$vid" )
+      # #53: the find recorded as a victim too, and the holder as one.
+      if [ "${3:-}" = twice ]; then _shmutant_kill_tree KILL "$root" "$v:$vid" "$kid:$(_shmutant_identity "$kid")" "$root:$holderid"
+      else _shmutant_kill_tree KILL "$root" "$v:$vid"
+      fi )
   }
   rm -f "$T/log"; kill_logged
   out="$(cat "$T/log" 2>/dev/null)"
-  want="$(printf 'ps -A -o pid= -o ppid= -o etime=\nps -A -o pid= -o pgid=\nps -A -o pid= -o etime=\nkill -KILL -- -%s %s %s' "$root" "$v" "$kid")"
-  eq "$out" "$want" 'the walk and the group are read first, every check from one table last, then one kill'
+  want="$(printf 'ps -A -o pid= -o ppid= -o etime=\nps -A -o pid= -o pgid=\nps -A -o pid= -o etime=\nkill -KILL -- %s %s -%s' "$v" "$kid" "$root")"
+  eq "$out" "$want" 'the walk and the group are read first, every check from one table last, then one kill, the group last'
   rm -f "$T/log"; kill_logged moved
   out="$(grep '^kill' "$T/log" 2>/dev/null)"
-  eq "$out" "kill -KILL -- -$root $v" 'a find of the walk the table shows with another start is not signalled'
+  eq "$out" "kill -KILL -- $v -$root" 'a find of the walk the table shows with another start is not signalled'
+  # #53: a pid two records choose is named once, and the holder, recorded as a victim, only through its
+  # group: by number before the group, either could end and free a number the kill names after it.
+  rm -f "$T/log"; kill_logged - - twice
+  out="$(grep '^kill' "$T/log" 2>/dev/null)"
+  eq "$out" "kill -KILL -- $v $kid -$root" 'a pid chosen twice is named once, and the holder only through its group'
   # Under a guard: told, then stopped (the victim, the find, the holder), then the reads, then the kill.
   rm -f "$T/log" "$T/told"; kill_logged - guarded
   out="$(cat "$T/log" 2>/dev/null)"
-  want="$(printf 'ps -A -o pid= -o ppid= -o etime=\nkill -STOP %s\nkill -STOP %s\nkill -STOP %s\nps -A -o pid= -o pgid=\nps -A -o pid= -o etime=\nkill -KILL -- -%s %s %s' "$v" "$kid" "$root" "$root" "$v" "$kid")"
+  want="$(printf 'ps -A -o pid= -o ppid= -o etime=\nkill -STOP %s\nkill -STOP %s\nkill -STOP %s\nps -A -o pid= -o pgid=\nps -A -o pid= -o etime=\nkill -KILL -- %s %s -%s' "$v" "$kid" "$root" "$v" "$kid" "$root")"
   eq "$out" "$want" 'under a guard, what is checked is stopped before the table, and the kill follows'
   eq "$(awk '{ print $1, $2 }' "$T/told" 2>/dev/null | tr '\n' ' ')" "p $v p $kid " 'under a guard, what is stopped is told to it first'
   # ...and a find the table then shows with another start is not killed by its number. One in the group
