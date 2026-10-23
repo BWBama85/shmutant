@@ -4634,6 +4634,15 @@ t_ps_end_signals_a_job_only_through_bash_s_record() {
             trap - DEBUG; set +T
             printf ' %s' "$rc" ) 2>/dev/null )"
   eq "$out" 'staged 0' 'a job reaped between its listing and its signal'
+  # Through the bounded read itself, no handler of the caller's runs between the listing and the signal:
+  # a DEBUG trap its functrace hands down could reap the job there and start another under the same job
+  # number, which the signal would then reach. Here the trap only marks that it ran at that line.
+  rm -f "$T/trapped"
+  out="$( ( set -T
+            trap 'case "$BASH_COMMAND" in "builtin kill -KILL"*) printf x >> "$T/trapped" ;; esac' DEBUG
+            SHMUTANT_PS_BOUND=5 _shmutant_ps -o pid= -p "$BASHPID" ) 2>/dev/null )"
+  [ -n "${out//[[:space:]]/}" ] || fail_ 'fixture: the bounded read under a DEBUG trap answered nothing'
+  [ ! -e "$T/trapped" ] || fail_ "a caller's DEBUG trap ran between the bounded read's job listing and its signal"
 }
 
 t_guard_gives_up_on_a_process_table_that_stalls() {

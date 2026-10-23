@@ -2445,3 +2445,7 @@ shmutant_mut 'a sampled CLI freeze with no guard ends what it saw in silence' \
   '  local err_fd=2' \
   '  local err_fd=' \
   't_cli_end_sampled_reports_a_freeze_with_no_guard'
+shmutant_mut 'the bounded read lets a caller'"'"'s handler run between a job'"'"'s listing and its signal' \
+  '    builtin trap - CHLD DEBUG RETURN ERR' \
+  '    :' \
+  't_ps_end_signals_a_job_only_through_bash_s_record'

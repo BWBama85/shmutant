@@ -690,6 +690,9 @@ _shmutant_ps() {
   case "${SHMUTANT_PS_BOUND:-}" in [1-9]|[1-9][0-9]|[1-9][0-9][0-9]) ;; *) command -p ps "$@"; return ;; esac
   local b="$SHMUTANT_PS_BOUND" out="" fd p st=0
   exec {fd}< <(
+    # No handler of the caller's runs in here: a DEBUG trap its functrace hands down, or a CHLD trap,
+    # run between a job's listing and its signal could reap the job and start another under its number.
+    builtin trap - CHLD DEBUG RETURN ERR
     # Job control on and off again before any job: bash then reads this shell's own process group,
     # which a substitution otherwise inherits stale, and starts each job in it, the one form of job
     # its `kill %<job>` signals only while it has not reaped it (_shmutant_ps_end).
@@ -719,8 +722,9 @@ _shmutant_ps() {
 # through its job (`kill %<job>`), which bash signals with SIGCHLD blocked and only while its record
 # shows the process alive, so the check and the signal are one step, and a job reaped before it is
 # sent nothing. That holds for a job started in this shell's own process group with job control off,
-# as _shmutant_ps's substitution starts its two; bash signals the job's process group for any other
-# (#53). The builtins' own jobs and kill: a caller's functions of those names must not keep the bound
+# and while no code of a caller's can run between the listing and the signal to start another job
+# under that number: _shmutant_ps's substitution makes sure of both, clearing every trap first. Bash
+# signals the job's process group for any other job (#53). The builtins' own jobs and kill: a caller's functions of those names must not keep the bound
 # from being kept.
 _shmutant_ps_end() {
   local js jp
