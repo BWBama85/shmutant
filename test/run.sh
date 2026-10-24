@@ -230,20 +230,30 @@ note_started() {
 }
 
 # seen_by_sampler <pid> — in a unit of a copy of this suite, wait until its sampler has recorded
-# <pid>: a fixture that needs its leftover swept waits for the sampler to see it, not a fixed time.
-# The record has no name a unit can read, so the copy mirrors each line the sampler writes to the
-# file $SAMPLE_MIRROR names (mirror_samples). Says so, fails the unit and returns 1 when <pid> is not
-# recorded within ten seconds.
+# the process now at <pid>, with the start it carries: a fixture that needs its leftover swept waits
+# for the sampler to see it, not a fixed time. The record has no name a unit can read, so the copy
+# mirrors each line the sampler writes to the file $SAMPLE_MIRROR names, emptied as the copy starts
+# (mirror_samples). Says so, fails the unit and returns 1 when that process is not recorded within
+# ten seconds, or its start cannot be read.
 seen_by_sampler() {
-  local i
-  for (( i = 0; i < 100; i++ )); do command -p grep -q "^$1:" "${SAMPLE_MIRROR:-}" 2>/dev/null && return 0; sleep 0.1; done
+  local i id line
+  id="$(_shmutant_identity "$1" 2>/dev/null)" || id=""
+  for (( i = 0; i < 100 && ${#id} > 0; i++ )); do
+    while IFS= read -r line; do
+      [ "${line%%:*}" = "$1" ] && _shmutant_same_start "${line#*:}" "$id" && return 0
+    done < "${SAMPLE_MIRROR:-/dev/null}" 2>/dev/null
+    sleep 0.1
+  done
   echo "fixture: the sampler never recorded pid $1"; _failed=1; return 1
 }
 
 # mirror_samples — the lines a copy of this suite appends to its source so that every line its
-# sampler writes is also appended to the file $SAMPLE_MIRROR names (seen_by_sampler).
+# sampler writes is also appended to the file $SAMPLE_MIRROR names (seen_by_sampler), which the copy
+# empties as it starts: a line from an earlier run is never taken for one of this run's. A mirror
+# that cannot be emptied stops the copy (exit 2).
 mirror_samples() {
-  printf '%s\n' 'eval "_real_sample_put() $(declare -f sample_put | sed 1d)"' \
+  printf '%s\n' '[ -z "${SAMPLE_MIRROR:-}" ] || : >| "$SAMPLE_MIRROR" || exit 2' \
+    'eval "_real_sample_put() $(declare -f sample_put | sed 1d)"' \
     'sample_put() { _real_sample_put "$@" || return 1; [ -z "${SAMPLE_MIRROR:-}" ] || printf "%s\n" "$1" >> "$SAMPLE_MIRROR"; }'
 }
 
@@ -6881,16 +6891,18 @@ t_suite_runs_each_unit_in_a_process_group_of_its_own() {
     echo "\$T" > $qt/breaks.dir; sleep 30 > /dev/null 2>&1 & echo \$! > $qt/breaks.pid
     seen_by_sampler \$!
   }
-  # The sampler is the suite's child that is not this unit's wrapper. It is stopped, then this unit
-  # says so ($qt/stopper.stopped) once the process groups of the suite, the sampler and the
-  # sampler's other members are recorded.
+  # The sampler's job is the suite's child that is not this unit's wrapper, and the sampler is the
+  # job's child. The sampler is stopped, then this unit says so ($qt/stopper.stopped) once the
+  # process groups of the suite and the sampler are recorded, with the job's pid (stopper.sampler).
   t_zz_stops_sampler() {
-    local me="\$BASHPID" w su s
+    local me="\$BASHPID" w su s sp
     w="\$(command -p ps -o ppid= -p "\$me" | tr -d ' ')"; su="\$(command -p ps -o ppid= -p "\$w" | tr -d ' ')"
-    s="\$(pick_sampler "\$su" "\$w" "\$(command -p ps -A -o pid= -o ppid=)")" || { echo 'fixture: the sampler was not found'; return; }
+    s="\$(pick_sampler "\$su" "\$w" "\$(command -p ps -A -o pid= -o ppid=)")" || { echo 'fixture: the sampler'"'"'s job was not found'; return; }
+    sp="\$(command -p ps -A -o pid= -o ppid= | awk -v j="\$s" '\$2 == j { print \$1; exit }')"
+    [ -n "\$sp" ] || { echo 'fixture: the sampler was not found'; return; }
     echo "\$s" > $qt/stopper.sampler
-    { command -p ps -o pgid= -p "\$su"; command -p ps -o pgid= -p "\$s"; } | tr -d ' ' > $qt/stopper.groups
-    kill -STOP "\$s" && : > $qt/stopper.stopped
+    { command -p ps -o pgid= -p "\$su"; command -p ps -o pgid= -p "\$sp"; } | tr -d ' ' > $qt/stopper.groups
+    kill -STOP "\$sp" && : > $qt/stopper.stopped
   }
   t_zz_stdin() { if IFS= read -r line; then printf 'read %s\n' "\$line"; else echo eof; fi > $qt/stdin; }
   t_zz_errexit() { set -e; false; : > $qt/errexit; }
@@ -6907,6 +6919,14 @@ EOF
     printf '%s\n' 'kill() {' \
       '  [ -z "${KILL_LOG:-}" ] || [ "${FUNCNAME[1]:-}" != sampler_kill ] || printf "%s\n" "$*" >> "$KILL_LOG"' \
       '  [ -z "${KILL_REFUSED:-}" ] || [ "${FUNCNAME[1]:-}" != sampler_kill ] || [ "$1" != -KILL ] || return 1' \
+      '  if [ -n "${GONE_BEFORE_KILL:-}" ] && [ "${FUNCNAME[1]:-}" = sampler_kill ] && [ "$1" = -KILL ]; then' \
+      '    local sp i' \
+      '    sp="$(command -p ps -A -o pid= -o ppid= | awk -v j="$sampler" '"'"'$2 == j { print $1; exit }'"'"')"' \
+      '    [ -z "$sp" ] || builtin kill -KILL "$sp"' \
+      '    for (( i = 0; i < 50; i++ )); do [ -n "$sp" ] && builtin kill -0 "$sp" 2>/dev/null || break; sleep 0.1; done' \
+      '    for (( i = 0; i < 20; i++ )); do builtin kill -0 "$sampler" 2>/dev/null || break; sleep 0.1; done' \
+      '    : > "$GONE_BEFORE_KILL"' \
+      '  fi' \
       '  if [ -n "${TERM_AT_KILL:-}" ] && [ "${FUNCNAME[1]:-}" = sampler_kill ] && [ "$1" = -KILL ] && [ ! -e "$TERM_AT_KILL" ]; then' \
       '    : > "$TERM_AT_KILL"; local r=0' \
       '    if [ "${TERM_WHEN:-}" = before ]; then builtin kill -TERM "$$"; builtin kill "$@" || r=$?; else builtin kill "$@" || r=$?; builtin kill -TERM "$$"; fi' \
@@ -7024,7 +7044,7 @@ EOF
     sampler="$(pick_sampler "$suite" "$wrapper" "$table")" || sampler=""
     if [ -z "$sampler" ]; then fail_ 'fixture: the suite'"'"'s sampler was not found'; kill -TERM "$suite"
     else
-      kill -STOP "$sampler"; kill -TERM "$suite"
+      kill -STOP -- "-$sampler"; kill -TERM "$suite"
       i=0; while kill -0 "$suite" 2>/dev/null && [ "$i" -lt 150 ]; do i=$((i + 1)); sleep 0.1; done
       if kill -0 "$suite" 2>/dev/null; then fail_ 'the suite sent TERM hung on its stopped sampler'; kill -KILL -- "-$sampler" 2>/dev/null || kill -KILL "$sampler" 2>/dev/null; fi
     fi
@@ -7057,21 +7077,18 @@ EOF
   local orc
   rm -f "$T/stopper.sampler" "$T/stopper.groups" "$T/stopper.stopped" "$T/orphan.pid" "$T/orphan.out" "$T/orphan.rc"
   ( set -m
-    bash -c 'trap ": hung up" HUP; SHMUTANT_SELECT=t_zz_stops_sampler bash "$1" > "$2" 2>&1; echo "$?" > "$3"' _ \
-      "$T/suite/test/run.sh" "$T/orphan.out" "$T/orphan.rc" & echo "$!" > "$T/orphan.pid"
+    bash -c 'trap ": hung up" HUP; SHMUTANT_SELECT=t_zz_stops_sampler bash "$1" > "$2" 2>&1; echo "$?" > "$3.part" && mv -f -- "$3.part" "$3"' _ \
+      "$T/suite/test/run.sh" "$T/orphan.out" "$T/orphan.rc" & note_started "$T/orphan.pid"
     set +m
     wait_for "$T/stopper.stopped" )
-  suite="$(cat "$T/orphan.pid" 2>/dev/null)"
-  i=0
-  if [ -z "$suite" ]; then fail_ 'fixture: the orphaned suite never recorded its pid'
-  else
-    while kill -0 "$suite" 2>/dev/null && [ "$i" -lt 600 ]; do i=$((i + 1)); sleep 0.1; done
-    if kill -0 "$suite" 2>/dev/null; then
-      fail_ 'the orphaned suite hung on the sampler its unit stopped'
-      pid="$(cat "$T/stopper.sampler" 2>/dev/null)"; [ -z "$pid" ] || kill -KILL "$pid" 2>/dev/null
-      kill -KILL -- "-$suite" 2>/dev/null
-    elif [ "$i" -ge 200 ]; then fail_ "the suite waited on a sampler its unit had stopped for $i polls of a tenth of a second"; fi
-  fi
+  # Its status written is its end: the shell that writes it was orphaned, so it cannot be waited on.
+  i=0; while [ ! -e "$T/orphan.rc" ] && [ "$i" -lt 600 ]; do i=$((i + 1)); sleep 0.1; done
+  if [ ! -e "$T/orphan.rc" ]; then
+    fail_ 'the orphaned suite hung on the sampler its unit stopped'
+    # Killed only while each is still the process recorded.
+    pid="$(cat "$T/stopper.sampler" 2>/dev/null)"; [ -z "$pid" ] || kill -KILL -- "-$pid" 2>/dev/null
+    for pid in $(left_running "$T/orphan.pid" 2>/dev/null); do kill -KILL -- "-$pid" 2>/dev/null; done
+  elif [ "$i" -ge 200 ]; then fail_ "the suite waited on a sampler its unit had stopped for $i polls of a tenth of a second"; fi
   [ -e "$T/stopper.stopped" ] || fail_ "fixture: t_zz_stops_sampler never stopped the sampler: [$(cat "$T/orphan.out" 2>/dev/null)]"
   orc="$(cat "$T/orphan.rc" 2>/dev/null)"
   eq "$orc" 1 'the orphaned suite whose unit stopped the sampler ends by itself, with status 1'
@@ -7083,12 +7100,12 @@ EOF
     fail_ "fixture: t_zz_stops_sampler did not record two process groups: [${sgroups[*]}]"
   else
     [ "${sgroups[1]}" != "${sgroups[0]}" ] || fail_ "the sampler was in the suite's own process group ${sgroups[0]}"
-    eq "${sgroups[1]}" "$(cat "$T/stopper.sampler" 2>/dev/null)" 'the sampler leads its own process group'
+    eq "${sgroups[1]}" "$(cat "$T/stopper.sampler" 2>/dev/null)" 'the sampler'"'"'s group is the one its job leads'
   fi
   # Sent TERM just before or just after the runner kills that sampler's group, the suite kills it
   # once and ends by TERM. The kill and its record are one step, which no handler of the suite's can
   # come between: a stop entered between them would either wait on the sampler still stopped, or
-  # kill the group again once the holder that reserved its number had died with it.
+  # kill the group again once the job that reserved its number had died with it.
   local when
   for when in before after; do
     rm -f "$T/stopper.sampler" "$T/stopper.groups" "$T/stopper.stopped" "$T/kill.log" "$T/termed"
@@ -7096,7 +7113,7 @@ EOF
     i=0; while kill -0 "$suite" 2>/dev/null && [ "$i" -lt 600 ]; do i=$((i + 1)); sleep 0.1; done
     if kill -0 "$suite" 2>/dev/null; then
       fail_ "the suite sent TERM $when killing its stopped sampler hung"
-      pid="$(cat "$T/stopper.sampler" 2>/dev/null)"; [ -z "$pid" ] || kill -KILL "$pid" 2>/dev/null
+      pid="$(cat "$T/stopper.sampler" 2>/dev/null)"; [ -z "$pid" ] || kill -KILL -- "-$pid" 2>/dev/null
       kill -KILL "$suite" 2>/dev/null
     fi
     rc=0; wait "$suite" 2>/dev/null || rc=$?
@@ -7126,6 +7143,17 @@ EOF
   pid="$(cat "$T/spawned" 2>/dev/null)"
   if [ -z "$pid" ]; then fail_ "fixture: the suite was never sent TERM as its sampler started: [$(cat "$T/spawn.out" 2>/dev/null)]"
   elif ! wait_gone "$pid" '' 1; then fail_ 'a sampler started as the suite was sent TERM outlived the suite'; kill -KILL -- "-$pid" 2>/dev/null; fi
+  # A sampler that ends between the runner's last look and its kill (here: killed and reaped by its
+  # job) leaves its group to that job, which keeps it until the runner is done: the kill still finds
+  # the group it was meant for, and the unit fails as a sampler that did not stop.
+  rm -f "$T/stopper.sampler" "$T/stopper.groups" "$T/stopper.stopped" "$T/kill.log" "$T/gone"
+  rc=0; out="$(KILL_LOG="$T/kill.log" GONE_BEFORE_KILL="$T/gone" SHMUTANT_SELECT=t_zz_stops_sampler bash "$T/suite/test/run.sh" 2>&1)" || rc=$?
+  [ -e "$T/gone" ] || fail_ "fixture: the sampler was never ended before the kill: [$out]"
+  rc_is "$rc" 1 'a unit whose sampler ended just before its kill fails'
+  has "$out" 'FAIL: t_zz_stops_sampler: the descendant sampler did not stop and was killed' 'and its group was still there to kill'
+  hasnt "$out" 'could not be killed' 'not a group gone before its kill'
+  pid="$(cat "$T/stopper.sampler" 2>/dev/null)"
+  [ -z "$pid" ] || eq "$(cat "$T/kill.log" 2>/dev/null)" "-KILL -- -$pid" 'the kill names the group the job leads'
   # A stopped state that could not be read is not taken for one: a sampler slow to end, whose state
   # read fails though it prints a stop, is waited on and not killed.
   out="$(PS_LIES=1 SLOW_SAMPLER=1 SHMUTANT_SELECT=t_zz_traps bash "$T/suite/test/run.sh" 2>&1)"; rc_is $? 0 'a unit whose slow sampler'"'"'s state cannot be read passes'
@@ -7381,7 +7409,10 @@ EOF
   # leftover is swept and the directory goes.
   local names
   rm -rf -- "$T/swaps.aside" "$T/callers" "$T/raced" "$T/swaps.pid" "$T/swaps.names" "$T/named-in-sweep"; mkdir "$T/callers"; : > "$T/callers/precious"
+  # A line an earlier run left in the mirror is gone once this run's copy starts (mirror_samples).
+  printf 'stale-line\n' >> "$SAMPLE_MIRROR"
   rc=0; out="$(NAMED_IN_SWEEP="$T/named-in-sweep" SWAP_RACE="$T" KEEP=1 HOW=names SHMUTANT_SELECT=t_zz_swaps bash "$T/suite/test/run.sh" 2>&1)" || rc=$?
+  ! command -p grep -qx stale-line "$SAMPLE_MIRROR" || fail_ 'a line an earlier run left in the sample mirror survived into this run'
   [ ! -s "$T/named-in-sweep" ] || fail_ "the sweep named a file of its own while the unit's leftovers ran: [$(cat "$T/named-in-sweep")]"
   pid="$(left_running "$T/swaps.pid" 2>/dev/null)"
   [ -z "$pid" ] || { fail_ "the leftover of a unit that looked for the sweep's files outlived the sweep"; kill -KILL "$pid" 2>/dev/null; wait_gone "$pid"; }
@@ -7397,6 +7428,10 @@ EOF
     eq "$names" '' 'the unit can name no file of the sweep'"'"'s, in TMPDIR or in a variable'
   fi
   [ -n "$dir" ] && [ ! -e "$dir" ] || fail_ "the directory of a unit whose records were whole was not removed: [$out]"
+  # A mirror that cannot be emptied stops the copy before any unit runs.
+  rc=0; out="$(SAMPLE_MIRROR="$T/no-such-dir/mirror" KEEP=1 HOW=trap SHMUTANT_SELECT=t_zz_swaps bash "$T/suite/test/run.sh" 2>&1)" || rc=$?
+  rc_is "$rc" 2 'a copy whose sample mirror cannot be emptied stops'
+  hasnt "$out" 'unit(s) ran' 'before any unit runs'
   # The suite sent TERM just after the first sweep read the sampler's record (TERM_IN_READ) sweeps
   # again from a descriptor of its own, so the whole record is swept a second time, not what the
   # first read left; or as the first sweep begins its kill (TERM_IN_SWEEP). The leftover is one only
@@ -7529,6 +7564,21 @@ t_ps_runs_needs_ps_to_report_this_shell() {
   fake_ps "$(( $$ + 1 ))" 0 && fail_ 'a ps that reported another pid passed the probe'
   fake_ps "$$"$'\n'"$$" 0 && fail_ 'a ps that reported this pid twice passed the probe'
   fake_ps "  $$ "$'\n' 0 || fail_ 'a ps that reported this pid padded with blanks failed the probe'
+}
+
+t_seen_by_sampler_matches_the_process_now() {
+  # A mirrored line for the pid with another start (a number reused since) is not the process now at
+  # that pid: the handshake waits, and fails, rather than pass on it. The line with its start passes.
+  sleep 30 > /dev/null 2>&1 & local p=$! real stale rc
+  real="$(_shmutant_identity "$p")" || { fail_ 'fixture: no identity for the sleep'; kill -KILL "$p"; wait "$p" 2>/dev/null; return; }
+  case "$real" in e*) stale=e99999 ;; *[!0-9]*) stale='Thu Jan  1 00:00:00 1970' ;; *) stale=1 ;; esac
+  printf '%s:%s\n' "$p" "$stale" > "$T/mirror"
+  rc=0; ( SAMPLE_MIRROR="$T/mirror"; _failed=0; seen_by_sampler "$p" > /dev/null ) || rc=$?
+  rc_is "$rc" 1 'a mirrored line carrying another start passed the handshake'
+  printf '%s:%s\n' "$p" "$real" >> "$T/mirror"
+  rc=0; ( SAMPLE_MIRROR="$T/mirror"; seen_by_sampler "$p" > /dev/null ) || rc=$?
+  rc_is "$rc" 0 'the mirrored line carrying the start of the process now at the pid failed the handshake'
+  kill -KILL "$p" 2>/dev/null; wait "$p" 2>/dev/null
 }
 
 t_unit_leftovers_fails_closed() {
@@ -8012,18 +8062,38 @@ sample_put() {
   SAMPLE_LINES=$(( ${SAMPLE_LINES:-0} + ${#nl} + 1 ))
 }
 
-# sampler_run <fd> <hold-fd> — the sampler's job, which leads a process group of its own: start the
-# group's holder, then sample the unit (sample_unit <fd>) and end the record with `end <n>`, <n> the
-# lines written before it. A record whose last line is not that count was cut or added to after the
-# sampler wrote it (sweep_record). The holder reads <hold-fd> until the runner closes its end
-# (sampler_stop), ignoring INT, TERM and HUP: while it waits, the group has a member, so the group's
-# number is this sampler's whenever the runner kills the group, even once bash has reaped the
-# sampler itself (no process or group takes a number while a group of that number exists). It ends
-# with sample_unit's status; it writes no last line after a failure, which is reported on its own.
+# sampler_job <fd> <hold-fd> <status-fd> — the sampler's job, which leads a process group of its own
+# and holds it: it starts the sampler in its group (sampler_run <fd>), says the sampler's pid
+# (`pid <n>`) and, once the sampler has ended, its status (`end <status>`) on <status-fd>, then
+# waits on <hold-fd> until the runner releases it (sampler_stop) and ends with that status. It
+# ignores INT, TERM and HUP throughout, and its sampler does not. So from the moment it is started
+# until the runner is done with it, the group has a member, and the group's number is this job's
+# whenever the runner kills the group, however late bash reaps anything (no process or group takes
+# a number while a group of that number exists). The release is a line on <hold-fd>, or its end;
+# the job looks for either once a second and also ends once the runner ($$) has, so a release the
+# kernel never delivers cannot hold it (D10).
+sampler_job() {
+  local cfd="$1" hfd="$2" tfd="$3" w st=0 runner=$$ r
+  trap '' INT TERM HUP
+  ( trap - INT TERM HUP; exec {hfd}<&- {tfd}>&-; sampler_run "$cfd" ) & w=$!
+  exec {cfd}<&-
+  { printf 'pid %s\n' "$w" >&"$tfd"; } 2>/dev/null
+  wait "$w" || st=$?
+  { printf 'end %s\n' "$st" >&"$tfd"; } 2>/dev/null
+  while :; do
+    IFS= read -r -t 1 _ <&"$hfd" && break
+    r=$?; [ "$r" -gt 128 ] || break
+    kill -0 "$runner" 2>/dev/null || break
+  done
+  return "$st"
+}
+
+# sampler_run <fd> — the sampler: sample the unit (sample_unit <fd>) and end the record with
+# `end <n>`, <n> the lines written before it. A record whose last line is not that count was cut or
+# added to after the sampler wrote it (sweep_record). It ends with sample_unit's status; it writes no
+# last line after a failure, which is reported on its own.
 sampler_run() {
-  local st=0 cfd="$1" hfd="$2"
-  ( trap '' INT TERM HUP; exec {cfd}<&-; IFS= read -r _ <&"$hfd" ) > /dev/null 2>&1 < /dev/null &
-  exec {hfd}<&-
+  local st=0
   SAMPLE_LINES=0
   sample_unit "$1" || st=$?
   [ "$st" = 0 ] || return "$st"
@@ -8204,32 +8274,40 @@ suite_job_runs() {
   return 1
 }
 
-# sampler_stop <tenths> — end the unit's sampler ($sampler), which leads a process group of its own
-# (D8, D10): send it `none` on its channel while that is open ($pfd), and wait for it to end, at
-# most <tenths> tenths of a second, and no longer once it is seen stopped. One that has not ended
-# then is killed with its whole group in one signal (sampler_kill): everything it started is in
-# that group (the sampler starts nothing in another), so nothing forked after a listing escapes, and
-# nothing is frozen. The group's number is this sampler's however late bash reaps it: the group's
-# holder (sampler_run) keeps a member in it until the runner closes its end of the holder's channel
-# ($hw), which it does only after that kill. Sets `src` to the sampler's status and leaves
-# `sampler_killed` (which main clears for each unit) at 1 when it was killed, 2 when the kill could
-# not be sent; clears `sampler`; does nothing when there is no sampler. A stop entered again by an
-# interrupt (suite_signalled) once the kill was sent only waits: the holder died with the group, so
-# its number is no longer reserved. A sampler the kill could not reach is waited on as long as a
-# running one is given, then ends the run as a harness failure (exit 2), never hanging it.
+# sampler_stop <tenths> — end the unit's sampler, which its job ($sampler, sampler_job) runs in a
+# process group the job leads (D8, D10): send it `none` on its channel while that is open ($pfd), and
+# wait for the job to say it has ended (on $tr), at most <tenths> tenths of a second, and no longer
+# once it is seen stopped. One that has not ended then is killed with its whole group in one signal
+# (sampler_kill): everything it started is in that group (the sampler starts nothing in another), so
+# nothing forked after a listing escapes, and nothing is frozen. The job keeps the group's number
+# reserved until the runner closes its end of the job's hold channel ($hw), which it does only after
+# that kill. Sets `src` to the sampler's status and leaves `sampler_killed` (which main clears for
+# each unit) at 1 when it was killed, 2 when the kill could not be sent; clears `sampler`; does
+# nothing when there is no sampler. A stop entered again by an interrupt (suite_signalled) once the
+# kill was sent only waits, as the group's number is no longer reserved; one entered after the first
+# had read the end it waited for waits for an end that does not come again, and kills the group,
+# still held. A sampler the kill could not reach is waited on as long as a running one is given,
+# then ends the run as a harness failure (exit 2), never hanging it.
 sampler_stop() {
-  local i
+  local i line w="" ended=""
   [ -n "${sampler:-}" ] || return 0
   if [ "${sampler_killed:-0}" = 0 ]; then
     [ -z "${pfd:-}" ] || { printf 'none\n' >&"$pfd"; } 2>/dev/null
     for (( i = 0; i < $1; i++ )); do
+      if IFS= read -r -t 0.1 -u "$tr" line; then
+        case "$line" in 'pid '*) w="${line#pid }" ;; 'end '*) ended=1; break ;; esac
+        continue
+      fi
       suite_job_runs "$sampler" || break
       # Once a second: a sampler held stopped will not end, so it is not waited on.
-      (( i % 10 != 9 )) || ! _shmutant_proc_stopped "$sampler" || break
-      command -p sleep 0.1
+      (( i % 10 != 9 )) || [ -z "$w" ] || ! _shmutant_proc_stopped "$w" || break
     done
-    ! suite_job_runs "$sampler" || sampler_kill
+    [ -n "$ended" ] || ! suite_job_runs "$sampler" || sampler_kill
   fi
+  # Released by a line and then the end: the runner still holds a read end of the channel ($hr), so
+  # the line cannot raise SIGPIPE here even once the job has gone.
+  if [ -n "${hw:-}" ]; then { printf 'go\n' >&"$hw"; } 2>/dev/null; exec {hw}>&-; fi
+  hw=""
   if [ "${sampler_killed:-0}" = 2 ]; then
     for (( i = 0; i < 300; i++ )); do suite_job_runs "$sampler" || break; command -p sleep 0.1; done
     if suite_job_runs "$sampler"; then
@@ -8239,14 +8317,12 @@ sampler_stop() {
   fi
   src=0; wait "$sampler" 2>/dev/null || src=$?
   sampler=""
-  [ -z "${hw:-}" ] || exec {hw}>&-
-  hw=""
 }
 
 # sampler_kill — KILL the sampler's process group and say so (`sampler_killed` 1, or 2 when the
 # signal could not be sent), with no handler of the suite's able to run between the two
 # (signals_hold). A stop entered between them would otherwise kill the group a second time, after
-# the holder that reserved its number had died with it, or skip the kill and wait on a sampler
+# the job that reserved its number had died with it, or skip the kill and wait on a sampler
 # still stopped.
 sampler_kill() {
   signals_hold
@@ -8339,7 +8415,7 @@ suite_signalled() {
 }
 
 main() {
-  local units u ran=0 failed=0 swept=0 urc sfd sfd2 ffd ffd2 sw hr hx ufd urd f sd left_unverified=0
+  local units u ran=0 failed=0 swept=0 urc sfd sfd2 ffd ffd2 sw hr hx ufd urd tw f sd left_unverified=0
   local -a left=()
   ps_runs || { echo 'run.sh: ps cannot run here (sandboxed?); the suite needs it, so no unit was run. Run the suite outside the sandbox.' >&2; exit 2; }
   units="$(declare -F | awk '$3 ~ /^t_/ { print $3 }')"
@@ -8347,7 +8423,7 @@ main() {
   # from the environment is someone else's path, a T_ID someone else's directory, and a T_SWEPT or
   # T_SAMPLED no sweep or sampler of this run's.
   T=""; T_ID=""; T_SWEPT=""; T_SAMPLED=""; SEEN_SWEEPING=""; SEEN_BAD=""; SEEN_LINES=(); SWEEP_UNIT=""; SWEEP_OWED=""
-  SWEEP_FINAL_FD=""; sampler=""; sampler_killed=0; src=0; pfd=""; hw=""; held=""
+  SWEEP_FINAL_FD=""; sampler=""; sampler_killed=0; src=0; pfd=""; hw=""; hr=""; tr=""; held=""
   # A harness failure (exit 2) mid-run still removes the unit directory the runner made, and only that,
   # unless it came before the unit's leftovers were swept: it is then left in place, and said so.
   trap '[ -z "${T:-}" ] || unit_dir_remove || unit_dir_failed run.sh "${u:-a unit}" "$?" >&2' EXIT
@@ -8358,7 +8434,9 @@ main() {
     SEEN_SWEEPING=""; SEEN_BAD=""; SEEN_LINES=()
     # The sampler's record ($sw, read through $sfd and $sfd2), the unit's last snapshot
     # ($SWEEP_FINAL_FD, read through $ffd and $ffd2), the sweep's unsettled channel ($ufd, $urd), the
-    # sampler's channel ($pfd) and its holder's ($hw, $hr) are files whose names are removed once they
+    # sampler's channel ($pfd), its job's hold channel ($hw; the runner keeps a read end, $hr, until
+    # the unit is done) and its job's status channel ($tw, read through $tr) are files whose names
+    # are removed once they
     # are open, before anything is spawned: no unit can name one, so none can be removed, replaced,
     # linked elsewhere or made unreadable by name, and each read goes through the runner's own
     # descriptor (sweep_record). A set-up that fails removes the name it had made. An interrupt is
@@ -8369,8 +8447,9 @@ main() {
     { f="$(sweep_file_name seen)" && exec {sw}>>"$f" {sfd}<"$f" {sfd2}<"$f" && command -p rm -f -- "$f" \
         && f="$(sweep_file_name final)" && exec {SWEEP_FINAL_FD}>>"$f" {ffd}<"$f" {ffd2}<"$f" && command -p rm -f -- "$f" \
         && f="$(sweep_file_name unsettled)" && exec {ufd}>>"$f" {urd}<"$f" && command -p rm -f -- "$f" \
-        && f="$(command -p mktemp -d "${TMPDIR:-/tmp}/shmutant-chan.XXXXXX")" && command -p mkfifo -- "$f/up" "$f/hold" \
+        && f="$(command -p mktemp -d "${TMPDIR:-/tmp}/shmutant-chan.XXXXXX")" && command -p mkfifo -- "$f/up" "$f/hold" "$f/status" \
         && exec {pfd}<>"$f/up" {hw}<>"$f/hold" {hr}<"$f/hold" {hx}>>"$f/hold" && exec {hw}>&- && hw="$hx" \
+        && exec {tr}<>"$f/status" {tw}>>"$f/status" \
         && command -p rm -rf -- "$f"; } \
       || { [ -z "$f" ] || command -p rm -rf -- "$f"; echo "run.sh: cannot set up the sweep for $u" >&2; exit 2; }
     f=""
@@ -8390,12 +8469,12 @@ main() {
     # does: the suite's group then holds only the suite and what it runs itself, and a sampler
     # something stopped can neither hang it up nor be frozen with it (D8 and D10 in
     # .ai-dev-baseline/decisions.md). It keeps only its own descriptors: the record's write end as
-    # its output, its channel, and its holder's read end.
+    # its output, its channel, and its hold and status channels' ends.
     set -m
-    sampler_run "$pfd" "$hr" >&"$sw" 2>/dev/null < /dev/null \
-      {sw}>&- {sfd}<&- {sfd2}<&- {ffd}<&- {ffd2}<&- {SWEEP_FINAL_FD}>&- {ufd}>&- {urd}<&- {hw}>&- & sampler_spawned
+    sampler_job "$pfd" "$hr" "$tw" >&"$sw" 2>/dev/null < /dev/null \
+      {sw}>&- {sfd}<&- {sfd2}<&- {ffd}<&- {ffd2}<&- {SWEEP_FINAL_FD}>&- {ufd}>&- {urd}<&- {hw}>&- {tr}<&- & sampler_spawned
     set +m
-    exec {sw}>&- {hr}<&-
+    exec {sw}>&- {tw}>&-
     signals_release
     # The unit runs in a process group of its own (job control, for this spawn only): nothing it leaves
     # behind shares the suite's group, which the sweep's freeze could otherwise hang up (D8 in
@@ -8430,7 +8509,7 @@ main() {
       printf '%s %s\n' "$_sweep_up" "$_sweep_id" >&"$pfd" \
         || { printf 'FAIL: %s: its pid could not be handed to the descendant sampler, so it was not run\n' "$u"; exit 1; }
       # The unit keeps one descriptor of the sweep's: the one its last snapshot is written to.
-      exec {pfd}>&- {sfd}<&- {sfd2}<&- {ffd}<&- {ffd2}<&- {ufd}>&- {urd}<&- {hw}>&-
+      exec {pfd}>&- {sfd}<&- {sfd2}<&- {ffd}<&- {ffd2}<&- {ufd}>&- {urd}<&- {hw}>&- {hr}<&- {tr}<&-
       _unit="$u"; _failed=0
       trap unit_finish EXIT
       cd "$T" || exit 1
@@ -8451,7 +8530,7 @@ main() {
     # check and the removal (sweep_record).
     sweep_record "$u"
     SWEEP_OWED=""
-    exec {sfd}<&- {sfd2}<&- {ffd}<&- {ffd2}<&- {ufd}>&- {urd}<&-
+    exec {sfd}<&- {sfd2}<&- {ffd}<&- {ffd2}<&- {ufd}>&- {urd}<&- {tr}<&- {hr}<&-
     SEEN_LINES=()
     # The directory is the runner's, removed now the unit's leftovers are swept, and only while it is
     # still the one the runner made: another directory there, one that cannot go, or a sweep that
