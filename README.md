@@ -192,8 +192,8 @@ read instead of passing it. So
 `run.sh: ps cannot run here …` line and exits 2.
 
 Each unit runs in a process group of its own, with stdin from `/dev/null`, and so does the sampler
-that records the unit's descendants while it runs: the suite's group holds the suite alone, so
-nothing a unit leaves behind or stops shares it. The leak check freezes a leftover before it kills
+that records the unit's descendants while it runs: the suite's group holds only the suite and the
+short commands it runs itself, so nothing a unit leaves behind, and no sampler a unit stops, shares it. The leak check freezes a leftover before it kills
 it. On macOS, in a session launchd started (as on the CI runner), the exit of a member launchd adopted
 can leave the kernel treating its group as newly orphaned, and an orphaned group with a member stopped
 is hung up whole: in the suite's group, that ended the suite with status 129. A sampler that does not
