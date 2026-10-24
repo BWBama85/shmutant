@@ -267,7 +267,9 @@ the fingerprint does not see.) A `SHMUTANT_STREAM` file is checked at the end no
 file the records went to but to hold, past what was there when it was opened, exactly the
 records the pool wrote, and the bytes that were there when the pool opened it are unchanged: a
 callback that truncates, overwrites (in place, within old or new records) or appends to it is a
-harness error (status 2). The rewrite of a row's target is
+harness error (status 2). Each identity, length and checksum the pool takes of the workdir, a
+directory it made or the stream is read whole: one it cannot read refuses the pool (status 2)
+or fails the check it was for, and never matches another that could not be read. The rewrite of a row's target is
 pinned to the target's directory and re-checked to be inside the tree from there, so a
 concurrent callback that swaps a directory component of a sibling's clone for a link cannot
 redirect it (that row is `unprepared`). A run that renamed its clone away and put another
@@ -352,7 +354,8 @@ Rules a row must satisfy, all enforced when the row is appended or the pool star
   it occurs once. One that occurs nowhere is not refused; its row is scored `unapplied`;
 - the old literal is non-empty, contains no newline, and differs from the new one;
 - the target file is relative to the tree root, carries no `..` component, and exists in the
-  prepared tree as a regular file with one hard link, and no regular file anywhere in the
+  prepared tree as a regular file with one hard link (a link count that cannot be read is refused
+  too), and no regular file anywhere in the
   prepared tree has more than one (the clone would give each name its own inode; a fixture
   written through one name and read through another would then differ from the tree `prepare`
   built) — a symlink, a path whose physical location
