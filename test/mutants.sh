@@ -1916,6 +1916,18 @@ shmutant_mut 'an identity read that found no inode still gives an identity' \
   '  case "$id" in '"''"'|*[!0-9]*) return 1 ;; esac' \
   '  :' \
   't_dir_id_fails_when_any_stage_fails'
+shmutant_mut 'an identity read that found something other than an inode still gives an identity' \
+  '  case "$id" in '"''"'|*[!0-9]*) return 1 ;; esac' \
+  '  case "$id" in '"''"') return 1 ;; esac' \
+  't_dir_id_fails_when_any_stage_fails'
+shmutant_mut 'a directory whose physical path could not be read still gives an identity' \
+  'phys="$(_shmutant_abs "$1")" || return 1; else' \
+  'phys="$(_shmutant_abs "$1")" || phys=""; else' \
+  't_dir_id_fails_when_any_stage_fails'
+shmutant_mut 'a directory identity leaves out its physical path' \
+  '  if [ -d "$1" ]; then phys=' \
+  '  if false; then phys=' \
+  't_dir_id_fails_when_any_stage_fails'
 shmutant_mut 'two failed identity reads match' \
   '  id="$(_shmutant_dir_id "$1")" && [ "$id" = "$2" ]' \
   '  id="$(_shmutant_dir_id "$1")"; [ "$id" = "$2" ]' \
@@ -1932,9 +1944,13 @@ shmutant_mut 'a failed wc still gives the stream a length' \
   'SHMUTANT_STREAM_BASE="$(set -o pipefail; command -p wc' \
   'SHMUTANT_STREAM_BASE="$(set +o pipefail; command -p wc' \
   't_stream_reads_fail_as_a_whole'
+shmutant_mut 'an empty stream length is taken' \
+  '    || [ -z "$SHMUTANT_STREAM_BASE" ] || [[' \
+  '    || [[' \
+  't_stream_reads_fail_as_a_whole'
 shmutant_mut 'a stream length that is not a number is taken' \
-  '    || [ -z "$SHMUTANT_STREAM_BASE" ] || [[ "$SHMUTANT_STREAM_BASE" == *[!0-9]* ]] \' \
-  '    || false \' \
+  ' || [[ "$SHMUTANT_STREAM_BASE" == *[!0-9]* ]] \' \
+  ' \' \
   't_stream_reads_fail_as_a_whole'
 shmutant_mut 'a failed dd still gives the stream a prefix checksum when it opens' \
   'SHMUTANT_STREAM_PREFIX_CK="$(set -o pipefail; command -p dd' \
@@ -1959,6 +1975,10 @@ shmutant_mut 'a failed ls still gives a link count' \
 shmutant_mut 'a link read that found no count still gives one' \
   '  case "$l" in '"''"'|*[!0-9]*) return 1 ;; esac' \
   '  :' \
+  't_link_count_fails_when_any_stage_fails'
+shmutant_mut 'a link read that found something other than a count still gives one' \
+  '  case "$l" in '"''"'|*[!0-9]*) return 1 ;; esac' \
+  '  case "$l" in '"''"') return 1 ;; esac' \
   't_link_count_fails_when_any_stage_fails'
 shmutant_mut 'a target whose link count could not be read is taken' \
   '    if ! links="$(_shmutant_link_count "$root/${SHMUTANT_ROWS_FILE[$i]}")"; then' \

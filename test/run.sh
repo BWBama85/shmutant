@@ -29,6 +29,18 @@ n_found() {
   n="$(set -o pipefail; find "$@" | wc -l | tr -d ' ')" && [ -n "$n" ] && printf '%s' "$n" && return 0
   printf 'unreadable'; return 1
 }
+# pick_sampler <suite pid> <wrapper pid> <process table> — the child of <suite pid> in the table
+# (`pid ppid` lines) that is not <wrapper pid>. Fails, printing nothing, on a wrapper that is not
+# a pid, an empty table or a selection that failed: an empty wrapper pid excludes no child, and
+# the wrapper would be picked in the sampler's place.
+pick_sampler() {
+  local s
+  case "$2" in ''|*[!0-9]*) return 1 ;; esac
+  [ -n "$3" ] || return 1
+  s="$(printf '%s\n' "$3" | awk -v s="$1" -v w="$2" '$2 == s && $1 != w { print $1; exit }')" || return 1
+  case "$s" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s' "$s"
+}
 
 # --- fixtures ----------------------------------------------------------------------------------
 
@@ -1744,7 +1756,8 @@ t_target_sample_that_could_not_be_read_is_not_a_match() {
 
 # fault <tool> <how> — define a `command` that fails <tool> when it runs as `command -p <tool>`:
 # `after` runs the real tool and then fails; `empty` runs it with its output discarded and
-# succeeds; `file` is `after` only when stdin is not a pipe. Every other call is the real one.
+# succeeds; `garble` does that and prints `x`; `file` is `after` only when stdin is not a pipe.
+# Every other call is the real one.
 fault() {
   _fault_tool="$1" _fault_how="$2"
   command() {
@@ -1753,6 +1766,7 @@ fault() {
       case "$_fault_how" in
         after) builtin command -p "$_fault_tool" "$@"; return 1 ;;
         empty) builtin command -p "$_fault_tool" "$@" > /dev/null; return 0 ;;
+        garble) builtin command -p "$_fault_tool" "$@" > /dev/null; printf 'x\n'; return 0 ;;
         file) builtin command -p "$_fault_tool" "$@" || return; [ -p /dev/stdin ] || return 1; return 0 ;;
       esac
     fi
@@ -1778,9 +1792,17 @@ t_dir_id_fails_when_any_stage_fails() {
     [ "$rc" -ne 0 ] && [ -z "$out" ] || fail_ "a failed $tool still gave an identity: rc $rc [$out]"
     ! ( fault "$tool" after; _shmutant_is_id "$T/d" "$id" ) || fail_ "a failed $tool still matched"
   done
-  # An ls that succeeds and prints nothing: there is no inode in that.
+  # An ls that succeeds and prints nothing, or an awk that prints what is no inode.
   out="$( fault ls empty; _shmutant_dir_id "$T/d" )"; rc=$?
   [ "$rc" -ne 0 ] && [ -z "$out" ] || fail_ "an ls that printed no inode still gave an identity: rc $rc [$out]"
+  out="$( fault awk garble; _shmutant_dir_id "$T/d" )"; rc=$?
+  [ "$rc" -ne 0 ] && [ -z "$out" ] || fail_ "an awk that printed no inode still gave an identity: rc $rc [$out]"
+  # The physical path is a stage too, for a directory; a regular file has none.
+  out="$( _shmutant_abs() { return 1; }; _shmutant_dir_id "$T/d" )"; rc=$?
+  [ "$rc" -ne 0 ] && [ -z "$out" ] || fail_ "a directory whose physical path could not be read still gave an identity: rc $rc [$out]"
+  : > "$T/file"
+  out="$(_shmutant_dir_id "$T/file")"; rc_is $? 0 'a regular file has an identity'
+  case "$out" in [0-9]*:) ;; *) fail_ "a regular file's identity is its inode alone: [$out]" ;; esac
 }
 
 t_stream_reads_fail_as_a_whole() {
@@ -1806,7 +1828,7 @@ t_stream_reads_fail_as_a_whole() {
   }
   out="$(try_open none after)"
   case "$out" in "0 $T/s.tsv "[0-9]*) ;; *) fail_ "fixture: the stream did not open whole: [$out] [$(cat "$T/open.err")]" ;; esac
-  for tool in ls:after awk:after wc:after tr:after tr:empty dd:after cksum:after; do
+  for tool in ls:after awk:after wc:after tr:after tr:empty tr:garble dd:after cksum:after; do
     how="${tool#*:}"; tool="${tool%%:*}"
     out="$(try_open "$tool" "$how")"
     eq "$out" '2 unset unset' "an open whose $tool failed ($how) is refused and rolled back"
@@ -1836,7 +1858,7 @@ t_link_count_fails_when_any_stage_fails() {
   printf 'x\n' > "$T/f"; ln "$T/f" "$T/g"
   local out rc tool
   eq "$(_shmutant_link_count "$T/f")" 2 'a count read whole'
-  for tool in ls:after awk:after ls:empty; do
+  for tool in ls:after awk:after ls:empty awk:garble; do
     out="$( fault "${tool%%:*}" "${tool#*:}"; _shmutant_link_count "$T/f" )"; rc=$?
     [ "$rc" -ne 0 ] && [ -z "$out" ] || fail_ "a failed read ($tool) still gave a count: rc $rc [$out]"
   done
@@ -1868,6 +1890,19 @@ t_suite_count_fails_when_a_stage_fails() {
   eq "$out" unreadable 'a failed wc'
   out="$( tr() { builtin command tr "$@"; return 1; }; n_found "$T/e" -mindepth 1 )" && fail_ 'a failed tr was a count'
   eq "$out" unreadable 'a failed tr'
+}
+
+t_suite_sampler_selection_fails_closed() {
+  # #52: the fixture that stops a suite's sampler picks it as the suite's child that is not the
+  # unit's wrapper. A wrapper pid or table that could not be read, or a selection that failed,
+  # picks nothing: the wrapper is never stopped in the sampler's place.
+  local table=$'10 1\n20 5\n30 5' out
+  eq "$(pick_sampler 5 20 "$table")" 30 'the child that is not the wrapper'
+  out="$(pick_sampler 5 '' "$table")" && fail_ "an unread wrapper pid picked [$out]"
+  out="$(pick_sampler 5 2x "$table")" && fail_ "a wrapper that is not a pid picked [$out]"
+  out="$(pick_sampler 5 20 '')" && fail_ "an unread table picked [$out]"
+  out="$( awk() { builtin command awk "$@"; return 1; }; pick_sampler 5 20 "$table" )" && fail_ "a failed selection picked [$out]"
+  eq "$out" '' 'and printed nothing'
 }
 
 t_checksum_uses_the_digest_file_not_a_function() {
@@ -6934,17 +6969,11 @@ EOF
     KILL_LOG="$T/kill.log" WALK_FAILS="$walk" SHMUTANT_KILL_GROUP="$stranger" SAMPLER_KIDS=1 SHMUTANT_SELECT=t_zz_slow bash "$T/suite/test/run.sh" > "$T/stopped.out" 2>&1 & suite=$!
     for (( i = 0; i < 100; i++ )); do [ "$(command -p grep -c . "$T/sampler.kids" 2>/dev/null)" = 3 ] && break; sleep 0.1; done
     if wait_for "$T/slow.started" && unitpid="$(cat "$T/slow.pid" 2>/dev/null)" && [ -n "$unitpid" ]; then
-      # The wrapper is the one child of the suite that is not its sampler. A wrapper pid or process
-      # table that could not be read selects nothing: an empty pid excludes no child, and the
-      # wrapper would be stopped in the sampler's place. The table is read whole before the
-      # selection, which stops at its first match.
+      # The wrapper is the one child of the suite that is not its sampler. The table is read whole
+      # before the selection, which stops at its first match; a read that failed selects nothing.
       wrapper="$(set -o pipefail; command -p ps -o ppid= -p "$unitpid" 2>/dev/null | tr -d ' ')" || wrapper=""
       table="$(command -p ps -A -o pid= -o ppid= 2>/dev/null)" || table=""
-      sampler=""
-      case "$wrapper" in
-        ''|*[!0-9]*) ;;
-        *) [ -z "$table" ] || sampler="$(printf '%s\n' "$table" | awk -v s="$suite" -v w="$wrapper" '$2 == s && $1 != w { print $1; exit }')" ;;
-      esac
+      sampler="$(pick_sampler "$suite" "$wrapper" "$table")" || sampler=""
       if [ -z "$sampler" ]; then fail_ 'fixture: the suite'"'"'s sampler was not found'; kill -TERM "$suite"
       else
         kill -STOP "$sampler"; kill -TERM "$suite"

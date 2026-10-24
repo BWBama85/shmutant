@@ -2235,15 +2235,16 @@ _shmutant_worker() {
   return 0
 }
 
-# _shmutant_dir_id <dir> — the inode number of <dir>, from POSIX `ls -di`; fails, printing
-# nothing, when <dir> is absent or any stage of the read fails.
+# _shmutant_dir_id <dir> — the inode number of <dir>, from POSIX `ls -di`, and its physical path;
+# fails, printing nothing, when <dir> is absent or any stage of the read fails.
 _shmutant_dir_id() {
   local id phys
   id="$(set -o pipefail; command -p ls -di -- "$1" 2>/dev/null | command -p awk '{ print $1 }')" || return 1
   case "$id" in ''|*[!0-9]*) return 1 ;; esac
   # The inode is unique only within a filesystem; the resolved physical path distinguishes a
   # same-inode directory reached across a swapped mount (portable, where a device number is not).
-  phys="$(_shmutant_abs "$1")" || phys=""
+  # A regular file (the verdict stream) has none.
+  if [ -d "$1" ]; then phys="$(_shmutant_abs "$1")" || return 1; else phys=""; fi
   printf '%s:%s' "$id" "$phys"
 }
 
