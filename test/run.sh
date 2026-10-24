@@ -6811,6 +6811,16 @@ EOF
   out="$(SHMUTANT_SELECT=t_zz_clean bash "$T/suite-nofifo/test/run.sh" 2>&1)"; rc_is $? 2 'a sweep that cannot be set up is a harness failure'
   has "$out" 'run.sh: cannot set up the sweep for t_zz_clean' 'and says so'
   eq "$(n_found "$TMPDIR" -mindepth 1 -maxdepth 1 \( -name 'shmutant-chan.*' -o -name 'shmutant-seen.*' -o -name 'shmutant-final.*' -o -name 'shmutant-unsettled.*' \))" 0 'and leaves no file of the sweep'"'"'s behind'
+  # Sent TERM in the middle of that set-up (its channels just made, their names not yet removed),
+  # the suite finishes it before it ends by the signal, so no name of the sweep's is left behind.
+  mkdir -p "$T/suite-setupterm/test"
+  cp -- "$SHMUTANT" "$T/suite-setupterm/shmutant.sh"
+  { sed '$d' "$T/suite/test/run.sh"
+    printf '%s\n' 'command() { if [ "${1:-} ${2:-}" = "-p mkfifo" ]; then builtin command "$@"; local r=$?; builtin kill -TERM "$$"; return "$r"; fi; builtin command "$@"; }' 'main "$@"'
+  } > "$T/suite-setupterm/test/run.sh"
+  rc=0; { SHMUTANT_SELECT=t_zz_clean bash "$T/suite-setupterm/test/run.sh" > /dev/null 2>&1; } 2>/dev/null || rc=$?
+  rc_is "$rc" 143 'the suite sent TERM as it sets up the sweep ends by TERM'
+  eq "$(n_found "$TMPDIR" -mindepth 1 -maxdepth 1 \( -name 'shmutant-chan.*' -o -name 'shmutant-seen.*' -o -name 'shmutant-final.*' -o -name 'shmutant-unsettled.*' \))" 0 'and leaves no file of the sweep'"'"'s behind'
   # A sampler that ends abnormally (killed from outside) stopped recording: that is unverified too.
   mkdir -p "$T/suite-killedsampler/test"
   cp -- "$SHMUTANT" "$T/suite-killedsampler/shmutant.sh"
@@ -6922,7 +6932,9 @@ EOF
       'eval "_real_ps() $(declare -f _shmutant_ps | sed 1d)"' \
       '_shmutant_ps() { if [ -n "${PS_LIES:-}" ] && case " ${FUNCNAME[*]} " in *" sampler_stop "*) true ;; *) false ;; esac; then echo T; return 1; fi; _real_ps "$@"; }' \
       'eval "_real_sampler_run() $(declare -f sampler_run | sed 1d)"' \
-      'sampler_run() { _real_sampler_run "$@"; local r=$?; [ -z "${SLOW_SAMPLER:-}" ] || command -p sleep 2; return "$r"; }'
+      'sampler_run() { _real_sampler_run "$@"; local r=$?; [ -z "${SLOW_SAMPLER:-}" ] || command -p sleep 2; return "$r"; }' \
+      'eval "_real_sampler_spawned() $(declare -f sampler_spawned | sed 1d)"' \
+      'sampler_spawned() { [ -z "${TERM_AT_SPAWN:-}" ] || [ -e "$TERM_AT_SPAWN" ] || { echo "$!" > "$TERM_AT_SPAWN"; builtin kill -TERM "$$"; }; _real_sampler_spawned; }'
     mirror_samples
     printf '%s\n' \
       'main "$@"'
@@ -7105,6 +7117,15 @@ EOF
   else kill -KILL -- "-$pid" 2>/dev/null; wait_gone "$pid" '' 1; fi
   rc_is "$rc" 2 'a sampler whose group kill could not be sent ends the run as a harness failure'
   has "$(cat "$T/refused.out" 2>/dev/null)" 'run.sh: t_zz_stops_sampler: its descendant sampler could not be killed and has not ended' 'and names it'
+  # Sent TERM between the sampler's start and the record of its pid, the suite still knows its
+  # sampler: the signal is held until the pid is recorded, then the sampler is stopped with the rest,
+  # not left running once the suite has ended.
+  rm -f "$T/spawned"
+  rc=0; { TERM_AT_SPAWN="$T/spawned" SHMUTANT_SELECT=t_zz_slow bash "$T/suite/test/run.sh" > "$T/spawn.out" 2>&1; } 2>/dev/null || rc=$?
+  rc_is "$rc" 143 'the suite sent TERM as its sampler starts ends by TERM'
+  pid="$(cat "$T/spawned" 2>/dev/null)"
+  if [ -z "$pid" ]; then fail_ "fixture: the suite was never sent TERM as its sampler started: [$(cat "$T/spawn.out" 2>/dev/null)]"
+  elif ! wait_gone "$pid" '' 1; then fail_ 'a sampler started as the suite was sent TERM outlived the suite'; kill -KILL -- "-$pid" 2>/dev/null; fi
   # A stopped state that could not be read is not taken for one: a sampler slow to end, whose state
   # read fails though it prints a stop, is waited on and not killed.
   out="$(PS_LIES=1 SLOW_SAMPLER=1 SHMUTANT_SELECT=t_zz_traps bash "$T/suite/test/run.sh" 2>&1)"; rc_is $? 0 'a unit whose slow sampler'"'"'s state cannot be read passes'
@@ -8223,18 +8244,41 @@ sampler_stop() {
 }
 
 # sampler_kill — KILL the sampler's process group and say so (`sampler_killed` 1, or 2 when the
-# signal could not be sent), with no handler of the suite's able to run between the two: an INT, TERM
-# or HUP arriving meanwhile is held, and sent to the suite again once both are done. A stop entered
-# between them would otherwise kill the group a second time, after the holder that reserved its
-# number had died with it, or skip the kill and wait on a sampler still stopped.
+# signal could not be sent), with no handler of the suite's able to run between the two
+# (signals_hold). A stop entered between them would otherwise kill the group a second time, after
+# the holder that reserved its number had died with it, or skip the kill and wait on a sampler
+# still stopped.
 sampler_kill() {
-  local saved held=""
-  saved="$(trap -p INT TERM HUP)"
-  trap 'held=INT' INT; trap 'held=TERM' TERM; trap 'held=HUP' HUP
+  signals_hold
   if kill -KILL -- "-$sampler" 2>/dev/null; then sampler_killed=1; else sampler_killed=2; fi
-  trap - INT TERM HUP
-  eval "$saved"
-  [ -z "$held" ] || kill "-$held" "$$"
+  signals_release
+}
+
+# sampler_spawned — record the sampler just started in the background ($!) as `sampler`.
+sampler_spawned() {
+  sampler=$!
+}
+
+# signals_hold — until signals_release, INT, TERM and HUP only note themselves (`held`), so that no
+# handler of the suite's (suite_signalled) runs in the middle of what must be found whole: a kill
+# and its record, the sweep's files made and their names removed, a sampler started and its pid
+# recorded. The handlers they replace are saved (`held_int`, `held_term`, `held_hup`).
+signals_hold() {
+  held=""
+  held_int="$(_shmutant_saved_trap INT)"; held_term="$(_shmutant_saved_trap TERM)"; held_hup="$(_shmutant_saved_trap HUP)"
+  trap 'held=INT' INT; trap 'held=TERM' TERM; trap 'held=HUP' HUP
+}
+
+# signals_release — put each handler signals_hold saved back in place of its noting one, a signal at
+# a time, so that none is left at its default meanwhile; then send the suite the signal held, if
+# any, which its own handler now takes.
+signals_release() {
+  local h
+  if [ -n "$held_int" ]; then eval "$held_int"; else trap - INT; fi
+  if [ -n "$held_term" ]; then eval "$held_term"; else trap - TERM; fi
+  if [ -n "$held_hup" ]; then eval "$held_hup"; else trap - HUP; fi
+  h="$held"; held=""
+  [ -z "$h" ] || kill "-$h" "$$"
 }
 
 # sampler_report <unit> — print the unit's failure for a sampler that sampler_stop found killed or
@@ -8303,7 +8347,7 @@ main() {
   # from the environment is someone else's path, a T_ID someone else's directory, and a T_SWEPT or
   # T_SAMPLED no sweep or sampler of this run's.
   T=""; T_ID=""; T_SWEPT=""; T_SAMPLED=""; SEEN_SWEEPING=""; SEEN_BAD=""; SEEN_LINES=(); SWEEP_UNIT=""; SWEEP_OWED=""
-  SWEEP_FINAL_FD=""; sampler=""; sampler_killed=0; src=0; pfd=""; hw=""
+  SWEEP_FINAL_FD=""; sampler=""; sampler_killed=0; src=0; pfd=""; hw=""; held=""
   # A harness failure (exit 2) mid-run still removes the unit directory the runner made, and only that,
   # unless it came before the unit's leftovers were swept: it is then left in place, and said so.
   trap '[ -z "${T:-}" ] || unit_dir_remove || unit_dir_failed run.sh "${u:-a unit}" "$?" >&2' EXIT
@@ -8317,7 +8361,10 @@ main() {
     # sampler's channel ($pfd) and its holder's ($hw, $hr) are files whose names are removed once they
     # are open, before anything is spawned: no unit can name one, so none can be removed, replaced,
     # linked elsewhere or made unreadable by name, and each read goes through the runner's own
-    # descriptor (sweep_record). A set-up that fails removes the name it had made.
+    # descriptor (sweep_record). A set-up that fails removes the name it had made. An interrupt is
+    # held until the sampler has started and been recorded (signals_hold), so it finds the set-up
+    # whole: no name left behind, and no sampler it does not know of.
+    signals_hold
     f=""
     { f="$(sweep_file_name seen)" && exec {sw}>>"$f" {sfd}<"$f" {sfd2}<"$f" && command -p rm -f -- "$f" \
         && f="$(sweep_file_name final)" && exec {SWEEP_FINAL_FD}>>"$f" {ffd}<"$f" {ffd2}<"$f" && command -p rm -f -- "$f" \
@@ -8346,9 +8393,10 @@ main() {
     # its output, its channel, and its holder's read end.
     set -m
     sampler_run "$pfd" "$hr" >&"$sw" 2>/dev/null < /dev/null \
-      {sw}>&- {sfd}<&- {sfd2}<&- {ffd}<&- {ffd2}<&- {SWEEP_FINAL_FD}>&- {ufd}>&- {urd}<&- {hw}>&- & sampler=$!
+      {sw}>&- {sfd}<&- {sfd2}<&- {ffd}<&- {ffd2}<&- {SWEEP_FINAL_FD}>&- {ufd}>&- {urd}<&- {hw}>&- & sampler_spawned
     set +m
     exec {sw}>&- {hr}<&-
+    signals_release
     # The unit runs in a process group of its own (job control, for this spawn only): nothing it leaves
     # behind shares the suite's group, which the sweep's freeze could otherwise hang up (D8 in
     # .ai-dev-baseline/decisions.md). Stdin from /dev/null: a background group reading the terminal

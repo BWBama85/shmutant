@@ -192,15 +192,16 @@ read instead of passing it. So
 `run.sh: ps cannot run here …` line and exits 2.
 
 Each unit runs in a process group of its own, with stdin from `/dev/null`, and so does the sampler
-that records the unit's descendants while it runs: the suite's group holds only the suite and the
-short commands it runs itself, so nothing a unit leaves behind, and no sampler a unit stops, shares it. The leak check freezes a leftover before it kills
-it. On macOS, in a session launchd started (as on the CI runner), the exit of a member launchd adopted
-can leave the kernel treating its group as newly orphaned, and an orphaned group with a member stopped
-is hung up whole: in the suite's group, that ended the suite with status 129. A sampler that does not
-end once its unit has (one something stopped) is killed with its whole group, and the unit fails. An
-INT, TERM or HUP sent to the suite is passed on to the unit it is running, which is killed if it has
-not ended three seconds later and then swept as any unit is, so a `^C` at the terminal still ends
-both.
+that records the unit's descendants while it runs. The suite's group holds only the suite and the
+short commands it runs itself, so nothing a unit leaves behind, and no sampler a unit stops, shares
+it. The leak check freezes a leftover before it kills it. On macOS, in a session launchd started (as
+on the CI runner), the exit of a member launchd adopted can leave the kernel treating its group as
+newly orphaned, and an orphaned group with a member stopped is hung up whole: in the suite's group,
+that ended the suite with status 129. Once its unit has ended, the sampler is given 30 seconds to end
+too, and no more once it is seen stopped; one that has not ended by then is killed with its whole
+group, and the unit fails. An INT, TERM or HUP sent to the suite is passed on to the unit it is
+running, which is killed if it has not ended three seconds later and then swept as any unit is, so a
+`^C` at the terminal still ends both.
 
 The sweep reads two records: what the sampler saw, which ends with a count of its lines, and the
 unit's last snapshot, written by its EXIT trap and ending in `done`. Each is a file whose name is
