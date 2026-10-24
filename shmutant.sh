@@ -681,7 +681,7 @@ _shmutant_proc_table() {
 # value is no bound), a ps that has not ended within that bound is given up on: status 124, nothing
 # printed, so a process table that stalls reads as one that could not be read. The bound is kept by a
 # process substitution of its own, which ends whichever of the ps and its timer is left (only while
-# it lists it as a job it has not seen end: _shmutant_ps_end). One that does not answer within five
+# bash has not reaped it: _shmutant_ps_end). One that does not answer within five
 # seconds more is given up on as well, signalled by nobody. A failed write of the output is a failed
 # call. The substitution ends through the builtin exit: inside a run, a function of that name (the
 # run's own, which snapshots what the run left) would be read for it, and would read the table again.
@@ -690,7 +690,13 @@ _shmutant_ps() {
   case "${SHMUTANT_PS_BOUND:-}" in [1-9]|[1-9][0-9]|[1-9][0-9][0-9]) ;; *) command -p ps "$@"; return ;; esac
   local b="$SHMUTANT_PS_BOUND" out="" fd p st=0
   exec {fd}< <(
-    set +e; c=""; t=""; w=""; s=0
+    # No handler of the caller's runs in here: a DEBUG trap its functrace hands down, or a CHLD trap,
+    # run between a job's listing and its signal could reap the job and start another under its number.
+    builtin trap - CHLD DEBUG RETURN ERR
+    # Job control on and off again before any job: bash then reads this shell's own process group,
+    # which a substitution otherwise inherits stale, and starts each job in it, the one form of job
+    # its `kill %<job>` signals only while it has not reaped it (_shmutant_ps_end).
+    set +e; builtin set -m; builtin set +m; c=""; t=""; w=""; s=0
     command -p ps "$@" & c=$!
     # The timer by its path, run directly: the job is then the sleep itself, which ending ends. The path
     # is the executable's on the standard utility path, never a function or alias of the caller's.
@@ -712,16 +718,24 @@ _shmutant_ps() {
   return "$st"
 }
 
-# _shmutant_ps_end <pid> — KILL <pid> while this shell lists it as a job of its own that it has not
-# seen end, running or stopped: a number it lists is its own child, which nobody else holds while it is
-# unreaped. One that ends and is reaped between the listing and the KILL leaves its number free for that
-# instant, as every check before a signal with no stop between them does (#53). (bash's `kill %<job>`
-# does not close it here: in a subshell it signals the process group of the job's number.) The builtins'
-# own jobs and kill: a caller's functions of those names must not keep the bound from being kept.
+# _shmutant_ps_end <pid> — KILL <pid> while it is a job of this shell's that bash has not reaped:
+# through its job (`kill %<job>`), which bash signals with SIGCHLD blocked and only while its record
+# shows the process alive, so the check and the signal are one step, and a job reaped before it is
+# sent nothing. That holds for a job started in this shell's own process group with job control off,
+# and while no code of a caller's can run between the listing and the signal to start another job
+# under that number: _shmutant_ps's substitution makes sure of both, clearing every trap first. Bash
+# signals the job's process group for any other job (#53). The builtins' own jobs and kill: a caller's functions of those names must not keep the bound
+# from being kept.
 _shmutant_ps_end() {
-  local jl
-  jl="$(builtin jobs -rp; builtin jobs -sp)"
-  case $'\n'"$jl"$'\n' in *$'\n'"$1"$'\n'*) builtin kill -KILL "$1" 2>/dev/null ;; esac
+  local js jp
+  while IFS=$' \t' read -r js jp _; do
+    case "$js" in '['*']'*) ;; *) continue ;; esac
+    [ "$jp" = "$1" ] || continue
+    js="${js#\[}"; js="${js%%]*}"
+    case "$js" in ''|*[!0-9]*) return 0 ;; esac
+    builtin kill -KILL "%$js" 2>/dev/null
+    return 0
+  done <<< "$(builtin jobs -l)"
   return 0
 }
 
@@ -1285,8 +1299,10 @@ _shmutant_guard_close() {
     if _shmutant_alive_since "$guard_pid" "${guard_id:-}"; then
       # With whatever it is waiting on (a process listing that stalled), through the process group it
       # leads, which its being there keeps its own: a child it forks meanwhile is in it too, where a
-      # snapshot of its descendants taken first would miss one. Then seen to go, within a bound.
-      kill -KILL -- -"$guard_pid" "$guard_pid" 2>/dev/null
+      # snapshot of its descendants taken first would miss one. The group alone, which takes the guard
+      # with it: its number named again after that KILL could reach a process given it since. Then
+      # seen to go, within a bound.
+      kill -KILL -- -"$guard_pid" 2>/dev/null
       for (( i = 0; i < 20; i++ )); do kill -0 "$guard_pid" 2>/dev/null || break; command -p sleep 0.1; done
       if kill -0 "$guard_pid" 2>/dev/null && ! _shmutant_guard_reaped "$guard_pid"; then
         _shmutant_freeze_err "the guard of a freeze (pid $guard_pid) was killed but could not be confirmed ended"
@@ -1372,9 +1388,9 @@ _shmutant_elapsed_gap() {
 # [<start>]` per process, and `g <pgid> <holder or -> [<holder identity>]` for a held group. `done`
 # (the KILL has been sent) ends it with nothing done. End-of-file without `done` means the freezing
 # shell has gone partway, killed: the guard then stops every recorded pid and the holder, and KILLs,
-# in one kill, every recorded pid that still carries the start it was recorded with, and the group
-# while its holder is shown to be the process
-# it was (_shmutant_holder_state 0), or, with no start to check it by, while the freeze kept it
+# in one kill, every recorded pid that still carries the start it was recorded with, each once, and,
+# named after them with its holder only through it, the group while its holder is shown to be the
+# process it was (_shmutant_holder_state 0), or, with no start to check it by, while the freeze kept it
 # stopped (`k`) and it is still stopped and in the group. Every other recorded pid is continued, never
 # killed and never left stopped. The group is continued when its holder is not shown, but only while
 # its number is shown to be the run's: a holder still there, stopped and in the group that cannot be
@@ -1385,7 +1401,7 @@ _shmutant_elapsed_gap() {
 _shmutant_guard() {
   local line chunk part="" pg="" ph="" phid="" p pid st gcont="" hs="" kept="" want members cfirst=""
   local -a recs=() kills=() conts=() stops=() left=()
-  local -A SHMUTANT_START=()
+  local -A SHMUTANT_START=() killing=()
   # Every process-table read it makes gives up after ten seconds (_shmutant_ps), and reads as one that
   # could not be read: once its freezing shell is gone nothing else is left to bound a ps that stalls,
   # and a read that never returns would keep it from sending anything at all.
@@ -1434,7 +1450,10 @@ _shmutant_guard() {
     pid="${p%% *}"; st=""
     case "$p" in *' '?*) st="${p#* }" ;; esac
     case "$pid" in ''|*[!0-9]*) continue ;; esac
-    if [ -n "$st" ] && [ -n "${SHMUTANT_START[$pid]:-}" ] && _shmutant_same_start "${SHMUTANT_START[$pid]}" "$st"; then kills+=("$pid")
+    # Named once however many records verify it: a second KILL by its number, after the first had
+    # ended it, could reach a process given that number in between.
+    if [ -n "$st" ] && [ -n "${SHMUTANT_START[$pid]:-}" ] && _shmutant_same_start "${SHMUTANT_START[$pid]}" "$st"; then
+      [ -n "${killing[$pid]:-}" ] || { killing["$pid"]=1; kills+=("$pid"); }
     # Not shown to be the process recorded (another start, none, or no table): this freeze may have
     # stopped it by number (a number reused between its listing and its stop, a start a clock step
     # moved), so it is continued, as _shmutant_frozen_only continues one, and never killed. A CONT
@@ -1459,6 +1478,14 @@ _shmutant_guard() {
     # One the freeze kept stopped (`k`) and still shown so is the holder: no start is needed to tell
     # it, as for a frozen pid.
     [ -z "$kept" ] || [ "$hs" != 2 ] || hs=0
+    # A holder shown to be the holder is the group's only while it is in the group, where the group's
+    # members can be read: it is ended through the group's KILL alone, and one outside it would be left
+    # stopped. One that is not in it is let go, as a holder not shown is. Where they cannot be read it is
+    # taken to be in it, as it is by construction (a run's holder is started in its group and never
+    # leaves it): killed by its number as well, it could be reaped before the group is reached.
+    if [ "$hs" = 0 ] && [ -n "$ph" ] && members=" $(set -o pipefail; _shmutant_ps -A -o pid= -o pgid= 2>/dev/null | command -p awk -v g="$pg" '$2 == g { printf "%s ", $1 }')"; then
+      case "$members" in *" $ph "*) ;; *) hs=1 ;; esac
+    fi
     # A holder not taken for the holder was stopped above all the same, and is let go: never killed, nor
     # taken for a verified member of its group, even when a record of it as a member verified (the
     # members told include the holder), since the two reads then disagree about one process.
@@ -1468,7 +1495,13 @@ _shmutant_guard() {
       for p in "${kills[@]}"; do [ "$p" = "$ph" ] || left+=("$p"); done
       kills=("${left[@]}")
     fi
-    if [ "$hs" = 0 ]; then kills=(-"$pg" "${kills[@]}")
+    # The group is named last, after every pid, and its holder only through it: a member killed by
+    # number before the group could be reaped and leave the group's number free by the time the group
+    # is reached. The holder's stop keeps it in the group, and the group's number its own, until then.
+    if [ "$hs" = 0 ]; then
+      left=()
+      for pid in "${kills[@]}"; do [ "$pid" = "$ph" ] || left+=("$pid"); done
+      kills=("${left[@]}" -"$pg")
     elif [ "$hs" = 2 ] || _shmutant_group_has "$pg" "${kills[@]}"; then gcont="$pg"
     fi
     # A holder shown to be the holder is never let go, whatever a record of it as a member said: it is
@@ -1519,7 +1552,8 @@ _shmutant_guard() {
 # <pids…> are `pid:identity` pairs recorded when each was seen (see _shmutant_identity); one that
 # no longer matches is a reused pid and is left alone. `pid:` with no identity is a frozen pid.
 # Every target is decided first and signalled in ONE kill: a parent signalled after its child
-# has already run on past the child's death.
+# has already run on past the child's death. In it each pid is named once, and the group last, the
+# holder only through it.
 # With a freeze's guard up (`guard_w`, and not lost), whatever is to be signalled on a check is told to
 # the guard and stopped first, then checked against ONE identity table read after the stop, and what
 # fails the check is let go: a stopped process cannot end and give its number away before its signal.
@@ -1527,11 +1561,12 @@ _shmutant_guard() {
 # direct call, or one whose guard went), nothing may be stopped: a shell killed between a stop and the
 # kill would leave the stop for good. Every check is then read from that one table after every other
 # read, the walk's and the group's, and only the kill comes after it: a target can still end and its
-# number be given away in that instant, which only a stop would close.
+# number be given away in that instant, which only a stop would close. That instant is the accepted
+# cost of a freeze with no guard (D9), which is reported unsettled.
 _shmutant_kill_tree() {
   local sig="$1" pid="$2" p out members="" gone_group="" hs=0 guarded="" want cont_first=""
   local -a targets=() found=() cands=() conts=() left=()
-  local -A SHMUTANT_START=() stopped=()
+  local -A SHMUTANT_START=() stopped=() named=()
   shift 2
   [ -z "${guard_w:-}" ] || [ "${guard_lost:-0}" != 0 ] || guarded=1
   # The walk first, each descendant with the start it was listed with, which the table below must
@@ -1579,6 +1614,13 @@ _shmutant_kill_tree() {
     elif [ -n "${stopped[${p%% *}]:-}" ]; then conts+=("${p%% *}")
     fi
   done
+  # Each pid named once, whatever number of records chose it (a victim also found by the walk): a
+  # second signal by a number the first had freed could reach a process given it in between.
+  if [ "${#targets[@]}" -gt 1 ]; then
+    left=()
+    for p in "${targets[@]}"; do [ -n "${named[$p]:-}" ] || { named["$p"]=1; left+=("$p"); }; done
+    targets=("${left[@]}")
+  fi
   # The group is the run's only while its holder lives. Checked again here: a holder continued after
   # the group stop may have read its end-of-file and gone, and a group number nothing reserves may
   # belong to someone else by now. A zombie holder still reserves it. A live pid at that number is
@@ -1588,8 +1630,18 @@ _shmutant_kill_tree() {
     [ -z "${holder:-}" ] || _shmutant_table_state "$holder" "${holderid:-}" || hs=$?
     # Under a guard the group is killed by a holder its stop reached, which cannot have ended since.
     [ -z "$guarded" ] || [ -z "${holder:-}" ] || [ -n "${stopped[$holder]:-}" ] || hs=1
+    # And only while the holder is in it, where its members could be read: the holder is ended through
+    # the group's KILL alone, so one outside it would be left as this call found it, stopped. Where they
+    # could not be read it is taken to be in it, as it is by construction: killed by its number as well,
+    # it could be reaped, and the group's number freed, before the group is reached.
+    [ -z "${holder:-}" ] || [ -z "$members" ] || case "$members" in *" $holder "*) ;; *) hs=1 ;; esac
     if [ "$hs" != 1 ]; then
-      targets=(-"$SHMUTANT_KILL_GROUP" "${targets[@]}")
+      # The group is named last, after every pid, and the holder only through it: a member killed by
+      # number before the group could be reaped and leave the group's number free by the time the
+      # group is reached, and the holder is what keeps it the run's until then.
+      left=()
+      for out in "${targets[@]}"; do [ "$out" = "${holder:-}" ] || left+=("$out"); done
+      targets=("${left[@]}" -"$SHMUTANT_KILL_GROUP")
       # Nor is a member that KILL takes continued after it, by a number the KILL may have freed: a
       # stop of this call keeps it in the group. With no members read, any of them may be one, and what
       # is let go is let go before the KILL, while the stop still keeps each number its own.
@@ -2705,9 +2757,9 @@ _shmutant_pool_locals_writable() {
     _shmutant_pool_t0 _shmutant_pool_wd after_ck ambiguous base base_sel base_verdict base_why cap cksum_bin clone_id comp copy counts counts_bad counts_end counts_got counts_r counts_w cwhy d \
     dbg depth detail dir dirmode done_pid err_fd errexit_before etime f fd fifo \
     fired fmt found frozen go got grp h have held helpers here \
-    hms hold hold_r holder holderid hp i id intact jobs k kept key \
-    killed kind kinds l label left left_r left_w line ls_bin m mark \
-    mode ms mutate_aliases n new nl now out out_r out_r2 out_w outf \
+    hms hold hold_r holder holderid hp i id intact jobs jp js k kept key \
+    killed killing kind kinds l label left left_r left_w line ls_bin m mark \
+    mode ms mutate_aliases n named new nl now out out_r out_r2 out_w outf \
     p parent path pending phys pid pids pool_aliases pout pout_r pout_w prc \
     prep r rc red rel rest ret rjrc root root_ok rootid rootls \
     roots rounds row_why run s sdir sec seen seen_r seen_w sel sent setup_failed sig size starts nul counts_r2 \
@@ -3435,15 +3487,18 @@ _shmutant_cli_wd_is_ours() {
 # <holder> is `pid identity` as the plan subshell published it: a holder that went (a plan
 # killed it) and a stranger now at its number are told apart, as for a run's holder; with no
 # identity readable now the holder is taken as it was, as with no ps at all.
-# The holder is a member of that group, so the one KILL, sent the moment after its check, ends it
-# with the rest: a KILL to it by number after the group's could reach another process, the holder
-# ended by the first and its number given away.
+# The group is ended by a freeze of it (_shmutant_kill_tree_twice -g). The plan subshell, reaped by
+# now, is named as reaped (`<pgid>:`), so neither its number nor anything beneath it is touched:
+# only the group is frozen and killed. Under the freeze's guard the holder is stopped before the
+# check that licenses the group's KILL, a stop that reached a process given its number since is
+# undone, and the holder is ended through its group, never by number. A holder already gone here
+# starts no freeze. A freeze with no guard to be had says so on the CLI's stderr.
 _shmutant_cli_end_group() {
-  local hp="${2%% *}" hid=""
-  case "$2" in *" "*) hid="${2#* }" ;; esac
-  [ -n "$hp" ] || return 0
-  _shmutant_holder_state "$hp" "$hid" || [ "$?" = 2 ] || return 0
-  kill -KILL -- -"$1" 2>/dev/null
+  local holder="${2%% *}" holderid="" err_fd=2
+  case "$2" in *" "*) holderid="${2#* }" ;; esac
+  [ -n "$holder" ] || return 0
+  _shmutant_holder_state "$holder" "$holderid" || [ "$?" = 2 ] || return 0
+  _shmutant_kill_tree_twice -g "$1" "$1:"
   return 0
 }
 
@@ -3464,6 +3519,8 @@ _shmutant_cli_end_sampled() {
   done
   exec {SHMUTANT_CLI_SEEN_R}<&-; unset SHMUTANT_CLI_SEEN_R SHMUTANT_CLI_SEEN_W
   [ "${#sampled[@]}" -gt 0 ] || return 0
+  # Its reports (a freeze with no guard, one that did not settle) on the CLI's stderr.
+  local err_fd=2
   _shmutant_kill_tree_twice "$1" "${sampled[@]}"
   return 0
 }
