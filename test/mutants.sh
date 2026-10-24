@@ -304,8 +304,8 @@ shmutant_mut 'the timeout is read bare, so nounset aborts the pool' \
   'local v_timeout="$SHMUTANT_TIMEOUT"' \
   't_pool_survives_nounset'
 shmutant_mut 'a hard-linked target is accepted' \
-  '| command -p awk '"'"'{ print $2 }'"'"')" -gt 1 ]; then' \
-  '| command -p awk '"'"'{ print $2 }'"'"')" -gt 99 ]; then' \
+  '    if [ "$links" -gt 1 ]; then' \
+  '    if [ "$links" -gt 99 ]; then' \
   't_pool_refuses_hard_linked_target'
 shmutant_mut 'SHMUTANT_JOBS=0 falls back to the CPU count' \
   'if [ "${#v_jobs}" -gt 4 ] || [ "$v_jobs" -lt 1 ]; then' \
@@ -608,7 +608,7 @@ shmutant_mut 'the verdict is scored from the output path, not the descriptor' \
   '  exec {out_r}<"$dir/output"; _shmutant_scan_output "$out_r" "${SHMUTANT_RED_PREFIX:-FAIL: }" "$wit"' \
   't_run_cannot_forge_its_output_or_the_marker'
 shmutant_mut 'a swapped worker directory is cleaned and written beneath' \
-  '  if [ -L "$1" ] || [ "$(_shmutant_dir_id "$1")" != "${SHMUTANT_DIR_ID:-}" ]; then' \
+  '  if [ -L "$1" ] || ! _shmutant_is_id "$1" "${SHMUTANT_DIR_ID:-}"; then' \
   '  if false; then' \
   't_worker_cleanup_refuses_a_swapped_directory'
 shmutant_mut 'a root given with an identity is stopped without checking it' \
@@ -626,7 +626,7 @@ shmutant_mut 'the wrapper snapshot runs after the callback, not from an EXIT tra
   '>&"$_shmutant_wrap_left"'"'"' USR2' \
   't_run_errexit_failure_still_snapshots_leftovers'
 shmutant_mut 'a verdict is read from whatever directory has the name' \
-  '  if [ -L "$dir" ] || [ "$(_shmutant_dir_id "$dir")" != "${SHMUTANT_DIR_IDS[$key]:-}" ]; then' \
+  '  if [ -L "$dir" ] || ! _shmutant_is_id "$dir" "${SHMUTANT_DIR_IDS[$key]:-}"; then' \
   '  if false; then' \
   't_pool_never_trusts_a_verdict_from_a_replaced_directory'
 shmutant_mut 'the stream cache is set before the open succeeds' \
@@ -1121,7 +1121,7 @@ shmutant_mut 'the interrupted CLI removes whatever sits at its workdir path' \
   '    elif false; then :' \
   't_cli_removes_only_the_workdir_it_created_by_identity'
 shmutant_mut 'the pool goes on in a workdir prepare replaced' \
-  '  if [ -L "$wd" ] || [ "$(_shmutant_dir_id "$wd")" != "${SHMUTANT_WD_ID:-}" ]; then _shmutant_err "$label: $wd is no longer the directory this pool marked as its own — prepare moved or replaced it"; _shmutant_pool_fail "$label" "$wd"; return 2; fi' \
+  '  if [ -L "$wd" ] || ! _shmutant_is_id "$wd" "${SHMUTANT_WD_ID:-}"; then _shmutant_err "$label: $wd is no longer the directory this pool marked as its own — prepare moved or replaced it"; _shmutant_pool_fail "$label" "$wd"; return 2; fi' \
   '  :' \
   't_cli_removes_only_the_workdir_it_created_by_identity'
 shmutant_mut 'a clone is not checked against the prepared tree after the copy' \
@@ -1137,13 +1137,13 @@ shmutant_mut 'a file the fingerprint cannot read is passed over' \
   '    :' \
   't_pool_refuses_a_modified_pristine_tree'
 shmutant_mut 'the verdict stream contents are not checked at the end' \
-  '  [ "$(command -p tail -c "+$(( ${SHMUTANT_STREAM_BASE:-0} + 1 ))" -- "$SHMUTANT_STREAM" 2>/dev/null | command -p cksum)" = "$(command -p cksum <&"$SHMUTANT_STREAM_COPY_R")" ]' \
+  '  [ "$got" = "$have" ]' \
   '  true' \
   't_stream_altered_in_place_is_reported'
 
 # --- guards added for the thirty-third review round ---
 shmutant_mut 'the prepared tree is removed from whatever directory sits at the workdir path' \
-  '  if [ "${SHMUTANT_KEEP:-0}" != 1 ] && [ ! -L "$2" ] && [ "$(_shmutant_dir_id "$2")" = "${SHMUTANT_WD_ID:-}" ]; then' \
+  '  if [ "${SHMUTANT_KEEP:-0}" != 1 ] && [ ! -L "$2" ] && _shmutant_is_id "$2" "${SHMUTANT_WD_ID:-}"; then' \
   '  if [ "${SHMUTANT_KEEP:-0}" != 1 ]; then' \
   't_pool_leaves_a_replaced_workdir_alone'
 shmutant_mut 'the root entry is left out of the pristine fingerprint' \
@@ -1151,7 +1151,7 @@ shmutant_mut 'the root entry is left out of the pristine fingerprint' \
   '    { command -p find . ! -name . -exec "$ls_bin" -ldn -- {} + \' \
   't_pool_refuses_a_modified_pristine_tree'
 shmutant_mut 'the rewrite trusts the worker directory at its path' \
-  '      [ "$(_shmutant_dir_id .)" = "${SHMUTANT_DIR_IDS[$kind-$i]:-}" ] || exit 4' \
+  '      _shmutant_is_id . "${SHMUTANT_DIR_IDS[$kind-$i]:-}" || exit 4' \
   '      :' \
   't_rewrite_refuses_a_worker_directory_swapped_after_the_clone'
 shmutant_mut 'the final dispatch guard calls a caller function named test' \
@@ -1291,7 +1291,7 @@ shmutant_mut 'the completion path is unlinked whatever now sits at the workdir' 
   '  command -p rm -f -- "$done_file"' \
   't_cli_removes_only_the_workdir_it_created_by_identity'
 shmutant_mut 'a clone swapped by its run is removed by path' \
-  '  if [ -L "$1/tree" ] || { [ -e "$1/tree" ] && [ "$(_shmutant_dir_id "$1/tree")" != "${SHMUTANT_CLONE_ID:-}" ]; }; then' \
+  '  if [ -L "$1/tree" ] || { [ -e "$1/tree" ] && ! _shmutant_is_id "$1/tree" "${SHMUTANT_CLONE_ID:-}"; }; then' \
   '  if [ -L "$1/tree" ]; then' \
   't_a_clone_swapped_by_its_run_is_not_removed'
 # (row 'an unverified CLI child is escalated on by bare number' dropped: a bare pid for the CLI's own unreaped child is now the intended behaviour, per the later review finding)
@@ -1368,7 +1368,7 @@ shmutant_mut 'a missing completion report ignores the keep channel' \
   '    :' \
   't_cli_removes_only_the_workdir_it_created_by_identity'
 shmutant_mut 'the prepared tree is removed by path at cleanup' \
-  '    elif [ -L "$2/pristine" ] || [ "$(_shmutant_dir_id "$2/pristine")" != "${SHMUTANT_PRISTINE_ID:-}" ]; then _shmutant_err "$1: refusing to remove $2/pristine: it is not the tree this pool prepared"; SHMUTANT_CLEANUP_FAILED=1' \
+  '    elif [ -L "$2/pristine" ] || ! _shmutant_is_id "$2/pristine" "${SHMUTANT_PRISTINE_ID:-}"; then _shmutant_err "$1: refusing to remove $2/pristine: it is not the tree this pool prepared"; SHMUTANT_CLEANUP_FAILED=1' \
   '    elif false; then :' \
   't_a_clone_swapped_by_its_run_is_not_removed'
 shmutant_mut 'the watchdog deadline is a wall-clock instant' \
@@ -1398,8 +1398,8 @@ shmutant_mut 'the prepare status stash skips its readonly check' \
   '  if false; then' \
   't_readonly_settings_do_not_kill_the_caller'
 shmutant_mut 'a kept clone is not identity-checked before its verdict' \
-  '  if [ -L "$1/tree" ] || { [ -e "$1/tree" ] && [ "$(_shmutant_dir_id "$1/tree")" != "${SHMUTANT_CLONE_ID:-}" ]; }; then' \
-  '  if [ "${SHMUTANT_KEEP:-0}" != 1 ] && { [ -L "$1/tree" ] || { [ -e "$1/tree" ] && [ "$(_shmutant_dir_id "$1/tree")" != "${SHMUTANT_CLONE_ID:-}" ]; }; }; then' \
+  '  if [ -L "$1/tree" ] || { [ -e "$1/tree" ] && ! _shmutant_is_id "$1/tree" "${SHMUTANT_CLONE_ID:-}"; }; then' \
+  '  if [ "${SHMUTANT_KEEP:-0}" != 1 ] && { [ -L "$1/tree" ] || { [ -e "$1/tree" ] && ! _shmutant_is_id "$1/tree" "${SHMUTANT_CLONE_ID:-}"; }; }; then' \
   't_a_clone_swapped_by_its_run_is_not_removed'
 shmutant_mut 'a swapped clone still publishes the run verdict' \
   '    set -- "$1" unprepared "$3" swapped' \
@@ -1491,8 +1491,8 @@ shmutant_mut 'the line terminator prepare printed is part of the root' \
   '  :' \
   't_pool_reads_the_table_prepare_declared'
 shmutant_mut 'the bytes the stream already held are not checked' \
-  '    [ "$(command -p dd if="$SHMUTANT_STREAM" bs="$SHMUTANT_STREAM_BASE" count=1 2>/dev/null | command -p cksum)" = "${SHMUTANT_STREAM_PREFIX_CK:-}" ] || return 1' \
-  '    :' \
+  '      && [ "$got" = "${SHMUTANT_STREAM_PREFIX_CK:-}" ] || return 1' \
+  '      || :' \
   't_stream_prefix_overwritten_in_place_is_noticed'
 
 # --- guards added for the forty-seventh review round ---
@@ -1906,6 +1906,84 @@ shmutant_mut 'a read after the run that failed counts as a match' \
   '"$kind-$i")" || after_ck=""' \
   '"$kind-$i")" || :' \
   't_target_sample_that_could_not_be_read_is_not_a_match'
+
+# --- a failed pipeline stage is never an identity, a length, a checksum or a count (#52) ---
+shmutant_mut 'a failed ls in the identity read still gives an identity' \
+  'id="$(set -o pipefail; command -p ls -di' \
+  'id="$(set +o pipefail; command -p ls -di' \
+  't_dir_id_fails_when_any_stage_fails'
+shmutant_mut 'an identity read that found no inode still gives an identity' \
+  '  case "$id" in '"''"'|*[!0-9]*) return 1 ;; esac' \
+  '  :' \
+  't_dir_id_fails_when_any_stage_fails'
+shmutant_mut 'an identity read that found something other than an inode still gives an identity' \
+  '  case "$id" in '"''"'|*[!0-9]*) return 1 ;; esac' \
+  '  case "$id" in '"''"') return 1 ;; esac' \
+  't_dir_id_fails_when_any_stage_fails'
+shmutant_mut 'a directory whose physical path could not be read still gives an identity' \
+  'phys="$(_shmutant_abs "$1")" || return 1; else' \
+  'phys="$(_shmutant_abs "$1")" || phys=""; else' \
+  't_dir_id_fails_when_any_stage_fails'
+shmutant_mut 'a directory identity leaves out its physical path' \
+  '  if [ -d "$1" ]; then phys=' \
+  '  if false; then phys=' \
+  't_dir_id_fails_when_any_stage_fails'
+shmutant_mut 'two failed identity reads match' \
+  '  id="$(_shmutant_dir_id "$1")" && [ "$id" = "$2" ]' \
+  '  id="$(_shmutant_dir_id "$1")"; [ "$id" = "$2" ]' \
+  't_dir_id_fails_when_any_stage_fails'
+shmutant_mut 'the pool goes on with a workdir identity it could not read' \
+  'SHMUTANT_WD_ID="$(_shmutant_dir_id "$wd")" || {' \
+  'SHMUTANT_WD_ID="$(_shmutant_dir_id "$wd")" || : || {' \
+  't_pool_refuses_a_workdir_whose_identity_cannot_be_read'
+shmutant_mut 'the stream opens with an identity it could not read' \
+  '  if ! SHMUTANT_STREAM_INO="$(_shmutant_dir_id "$SHMUTANT_STREAM")" \' \
+  '  if ! { SHMUTANT_STREAM_INO="$(_shmutant_dir_id "$SHMUTANT_STREAM")" || :; } \' \
+  't_stream_reads_fail_as_a_whole'
+shmutant_mut 'a failed wc still gives the stream a length' \
+  'SHMUTANT_STREAM_BASE="$(set -o pipefail; command -p wc' \
+  'SHMUTANT_STREAM_BASE="$(set +o pipefail; command -p wc' \
+  't_stream_reads_fail_as_a_whole'
+shmutant_mut 'an empty stream length is taken' \
+  '    || [ -z "$SHMUTANT_STREAM_BASE" ] || [[' \
+  '    || [[' \
+  't_stream_reads_fail_as_a_whole'
+shmutant_mut 'a stream length that is not a number is taken' \
+  ' || [[ "$SHMUTANT_STREAM_BASE" == *[!0-9]* ]] \' \
+  ' \' \
+  't_stream_reads_fail_as_a_whole'
+shmutant_mut 'a failed dd still gives the stream a prefix checksum when it opens' \
+  'SHMUTANT_STREAM_PREFIX_CK="$(set -o pipefail; command -p dd' \
+  'SHMUTANT_STREAM_PREFIX_CK="$(set +o pipefail; command -p dd' \
+  't_stream_reads_fail_as_a_whole'
+shmutant_mut 'a failed dd still checks the stream prefix at the end' \
+  '    got="$(set -o pipefail; command -p dd' \
+  '    got="$(set +o pipefail; command -p dd' \
+  't_stream_reads_fail_as_a_whole'
+shmutant_mut 'a failed tail still checks the stream records at the end' \
+  '  got="$(set -o pipefail; command -p tail' \
+  '  got="$(set +o pipefail; command -p tail' \
+  't_stream_reads_fail_as_a_whole'
+shmutant_mut 'a failed checksum of the private copy still checks the stream records' \
+  '  have="$(command -p cksum <&"$SHMUTANT_STREAM_COPY_R")" || return 1' \
+  '  have="$(command -p cksum <&"$SHMUTANT_STREAM_COPY_R")" || :' \
+  't_stream_reads_fail_as_a_whole'
+shmutant_mut 'a failed ls still gives a link count' \
+  'l="$(set -o pipefail; command -p ls -ld' \
+  'l="$(set +o pipefail; command -p ls -ld' \
+  't_link_count_fails_when_any_stage_fails'
+shmutant_mut 'a link read that found no count still gives one' \
+  '  case "$l" in '"''"'|*[!0-9]*) return 1 ;; esac' \
+  '  :' \
+  't_link_count_fails_when_any_stage_fails'
+shmutant_mut 'a link read that found something other than a count still gives one' \
+  '  case "$l" in '"''"'|*[!0-9]*) return 1 ;; esac' \
+  '  case "$l" in '"''"') return 1 ;; esac' \
+  't_link_count_fails_when_any_stage_fails'
+shmutant_mut 'a target whose link count could not be read is taken' \
+  '    if ! links="$(_shmutant_link_count "$root/${SHMUTANT_ROWS_FILE[$i]}")"; then' \
+  '    if ! links="$(_shmutant_link_count "$root/${SHMUTANT_ROWS_FILE[$i]}")" && false; then' \
+  't_pool_refuses_a_target_whose_link_count_cannot_be_read'
 
 # --- a freezing shell killed before its KILL leaves nothing stopped (#47) ---
 shmutant_mut 'a freeze pass does not tell the guard what it stops' \

@@ -22,6 +22,25 @@ eq()    { [ "$1" = "$2" ] || fail_ "$3: got [$1] want [$2]"; }
 has()   { case "$1" in *"$2"*) ;; *) fail_ "$3: missing [$2] in [$1]" ;; esac; }
 hasnt() { case "$1" in *"$2"*) fail_ "$3: unexpectedly contains [$2]" ;; *) ;; esac; }
 rc_is() { [ "$1" -eq "$2" ] || fail_ "$3: rc $1, want $2"; }
+# n_found <find arguments…> — how many entries find reports. A failed stage (find, wc or tr) prints
+# `unreadable` and fails: an empty count would read as none found.
+n_found() {
+  local n
+  n="$(set -o pipefail; find "$@" | wc -l | tr -d ' ')" && [ -n "$n" ] && printf '%s' "$n" && return 0
+  printf 'unreadable'; return 1
+}
+# pick_sampler <suite pid> <wrapper pid> <process table> — the child of <suite pid> in the table
+# (`pid ppid` lines) that is not <wrapper pid>. Fails, printing nothing, on a wrapper that is not
+# a pid, an empty table or a selection that failed: an empty wrapper pid excludes no child, and
+# the wrapper would be picked in the sampler's place.
+pick_sampler() {
+  local s
+  case "$2" in ''|*[!0-9]*) return 1 ;; esac
+  [ -n "$3" ] || return 1
+  s="$(printf '%s\n' "$3" | awk -v s="$1" -v w="$2" '$2 == s && $1 != w { print $1; exit }')" || return 1
+  case "$s" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s' "$s"
+}
 
 # --- fixtures ----------------------------------------------------------------------------------
 
@@ -332,7 +351,7 @@ t_mutate_applies_first_occurrence_only() {
   local got; got="$(shmutant_mutate "$T/shadow-f" zzz y; echo "rc=$?")"
   unset -f rm
   eq "$got" 'rc=2' 'a miss returns 2 and prints nothing from a caller-defined rm'
-  eq "$(find "$T" -maxdepth 1 -name '.shmutant.*' | wc -l | tr -d ' ')" 0 'the temporary rewrite was removed by the real rm'
+  eq "$(n_found "$T" -maxdepth 1 -name '.shmutant.*')" 0 'the temporary rewrite was removed by the real rm'
 }
 
 t_mutate_within_one_line_only() {
@@ -1693,9 +1712,10 @@ t_target_ck_fails_when_any_stage_fails() {
     # what it printed is what the real tool prints, up to its own stage: the chain stops there
     [ -n "$out" ] && case "$whole" in "$out"*) true ;; *) false ;; esac || fail_ "fixture: the failing $tool did not print what the real one does: [$out]"
   done
-  # awk and cksum run through `command -p`: a shadow that runs the real tool, then fails
+  # awk and cksum run through `command -p`: a shadow that runs the real tool, then fails. Not in
+  # the directory's identity read, which fails on its own failed awk before anything is printed.
   for tool in awk cksum; do
-    out="$( command() { if [ "$1" = -p ] && [ "$2" = "$tool" ]; then shift 2; builtin command -p "$tool" "$@"; return 1; fi; builtin command "$@"; }
+    out="$( command() { if [ "$1" = -p ] && [ "$2" = "$tool" ] && [ "${FUNCNAME[1]}" != _shmutant_dir_id ]; then shift 2; builtin command -p "$tool" "$@"; return 1; fi; builtin command "$@"; }
             _shmutant_target_ck "$T/w" tree/f k )"; rc=$?
     [ "$rc" -ne 0 ] || fail_ "a failed $tool still gave a fingerprint: [$out]"
     # what it printed is what the real tool prints, up to its own stage: the chain stops there
@@ -1732,6 +1752,157 @@ t_target_sample_that_could_not_be_read_is_not_a_match() {
   FAIL_AFTER_RUN=1 SHMUTANT_BASELINE=0 pool lbl "$T/wd2" toy_prepare toy_run
   rc_is "$RC" 2 'a read after the run that printed the fingerprint and failed is a harness error'
   has "$ERR" 'not as the pool wrote it' 'says why, after the run too'
+}
+
+# fault <tool> <how> — define a `command` that fails <tool> when it runs as `command -p <tool>`:
+# `after` runs the real tool and then fails; `empty` runs it with its output discarded and
+# succeeds; `garble` does that and prints `x`; `file` is `after` only when stdin is not a pipe.
+# Every other call is the real one.
+fault() {
+  _fault_tool="$1" _fault_how="$2"
+  command() {
+    if [ "$1" = -p ] && [ "$2" = "$_fault_tool" ]; then
+      shift 2
+      case "$_fault_how" in
+        after) builtin command -p "$_fault_tool" "$@"; return 1 ;;
+        empty) builtin command -p "$_fault_tool" "$@" > /dev/null; return 0 ;;
+        garble) builtin command -p "$_fault_tool" "$@" > /dev/null; printf 'x\n'; return 0 ;;
+        file) builtin command -p "$_fault_tool" "$@" || return; [ -p /dev/stdin ] || return 1; return 0 ;;
+      esac
+    fi
+    builtin command "$@"
+  }
+}
+
+t_dir_id_fails_when_any_stage_fails() {
+  # #52: a directory's identity is its inode (ls -di, then awk) and its physical path. A stage that
+  # fails fails the read, which prints nothing, even after the real tool printed: two failed reads
+  # would otherwise be one identity. And a failed read is never a match, with an empty identity
+  # (one that could not be recorded) least of all.
+  mkdir -p "$T/d"
+  local id out rc tool
+  id="$(_shmutant_dir_id "$T/d")"; rc_is $? 0 'an identity read whole'
+  case "$id" in [0-9]*:/*) ;; *) fail_ "an identity is an inode and a path: [$id]" ;; esac
+  _shmutant_is_id "$T/d" "$id" || fail_ 'a directory does not match its own identity'
+  out="$(_shmutant_dir_id "$T/absent")"; rc=$?
+  [ "$rc" -ne 0 ] && [ -z "$out" ] || fail_ "an absent path has an identity: rc $rc [$out]"
+  ! _shmutant_is_id "$T/absent" '' || fail_ 'an absent path matched an empty identity'
+  for tool in ls awk; do
+    out="$( fault "$tool" after; _shmutant_dir_id "$T/d" )"; rc=$?
+    [ "$rc" -ne 0 ] && [ -z "$out" ] || fail_ "a failed $tool still gave an identity: rc $rc [$out]"
+    ! ( fault "$tool" after; _shmutant_is_id "$T/d" "$id" ) || fail_ "a failed $tool still matched"
+  done
+  # An ls that succeeds and prints nothing, or an awk that prints what is no inode.
+  out="$( fault ls empty; _shmutant_dir_id "$T/d" )"; rc=$?
+  [ "$rc" -ne 0 ] && [ -z "$out" ] || fail_ "an ls that printed no inode still gave an identity: rc $rc [$out]"
+  out="$( fault awk garble; _shmutant_dir_id "$T/d" )"; rc=$?
+  [ "$rc" -ne 0 ] && [ -z "$out" ] || fail_ "an awk that printed no inode still gave an identity: rc $rc [$out]"
+  # The physical path is a stage too, for a directory; a regular file has none.
+  out="$( _shmutant_abs() { return 1; }; _shmutant_dir_id "$T/d" )"; rc=$?
+  [ "$rc" -ne 0 ] && [ -z "$out" ] || fail_ "a directory whose physical path could not be read still gave an identity: rc $rc [$out]"
+  : > "$T/file"
+  out="$(_shmutant_dir_id "$T/file")"; rc_is $? 0 'a regular file has an identity'
+  case "$out" in [0-9]*:) ;; *) fail_ "a regular file's identity is its inode alone: [$out]" ;; esac
+}
+
+t_stream_reads_fail_as_a_whole() {
+  # #52: the verdict stream's identity, length and first bytes are read when it opens; its first
+  # bytes and what follows them are read again at the end. Each read fails as a whole, any stage of
+  # it. At the open the stream is refused and rolled back (a length never read is not zero); at the
+  # end the stream is not intact (a checksum of no input matches another taken of no input, and an
+  # empty private copy is what a pool that wrote nothing has).
+  printf 'earlier\trecord\n' > "$T/s.tsv"
+  local out tool how
+  # try_open <tool> <how> — the open, with <tool> faulted: `<status> <cached> <descriptor>`
+  try_open() {
+    ( fault "$1" "$2"; SHMUTANT_STREAM="$T/s.tsv"
+      _shmutant_open_stream lbl 2>"$T/open.err"; printf '%s %s %s' "$?" "${SHMUTANT_STREAM_OPENED-unset}" "${SHMUTANT_STREAM_FD-unset}" )
+  }
+  # try_intact <tool> <how> [record] — opened whole, then (after one record when asked) checked at
+  # the end with <tool> faulted: the check's status
+  try_intact() {
+    ( SHMUTANT_STREAM="$T/s.tsv"
+      _shmutant_open_stream lbl 2>/dev/null || exit 9
+      if [ -n "${3:-}" ]; then printf 'new\trecord\n' >&"$SHMUTANT_STREAM_FD"; printf 'new\trecord\n' >&"$SHMUTANT_STREAM_COPY_W"; fi
+      fault "$1" "$2"; _shmutant_stream_intact )
+  }
+  out="$(try_open none after)"
+  case "$out" in "0 $T/s.tsv "[0-9]*) ;; *) fail_ "fixture: the stream did not open whole: [$out] [$(cat "$T/open.err")]" ;; esac
+  for tool in ls:after awk:after wc:after tr:after tr:empty tr:garble dd:after cksum:after; do
+    how="${tool#*:}"; tool="${tool%%:*}"
+    out="$(try_open "$tool" "$how")"
+    eq "$out" '2 unset unset' "an open whose $tool failed ($how) is refused and rolled back"
+    has "$(cat "$T/open.err")" 'cannot read the identity, length or first bytes' "says why ($tool, $how)"
+  done
+  try_intact none after; rc_is $? 0 'fixture: an untouched stream with nothing written is intact'
+  try_intact none after record; rc_is $? 0 'fixture: an untouched stream with a record written is intact'
+  try_intact dd after record; rc_is $? 1 'an end check whose dd failed is not intact'
+  try_intact tail after; rc_is $? 1 'an end check whose tail failed is not intact, with nothing written either'
+  try_intact cksum file record; rc_is $? 1 'an end check whose checksum of the private copy failed is not intact'
+}
+
+t_pool_refuses_a_target_whose_link_count_cannot_be_read() {
+  # #52: the pool refuses a target whose hard-link count could not be read: an empty count is no
+  # evidence of a single link, and compared with -gt it read as false, so the target was taken.
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh; shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  _shmutant_link_count() { return 1; }
+  pool lbl "$T/wd" toy_prepare toy_run
+  rc_is "$RC" 2 'a target whose link count cannot be read is refused before any run'
+  has "$ERR" "row 'a' targets lib.sh, whose hard-link count cannot be read" 'says why, naming the row'
+}
+
+t_link_count_fails_when_any_stage_fails() {
+  # #52: the hard-link refusal reads a target's link count (ls -ld, then awk). A stage that fails
+  # fails the read, which prints nothing, even after the real tool printed.
+  printf 'x\n' > "$T/f"; ln "$T/f" "$T/g"
+  local out rc tool
+  eq "$(_shmutant_link_count "$T/f")" 2 'a count read whole'
+  for tool in ls:after awk:after ls:empty awk:garble; do
+    out="$( fault "${tool%%:*}" "${tool#*:}"; _shmutant_link_count "$T/f" )"; rc=$?
+    [ "$rc" -ne 0 ] && [ -z "$out" ] || fail_ "a failed read ($tool) still gave a count: rc $rc [$out]"
+  done
+}
+
+t_pool_refuses_a_workdir_whose_identity_cannot_be_read() {
+  # #52: the workdir's identity is recorded before prepare runs, and a read that fails refuses the
+  # pool there: an identity recorded empty matches nothing later, and the pool would run prepare in
+  # a workdir it could never again prove its own.
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh; shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  eval "$(declare -f _shmutant_dir_id | sed '1s/^_shmutant_dir_id /_shmutant_dir_id_real /')"
+  _shmutant_dir_id() { case "$1" in */wd) return 1 ;; esac; _shmutant_dir_id_real "$@"; }
+  pool lbl "$T/wd" toy_prepare toy_run
+  rc_is "$RC" 2 'a workdir whose identity cannot be read is a harness error'
+  has "$ERR" 'cannot read the identity of workdir' 'says why'
+  [ ! -e "$T/wd/pristine" ] || fail_ 'prepare ran in a workdir whose identity was never recorded'
+}
+
+t_suite_count_fails_when_a_stage_fails() {
+  # #52: the suite's entry counts fail as a whole. A find, wc or tr that failed reads as
+  # `unreadable`, never as no entries: an assertion that nothing was left behind would pass on it.
+  mkdir -p "$T/e"
+  local out
+  eq "$(n_found "$T/e" -mindepth 1)" 0 'an empty directory has no entries'
+  out="$(n_found "$T/absent" -mindepth 1 2>/dev/null)" && fail_ 'a failed find was a count'
+  eq "$out" unreadable 'a failed find'
+  out="$( wc() { builtin command wc "$@"; return 1; }; n_found "$T/e" -mindepth 1 )" && fail_ 'a failed wc was a count'
+  eq "$out" unreadable 'a failed wc'
+  out="$( tr() { builtin command tr "$@"; return 1; }; n_found "$T/e" -mindepth 1 )" && fail_ 'a failed tr was a count'
+  eq "$out" unreadable 'a failed tr'
+}
+
+t_suite_sampler_selection_fails_closed() {
+  # #52: the fixture that stops a suite's sampler picks it as the suite's child that is not the
+  # unit's wrapper. A wrapper pid or table that could not be read, or a selection that failed,
+  # picks nothing: the wrapper is never stopped in the sampler's place.
+  local table=$'10 1\n20 5\n30 5' out
+  eq "$(pick_sampler 5 20 "$table")" 30 'the child that is not the wrapper'
+  out="$(pick_sampler 5 '' "$table")" && fail_ "an unread wrapper pid picked [$out]"
+  out="$(pick_sampler 5 2x "$table")" && fail_ "a wrapper that is not a pid picked [$out]"
+  out="$(pick_sampler 5 20 '')" && fail_ "an unread table picked [$out]"
+  out="$( awk() { builtin command awk "$@"; return 1; }; pick_sampler 5 20 "$table" )" && fail_ "a failed selection picked [$out]"
+  eq "$out" '' 'and printed nothing'
 }
 
 t_checksum_uses_the_digest_file_not_a_function() {
@@ -2433,7 +2604,7 @@ EOF
   rm -rf "$T/tmpd"; mkdir -p "$T/tmpd"
   TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-keep-redirect.sh" --no-baseline > /dev/null 2>"$T/e6"; rc_is $? 2 'a plan that leaves after a redirecting exec is a harness error'
   hasnt "$(cat "$T/e6")" 'workdir kept' 'the keep settled after the redirecting exec is the one honoured'
-  eq "$(find "$T/tmpd" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" 0 'and the workdir is removed'
+  eq "$(n_found "$T/tmpd" -mindepth 1 -maxdepth 1)" 0 'and the workdir is removed'
 }
 
 t_cli_abort_keeps_the_workdir_the_environment_asked_to_keep() {
@@ -3438,7 +3609,7 @@ t_sibling_cannot_plant_in_another_workers_directory() {
   ( SHMUTANT_TIMEOUT=0 _shmutant_worker mut 0 "$T/wd" toy_run "" )
   SHMUTANT_CLEANUP_FAILED=0; _shmutant_collect "$T/wd/mut-0" mut-0 0 2>/dev/null
   eq "$SHMUTANT_V_VERDICT" unprepared 'a planted link at tree is not cloned into'
-  eq "$(find "$T/other" -mindepth 1 | wc -l | tr -d ' ')" 0 'nothing was copied into the link'"'"'s target'
+  eq "$(n_found "$T/other" -mindepth 1)" 0 'nothing was copied into the link'"'"'s target'
   rm -f "$T/wd/mut-0/tree"
   _shmutant_open_channel "$T/wd" mut-0 || fail_ 'fixture: no channel'
   ( SHMUTANT_TIMEOUT=0 _shmutant_worker mut 0 "$T/wd" toy_run "" )
@@ -4968,7 +5139,7 @@ t_run_partial_channel_open_is_a_setup_failure() {
     printf '%s' "$SHMUTANT_RUN_STATUS" > "$T/status" )
   eq "$(cat "$T/status")" 127 'a channel that could not be opened is a setup failure'
   [ -e "$T/ran" ] && fail_ 'the callback ran without its channels'
-  eq "$(find "$T/d" -name '.*' | wc -l | tr -d ' ')" 0 'no channel file was left behind'
+  eq "$(n_found "$T/d" -name '.*')" 0 'no channel file was left behind'
   # and through the pool it is a harness error, not a verdict on the row
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
@@ -5500,7 +5671,7 @@ EOF
   mkdir -p "$T/tmpd"
   TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan.sh" > /dev/null 2> "$T/e"; rc_is $? 2 'a prepare whose own set -e fires ends the run as a harness error, not a pass over a partial tree'
   has "$(cat "$T/e")" 'before the pool completed' 'says so'
-  eq "$(find "$T/tmpd" -mindepth 1 | wc -l | tr -d ' ')" 0 'and the automatic workdir was still removed'
+  eq "$(n_found "$T/tmpd" -mindepth 1)" 0 'and the automatic workdir was still removed'
   lax_prepare() { set -e; shmutant_copy_tree "$TOY" "$1"; }
   case "$-" in *e*) fail_ 'precondition: errexit already on' ;; esac
   shmutant_pool lbl "$T/wd3" lax_prepare toy_run > /dev/null 2>&1; rc_is $? 0 'killed'
@@ -5869,13 +6040,13 @@ t_copy_tree_excludes_git() {
 /f"; mkdir -p "$T/nlm"
   shmutant_mutate "$T/nlm
 /f" old new 2>/dev/null; rc_is $? 1 'a mutate path with a newline is refused'
-  eq "$(find "$T/nlm" -mindepth 1 | wc -l | tr -d ' ')" 0 'and nothing was made in the sibling directory'
+  eq "$(n_found "$T/nlm" -mindepth 1)" 0 'and nothing was made in the sibling directory'
   has "$(cat "$T/e2")" 'usage' 'reported as a usage error'
   ( set -u; SHMUTANT_SELECT=x shmutant_selected 2>"$T/e3" ); rc_is $? 2 'a selected call with no unit is a usage failure even under set -u'
   has "$(cat "$T/e3")" 'usage' 'reported as a usage error'
   mkdir -p "$T/cwd"
   ( cd "$T/cwd" && shmutant_copy_tree "$T/src" "" 2>/dev/null ); rc_is $? 1 'an empty destination is refused'
-  eq "$(find "$T/cwd" -mindepth 1 | wc -l | tr -d ' ')" 0 'and nothing was copied into the current directory'
+  eq "$(n_found "$T/cwd" -mindepth 1)" 0 'and nothing was copied into the current directory'
   has "$(cat "$T/e")" 'usage' 'reported as a usage error, not an unbound-variable abort'
   [ -e "$T/dst2" ] && fail_ 'a missing source was refused only after its destination had been created'
   mkdir -p "$T/gl/.git/objects"; printf 'o' > "$T/gl/.git/objects/x"; ln "$T/gl/.git/objects/x" "$T/gl/.git/objects/y"; printf 'f' > "$T/gl/f"
@@ -6052,7 +6223,7 @@ t_cli_removes_only_the_workdir_it_made_unless_kept() {
   sed 's/^prepare() {/prepare() { SHMUTANT_KEEP=0;/' "$T/toy/plan.sh" > "$T/toy/plan-unkeep.sh"
   rm -rf "$T/tmpd"; mkdir -p "$T/tmpd"
   TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-unkeep.sh" --keep > /dev/null 2>&1
-  eq "$(find "$T/tmpd" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" 0 'a prepare that settled SHMUTANT_KEEP=0 under --keep leaves no workdir behind'
+  eq "$(n_found "$T/tmpd" -mindepth 1 -maxdepth 1)" 0 'a prepare that settled SHMUTANT_KEEP=0 under --keep leaves no workdir behind'
   printf "shmutant_mut 'survivor' '%%' '+' 'uncovered'\n" >> "$T/toy/plan.sh"
   bash "$SHMUTANT" run "$T/toy/plan.sh" > /dev/null 2>&1; rc_is $? 1 'a survivor exits 1'
   bash "$SHMUTANT" run "$T/toy/plan.sh" --jobs 1 --no-baseline --timeout 30 --workdir "$T/w" --keep > /dev/null 2>&1; rc_is $? 1 'options are accepted'
@@ -6129,7 +6300,7 @@ t_cli_counts_a_plan_that_ends_early_as_a_load_failure() {
   TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/broken.sh" > /dev/null 2>&1; rc_is $? 2 'a broken plan is a load failure'
   TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/norun.sh" > /dev/null 2>&1; rc_is $? 2 'a plan without callbacks is a load failure'
   TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-ef.sh" > /dev/null 2>&1; rc_is $? 2 'a plan whose errexit fires is a load failure'
-  eq "$(find "$T/tmpd" -mindepth 1 | wc -l | tr -d ' ')" 0 'no automatic workdir survives a load failure'
+  eq "$(n_found "$T/tmpd" -mindepth 1)" 0 'no automatic workdir survives a load failure'
   { cat "$T/toy/plan-base.sh"; printf 'trap "echo bye" EXIT\nexit 0\n'; } > "$T/toy/plan-trap.sh"
   TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-trap.sh" > /dev/null 2>"$T/err-trap"; rc_is $? 2 'a plan that installs its own EXIT trap and exits is still a load failure'
   has "$(cat "$T/err-trap")" 'before the pool completed' 'the exit is reported as an incomplete run'
@@ -6150,12 +6321,12 @@ t_cli_counts_a_plan_that_ends_early_as_a_load_failure() {
   TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-subs.sh" > /dev/null 2>&1; rc_is $? 1 'a plan with set -e, a command substitution and a subshell loads and runs normally'
   { cat "$T/toy/plan-base.sh"; printf 'trap "echo usr" USR1\n'; } > "$T/toy/plan-usr.sh"
   TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-usr.sh" > /dev/null 2>&1; rc_is $? 1 'a plan may still trap other signals'
-  eq "$(find "$T/tmpd" -mindepth 1 | wc -l | tr -d ' ')" 0 'no automatic workdir survives those load failures'
+  eq "$(n_found "$T/tmpd" -mindepth 1)" 0 'no automatic workdir survives those load failures'
   # prepare leaves a read-only tree in the workdir and ends the subshell before the pool could
   # clean up: the automatic workdir is still removed.
   { cat "$T/toy/plan-base.sh"; printf 'prepare() { mkdir -p "$1/ro"; : > "$1/ro/f"; chmod 555 "$1/ro"; exit 0; }\n'; } > "$T/toy/plan-roexit.sh"
   TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-roexit.sh" > /dev/null 2>&1; rc_is $? 2 'a prepare that exits is a harness error'
-  eq "$(find "$T/tmpd" -mindepth 1 | wc -l | tr -d ' ')" 0 'the automatic workdir holding a read-only tree was removed after the early exit'
+  eq "$(n_found "$T/tmpd" -mindepth 1)" 0 'the automatic workdir holding a read-only tree was removed after the early exit'
 }
 
 t_cli_interrupted_ends_its_workers_and_removes_its_workdir() {
@@ -6171,7 +6342,7 @@ t_cli_interrupted_ends_its_workers_and_removes_its_workdir() {
   kill -TERM "$cli"; wait "$cli" 2>/dev/null
   run_gone "$T/run.ids" 'the interrupted run'
   [ -e "$T/toy/finished" ] && fail_ 'a worker outlived the CLI that was sent TERM'
-  eq "$(find "$T/tmpd" -mindepth 1 | wc -l | tr -d ' ')" 0 'the interrupted CLI removed the workdir it created'
+  eq "$(n_found "$T/tmpd" -mindepth 1)" 0 'the interrupted CLI removed the workdir it created'
 }
 
 t_cli_interrupted_honours_the_keep_prepare_settled() {
@@ -6196,7 +6367,7 @@ t_cli_interrupted_honours_the_keep_prepare_settled() {
   wait_for "$T/toy/started" || fail_ 'the unkeep run never started'; rm -f "$T/toy/started"
   kill -TERM "$cli"; wait "$cli" 2>/dev/null
   sleep 4; rm -f "$T/toy/finished"
-  eq "$(find "$T/tmpd" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" 0 'a workdir created under --keep that prepare settled to 0 is removed on an interrupt'
+  eq "$(n_found "$T/tmpd" -mindepth 1 -maxdepth 1)" 0 'a workdir created under --keep that prepare settled to 0 is removed on an interrupt'
 }
 
 t_cli_interrupted_keeps_the_workdir_the_operator_or_plan_asked_for() {
@@ -6234,7 +6405,7 @@ t_cli_interrupted_keeps_the_workdir_the_operator_or_plan_asked_for() {
   wait_for "$T/toy/started" || fail_ 'the run never started'; rm -f "$T/toy/started"
   kill -TERM "$cli"; wait "$cli" 2>/dev/null
   sleep 4; rm -f "$T/toy/finished"
-  eq "$(find "$T/mine" -maxdepth 1 -name '.done.*' -o -maxdepth 1 -name '.keep.*' | wc -l | tr -d ' ')" 0 'no completion or keep marker survives an interrupt in the caller'"'"'s workdir'
+  eq "$(n_found "$T/mine" -maxdepth 1 -name '.done.*' -o -maxdepth 1 -name '.keep.*')" 0 'no completion or keep marker survives an interrupt in the caller'"'"'s workdir'
   SHMUTANT_KEEP=1 TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-hang.sh" --timeout 0 --no-baseline > /dev/null 2>&1 & cli=$!
   wait_for "$T/toy/started" || fail_ 'the env-keep run never started'; rm -f "$T/toy/started"
   kill -TERM "$cli"; wait "$cli" 2>/dev/null
@@ -6299,7 +6470,7 @@ t_cli_keeps_plan_output_off_the_stream_and_paths_where_invoked() {
   ( cd "$T" && TMPDIR=tmpd SHMUTANT_STREAM=out.tsv bash "$SHMUTANT" run "$T/toy/plan-cd.sh" > /dev/null 2>&1 )
   [ -f "$T/out.tsv" ] || fail_ 'a relative SHMUTANT_STREAM was resolved after the plan changed directory'
   [ -e "$T/toy/out.tsv" ] && fail_ 'the stream landed relative to the plan directory'
-  eq "$(find "$T/tmpd" -mindepth 1 | wc -l | tr -d ' ')" 0 'a relative TMPDIR workdir is resolved before the plan cds, and removed'
+  eq "$(n_found "$T/tmpd" -mindepth 1)" 0 'a relative TMPDIR workdir is resolved before the plan cds, and removed'
   [ -e "$T/toy/tmpd" ] && fail_ 'a second workdir was created relative to the plan directory'
 }
 
@@ -6789,7 +6960,7 @@ EOF
   # whose children those would be): that is said. One whose start cannot be read (noid) still has its descendants
   # listed and killed, and one whose start cannot be read again (recheck) is still killed while it
   # is this shell's job, with its descendants: left stopped, it would hang the suite.
-  local stranger strangerid walk
+  local stranger strangerid walk table
   for walk in '' bare all exits recheck noid; do
     rm -f "$T/slow.pid" "$T/slow.started" "$T/slow.finished" "$T/sampler.kids" "$T/sampler.gkid" "$T/kill.log"; sampler=""
     set -m; sleep 30 > /dev/null 2>&1 & stranger=$!; set +m
@@ -6798,8 +6969,11 @@ EOF
     KILL_LOG="$T/kill.log" WALK_FAILS="$walk" SHMUTANT_KILL_GROUP="$stranger" SAMPLER_KIDS=1 SHMUTANT_SELECT=t_zz_slow bash "$T/suite/test/run.sh" > "$T/stopped.out" 2>&1 & suite=$!
     for (( i = 0; i < 100; i++ )); do [ "$(command -p grep -c . "$T/sampler.kids" 2>/dev/null)" = 3 ] && break; sleep 0.1; done
     if wait_for "$T/slow.started" && unitpid="$(cat "$T/slow.pid" 2>/dev/null)" && [ -n "$unitpid" ]; then
-      wrapper="$(command -p ps -o ppid= -p "$unitpid" 2>/dev/null | tr -d ' ')"
-      sampler="$(command -p ps -A -o pid= -o ppid= 2>/dev/null | awk -v s="$suite" -v w="$wrapper" '$2 == s && $1 != w { print $1; exit }')"
+      # The wrapper is the one child of the suite that is not its sampler. The table is read whole
+      # before the selection, which stops at its first match; a read that failed selects nothing.
+      wrapper="$(set -o pipefail; command -p ps -o ppid= -p "$unitpid" 2>/dev/null | tr -d ' ')" || wrapper=""
+      table="$(command -p ps -A -o pid= -o ppid= 2>/dev/null)" || table=""
+      sampler="$(pick_sampler "$suite" "$wrapper" "$table")" || sampler=""
       if [ -z "$sampler" ]; then fail_ 'fixture: the suite'"'"'s sampler was not found'; kill -TERM "$suite"
       else
         kill -STOP "$sampler"; kill -TERM "$suite"

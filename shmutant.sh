@@ -2078,7 +2078,7 @@ _shmutant_worker_finish() {
   # Only in a directory that is still the one this run created, by inode: a callback may have
   # renamed it away and put a symlink or a fresh directory in its place, and nothing is written
   # or removed beneath a replacement.
-  if [ -L "$1" ] || [ "$(_shmutant_dir_id "$1")" != "${SHMUTANT_DIR_ID:-}" ]; then
+  if [ -L "$1" ] || ! _shmutant_is_id "$1" "${SHMUTANT_DIR_ID:-}"; then
     _shmutant_err "refusing to clean $1: it is no longer the worker directory this run created"
     return 0
   fi
@@ -2088,7 +2088,7 @@ _shmutant_worker_finish() {
   # The clone's identity, kept or not: what a callback put at the path stays, and the verdict
   # of a run that renamed its clone away and put another directory there is not accepted —
   # nothing says which tree it ran against. Only the removal waits on SHMUTANT_KEEP.
-  if [ -L "$1/tree" ] || { [ -e "$1/tree" ] && [ "$(_shmutant_dir_id "$1/tree")" != "${SHMUTANT_CLONE_ID:-}" ]; }; then
+  if [ -L "$1/tree" ] || { [ -e "$1/tree" ] && ! _shmutant_is_id "$1/tree" "${SHMUTANT_CLONE_ID:-}"; }; then
     _shmutant_err "$1/tree is no longer the clone this run made; the verdict of a run that swapped its tree is not accepted"
     { printf 'swapped\n' >&"$SHMUTANT_VERDICT_FD"; } 2>/dev/null
     set -- "$1" unprepared "$3" swapped
@@ -2128,7 +2128,7 @@ _shmutant_worker() {
     _shmutant_worker_finish "$dir" unprepared 0 modified; return 0
   fi
   SHMUTANT_CLONE_ID=""
-  if [ "$(_shmutant_dir_id "$wd/pristine")" != "${SHMUTANT_PRISTINE_ID:-}" ] || [ -L "$wd/pristine" ] \
+  if ! _shmutant_is_id "$wd/pristine" "${SHMUTANT_PRISTINE_ID:-}" || [ -L "$wd/pristine" ] \
     || ! command -p mkdir -- "$dir/tree" 2>/dev/null; then
     _shmutant_worker_finish "$dir" unprepared 0 clone; return 0
   fi
@@ -2158,7 +2158,7 @@ _shmutant_worker() {
     # clone physically, naming the target by its base name alone: nothing named by path after
     # the identity check can be redirected by a sibling.
     ( builtin cd -P -- "$dir" 2>/dev/null || exit 4
-      [ "$(_shmutant_dir_id .)" = "${SHMUTANT_DIR_IDS[$kind-$i]:-}" ] || exit 4
+      _shmutant_is_id . "${SHMUTANT_DIR_IDS[$kind-$i]:-}" || exit 4
       wroot="$(builtin pwd -P)"
       builtin cd -P -- "./tree$suffix/$(command -p dirname -- "${SHMUTANT_ROWS_FILE[$i]}")" 2>/dev/null || exit 4
       _shmutant_inside "$wroot/tree" "$(builtin pwd -P)" || exit 4
@@ -2235,15 +2235,34 @@ _shmutant_worker() {
   return 0
 }
 
-# _shmutant_dir_id <dir> — the inode number of <dir>, from POSIX `ls -di`; empty when absent.
+# _shmutant_dir_id <dir> — the inode number of <dir>, from POSIX `ls -di`, and its physical path;
+# fails, printing nothing, when <dir> is absent or any stage of the read fails.
 _shmutant_dir_id() {
   local id phys
-  id="$(command -p ls -di -- "$1" 2>/dev/null | command -p awk '{ print $1 }')"
-  [ -n "$id" ] || return 0
+  id="$(set -o pipefail; command -p ls -di -- "$1" 2>/dev/null | command -p awk '{ print $1 }')" || return 1
+  case "$id" in ''|*[!0-9]*) return 1 ;; esac
   # The inode is unique only within a filesystem; the resolved physical path distinguishes a
   # same-inode directory reached across a swapped mount (portable, where a device number is not).
-  phys="$(_shmutant_abs "$1")" || phys=""
+  # A regular file (the verdict stream) has none.
+  if [ -d "$1" ]; then phys="$(_shmutant_abs "$1")" || return 1; else phys=""; fi
   printf '%s:%s' "$id" "$phys"
+}
+
+# _shmutant_is_id <path> <id> — true when <path> reads, by _shmutant_dir_id, as <id>. Never for
+# a failed read, nor for an empty <id> (a read that succeeds is never empty): an identity that
+# could not be recorded and one that could not be read again are not the same directory.
+_shmutant_is_id() {
+  local id
+  id="$(_shmutant_dir_id "$1")" && [ "$id" = "$2" ]
+}
+
+# _shmutant_link_count <path> — the hard-link count of <path>, `ls -l` column 2; fails, printing
+# nothing, when any stage of the read fails or what it read is not a count.
+_shmutant_link_count() {
+  local l
+  l="$(set -o pipefail; command -p ls -ld -- "$1" 2>/dev/null | command -p awk '{ print $2 }')" || return 1
+  case "$l" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s' "$l"
 }
 
 # _shmutant_collect <dir> <key> <wait-status> — read a reaped worker's channel into
@@ -2280,7 +2299,7 @@ _shmutant_collect() {
     SHMUTANT_V_VERDICT=lost; SHMUTANT_V_US=0; SHMUTANT_V_STATUS=""
     # The identity may have been read off the channel already, by the helper that ended the worker.
     [ -n "$clone_id" ] || clone_id="${SHMUTANT_RES_CLONE[$key]:-}"
-    if [ "${SHMUTANT_KEEP:-0}" != 1 ] && [ ! -L "$dir" ] && [ "$(_shmutant_dir_id "$dir")" = "${SHMUTANT_DIR_IDS[$key]:-}" ]; then
+    if [ "${SHMUTANT_KEEP:-0}" != 1 ] && [ ! -L "$dir" ] && _shmutant_is_id "$dir" "${SHMUTANT_DIR_IDS[$key]:-}"; then
       # Only the clone the worker made, by the identity it published; what a callback put at
       # the path stays, and the pool then finds a tree left behind (a harness error).
       if [ ! -e "$dir/tree" ] && [ ! -L "$dir/tree" ]; then :
@@ -2313,7 +2332,7 @@ _shmutant_collect() {
   fi
   # A clone the worker did not remove is a harness error, whatever it reported: the next run
   # in this workdir would find it. Only the directory the pool created is looked at, by inode.
-  if [ -L "$dir" ] || [ "$(_shmutant_dir_id "$dir")" != "${SHMUTANT_DIR_IDS[$key]:-}" ]; then
+  if [ -L "$dir" ] || ! _shmutant_is_id "$dir" "${SHMUTANT_DIR_IDS[$key]:-}"; then
     _shmutant_err "$dir is no longer the directory this run created"; SHMUTANT_CLEANUP_FAILED=1
   elif [ "${SHMUTANT_KEEP:-0}" != 1 ] && { [ -e "$dir/tree" ] || [ -L "$dir/tree" ]; }; then
     _shmutant_err "$dir/tree was not removed"; SHMUTANT_CLEANUP_FAILED=1
@@ -2646,7 +2665,8 @@ _shmutant_validate_settings() {
 
 # _shmutant_open_stream <label> — hold the validated SHMUTANT_STREAM open as a descriptor. Called
 # again after prepare: a path prepare assigned replaces the one opened before it, and one it
-# unset closes it. Returns 2 when the file cannot be opened.
+# unset closes it. Returns 2, the open rolled back, when the file cannot be opened or its identity,
+# length or first bytes cannot be read.
 _shmutant_open_stream() {
   local label="$1"
   if [ -n "${SHMUTANT_STREAM_OPENED+x}" ] && [ "$SHMUTANT_STREAM_OPENED" = "${SHMUTANT_STREAM:-}" ]; then return 0; fi
@@ -2664,12 +2684,17 @@ _shmutant_open_stream() {
   # that what follows the bytes already there is exactly what the pool wrote: every record also
   # goes to a private unlinked copy, so a callback that truncates, overwrites or appends to the
   # stream in place is seen.
-  SHMUTANT_STREAM_INO="$(_shmutant_dir_id "$SHMUTANT_STREAM")"
-  SHMUTANT_STREAM_BASE="$(command -p wc -c < "$SHMUTANT_STREAM" 2>/dev/null | command -p tr -d ' ')" || SHMUTANT_STREAM_BASE=0
   # The bytes already there, by checksum: an overwrite in place within them keeps the length.
-  if [ "${SHMUTANT_STREAM_BASE:-0}" -gt 0 ]; then
-    SHMUTANT_STREAM_PREFIX_CK="$(command -p dd if="$SHMUTANT_STREAM" bs="$SHMUTANT_STREAM_BASE" count=1 2>/dev/null | command -p cksum)"
-  else SHMUTANT_STREAM_PREFIX_CK=""; fi
+  # Each read fails as a whole, any stage of it: a length that was never read is not zero, and a
+  # checksum of no input matches another taken of no input.
+  SHMUTANT_STREAM_PREFIX_CK=""
+  if ! SHMUTANT_STREAM_INO="$(_shmutant_dir_id "$SHMUTANT_STREAM")" \
+    || ! SHMUTANT_STREAM_BASE="$(set -o pipefail; command -p wc -c < "$SHMUTANT_STREAM" 2>/dev/null | command -p tr -d ' ')" \
+    || [ -z "$SHMUTANT_STREAM_BASE" ] || [[ "$SHMUTANT_STREAM_BASE" == *[!0-9]* ]] \
+    || { [ "$SHMUTANT_STREAM_BASE" -gt 0 ] \
+      && ! SHMUTANT_STREAM_PREFIX_CK="$(set -o pipefail; command -p dd if="$SHMUTANT_STREAM" bs="$SHMUTANT_STREAM_BASE" count=1 2>/dev/null | command -p cksum)"; }; then
+    _shmutant_stream_rollback; _shmutant_err "$label: cannot read the identity, length or first bytes of SHMUTANT_STREAM ($SHMUTANT_STREAM) — a change to it could not be seen"; return 2
+  fi
   _shmutant_close_stream_copy
   local copy
   # A failure here rolls the open back: left open and cached, the next pool for the same stream
@@ -2696,16 +2721,22 @@ _shmutant_close_stream_copy() {
 # _shmutant_stream_intact — true when SHMUTANT_STREAM is unset or still names the file that was
 # opened: a callback that unlinked or replaced it left the records on an inode nobody can read.
 _shmutant_stream_intact() {
+  local got have
   [ -n "${SHMUTANT_STREAM:-}" ] || return 0
-  [ ! -L "$SHMUTANT_STREAM" ] && [ "$(_shmutant_dir_id "$SHMUTANT_STREAM")" = "${SHMUTANT_STREAM_INO:-}" ] || return 1
+  [ ! -L "$SHMUTANT_STREAM" ] && _shmutant_is_id "$SHMUTANT_STREAM" "${SHMUTANT_STREAM_INO:-}" || return 1
   # Contents, past what was there when opened: a truncation, an overwrite or an appended record
   # from a callback changes them; the pool's own records, through the descriptor, do not.
   [ -n "${SHMUTANT_STREAM_COPY_R:-}" ] || return 1
   # And what was there when opened, unchanged: an overwrite in place within it keeps the length.
+  # Every read fails as a whole, any stage of it: a checksum of no input matches another taken of
+  # no input, and an empty private copy is what a pool that wrote nothing has.
   if [ "${SHMUTANT_STREAM_BASE:-0}" -gt 0 ]; then
-    [ "$(command -p dd if="$SHMUTANT_STREAM" bs="$SHMUTANT_STREAM_BASE" count=1 2>/dev/null | command -p cksum)" = "${SHMUTANT_STREAM_PREFIX_CK:-}" ] || return 1
+    got="$(set -o pipefail; command -p dd if="$SHMUTANT_STREAM" bs="$SHMUTANT_STREAM_BASE" count=1 2>/dev/null | command -p cksum)" \
+      && [ "$got" = "${SHMUTANT_STREAM_PREFIX_CK:-}" ] || return 1
   fi
-  [ "$(command -p tail -c "+$(( ${SHMUTANT_STREAM_BASE:-0} + 1 ))" -- "$SHMUTANT_STREAM" 2>/dev/null | command -p cksum)" = "$(command -p cksum <&"$SHMUTANT_STREAM_COPY_R")" ]
+  got="$(set -o pipefail; command -p tail -c "+$(( ${SHMUTANT_STREAM_BASE:-0} + 1 ))" -- "$SHMUTANT_STREAM" 2>/dev/null | command -p cksum)" || return 1
+  have="$(command -p cksum <&"$SHMUTANT_STREAM_COPY_R")" || return 1
+  [ "$got" = "$have" ]
 }
 
 # _shmutant_readonly <name> — true when <name> is readonly in this shell; an assignment to it
@@ -2758,7 +2789,7 @@ _shmutant_pool_locals_writable() {
     dbg depth detail dir dirmode done_pid err_fd errexit_before etime f fd fifo \
     fired fmt found frozen go got grp h have held helpers here \
     hms hold hold_r holder holderid hp i id intact jobs jp js k kept key \
-    killed killing kind kinds l label left left_r left_w line ls_bin m mark \
+    killed killing kind kinds l label left left_r left_w line links ls_bin m mark \
     mode ms mutate_aliases n named new nl now out out_r out_r2 out_w outf \
     p parent path pending phys pid pids pool_aliases pout pout_r pout_w prc \
     prep r rc red rel rest ret rjrc root root_ok rootid rootls \
@@ -2908,7 +2939,7 @@ _shmutant_target_ck() {
   # reads would pass unseen.
   ( set -o pipefail
     builtin cd -P -- "$1" 2>/dev/null || exit 1
-    [ "$(_shmutant_dir_id .)" = "${SHMUTANT_DIR_IDS[$3]:-}" ] || exit 1
+    _shmutant_is_id . "${SHMUTANT_DIR_IDS[$3]:-}" || exit 1
     [ ! -L "$2" ] && [ -f "$2" ] || exit 1
     # Mode, owner, size and the mtime (exact where stat gives one) as well as the content: a
     # test sensitive to any of them must see the file as the pool wrote it.
@@ -2920,7 +2951,7 @@ _shmutant_target_ck() {
 # _shmutant_wd_is_marked <workdir> — true while <workdir> is, by identity, the directory this
 # pool marked as its own; says so otherwise.
 _shmutant_wd_is_marked() {
-  [ ! -L "$1" ] && [ "$(_shmutant_dir_id "$1")" = "${SHMUTANT_WD_ID:-}" ] && return 0
+  [ ! -L "$1" ] && _shmutant_is_id "$1" "${SHMUTANT_WD_ID:-}" && return 0
   _shmutant_err "$1 is no longer the directory this pool marked as its own — a callback moved or replaced it"
   return 1
 }
@@ -2938,11 +2969,11 @@ _shmutant_pool_cleanup() {
   # The prepared tree is removed only from the workdir this pool marked as its own: prepare
   # could have moved the workdir away and put a caller's directory, with a `pristine` entry of
   # its own, at its path.
-  if [ "${SHMUTANT_KEEP:-0}" != 1 ] && [ ! -L "$2" ] && [ "$(_shmutant_dir_id "$2")" = "${SHMUTANT_WD_ID:-}" ]; then
+  if [ "${SHMUTANT_KEEP:-0}" != 1 ] && [ ! -L "$2" ] && _shmutant_is_id "$2" "${SHMUTANT_WD_ID:-}"; then
     # And the tree itself, by the identity recorded when it was made: a callback that renamed
     # it away and put a directory of its own at the path does not get that removed.
     if [ ! -e "$2/pristine" ] && [ ! -L "$2/pristine" ]; then :
-    elif [ -L "$2/pristine" ] || [ "$(_shmutant_dir_id "$2/pristine")" != "${SHMUTANT_PRISTINE_ID:-}" ]; then _shmutant_err "$1: refusing to remove $2/pristine: it is not the tree this pool prepared"; SHMUTANT_CLEANUP_FAILED=1
+    elif [ -L "$2/pristine" ] || ! _shmutant_is_id "$2/pristine" "${SHMUTANT_PRISTINE_ID:-}"; then _shmutant_err "$1: refusing to remove $2/pristine: it is not the tree this pool prepared"; SHMUTANT_CLEANUP_FAILED=1
     else _shmutant_remove "$2/pristine" "$2" || { _shmutant_err "$1: could not remove $2/pristine"; SHMUTANT_CLEANUP_FAILED=1; }
     fi
   fi
@@ -3073,7 +3104,7 @@ shmutant_pool() {
 _shmutant_pool_body() {
   if [ "$#" -lt 4 ] || [ "$#" -gt 5 ]; then _shmutant_err "pool: usage: shmutant_pool <label> <workdir> <prepare> <run> [cap] (got $# arguments)"; return 2; fi
   local label="$1" wd="$2" prep="$3" run="$4" cap="${5:-}"
-  local n jobs root suffix i k sel t0 t1 killed=0 rc=0 verdict detail rjrc linked starts ambiguous=0 cwhy
+  local n jobs root suffix i k sel t0 t1 killed=0 rc=0 verdict detail rjrc linked starts ambiguous=0 cwhy links
   local -a base_sel=() base_verdict=() base_why=() row_why=()
   n="${#SHMUTANT_ROWS_NAME[@]}"
   t0="$(_shmutant_now)"
@@ -3093,7 +3124,7 @@ _shmutant_pool_body() {
   command -p mkdir -p -- "$wd" 2>/dev/null || { _shmutant_err "$label: cannot create workdir $wd"; return 2; }
   wd="$(_shmutant_abs "$wd")" || { _shmutant_err "$label: cannot resolve workdir"; return 2; }
   _shmutant_workdir_owned "$label" "$wd" || return 2
-  SHMUTANT_WD_ID="$(_shmutant_dir_id "$wd")"
+  SHMUTANT_WD_ID="$(_shmutant_dir_id "$wd")" || { _shmutant_err "$label: cannot read the identity of workdir $wd — nothing in it could later be proven this pool's"; return 2; }
   _shmutant_callable "$prep" || { _shmutant_err "$label: prepare callback not found: $prep (a function or an executable; an alias cannot be called by name, and a builtin such as exit or return would end or leave this shell)"; return 2; }
   _shmutant_callable "$run" || { _shmutant_err "$label: run callback not found: $run (a function or an executable; an alias cannot be called by name, and a builtin such as exit or return would end or leave this shell)"; return 2; }
   # Executables by absolute physical path from here: a prepare that changes the working
@@ -3172,7 +3203,7 @@ _shmutant_pool_body() {
   # The workdir itself: prepare could have renamed it away and put another directory at its
   # path. Nothing there is this pool's, so nothing there is removed (the pristine prepare made
   # in it included).
-  if [ -L "$wd" ] || [ "$(_shmutant_dir_id "$wd")" != "${SHMUTANT_WD_ID:-}" ]; then _shmutant_err "$label: $wd is no longer the directory this pool marked as its own — prepare moved or replaced it"; _shmutant_pool_fail "$label" "$wd"; return 2; fi
+  if [ -L "$wd" ] || ! _shmutant_is_id "$wd" "${SHMUTANT_WD_ID:-}"; then _shmutant_err "$label: $wd is no longer the directory this pool marked as its own — prepare moved or replaced it"; _shmutant_pool_fail "$label" "$wd"; return 2; fi
   _shmutant_callable "$run" || { _shmutant_err "$label: run callback not found after prepare: $run"; _shmutant_pool_fail "$label" "$wd"; return 2; }
   # prepare may have declared rows or had one refused: the table is read again here, and a
   # refusal after prepare is the same harness error as one before it.
@@ -3205,7 +3236,12 @@ _shmutant_pool_body() {
     fi
     # Link count is `ls -l` column 2. A clone gives each hard link its own inode, so a test
     # reading the alias would see pristine code while the named target carries the defect.
-    if [ "$(command -p ls -ld -- "$root/${SHMUTANT_ROWS_FILE[$i]}" | command -p awk '{ print $2 }')" -gt 1 ]; then
+    # A count that could not be read is refused too: it is no evidence of a single link.
+    if ! links="$(_shmutant_link_count "$root/${SHMUTANT_ROWS_FILE[$i]}")"; then
+      _shmutant_err "$label: row '${SHMUTANT_ROWS_NAME[$i]}' targets ${SHMUTANT_ROWS_FILE[$i]}, whose hard-link count cannot be read"
+      _shmutant_pool_fail "$label" "$wd"; return 2
+    fi
+    if [ "$links" -gt 1 ]; then
       _shmutant_err "$label: row '${SHMUTANT_ROWS_NAME[$i]}' targets ${SHMUTANT_ROWS_FILE[$i]}, which has more than one hard link — a clone cannot keep them joined"
       _shmutant_pool_fail "$label" "$wd"; return 2
     fi
@@ -3477,7 +3513,7 @@ _shmutant_cli_keep_exit_trap() {
 
 # _shmutant_cli_wd_is_ours <path> — true while <path> is, by identity, the workdir this run made.
 _shmutant_cli_wd_is_ours() {
-  [ ! -L "$1" ] && [ "$(_shmutant_dir_id "$1")" = "${SHMUTANT_CLI_WD_ID:-}" ]
+  [ ! -L "$1" ] && _shmutant_is_id "$1" "${SHMUTANT_CLI_WD_ID:-}"
 }
 
 # _shmutant_cli_end_group <pgid> <holder-pid> — end what the plan subshell left in its process
