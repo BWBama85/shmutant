@@ -199,7 +199,9 @@ on the CI runner), the exit of a member launchd adopted can leave the kernel tre
 newly orphaned, and an orphaned group with a member stopped is hung up whole: in the suite's group,
 that ended the suite with status 129. Once its unit has ended, the sampler is given 30 seconds to end
 too, and no more once it is seen stopped; one that has not ended by then is killed with its whole
-group, and the unit fails. An INT, TERM or HUP sent to the suite is passed on to the unit it is
+group, and the unit fails. A sampler whose group cannot be killed, or whose holder has not ended 30
+seconds after the suite let it go (or is seen stopped), ends the run as a harness failure (status 2)
+instead of hanging it. An INT, TERM or HUP sent to the suite is passed on to the unit it is
 running, which is killed if it has not ended three seconds later and then swept as any unit is, so a
 `^C` at the terminal still ends both.
 

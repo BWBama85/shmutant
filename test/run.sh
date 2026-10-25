@@ -220,6 +220,17 @@ end_group() {
   return 0
 }
 
+# end_sampler_group — a cleanup of a fixture of t_suite_runs_each_unit_in_a_process_group_of_its_own:
+# end the group of the sampler's job that t_zz_stops_sampler recorded ($T/stopper.sampler), only
+# through a member it recorded with its identity ($T/stopper.members) still there (end_group).
+end_sampler_group() {
+  local g m
+  local -a ms=()
+  g="$(cat "$T/stopper.sampler" 2>/dev/null)" || return 0
+  while IFS= read -r m; do [ -z "$m" ] || ms+=("$m"); done < "$T/stopper.members" 2>/dev/null
+  [ -z "$g" ] || [ "${#ms[@]}" -eq 0 ] || end_group "$g" "${ms[@]}"
+}
+
 # note_started <file> — record the calling shell's last background job ($!) in <file> as
 # `pid:identity`, the identity read at once: a later check or kill then reaches that process, and
 # no other that comes to hold its number. One whose identity could not be read is left as `pid:`.
@@ -6893,7 +6904,8 @@ t_suite_runs_each_unit_in_a_process_group_of_its_own() {
   }
   # The sampler's job is the suite's child that is not this unit's wrapper, and the sampler is the
   # job's child. The sampler is stopped, then this unit says so ($qt/stopper.stopped) once the
-  # process groups of the suite and the sampler are recorded, with the job's pid (stopper.sampler).
+  # process groups of the suite and the sampler are recorded, with the job's pid (stopper.sampler) and
+  # the job and the sampler as pid:identity (stopper.members), what a cleanup checks them by.
   t_zz_stops_sampler() {
     local me="\$BASHPID" w su s sp
     w="\$(command -p ps -o ppid= -p "\$me" | tr -d ' ')"; su="\$(command -p ps -o ppid= -p "\$w" | tr -d ' ')"
@@ -6901,6 +6913,7 @@ t_suite_runs_each_unit_in_a_process_group_of_its_own() {
     sp="\$(command -p ps -A -o pid= -o ppid= | awk -v j="\$s" '\$2 == j { print \$1; exit }')"
     [ -n "\$sp" ] || { echo 'fixture: the sampler was not found'; return; }
     echo "\$s" > $qt/stopper.sampler
+    pairs_of "\$s" "\$sp" > $qt/stopper.members
     { command -p ps -o pgid= -p "\$su"; command -p ps -o pgid= -p "\$sp"; } | tr -d ' ' > $qt/stopper.groups
     kill -STOP "\$sp" && : > $qt/stopper.stopped
   }
@@ -6917,7 +6930,8 @@ EOF
     # suite is sent TERM just before or just after (TERM_WHEN) its first KILL (TERM_AT_KILL, a marker);
     # once that has fired, a stop entered again finds the sampler not yet reaped, as bash can leave it.
     # So it does once the suite is sent TERM just after it releases the sampler's job and that job has
-    # ended (TERM_AT_RELEASE, a marker naming the job).
+    # ended (TERM_AT_RELEASE, a marker naming the job). The job is stopped just before its release
+    # (STOP_JOB, a marker recording it as `pid:identity`).
     printf '%s\n' 'kill() {' \
       '  [ -z "${KILL_LOG:-}" ] || [ "${FUNCNAME[1]:-}" != sampler_kill ] || printf "%s\n" "$*" >> "$KILL_LOG"' \
       '  [ -z "${KILL_REFUSED:-}" ] || [ "${FUNCNAME[1]:-}" != sampler_kill ] || [ "$1" != -KILL ] || return 1' \
@@ -6955,6 +6969,7 @@ EOF
       'say_end() { if [ -n "${SPLIT_END:-}" ]; then printf en; sleep 0.5; printf "d %s\n" "$1"; else printf "end %s\n" "$1"; fi; }' \
       'eval "_real_sampler_release() $(declare -f sampler_release | sed 1d)"' \
       'sampler_release() {' \
+      '  [ -z "${STOP_JOB:-}" ] || [ -e "$STOP_JOB" ] || { pairs_of "$sampler" > "$STOP_JOB"; builtin kill -STOP "$sampler"; }' \
       '  _real_sampler_release; [ -n "${TERM_AT_RELEASE:-}" ] && [ ! -e "$TERM_AT_RELEASE" ] || return 0' \
       '  echo "$sampler" > "$TERM_AT_RELEASE"; local i' \
       '  for (( i = 0; i < 50; i++ )); do case "$(command -p ps -o stat= -p "$sampler" 2>/dev/null)" in ""|*Z*) break ;; esac; sleep 0.1; done' \
@@ -6965,12 +6980,12 @@ EOF
       'eval "_real_sampler_run() $(declare -f sampler_run | sed 1d)"' \
       'sampler_run() { _real_sampler_run "$@"; local r=$?; [ -z "${SLOW_SAMPLER:-}" ] || command -p sleep 2; return "$r"; }' \
       'eval "_real_sampler_spawned() $(declare -f sampler_spawned | sed 1d)"' \
-      'sampler_spawned() { [ -z "${TERM_AT_SPAWN:-}" ] || [ -e "$TERM_AT_SPAWN" ] || { echo "$!" > "$TERM_AT_SPAWN"; builtin kill -TERM "$$"; }; _real_sampler_spawned; }'
+      'sampler_spawned() { [ -z "${TERM_AT_SPAWN:-}" ] || [ -e "$TERM_AT_SPAWN" ] || { note_started "$TERM_AT_SPAWN"; builtin kill -TERM "$$"; }; _real_sampler_spawned; }'
     mirror_samples
     printf '%s\n' \
       'main "$@"'
   } > "$T/suite/test/run.sh"
-  local out c pid dir suite rc unitpid wrapper sampler i
+  local out c pid dir suite rc unitpid wrapper sampler i line
   local -a groups=()
   out="$(SHMUTANT_SELECT=t_zz_strands bash "$T/suite/test/run.sh" 2>&1)"; rc_is $? 1 'a unit that strands two processes fails the suite, which outlives the sweep that kills them'
   has "$out" 'FAIL: t_zz_strands: 2 process(es) outlived the unit and were killed' 'both are killed'
@@ -7086,7 +7101,7 @@ EOF
   # parent ends once the sampler is stopped, which orphans the group, and it survives a hang-up.
   local -a sgroups=()
   local orc
-  rm -f "$T/stopper.sampler" "$T/stopper.groups" "$T/stopper.stopped" "$T/orphan.pid" "$T/orphan.out" "$T/orphan.rc"
+  rm -f "$T/stopper.sampler" "$T/stopper.members" "$T/stopper.groups" "$T/stopper.stopped" "$T/orphan.pid" "$T/orphan.out" "$T/orphan.rc"
   ( set -m
     bash -c 'trap ": hung up" HUP; SHMUTANT_SELECT=t_zz_stops_sampler bash "$1" > "$2" 2>&1; echo "$?" > "$3.part" && mv -f -- "$3.part" "$3"' _ \
       "$T/suite/test/run.sh" "$T/orphan.out" "$T/orphan.rc" & note_started "$T/orphan.pid"
@@ -7097,7 +7112,7 @@ EOF
   if [ ! -e "$T/orphan.rc" ]; then
     fail_ 'the orphaned suite hung on the sampler its unit stopped'
     # Killed only while each is still the process recorded.
-    pid="$(cat "$T/stopper.sampler" 2>/dev/null)"; [ -z "$pid" ] || kill -KILL -- "-$pid" 2>/dev/null
+    end_sampler_group
     for pid in $(left_running "$T/orphan.pid" 2>/dev/null); do kill -KILL -- "-$pid" 2>/dev/null; done
   elif [ "$i" -ge 200 ]; then fail_ "the suite waited on a sampler its unit had stopped for $i polls of a tenth of a second"; fi
   [ -e "$T/stopper.stopped" ] || fail_ "fixture: t_zz_stops_sampler never stopped the sampler: [$(cat "$T/orphan.out" 2>/dev/null)]"
@@ -7119,12 +7134,12 @@ EOF
   # kill the group again once the job that reserved its number had died with it.
   local when
   for when in before after; do
-    rm -f "$T/stopper.sampler" "$T/stopper.groups" "$T/stopper.stopped" "$T/kill.log" "$T/termed"
+    rm -f "$T/stopper.sampler" "$T/stopper.members" "$T/stopper.groups" "$T/stopper.stopped" "$T/kill.log" "$T/termed"
     KILL_LOG="$T/kill.log" TERM_AT_KILL="$T/termed" TERM_WHEN="$when" SHMUTANT_SELECT=t_zz_stops_sampler bash "$T/suite/test/run.sh" > "$T/rekill.out" 2>&1 & suite=$!
     i=0; while kill -0 "$suite" 2>/dev/null && [ "$i" -lt 600 ]; do i=$((i + 1)); sleep 0.1; done
     if kill -0 "$suite" 2>/dev/null; then
       fail_ "the suite sent TERM $when killing its stopped sampler hung"
-      pid="$(cat "$T/stopper.sampler" 2>/dev/null)"; [ -z "$pid" ] || kill -KILL -- "-$pid" 2>/dev/null
+      end_sampler_group
       kill -KILL "$suite" 2>/dev/null
     fi
     rc=0; wait "$suite" 2>/dev/null || rc=$?
@@ -7146,17 +7161,32 @@ EOF
   rc_is "$rc" 143 'the suite sent TERM once its sampler is released ends by TERM'
   [ ! -s "$T/kill.log" ] || fail_ "a sampler group was killed once its job was released: [$(tr '\n' ';' < "$T/kill.log")]"
   hasnt "$(cat "$T/release.out" 2>/dev/null)" 'did not stop' 'nor is its sampler reported as one that did not stop'
+  # A job stopped once its sampler has ended, before it could read its release, does not leave the
+  # suite waiting on it: the run ends as a harness failure that names it, at once, and the job is
+  # sent nothing (its group's number is no longer reserved once it is released).
+  rm -f "$T/kill.log" "$T/jobstopped"
+  KILL_LOG="$T/kill.log" STOP_JOB="$T/jobstopped" SHMUTANT_SELECT=t_zz_traps bash "$T/suite/test/run.sh" > "$T/jobstop.out" 2>&1 & suite=$!
+  i=0; while kill -0 "$suite" 2>/dev/null && [ "$i" -lt 600 ]; do i=$((i + 1)); sleep 0.1; done
+  if kill -0 "$suite" 2>/dev/null; then fail_ 'the suite whose released sampler job was stopped hung'; kill -KILL "$suite" 2>/dev/null
+  elif [ "$i" -ge 200 ]; then fail_ "the suite waited on a released sampler job held stopped for $i polls of a tenth of a second"; fi
+  rc=0; wait "$suite" 2>/dev/null || rc=$?
+  line="$(cat "$T/jobstopped" 2>/dev/null)"
+  if [ -z "$line" ]; then fail_ "fixture: the sampler's job was never stopped: [$(cat "$T/jobstop.out" 2>/dev/null)]"
+  else end_group "${line%%:*}" "$line"; fi
+  rc_is "$rc" 2 'a released sampler job held stopped ends the run as a harness failure'
+  has "$(cat "$T/jobstop.out" 2>/dev/null)" "run.sh: t_zz_traps: its descendant sampler's job has not ended once released" 'and names it'
+  [ ! -s "$T/kill.log" ] || fail_ "a released sampler job was signalled: [$(tr '\n' ';' < "$T/kill.log")]"
   # A group kill that cannot be sent does not leave the suite waiting on a sampler still stopped: it
   # is waited on as long as a running one is given, then the run ends as a harness failure that
   # names it.
-  rm -f "$T/stopper.sampler" "$T/stopper.groups" "$T/stopper.stopped"
+  rm -f "$T/stopper.sampler" "$T/stopper.members" "$T/stopper.groups" "$T/stopper.stopped"
   KILL_REFUSED=1 SHMUTANT_SELECT=t_zz_stops_sampler bash "$T/suite/test/run.sh" > "$T/refused.out" 2>&1 & suite=$!
   i=0; while kill -0 "$suite" 2>/dev/null && [ "$i" -lt 900 ]; do i=$((i + 1)); sleep 0.1; done
   if kill -0 "$suite" 2>/dev/null; then fail_ 'the suite whose sampler kill could not be sent hung'; kill -KILL "$suite" 2>/dev/null; fi
   rc=0; wait "$suite" 2>/dev/null || rc=$?
   pid="$(cat "$T/stopper.sampler" 2>/dev/null)"
   if [ -z "$pid" ]; then fail_ "fixture: t_zz_stops_sampler never found the sampler: [$(cat "$T/refused.out" 2>/dev/null)]"
-  else kill -KILL -- "-$pid" 2>/dev/null; wait_gone "$pid" '' 1; fi
+  else end_sampler_group; wait_gone "$pid" '' 1; fi
   rc_is "$rc" 2 'a sampler whose group kill could not be sent ends the run as a harness failure'
   has "$(cat "$T/refused.out" 2>/dev/null)" 'run.sh: t_zz_stops_sampler: its descendant sampler could not be killed and has not ended' 'and names it'
   # Sent TERM between the sampler's start and the record of its pid, the suite still knows its
@@ -7165,13 +7195,13 @@ EOF
   rm -f "$T/spawned"
   rc=0; { TERM_AT_SPAWN="$T/spawned" SHMUTANT_SELECT=t_zz_slow bash "$T/suite/test/run.sh" > "$T/spawn.out" 2>&1; } 2>/dev/null || rc=$?
   rc_is "$rc" 143 'the suite sent TERM as its sampler starts ends by TERM'
-  pid="$(cat "$T/spawned" 2>/dev/null)"
+  line="$(cat "$T/spawned" 2>/dev/null)"; pid="${line%%:*}"
   if [ -z "$pid" ]; then fail_ "fixture: the suite was never sent TERM as its sampler started: [$(cat "$T/spawn.out" 2>/dev/null)]"
-  elif ! wait_gone "$pid" '' 1; then fail_ 'a sampler started as the suite was sent TERM outlived the suite'; kill -KILL -- "-$pid" 2>/dev/null; fi
+  elif ! wait_gone "$pid" "${line#*:}" 1; then fail_ 'a sampler started as the suite was sent TERM outlived the suite'; end_group "$pid" "$line"; fi
   # A sampler that ends between the runner's last look and its kill (here: killed and reaped by its
   # job) leaves its group to that job, which keeps it until the runner is done: the kill still finds
   # the group it was meant for, and the unit fails as a sampler that did not stop.
-  rm -f "$T/stopper.sampler" "$T/stopper.groups" "$T/stopper.stopped" "$T/kill.log" "$T/gone"
+  rm -f "$T/stopper.sampler" "$T/stopper.members" "$T/stopper.groups" "$T/stopper.stopped" "$T/kill.log" "$T/gone"
   rc=0; out="$(KILL_LOG="$T/kill.log" GONE_BEFORE_KILL="$T/gone" SHMUTANT_SELECT=t_zz_stops_sampler bash "$T/suite/test/run.sh" 2>&1)" || rc=$?
   [ -e "$T/gone" ] || fail_ "fixture: the sampler was never ended before the kill: [$out]"
   rc_is "$rc" 1 'a unit whose sampler ended just before its kill fails'
@@ -8333,15 +8363,29 @@ sampler_stop() {
     [ -n "$ended" ] || ! suite_job_runs "$sampler" || sampler_kill
   fi
   sampler_release
-  if [ "${sampler_killed:-0}" = 2 ]; then
-    for (( i = 0; i < 300; i++ )); do suite_job_runs "$sampler" || break; command -p sleep 0.1; done
-    if suite_job_runs "$sampler"; then
-      echo "run.sh: ${u:-a unit}: its descendant sampler could not be killed and has not ended" >&2
-      exit 2
-    fi
-  fi
+  sampler_job_wait
   src=0; wait "$sampler" 2>/dev/null || src=$?
   sampler=""
+}
+
+# sampler_job_wait — wait for the sampler's job ($sampler), released or killed, to end, which it does
+# at once. One that has not, thirty seconds on or once seen stopped (a job held stopped cannot read its
+# release), ends the run as a harness failure (exit 2), never hanging it, and is sent nothing: its
+# group's number is no longer reserved for a kill.
+sampler_job_wait() {
+  local i
+  for (( i = 0; i < 300; i++ )); do
+    suite_job_runs "$sampler" || return 0
+    (( i % 10 != 9 )) || ! _shmutant_proc_stopped "$sampler" || break
+    command -p sleep 0.1
+  done
+  suite_job_runs "$sampler" || return 0
+  if [ "${sampler_killed:-0}" = 2 ]; then
+    echo "run.sh: ${u:-a unit}: its descendant sampler could not be killed and has not ended" >&2
+  else
+    echo "run.sh: ${u:-a unit}: its descendant sampler's job has not ended once released" >&2
+  fi
+  exit 2
 }
 
 # sampler_kill — KILL the sampler's process group and say so (`sampler_killed` 1, or 2 when the
