@@ -220,6 +220,16 @@ end_group() {
   return 0
 }
 
+# names_outside <dir> — print each `name=value` line of stdin whose value (quotes and an `inode:`
+# prefix taken off) is neither <dir> nor a path below it, compared byte for byte: <dir> reaches awk
+# through its environment, which keeps a backslash in it as it is.
+names_outside() {
+  NAMES_DIR="$1" command -p awk '
+    BEGIN { d = ENVIRON["NAMES_DIR"] }
+    { v = $0; sub(/^[^=]*=/, "", v); gsub(/^\047|\047$/, "", v); sub(/^[0-9]+:/, "", v)
+      if (v == d || index(v, d "/") == 1) next; print }'
+}
+
 # end_sampler_group — a cleanup of a fixture of t_suite_runs_each_unit_in_a_process_group_of_its_own:
 # end the group of the sampler's job that t_zz_stops_sampler recorded ($T/stopper.sampler), only
 # through a member it recorded with its identity ($T/stopper.members) still there (end_group).
@@ -7478,8 +7488,7 @@ EOF
   else
     # A variable holding the unit's own directory, a path below it, or its identity (`inode:path`,
     # T_ID) is the unit's: compared whole.
-    names="$(command -p grep -v -- '^shmutant-test\.' "$T/swaps.names" \
-      | command -p awk -v d="$dir" '{ v = $0; sub(/^[^=]*=/, "", v); gsub(/^'"'"'|'"'"'$/, "", v); sub(/^[0-9]+:/, "", v); if (v == d || index(v, d "/") == 1) next; print }')"
+    names="$(command -p grep -v -- '^shmutant-test\.' "$T/swaps.names" | names_outside "$dir")"
     eq "$names" '' 'the unit can name no file of the sweep'"'"'s, in TMPDIR or in a variable'
   fi
   [ -n "$dir" ] && [ ! -e "$dir" ] || fail_ "the directory of a unit whose records were whole was not removed: [$out]"
@@ -7634,6 +7643,13 @@ t_seen_by_sampler_matches_the_process_now() {
   rc=0; ( SAMPLE_MIRROR="$T/mirror"; seen_by_sampler "$p" > /dev/null ) || rc=$?
   rc_is "$rc" 0 'the mirrored line carrying the start of the process now at the pid failed the handshake'
   kill -KILL "$p" 2>/dev/null; wait "$p" 2>/dev/null
+}
+
+t_names_outside_compares_a_path_byte_for_byte() {
+  # A directory whose name holds a backslash is matched as it is, not as awk would read an escape.
+  local d='/tmp/a\tb' got
+  got="$(printf '%s\n' "T=$d" "PWD='$d/sub'" "T_ID=12:$d" "OTHER=/tmp/a	b" "NEAR=${d}c" | names_outside "$d")"
+  eq "$got" "OTHER=/tmp/a	b"$'\n'"NEAR=${d}c" 'only the values outside the directory are named'
 }
 
 t_unit_leftovers_fails_closed() {
