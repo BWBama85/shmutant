@@ -220,6 +220,25 @@ end_group() {
   return 0
 }
 
+# tmp_names — print `name=line` for each line of each shell variable's values (array elements and
+# keys too) that names a path below TMPDIR: what a unit could learn of files there from what it
+# inherits. Values are read as they are, never from `set`, which quotes what it prints, so a path
+# holding a quote or a backslash is still found.
+tmp_names() {
+  local _tn_v _tn_e _tn_l _tn_p="${TMPDIR:-/tmp}"
+  local -a _tn_vals
+  _tn_p="${_tn_p%/}/"
+  for _tn_v in $(compgen -v); do
+    case "$_tn_v" in _tn_*) continue ;; esac
+    eval '_tn_vals=("${'"$_tn_v"'[@]}" "${!'"$_tn_v"'[@]}")' 2>/dev/null || continue
+    for _tn_e in "${_tn_vals[@]}"; do
+      while IFS= read -r _tn_l; do
+        case "$_tn_l" in *"$_tn_p"?*) printf '%s=%s\n' "$_tn_v" "$_tn_l" ;; esac
+      done <<< "$_tn_e"
+    done
+  done
+}
+
 # names_outside <dir> — print each `name=value` line of stdin whose value (quotes and an `inode:`
 # prefix taken off) is neither <dir> nor a path below it, compared byte for byte: <dir> reaches awk
 # through its environment, which keeps a backslash in it as it is.
@@ -7324,7 +7343,7 @@ t_suite_removes_a_unit_directory_only_while_it_is_the_runners() {
       # TMPDIR, where the sweep makes its files, and every shell variable naming a path there.
       names)
         set -m; sleep 30 > /dev/null 2>&1 & note_started $qt/swaps.pid; set +m
-        seen_by_sampler \$! && { ls -A "\$TMPDIR"; set | grep -F -- "\$TMPDIR/"; } > $qt/swaps.names ;;
+        seen_by_sampler \$! && { ls -A "\$TMPDIR"; tmp_names; } > $qt/swaps.names ;;
     esac
   }
 EOF
