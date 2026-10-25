@@ -7507,7 +7507,7 @@ EOF
   else
     # A variable holding the unit's own directory, a path below it, or its identity (`inode:path`,
     # T_ID) is the unit's: compared whole.
-    names="$(command -p grep -v -- '^shmutant-test\.' "$T/swaps.names" | names_outside "$dir")"
+    names="$(command -p grep -vxF -- "${dir##*/}" "$T/swaps.names" | names_outside "$dir")"
     eq "$names" '' 'the unit can name no file of the sweep'"'"'s, in TMPDIR or in a variable'
   fi
   [ -n "$dir" ] && [ ! -e "$dir" ] || fail_ "the directory of a unit whose records were whole was not removed: [$out]"
