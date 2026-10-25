@@ -229,7 +229,8 @@ tmp_names() {
   local -a _tn_vals
   _tn_p="${_tn_p%/}/"
   for _tn_v in $(compgen -v); do
-    case "$_tn_v" in _tn_*) continue ;; esac
+    # Its own names, told by `[`, which an inherited nocasematch does not reach as it does `case`.
+    [ "${_tn_v:0:4}" != _tn_ ] || continue
     eval '_tn_vals=("${'"$_tn_v"'[@]}" "${!'"$_tn_v"'[@]}")' 2>/dev/null || continue
     for _tn_e in "${_tn_vals[@]}"; do
       while IFS= read -r _tn_l; do
@@ -7491,7 +7492,7 @@ EOF
   # holds only the units' directories while the unit runs, and no variable the unit inherits names a
   # path there but its own directory. The records are read through the runner's descriptors, so its
   # leftover is swept and the directory goes.
-  local names
+  local names listed
   rm -rf -- "$T/swaps.aside" "$T/callers" "$T/raced" "$T/swaps.pid" "$T/swaps.names" "$T/named-in-sweep"; mkdir "$T/callers"; : > "$T/callers/precious"
   # A line an earlier run left in the mirror is gone once this run's copy starts (mirror_samples).
   printf 'stale-line\n' >> "$SAMPLE_MIRROR"
@@ -7504,10 +7505,12 @@ EOF
   has "$out" 'FAIL: t_zz_swaps: 1 process(es) outlived the unit and were killed' 'and its leftover is swept from the records it cannot name'
   dir="$(cat "$T/swaps.dir" 2>/dev/null)"
   if [ ! -s "$T/swaps.names" ]; then fail_ "fixture: t_zz_swaps never listed what it can see of the sweep: [$out]"
+  elif ! listed="$(cat "$T/swaps.names")" || [ -z "$listed" ]; then fail_ 'fixture: what t_zz_swaps listed of the sweep could not be read'
+  # A variable holding the unit's own directory, a path below it, or its identity (`inode:path`,
+  # T_ID) is the unit's: compared whole. A filter that failed is not a list that came back empty.
+  elif ! names="$(set -o pipefail; printf '%s\n' "$listed" | { command -p grep -vxF -- "${dir##*/}" || [ "$?" = 1 ]; } | names_outside "$dir")"; then
+    fail_ 'what t_zz_swaps listed of the sweep could not be filtered'
   else
-    # A variable holding the unit's own directory, a path below it, or its identity (`inode:path`,
-    # T_ID) is the unit's: compared whole.
-    names="$(command -p grep -vxF -- "${dir##*/}" "$T/swaps.names" | names_outside "$dir")"
     eq "$names" '' 'the unit can name no file of the sweep'"'"'s, in TMPDIR or in a variable'
   fi
   [ -n "$dir" ] && [ ! -e "$dir" ] || fail_ "the directory of a unit whose records were whole was not removed: [$out]"
