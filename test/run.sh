@@ -6916,6 +6916,8 @@ EOF
     # The sweep's kills are spaced, one target at a time; every kill sampler_kill makes is logged. The
     # suite is sent TERM just before or just after (TERM_WHEN) its first KILL (TERM_AT_KILL, a marker);
     # once that has fired, a stop entered again finds the sampler not yet reaped, as bash can leave it.
+    # So it does once the suite is sent TERM just after it releases the sampler's job and that job has
+    # ended (TERM_AT_RELEASE, a marker naming the job).
     printf '%s\n' 'kill() {' \
       '  [ -z "${KILL_LOG:-}" ] || [ "${FUNCNAME[1]:-}" != sampler_kill ] || printf "%s\n" "$*" >> "$KILL_LOG"' \
       '  [ -z "${KILL_REFUSED:-}" ] || [ "${FUNCNAME[1]:-}" != sampler_kill ] || [ "$1" != -KILL ] || return 1' \
@@ -6948,7 +6950,16 @@ EOF
       'eval "_real_sweep_unit() $(declare -f sweep_unit | sed 1d)"' \
       'sweep_unit() { [ -z "${BREAK_SWEEP:-}" ] || { echo "run.sh: cannot set up the sweep for $1" >&2; exit 2; }; _real_sweep_unit "$@"; }' \
       'eval "_real_job_runs() $(declare -f suite_job_runs | sed 1d)"' \
-      'suite_job_runs() { if [ -n "${TERM_AT_KILL:-}" ] && [ -e "$TERM_AT_KILL" ] && [ "${FUNCNAME[1]:-}" = sampler_stop ] && [ "${FUNCNAME[2]:-}" = suite_signalled ]; then return 0; fi; _real_job_runs "$@"; }' \
+      'suite_job_runs() { if [ -e "${TERM_AT_KILL:-/nonexistent}" ] || [ -e "${TERM_AT_RELEASE:-/nonexistent}" ]; then [ "${FUNCNAME[1]:-}" != sampler_stop ] || [ "${FUNCNAME[2]:-}" != suite_signalled ] || return 0; fi; _real_job_runs "$@"; }' \
+      'eval "$(declare -f sampler_job | sed '"'"'s/printf .end %s.n. "$st"/say_end "$st"/'"'"')"' \
+      'say_end() { if [ -n "${SPLIT_END:-}" ]; then printf en; sleep 0.5; printf "d %s\n" "$1"; else printf "end %s\n" "$1"; fi; }' \
+      'eval "_real_sampler_release() $(declare -f sampler_release | sed 1d)"' \
+      'sampler_release() {' \
+      '  _real_sampler_release; [ -n "${TERM_AT_RELEASE:-}" ] && [ ! -e "$TERM_AT_RELEASE" ] || return 0' \
+      '  echo "$sampler" > "$TERM_AT_RELEASE"; local i' \
+      '  for (( i = 0; i < 50; i++ )); do case "$(command -p ps -o stat= -p "$sampler" 2>/dev/null)" in ""|*Z*) break ;; esac; sleep 0.1; done' \
+      '  builtin kill -TERM "$$"' \
+      '}' \
       'eval "_real_ps() $(declare -f _shmutant_ps | sed 1d)"' \
       '_shmutant_ps() { if [ -n "${PS_LIES:-}" ] && case " ${FUNCNAME[*]} " in *" sampler_stop "*) true ;; *) false ;; esac; then echo T; return 1; fi; _real_ps "$@"; }' \
       'eval "_real_sampler_run() $(declare -f sampler_run | sed 1d)"' \
@@ -7121,6 +7132,20 @@ EOF
     rc_is "$rc" 143 "the suite sent TERM $when it kills its stopped sampler ends by TERM"
     eq "$(command -p grep -c '^-KILL' "$T/kill.log" 2>/dev/null)" 1 "the sampler's group is killed once, the suite sent TERM $when that kill"
   done
+  # The job's word that its sampler ended, arriving in two parts with a read's timeout between them,
+  # is read whole: the sampler is not taken for one that never ended.
+  rc=0; out="$(SPLIT_END=1 SHMUTANT_SELECT=t_zz_traps bash "$T/suite/test/run.sh" 2>&1)" || rc=$?
+  rc_is "$rc" 0 'a unit whose sampler said it ended in two parts passes'
+  hasnt "$out" 'did not stop' 'and its sampler is not reported as one that did not stop'
+  # Sent TERM once it has released the sampler's job and that job has ended, the suite only waits for
+  # it: the group's number is no longer the job's, so it is sent nothing, though bash may not yet have
+  # reaped the job.
+  rm -f "$T/kill.log" "$T/released"
+  rc=0; { KILL_LOG="$T/kill.log" TERM_AT_RELEASE="$T/released" SHMUTANT_SELECT=t_zz_traps bash "$T/suite/test/run.sh" > "$T/release.out" 2>&1; } 2>/dev/null || rc=$?
+  [ -s "$T/released" ] || fail_ "fixture: the suite was never sent TERM once its sampler was released: [$(cat "$T/release.out" 2>/dev/null)]"
+  rc_is "$rc" 143 'the suite sent TERM once its sampler is released ends by TERM'
+  [ ! -s "$T/kill.log" ] || fail_ "a sampler group was killed once its job was released: [$(tr '\n' ';' < "$T/kill.log")]"
+  hasnt "$(cat "$T/release.out" 2>/dev/null)" 'did not stop' 'nor is its sampler reported as one that did not stop'
   # A group kill that cannot be sent does not leave the suite waiting on a sampler still stopped: it
   # is waited on as long as a running one is given, then the run ends as a harness failure that
   # names it.
@@ -8280,34 +8305,34 @@ suite_job_runs() {
 # once it is seen stopped. One that has not ended then is killed with its whole group in one signal
 # (sampler_kill): everything it started is in that group (the sampler starts nothing in another), so
 # nothing forked after a listing escapes, and nothing is frozen. The job keeps the group's number
-# reserved until the runner closes its end of the job's hold channel ($hw), which it does only after
-# that kill. Sets `src` to the sampler's status and leaves `sampler_killed` (which main clears for
-# each unit) at 1 when it was killed, 2 when the kill could not be sent; clears `sampler`; does
-# nothing when there is no sampler. A stop entered again by an interrupt (suite_signalled) once the
-# kill was sent only waits, as the group's number is no longer reserved; one entered after the first
-# had read the end it waited for waits for an end that does not come again, and kills the group,
-# still held. A sampler the kill could not reach is waited on as long as a running one is given,
+# reserved until the runner releases it (sampler_release), which it does only after that kill. Sets
+# `src` to the sampler's status and leaves `sampler_killed` (which main clears for each unit) at 1
+# when it was killed, 2 when the kill could not be sent; clears `sampler`; does nothing when there is
+# no sampler. A stop entered again by an interrupt (suite_signalled) once the kill was sent, or once
+# the job was released, only waits, as the group's number is no longer reserved; one entered after
+# the first had read the end it waited for waits for an end that does not come again, and kills the
+# group, still held. A sampler the kill could not reach is waited on as long as a running one is given,
 # then ends the run as a harness failure (exit 2), never hanging it.
 sampler_stop() {
-  local i line w="" ended=""
+  local i line part="" w="" ended=""
   [ -n "${sampler:-}" ] || return 0
-  if [ "${sampler_killed:-0}" = 0 ]; then
+  if [ "${sampler_killed:-0}" = 0 ] && [ "${sampler_released:-0}" = 0 ]; then
     [ -z "${pfd:-}" ] || { printf 'none\n' >&"$pfd"; } 2>/dev/null
     for (( i = 0; i < $1; i++ )); do
       if IFS= read -r -t 0.1 -u "$tr" line; then
+        line="$part$line"; part=""
         case "$line" in 'pid '*) w="${line#pid }" ;; 'end '*) ended=1; break ;; esac
         continue
       fi
+      # A read the timeout cut short hands over what it had read of the line: kept for the next.
+      part="$part$line"
       suite_job_runs "$sampler" || break
       # Once a second: a sampler held stopped will not end, so it is not waited on.
       (( i % 10 != 9 )) || [ -z "$w" ] || ! _shmutant_proc_stopped "$w" || break
     done
     [ -n "$ended" ] || ! suite_job_runs "$sampler" || sampler_kill
   fi
-  # Released by a line and then the end: the runner still holds a read end of the channel ($hr), so
-  # the line cannot raise SIGPIPE here even once the job has gone.
-  if [ -n "${hw:-}" ]; then { printf 'go\n' >&"$hw"; } 2>/dev/null; exec {hw}>&-; fi
-  hw=""
+  sampler_release
   if [ "${sampler_killed:-0}" = 2 ]; then
     for (( i = 0; i < 300; i++ )); do suite_job_runs "$sampler" || break; command -p sleep 0.1; done
     if suite_job_runs "$sampler"; then
@@ -8327,6 +8352,20 @@ sampler_stop() {
 sampler_kill() {
   signals_hold
   if kill -KILL -- "-$sampler" 2>/dev/null; then sampler_killed=1; else sampler_killed=2; fi
+  signals_release
+}
+
+# sampler_release — let the sampler's job end (sampler_job) by a line on its hold channel, then that
+# channel's end ($hw), once `sampler_released` (which main clears for each unit) says so, with no
+# handler of the suite's able to run between the two (signals_hold): a stop entered after the line
+# would otherwise find the sampler not yet released and could kill a group whose job has ended. The
+# runner still holds a read end of the channel ($hr), so the line cannot raise SIGPIPE here even once
+# the job has gone.
+sampler_release() {
+  signals_hold
+  sampler_released=1
+  if [ -n "${hw:-}" ]; then { printf 'go\n' >&"$hw"; } 2>/dev/null; exec {hw}>&-; fi
+  hw=""
   signals_release
 }
 
@@ -8423,7 +8462,7 @@ main() {
   # from the environment is someone else's path, a T_ID someone else's directory, and a T_SWEPT or
   # T_SAMPLED no sweep or sampler of this run's.
   T=""; T_ID=""; T_SWEPT=""; T_SAMPLED=""; SEEN_SWEEPING=""; SEEN_BAD=""; SEEN_LINES=(); SWEEP_UNIT=""; SWEEP_OWED=""
-  SWEEP_FINAL_FD=""; sampler=""; sampler_killed=0; src=0; pfd=""; hw=""; hr=""; tr=""; held=""
+  SWEEP_FINAL_FD=""; sampler=""; sampler_killed=0; sampler_released=0; src=0; pfd=""; hw=""; hr=""; tr=""; held=""
   # A harness failure (exit 2) mid-run still removes the unit directory the runner made, and only that,
   # unless it came before the unit's leftovers were swept: it is then left in place, and said so.
   trap '[ -z "${T:-}" ] || unit_dir_remove || unit_dir_failed run.sh "${u:-a unit}" "$?" >&2' EXIT
@@ -8464,7 +8503,7 @@ main() {
       || { echo "run.sh: cannot create the directory for $u" >&2
            [ -z "$T" ] || rm -rf -- "$T" || echo "run.sh: $u: its directory $T could not be removed" >&2
            T=""; T_ID=""; exit 2; }
-    T="$sd"; T_SWEPT=1; sampler_killed=0
+    T="$sd"; T_SWEPT=1; sampler_killed=0; sampler_released=0
     # The sampler leads a process group of its own (job control, for this spawn only), as the unit
     # does: the suite's group then holds only the suite and what it runs itself, and a sampler
     # something stopped can neither hang it up nor be frozen with it (D8 and D10 in
