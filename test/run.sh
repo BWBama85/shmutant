@@ -283,6 +283,19 @@ left_running() {
   [ "$n" -gt 0 ]
 }
 
+# carries_identity <pid> <identity> — 0 while <pid> runs carrying <identity>; 1 once it has gone or
+# carries another (a reused pid); 2 when, while it ran, its identity could not be read in ten looks a
+# tenth of a second apart: a read that failed is not a process that has gone.
+carries_identity() {
+  local i now
+  for (( i = 1; ; i++ )); do
+    kill -0 "$1" 2>/dev/null || return 1
+    if now="$(_shmutant_identity "$1" 2>/dev/null)" && [ -n "$now" ]; then _shmutant_same_start "$now" "$2" || return 1; return 0; fi
+    [ "$i" -lt 10 ] || return 2
+    sleep 0.1
+  done
+}
+
 # run_gone <record> <what> [looks] — wait until no process recorded in <record> (`pid:identity` per
 # line, as _shmutant_snapshot prints them) still runs, looking at most <looks> times a tenth of a
 # second apart (150, fifteen seconds, when not given). <record> is read once: every look checks the
@@ -291,7 +304,9 @@ left_running() {
 # with its tree first, so nothing it forks escapes the kill. One inside it is killed with the
 # descendants found then, unfrozen, so a child it forks between that snapshot and the kill escapes: a
 # freeze there could hang up the unit itself (D8). A survivor whose identity cannot be read in ten
-# looks is never signalled by its number alone: it fails the unit as not killed. A record that is
+# looks is never signalled by its number alone: it fails the unit as not killed; and the descendants
+# of one inside whose identity cannot be confirmed around their listing fail it as not killed too,
+# since they could be a reused pid's. A record that is
 # empty or holds a line that is not `pid:identity` fails too: such a line could not be told from a
 # reused pid, and the wait would pass vacuously. Returns 1 on any failure, 2 for <looks> that is not a
 # decimal from 1 to 9999.
@@ -348,10 +363,15 @@ run_gone() {
       inside+=("$p:$id")
       # Its descendants count only while it still carries its identity, before and after the
       # snapshot: the children of a pid reused since are someone else's.
-      if _shmutant_alive_since "$p" "$id"; then
+      carries_identity "$p" "$id"; c=$?
+      if [ "$c" = 0 ]; then
         snap="$(_shmutant_snapshot "$p")"
-        ! _shmutant_alive_since "$p" "$id" || [ -z "$snap" ] || mapfile -t -O "${#inside[@]}" inside <<< "$snap"
+        if [ -n "$snap" ]; then
+          carries_identity "$p" "$id"; c=$?
+          [ "$c" != 0 ] || mapfile -t -O "${#inside[@]}" inside <<< "$snap"
+        fi
       fi
+      [ "$c" != 2 ] || fail_ "$2: the identity of $p could not be confirmed around listing its descendants, so they were not killed"
     fi
   done
   [ "${#outside[@]}" -eq 0 ] || _shmutant_kill_tree_twice 0: "${outside[@]}"
@@ -3487,7 +3507,7 @@ t_post_run_cleanup_never_signals_a_reaped_root_by_number() {
   [ ! -s "$T/b2.signals" ] || fail_ "a root whose given identity does not match was signalled, if only stopped and let go: [$(tr '\n' ';' < "$T/b2.signals")]"
   kill "$b2" 2>/dev/null; wait "$b2" 2>/dev/null
   # a rejected root's current children are not searched from either
-  ( sleep 5; : ) & local b3=$!
+  ( sleep 30; : ) & local b3=$!
   wait_descendants "$b3" 1 || { fail_ 'fixture: the root has no child to protect'; _shmutant_kill_tree KILL "$b3" "$b3:"; wait "$b3" 2>/dev/null; return; }
   local kid; kid="$(_shmutant_descendants "$b3" | head -n 1)"
   [ -n "$kid" ] || fail_ 'fixture: the root has no child to protect'
@@ -7755,6 +7775,12 @@ t_wait_descendants_waits_for_the_count_and_expires() {
   done
   wait_descendants "$root" 2>/dev/null; rc_is $? 2 'no count is refused'
   _shmutant_kill_tree KILL "$root" "$root:"; wait "$root" 2>/dev/null
+  # Looks counted through a stubbed walk: two descendants appear only at the fourth, and none ever
+  # makes the wait look fifty times.
+  ( _shmutant_descendants() { printf 'x\n' >> "$T/looks"; [ "$(command -p wc -l < "$T/looks")" -lt "$LATE_AT" ] || printf '1\n2\n'; }
+    rm -f "$T/looks"; LATE_AT=4; wait_descendants 1 2; echo "rc=$? looks=$(command -p wc -l < "$T/looks" | tr -d ' ')"
+    rm -f "$T/looks"; LATE_AT=99; wait_descendants 1 2; echo "rc=$? looks=$(command -p wc -l < "$T/looks" | tr -d ' ')" ) > "$T/counted"
+  eq "$(tr '\n' ' ' < "$T/counted")" 'rc=0 looks=4 rc=1 looks=50 ' 'the wait looks until the count appears, and fifty times when it never does'
 }
 
 t_wait_gone_takes_a_zombie_as_gone() {
@@ -7923,24 +7949,40 @@ t_run_gone_fails_and_ends_what_outlives_the_wait() {
       fi
     done
   done
-  # Identified, in the unit's own group, and its identity unreadable at the check before its
-  # descendants are listed: it is still killed.
-  rm -f "$T/reads"
-  ( sleep 30 > /dev/null 2>&1 & note_started "$T/late.id" )
-  s="$(cat "$T/late.id" 2>/dev/null)"; sid="${s#*:}"; s="${s%%:*}"
-  if [ -z "$s" ] || [ -z "$sid" ]; then fail_ 'fixture: the survivor whose later check fails was not recorded'
-  else
-    out="$( stub_pid="$s"; eval "_real_identity() $(declare -f _shmutant_identity | sed 1d)"
+  # Identified, in the unit's own group, with a child, and its identity unreadable at a check around
+  # the listing of its descendants (call 1 is before the listing, call 2 after it): read once, it is
+  # killed with its child; never read, it is still killed, and its child fails the unit as not killed.
+  local mode child cid
+  for mode in before-once after-once before-always after-always; do
+    rm -f "$T/reads" "$T/child.pid"
+    ( bash -c 'sleep 30 > /dev/null 2>&1 & echo "$!" > "$1/child.pid"; wait' _ "$T" & note_started "$T/late.id" )
+    s="$(cat "$T/late.id" 2>/dev/null)"; sid="${s#*:}"; s="${s%%:*}"
+    i=0; until [ -s "$T/child.pid" ]; do i=$((i + 1)); [ "$i" -lt 50 ] || break; sleep 0.1; done
+    child="$(cat "$T/child.pid" 2>/dev/null)"; cid="$(_shmutant_identity "$child" 2>/dev/null)"
+    if [ -z "$s" ] || [ -z "$sid" ] || [ -z "$child" ] || [ -z "$cid" ]; then
+      fail_ "fixture: the survivor whose later check fails, or its child, was not recorded ($mode)"; _shmutant_kill_tree KILL "" "$s:$sid" "$child:$cid"; continue
+    fi
+    out="$( stub_pid="$s" stub_mode="$mode"; eval "_real_identity() $(declare -f _shmutant_identity | sed 1d)"
       _shmutant_identity() {
-        if [ "$1" = "$stub_pid" ] && [ "${FUNCNAME[1]}" = _shmutant_alive_since ] && [ "${FUNCNAME[2]}" = run_gone ]; then
-          printf 'failed\n' >> "$T/reads"; return 1
+        local n
+        if [ "$1" = "$stub_pid" ] && [ "${FUNCNAME[1]}" = carries_identity ] && [ "${FUNCNAME[2]}" = run_gone ]; then
+          printf 'call\n' >> "$T/reads"; n="$(command -p wc -l < "$T/reads" | command -p tr -d ' ')"
+          case "$stub_mode:$n" in before-once:1|after-once:2|before-always:*) return 1 ;; after-always:*) [ "$n" = 1 ] || return 1 ;; esac
         fi
         _real_identity "$@"
       }
-      run_gone "$T/late.id" 'the late run' 2 )"; rc_is $? 1 'a survivor whose later identity check fails fails'
-    [ -s "$T/reads" ] || fail_ 'fixture: the check before the descendants are listed was not made to fail'
-    wait_gone "$s" "$sid" 1 || { fail_ 'a survivor whose identity check failed before its descendants were listed was still running when run_gone returned'; _shmutant_kill_tree KILL "" "$s:$sid"; }
-  fi
+      run_gone "$T/late.id" 'the late run' 2 )"; rc_is $? 1 "a survivor whose later identity check fails fails ($mode)"
+    [ -s "$T/reads" ] || fail_ "fixture: no check around the listing of the descendants was made ($mode)"
+    wait_gone "$s" "$sid" 1 || { fail_ "a survivor whose identity check failed around listing its descendants was still running when run_gone returned ($mode)"; _shmutant_kill_tree KILL "" "$s:$sid"; }
+    case "$mode" in
+      *-once)
+        hasnt "$out" 'could not be confirmed' "a check that works on a later read reports nothing unconfirmed ($mode)"
+        wait_gone "$child" "$cid" 1 || { fail_ "the child of a survivor whose check worked on a later read was still running when run_gone returned ($mode)"; _shmutant_kill_tree KILL "" "$child:$cid"; } ;;
+      *)
+        has "$out" "FAIL: $_unit: the late run: the identity of $s could not be confirmed around listing its descendants, so they were not killed" "a check that never works is reported ($mode)"
+        _shmutant_kill_tree KILL "" "$child:$cid"; wait_gone "$child" "$cid" || fail_ "fixture: the child of the survivor could not be ended ($mode)" ;;
+    esac
+  done
 }
 
 # --- runner -----------------------------------------------------------------------------------------------
