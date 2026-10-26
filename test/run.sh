@@ -172,7 +172,7 @@ stopped_among() {
   local want=" " p
   for p in "$@"; do want="$want$p "; done
   table="$(command -p ps -A -o pid= -o stat= 2>/dev/null)" && [ -n "$table" ] || return 1
-  ( set -o pipefail; printf '%s\n' "$table" | command -p awk -v want="$want" '
+  (set -o pipefail; printf '%s\n' "$table" | command -p awk -v want="$want" '
     index(want, " " $1 " ") && $2 ~ /T/ { print $1 }' )
 }
 
@@ -216,7 +216,7 @@ pgid_of() {
 group_members() {
   local table
   table="$(command -p ps -A -o pid= -o pgid= 2>/dev/null)" && [ -n "$table" ] || return 1
-  ( set -o pipefail; printf '%s\n' "$table" | command -p awk -v g="$1" '$2 == g { print $1 }' )
+  (set -o pipefail; printf '%s\n' "$table" | command -p awk -v g="$1" '$2 == g { print $1 }' )
 }
 
 # pairs_of <pid>… — print `pid:identity` for each of <pid>… whose identity can be read now, one per

@@ -642,7 +642,7 @@ _shmutant_scan_output() {
 _shmutant_descendants() {
   local table
   table="$(command -p ps -A -o pid= -o ppid= 2>/dev/null)" || return 0
-  ( set -o pipefail; printf '%s\n' "$table" | command -p awk -v root="$1" '
+  (set -o pipefail; printf '%s\n' "$table" | command -p awk -v root="$1" '
     { child[NR] = $1; parent[NR] = $2 }
     END {
       want[root] = 1
@@ -748,7 +748,7 @@ _shmutant_descendants_started() {
   local table now
   if [ "${SHMUTANT_PROC:-}" = 1 ]; then
     table="$(_shmutant_proc_table)"; [ -n "$table" ] || return 1
-    ( set -o pipefail; printf '%s\n' "$table" | command -p awk -v root="$1" '
+    (set -o pipefail; printf '%s\n' "$table" | command -p awk -v root="$1" '
       { i++; child[i] = $1; parent[i] = $2; start[i] = $3 }
       END {
         want[root] = 1
@@ -762,7 +762,7 @@ _shmutant_descendants_started() {
   fi
   if [ "${SHMUTANT_PS_LSTART:-}" != 0 ] && _shmutant_identity "$BASHPID" > /dev/null && [ "${SHMUTANT_PS_LSTART:-}" = 1 ]; then
     table="$(command -p ps -A -o pid= -o ppid= -o lstart= 2>/dev/null)" && [ -n "$table" ] || return 1
-    ( set -o pipefail; printf '%s\n' "$table" | command -p awk -v root="$1" '
+    (set -o pipefail; printf '%s\n' "$table" | command -p awk -v root="$1" '
       NF > 2 && $1 ~ /^[0-9]+$/ { i++; child[i] = $1; parent[i] = $2; $1 = ""; $2 = ""; sub(/^ +/, ""); start[i] = $0 }
       END {
         want[root] = 1
@@ -776,7 +776,7 @@ _shmutant_descendants_started() {
   fi
   table="$(command -p ps -A -o pid= -o ppid= -o etime= 2>/dev/null)" && [ -n "$table" ] || return 1
   now="$(_shmutant_now)"; now=$(( now / 1000000 ))
-  ( set -o pipefail; printf '%s\n' "$table" | command -p awk -v root="$1" -v now="$now" '
+  (set -o pipefail; printf '%s\n' "$table" | command -p awk -v root="$1" -v now="$now" '
     NF == 3 && $1 ~ /^[0-9]+$/ {
       child[NR] = $1; parent[NR] = $2
       e = $3; d = 0
@@ -1209,7 +1209,7 @@ _shmutant_guard_members() {
   # Nor is the group told whole while the second read holds a member the first did not: a process of
   # the run's session can join it between them, and that one is never told.
   first=" "; for p in "${members[@]}"; do first="$first$p "; done
-  ( set -o pipefail; printf '%s\n' "$table" | command -p awk -v g="$1" -v first="$first" '$2 == g && !index(first, " " $1 " ") { f = 1 } END { exit f }' ) || return 1
+  (set -o pipefail; printf '%s\n' "$table" | command -p awk -v g="$1" -v first="$first" '$2 == g && !index(first, " " $1 " ") { f = 1 } END { exit f }' ) || return 1
   for p in "${members[@]}"; do
     [ -n "$p" ] && [ -z "${have[$p]:-}" ] || continue
     case "$out" in *" $p "*) ;; *) continue ;; esac
@@ -2054,7 +2054,7 @@ _shmutant_group_has() {
   # Joined here, one space each: "$*" would join with the caller's IFS.
   for p in "$@"; do want="$want$p "; done
   table="$(_shmutant_ps -A -o pid= -o pgid= 2>/dev/null)" && [ -n "$table" ] || return 1
-  ( set -o pipefail; printf '%s\n' "$table" | command -p awk -v g="$g" -v want="$want" '$2 == g && index(want, " " $1 " ") { f = 1 } END { exit !f }' )
+  (set -o pipefail; printf '%s\n' "$table" | command -p awk -v g="$g" -v want="$want" '$2 == g && index(want, " " $1 " ") { f = 1 } END { exit !f }' )
 }
 
 # _shmutant_holder_state <pid> <identity> — whether a run's holder, started as <pid> with
