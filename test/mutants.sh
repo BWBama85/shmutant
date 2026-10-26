@@ -2569,3 +2569,22 @@ shmutant_mut 'a group a process joined between its reads is told whole' \
   '$2 == g && !index(first, " " $1 " ") { f = 1 } END { exit f }'"'"' || return 1' \
   '$2 == g && !index(first, " " $1 " ") { f = 1 } END { exit 0 }'"'"' || return 1' \
   't_freeze_takes_group_members_as_roots_but_not_the_holder'
+# (no row on the pipefail of the walks in _shmutant_descendants and of the /proc and lstart walks in
+# _shmutant_descendants_started: those lines are the same text, so no literal names one of them;
+# t_process_table_filters_take_a_failed_write_as_no_table covers each)
+shmutant_mut 'an elapsed-time walk takes a table whose write failed' \
+  '  ( set -o pipefail; printf '"'"'%s\n'"'"' "$table" | command -p awk -v root="$1" -v now="$now" '"'"'' \
+  '  ( printf '"'"'%s\n'"'"' "$table" | command -p awk -v root="$1" -v now="$now" '"'"'' \
+  't_process_table_filters_take_a_failed_write_as_no_table'
+shmutant_mut 'a group membership is read from a table whose write failed' \
+  '  ( set -o pipefail; printf '"'"'%s\n'"'"' "$table" | command -p awk -v g="$g" -v want="$want"' \
+  '  ( printf '"'"'%s\n'"'"' "$table" | command -p awk -v g="$g" -v want="$want"' \
+  't_process_table_filters_take_a_failed_write_as_no_table'
+shmutant_mut 'the freeze takes a group read from a write that failed for an empty one' \
+  '  out="$(set -o pipefail; printf '"'"'%s\n'"'"' "$table" | command -p awk -v g="$1" '"'"'$2 == g { print $1 }'"'"')" || return 1' \
+  '  out="$(printf '"'"'%s\n'"'"' "$table" | command -p awk -v g="$1" '"'"'$2 == g { print $1 }'"'"')" || return 1' \
+  't_process_table_filters_take_a_failed_write_as_no_table'
+shmutant_mut 'the freeze checks for a joined member in a table whose write failed' \
+  '  ( set -o pipefail; printf '"'"'%s\n'"'"' "$table" | command -p awk -v g="$1" -v first="$first"' \
+  '  ( printf '"'"'%s\n'"'"' "$table" | command -p awk -v g="$1" -v first="$first"' \
+  't_process_table_filters_take_a_failed_write_as_no_table'

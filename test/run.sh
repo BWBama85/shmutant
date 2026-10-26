@@ -172,8 +172,8 @@ stopped_among() {
   local want=" " p
   for p in "$@"; do want="$want$p "; done
   table="$(command -p ps -A -o pid= -o stat= 2>/dev/null)" && [ -n "$table" ] || return 1
-  printf '%s\n' "$table" | command -p awk -v want="$want" '
-    index(want, " " $1 " ") && $2 ~ /T/ { print $1 }'
+  ( set -o pipefail; printf '%s\n' "$table" | command -p awk -v want="$want" '
+    index(want, " " $1 " ") && $2 ~ /T/ { print $1 }' )
 }
 
 # none_stopped <looks> <pid>… — wait until none of <pid>… is stopped, looking at most <looks> times a
@@ -216,7 +216,7 @@ pgid_of() {
 group_members() {
   local table
   table="$(command -p ps -A -o pid= -o pgid= 2>/dev/null)" && [ -n "$table" ] || return 1
-  printf '%s\n' "$table" | command -p awk -v g="$1" '$2 == g { print $1 }'
+  ( set -o pipefail; printf '%s\n' "$table" | command -p awk -v g="$1" '$2 == g { print $1 }' )
 }
 
 # pairs_of <pid>… — print `pid:identity` for each of <pid>… whose identity can be read now, one per
@@ -4630,6 +4630,59 @@ t_guard_verifies_with_its_top_shell_gone() {
   kill -KILL "$a" 2>/dev/null; wait "$a" 2>/dev/null
 }
 
+# shellcheck disable=SC2034
+t_process_table_filters_take_a_failed_write_as_no_table() {
+  # #51: a process table handed to awk through a pipe is read whole only when its write succeeded, in
+  # whatever shell options the caller runs with: a failed printf, whatever it wrote first, fails the
+  # read rather than passing a short table off as the whole one. Modelled by a printf that fails at the
+  # <at>th write of a value spanning lines, writing it first or not at all (`fail_write <at> <wrote>`).
+  local me kid h hk i out pg at how
+  local -a known=()
+  me="$BASHPID"
+  sleep 60 > /dev/null 2>&1 & kid=$!
+  pg="$(pgid_of "$me")" || { fail_ 'fixture: the unit'"'"'s own group could not be read'; kill -KILL "$kid"; wait "$kid" 2>/dev/null; return; }
+  fail_write() {
+    rm -f "$T/pf.n"; PF_AT="$1"; PF_WROTE="$2"
+    printf() {
+      local a n=0
+      for a in "$@"; do case "$a" in *$'\n'*) n=1 ;; esac; done
+      [ "$n" = 1 ] || { builtin printf "$@"; return; }
+      n="$(command -p cat "$T/pf.n" 2>/dev/null)"; n=$(( ${n:-0} + 1 )); builtin printf '%s' "$n" > "$T/pf.n"
+      [ "$n" = "$PF_AT" ] || { builtin printf "$@"; return; }
+      [ "$PF_WROTE" = 0 ] || builtin printf "$@"
+      return 1
+    }
+  }
+  ( set +o pipefail; fail_write 1 1; _shmutant_descendants "$me" > /dev/null ) && fail_ 'a walk of descendants took a table whose write failed'
+  for how in proc lstart etime; do
+    ( set +o pipefail; fail_write 1 1
+      case "$how" in
+        proc)   SHMUTANT_PROC=1; _shmutant_proc_table() { builtin printf '%s 1 5\n%s %s 6\n' "$me" "$kid" "$me"; } ;;
+        lstart) SHMUTANT_PROC=0; SHMUTANT_PS_LSTART=1 ;;
+        etime)  SHMUTANT_PROC=0; SHMUTANT_PS_LSTART=0 ;;
+      esac
+      _shmutant_descendants_started "$me" > /dev/null ) && fail_ "$how: a walk of descendants with starts took a table whose write failed"
+  done
+  ( set +o pipefail; fail_write 1 1; _shmutant_group_has "$pg" "$me" ) && fail_ 'a group membership was read from a table whose write failed'
+  # The freeze's reads of a stopped group: the first (a write that fails having written nothing reads
+  # as an empty group) and the check for a member that joined between them (one that reads nothing
+  # finds none) never tell the guard the group is whole.
+  rm -f "$T/hk"
+  set -m; sh -c 'sleep 60 & echo "$!" > "$1"; exec sleep 60' _ "$T/hk" < /dev/null > /dev/null 2>&1 & h=$!; set +m
+  for (( i = 0; i < 50; i++ )); do [ -s "$T/hk" ] && break; sleep 0.1; done
+  hk="$(cat "$T/hk" 2>/dev/null)"
+  for at in 1 3; do
+    rm -f "$T/told"
+    out="$( set +o pipefail; declare -a frozen=() roots=(); declare -A have=(); holder="$h"; exec {guard_w}> "$T/told"
+            fail_write "$at" 0; _shmutant_guard_members "$h"; builtin printf 'rc=%s' "$?" )"
+    eq "$out" rc=1 "write $at of the group's reads failed, and the group was still read"
+    if grep -qx m "$T/told" 2>/dev/null; then fail_ "write $at of the group's reads failed, and the group was told whole: [$(tr '\n' ';' < "$T/told")]"; fi
+  done
+  mapfile -t known < <(pairs_of "$h" ${hk:+"$hk"})
+  end_group "$h" "${known[@]}"; wait_gone "$h" "" 30; [ -z "$hk" ] || wait_gone "$hk" "" 30
+  kill -KILL "$kid" 2>/dev/null; wait "$kid" 2>/dev/null
+}
+
 t_process_state_reads_take_a_failed_ps_as_no_state() {
   # A table read whole that lists nothing fills nothing and still returns, to a caller with errexit on:
   # a shell of its own, as a unit runs where bash ignores errexit.
@@ -8171,7 +8224,7 @@ unit_snapshot() {
   [ -n "$out" ] || return 0
   # Rewritten before it is written, in one printf: a pipeline reports only its last command, and
   # the write is the status that matters.
-  out="$(printf '%s\n' "$out" | command -p sed 's/ /:/')" || return 1
+  out="$(set -o pipefail; printf '%s\n' "$out" | command -p sed 's/ /:/')" || return 1
   printf '%s\n' "$out"
 }
 
@@ -8470,7 +8523,7 @@ suite_signalled() {
       # What the walk lists is the sampler's only while the sampler was this shell's job throughout:
       # one reaped meanwhile may have given its number to another process, whose children those are.
       if kids="$(_shmutant_descendants_started "$sampler")" \
-        && kids="$(printf '%s\n' "$kids" | command -p sed 's/ /:/')" && suite_job_runs "$sampler"; then
+        && kids="$(set -o pipefail; printf '%s\n' "$kids" | command -p sed 's/ /:/')" && suite_job_runs "$sampler"; then
         [ -z "$kids" ] || mapfile -t kv <<< "$kids"
       else killed=2; fi
       [ -n "$sid" ] && kv=("$sampler:$sid" "${kv[@]}")

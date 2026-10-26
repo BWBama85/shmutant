@@ -637,11 +637,12 @@ _shmutant_scan_output() {
 }
 
 # _shmutant_descendants <pid> — print every descendant pid of <pid>, via POSIX `ps -A -o pid= -o ppid=`.
-# Prints nothing when ps is unavailable; the process-group kill still applies then.
+# Prints nothing when ps is unavailable; the process-group kill still applies then. Fails when the
+# table could not be filtered whole.
 _shmutant_descendants() {
   local table
   table="$(command -p ps -A -o pid= -o ppid= 2>/dev/null)" || return 0
-  printf '%s\n' "$table" | command -p awk -v root="$1" '
+  ( set -o pipefail; printf '%s\n' "$table" | command -p awk -v root="$1" '
     { child[NR] = $1; parent[NR] = $2 }
     END {
       want[root] = 1
@@ -650,7 +651,7 @@ _shmutant_descendants() {
         for (i = 1; i <= NR; i++) if ((parent[i] in want) && !(child[i] in want)) { want[child[i]] = 1; added = 1 }
       } while (added)
       for (p in want) if (p != root) print p
-    }'
+    }' )
 }
 
 # _shmutant_proc_table — one line per process from /proc, `pid ppid starttime`. Each stat file is
@@ -747,7 +748,7 @@ _shmutant_descendants_started() {
   local table now
   if [ "${SHMUTANT_PROC:-}" = 1 ]; then
     table="$(_shmutant_proc_table)"; [ -n "$table" ] || return 1
-    printf '%s\n' "$table" | command -p awk -v root="$1" '
+    ( set -o pipefail; printf '%s\n' "$table" | command -p awk -v root="$1" '
       { i++; child[i] = $1; parent[i] = $2; start[i] = $3 }
       END {
         want[root] = 1
@@ -756,12 +757,12 @@ _shmutant_descendants_started() {
           for (j = 1; j <= i; j++) if ((parent[j] in want) && !(child[j] in want)) { want[child[j]] = 1; added = 1 }
         } while (added)
         for (j = 1; j <= i; j++) if ((child[j] in want) && child[j] != root) print child[j], start[j]
-      }'
+      }' ) || return 1
     return 0
   fi
   if [ "${SHMUTANT_PS_LSTART:-}" != 0 ] && _shmutant_identity "$BASHPID" > /dev/null && [ "${SHMUTANT_PS_LSTART:-}" = 1 ]; then
     table="$(command -p ps -A -o pid= -o ppid= -o lstart= 2>/dev/null)" && [ -n "$table" ] || return 1
-    printf '%s\n' "$table" | command -p awk -v root="$1" '
+    ( set -o pipefail; printf '%s\n' "$table" | command -p awk -v root="$1" '
       NF > 2 && $1 ~ /^[0-9]+$/ { i++; child[i] = $1; parent[i] = $2; $1 = ""; $2 = ""; sub(/^ +/, ""); start[i] = $0 }
       END {
         want[root] = 1
@@ -770,12 +771,12 @@ _shmutant_descendants_started() {
           for (j = 1; j <= i; j++) if ((parent[j] in want) && !(child[j] in want)) { want[child[j]] = 1; added = 1 }
         } while (added)
         for (j = 1; j <= i; j++) if ((child[j] in want) && child[j] != root) print child[j], start[j]
-      }'
+      }' ) || return 1
     return 0
   fi
   table="$(command -p ps -A -o pid= -o ppid= -o etime= 2>/dev/null)" && [ -n "$table" ] || return 1
   now="$(_shmutant_now)"; now=$(( now / 1000000 ))
-  printf '%s\n' "$table" | command -p awk -v root="$1" -v now="$now" '
+  ( set -o pipefail; printf '%s\n' "$table" | command -p awk -v root="$1" -v now="$now" '
     NF == 3 && $1 ~ /^[0-9]+$/ {
       child[NR] = $1; parent[NR] = $2
       e = $3; d = 0
@@ -793,7 +794,7 @@ _shmutant_descendants_started() {
         for (i = 1; i <= NR; i++) if ((parent[i] in want) && !(child[i] in want)) { want[child[i]] = 1; added = 1 }
       } while (added)
       for (i = 1; i <= NR; i++) if ((child[i] in want) && child[i] != root) print child[i], start[i]
-    }'
+    }' )
 }
 
 # _shmutant_etime_secs <etime> — seconds from a POSIX `ps -o etime` value ([[dd-]hh:]mm:ss).
@@ -1196,19 +1197,19 @@ _shmutant_guard_members() {
   local -a members=() recs=()
   local -A SHMUTANT_START=()
   table="$(command -p ps -A -o pid= -o pgid= 2>/dev/null)" && [ -n "$table" ] || return 1
-  out="$(printf '%s\n' "$table" | command -p awk -v g="$1" '$2 == g { print $1 }')" || return 1
+  out="$(set -o pipefail; printf '%s\n' "$table" | command -p awk -v g="$1" '$2 == g { print $1 }')" || return 1
   if [ -z "$out" ]; then _shmutant_guard_tell m; return; fi
   mapfile -t members <<< "$out"
   _shmutant_identity_table
   # The group read again after the starts: a member still in it is the process both reads saw, since
-  # nothing new can join a group whose members are all stopped. One gone from it between the reads
+  # no member forks into a group whose members are all stopped. One gone from it between the reads
   # (killed, its number perhaps someone else's by the start read) is not told.
   table="$(command -p ps -A -o pid= -o pgid= 2>/dev/null)" && [ -n "$table" ] || return 1
   out="$(set -o pipefail; printf '%s\n' "$table" | command -p awk -v g="$1" '$2 == g { print " " $1 " " }' | command -p tr -d '\n')" || return 1
   # Nor is the group told whole while the second read holds a member the first did not: a process of
   # the run's session can join it between them, and that one is never told.
   first=" "; for p in "${members[@]}"; do first="$first$p "; done
-  printf '%s\n' "$table" | command -p awk -v g="$1" -v first="$first" '$2 == g && !index(first, " " $1 " ") { f = 1 } END { exit f }' || return 1
+  ( set -o pipefail; printf '%s\n' "$table" | command -p awk -v g="$1" -v first="$first" '$2 == g && !index(first, " " $1 " ") { f = 1 } END { exit f }' ) || return 1
   for p in "${members[@]}"; do
     [ -n "$p" ] && [ -z "${have[$p]:-}" ] || continue
     case "$out" in *" $p "*) ;; *) continue ;; esac
@@ -2053,7 +2054,7 @@ _shmutant_group_has() {
   # Joined here, one space each: "$*" would join with the caller's IFS.
   for p in "$@"; do want="$want$p "; done
   table="$(_shmutant_ps -A -o pid= -o pgid= 2>/dev/null)" && [ -n "$table" ] || return 1
-  printf '%s\n' "$table" | command -p awk -v g="$g" -v want="$want" '$2 == g && index(want, " " $1 " ") { f = 1 } END { exit !f }'
+  ( set -o pipefail; printf '%s\n' "$table" | command -p awk -v g="$g" -v want="$want" '$2 == g && index(want, " " $1 " ") { f = 1 } END { exit !f }' )
 }
 
 # _shmutant_holder_state <pid> <identity> — whether a run's holder, started as <pid> with
