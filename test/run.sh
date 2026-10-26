@@ -4384,7 +4384,7 @@ t_freeze_takes_group_members_as_roots_but_not_the_holder() {
   # #47: the members of a stopped group are told to the guard, taken as frozen and searched from (a
   # child of one may lead a group of its own), all but the holder: it is let go next and may end,
   # so its number is never taken as one that needs no start to be signalled.
-  local h kid i out
+  local h kid i out how
   local -a known=()
   set -m; sh -c 'sleep 60 & exec sleep 60' < /dev/null > /dev/null 2>&1 & h=$!; set +m
   disown "$h"
@@ -4418,6 +4418,14 @@ t_freeze_takes_group_members_as_roots_but_not_the_holder() {
   ( declare -a frozen=() roots=(); declare -A have=(); holder=""
     exec {guard_w}> "$T/told"; _shmutant_guard_members 2000000000 ) > /dev/null 2>&1
   eq "$(cat "$T/told" 2>/dev/null)" m 'a group with no member left is told whole'
+  # A write of that `m` that fails (here the guard's end is open for reading only) fails the call and
+  # marks the guard gone, from each of the three places it is told.
+  for how in members before empty; do
+    out="$( declare -a frozen=() roots=(); declare -A have=(); holder="$h"; guard_lost=0; g="$h"
+            case "$how" in before) have["$h"]=1; have["$kid"]=1 ;; empty) g=2000000000 ;; esac
+            exec {guard_w}< /dev/null; _shmutant_guard_members "$g"; printf 'rc=%s lost=%s' "$?" "$guard_lost" )"
+    eq "$out" 'rc=1 lost=1' "$how: a write of the m that failed is a failed call and a guard gone"
+  done
   # A member whose stop does not take (a set-uid process refuses it) is not taken as frozen: the group
   # stop succeeds when it reaches any member, so only a stop sent to it alone shows it took.
   out="$( declare -a frozen=() roots=(); declare -A have=(); holder="$h"; guard_w=""
@@ -4450,10 +4458,10 @@ t_freeze_takes_group_members_as_roots_but_not_the_holder() {
 t_freeze_keeps_the_holder_stopped_when_its_members_cannot_be_told() {
   # #47: when the members of a stopped group cannot all be told to the guard (no table of starts,
   # here), the holder is not let go: it cannot end, so it goes on showing the group is the run's, and
-  # the guard is told it was kept stopped. Once the freezing shell is killed, the guard still ends a
-  # child that holds nothing of the run's, through the group of a holder it can verify, or, with no
-  # start readable at all, one it knows the freeze kept stopped.
-  local how outer grp holder holderid orphan oid fz fzo
+  # the guard is never told the group whole. Once the freezing shell is killed, the guard still ends a
+  # child that holds nothing of the run's through the group of a holder it can verify; with no start
+  # readable at all it can show nothing (#51), and continues that child, never leaving it stopped.
+  local how outer grp holder holderid orphan oid fz fzo i left
   for how in no-table no-start; do
     mkdir -p "$T/$how"; rm -f "$T/started" "$T/orphan.pid" "$T/freezer.pid" "$T/never"
     ( exec {vf}>|"$T/$how/chan"; SHMUTANT_VERDICT_FD="$vf"
@@ -4483,8 +4491,15 @@ t_freeze_keeps_the_holder_stopped_when_its_members_cannot_be_told() {
       *) fail_ "$how: the holder was let go although the group's members could not be told ($(command -p ps -o stat= -p "$holder" 2>/dev/null | tr -d ' '))" ;;
     esac
     [ -z "$fz" ] || kill -KILL "$fz" 2>/dev/null
-    wait_gone "$orphan" "$oid" 50 || fail_ "$how: a member of the stopped group was left $(command -p ps -o stat= -p "$orphan" 2>/dev/null | tr -d ' ')"
-    wait_gone "$holder" "$holderid" 50 || fail_ "$how: the holder was left behind"
+    if [ "$how" = no-table ]; then
+      wait_gone "$orphan" "$oid" 50 || fail_ "$how: a member of the stopped group was left $(command -p ps -o stat= -p "$orphan" 2>/dev/null | tr -d ' ')"
+      wait_gone "$holder" "$holderid" 50 || fail_ "$how: the holder was left behind"
+    else
+      # Read whole each time: a table that could not be read shows nothing stopped and proves nothing.
+      for (( i = 0; i < 50; i++ )); do left="$(stopped_among "$orphan" "$holder")" || left=unread; [ -n "$left" ] || break; sleep 0.1; done
+      [ -z "$left" ] || fail_ "$how: a member of the stopped group, or its holder, was left stopped ($left)"
+      kill -0 "$orphan" 2>/dev/null || fail_ "$how: a member was killed though its group could not be shown to be the run's"
+    fi
     _shmutant_kill_tree KILL "$fzo" "$fzo:"; wait "$fzo" 2>/dev/null
     _shmutant_kill_tree KILL "$outer" "$outer:"; wait "$outer" 2>/dev/null
     _shmutant_kill_tree KILL "" "$orphan:$oid" "$holder:$holderid"; wait_gone "$orphan" "$oid"
@@ -4792,25 +4807,20 @@ t_guard_ends_only_what_it_can_verify() {
     printf '%s\n' "$out" | grep -qx -- "kill -CONT -- -$m" || fail_ "$how: a group whose holder cannot be identified, its members not all told, was not continued: [$out]"
     if group_killed "$out" "$m"; then fail_ "$how: a group whose holder cannot be identified was killed: [$out]"; fi
   done
-  # One the freeze kept stopped (`k`, sent when it could not tell every member) is the holder while it
-  # is still stopped and in the group, and its group is killed; once it runs, unreached by the guard's
-  # stop, or one stopped in another group is at its number, it proves nothing, and the group, which may
-  # hold a member nothing else reaches, is continued and never killed (#51).
-  out="$(guard_unidentified "g $sh $sh $aid" k)"
-  printf '%s\n' "$out" | grep -qx -- "kill -KILL -- -$sh" || fail_ "a group whose kept holder is still stopped was not killed: [$out]"
-  for h in "$m" "$sh"; do
-    out="$(guard_unidentified "g $m $h $aid" k)"
-    printf '%s\n' "$out" | grep -qx -- "kill -CONT -- -$m" || fail_ "a group whose kept holder ($h) proves nothing was not continued: [$out]"
-    if group_killed "$out" "$m"; then fail_ "a group whose kept holder ($h) proves nothing was killed: [$out]"; fi
-  done
-  # #51: one the freeze kept stopped whose state cannot be read at all proves nothing either: its group
-  # is never killed, and is continued, so a member reached only through it is not left stopped.
+  # #51: such a holder, stopped and in the group, is never shown to be the holder, members told or not,
+  # even where the freeze kept it stopped: a stranger given its number after a kill from outside, stopped
+  # by this guard's own stop, looks the same. Its group is continued, never killed.
+  out="$(guard_unidentified "g $sh $sh $aid")"
+  printf '%s\n' "$out" | grep -qx -- "kill -CONT -- -$sh" || fail_ "a group whose stopped holder cannot be identified, its members not all told, was not continued: [$out]"
+  if group_killed "$out" "$sh"; then fail_ "a group whose stopped holder cannot be identified was killed: [$out]"; fi
+  # #51: one whose state cannot be read at all proves nothing either: its group is never killed, and is
+  # continued, so a member reached only through it is not left stopped.
   out="$( kill() { if [ "${1:-}" = -0 ]; then builtin kill "$@"; else printf 'kill %s\n' "$*"; fi; }
           _shmutant_identity() { return 1; }; _shmutant_identity_table() { SHMUTANT_START=(); }
           _shmutant_ps() { case "$*" in *stat=*) return 1 ;; esac; command -p ps "$@"; }
-          printf '%s\n' "g $m $m $aid" k | _shmutant_guard )"
-  printf '%s\n' "$out" | grep -qx -- "kill -CONT -- -$m" || fail_ "a group whose kept holder cannot be read at all was not continued: [$out]"
-  if group_killed "$out" "$m"; then fail_ "a group whose kept holder cannot be read at all was killed: [$out]"; fi
+          printf '%s\n' "g $m $m $aid" | _shmutant_guard )"
+  printf '%s\n' "$out" | grep -qx -- "kill -CONT -- -$m" || fail_ "a group whose holder cannot be read at all was not continued: [$out]"
+  if group_killed "$out" "$m"; then fail_ "a group whose holder cannot be read at all was killed: [$out]"; fi
   kill -KILL "$sh" 2>/dev/null; wait "$sh" 2>/dev/null
   # The membership test does not depend on the caller's IFS.
   ( IFS=:; _shmutant_group_has "$m" 1 "$m" ) || fail_ 'a member was missed with IFS set to a colon'
@@ -4828,8 +4838,8 @@ t_guard_reads_a_moved_elapsed_start_as_a_holder_it_cannot_check() {
   # #51: in the elapsed-time identity form a clock step between the freeze's records and the guard's
   # check gives the holder, and every member told with it, another start. That form cannot tell the step
   # from a reused pid, so a holder still there is one that cannot be checked: its group is continued
-  # while it is stopped and in it, and killed when the freeze kept it stopped (`k`), so a member reached
-  # only through the group is never left stopped. With the clock unmoved the group is killed; a holder
+  # while it is stopped and in it, never killed, so a member reached only through the group is never
+  # left stopped. With the clock unmoved the group is killed; a holder
   # the step moved that runs again, or whose state cannot be read, proves nothing, and its group is
   # then continued, never killed, unless every member was told (`m`), when it is sent nothing. h leads
   # a group of its own and is stopped; r leads one and runs. Every kill but the liveness probe is
@@ -4849,12 +4859,19 @@ t_guard_reads_a_moved_elapsed_start_as_a_holder_it_cannot_check() {
   }
   out="$(guard_stepped 0 "g $h $h $hid")"
   printf '%s\n' "$out" | grep -qx -- "kill -KILL -- -$h" || fail_ "with the clock unmoved, a group whose holder verifies was not killed: [$out]"
+  # #51: a process given the holder's number since (here: one whose recorded start, e0, is older than
+  # its own), stopped by the guard and in the group, is a holder it cannot check, never the holder.
+  out="$(guard_stepped 0 "g $h $h e0")"
+  printf '%s\n' "$out" | grep -qx -- "kill -CONT -- -$h" || fail_ "the group of a stopped stranger at the holder's number was not continued: [$out]"
+  case "$out" in *-KILL*) fail_ "the group of a stopped stranger at the holder's number was killed: [$out]" ;; esac
   for step in 10000000 -10000000; do
     out="$(guard_stepped "$step" "p $h $hid" "g $h $h $hid")"
     printf '%s\n' "$out" | grep -qx -- "kill -CONT -- -$h" || fail_ "with the clock stepped $step us, the group of a stopped holder was not continued: [$out]"
     case "$out" in *-KILL*) fail_ "with the clock stepped $step us, something was killed though nothing verified: [$out]" ;; esac
-    out="$(guard_stepped "$step" "p $h $hid" "g $h $h $hid" k)"
-    printf '%s\n' "$out" | grep -qx -- "kill -KILL -- -$h" || fail_ "with the clock stepped $step us, the group of a holder the freeze kept stopped was not killed: [$out]"
+    # Its members all told (`m`), the holder it cannot check is then the only reason for the CONT.
+    out="$(guard_stepped "$step" "p $h $hid" "g $h $h $hid" m)"
+    printf '%s\n' "$out" | grep -qx -- "kill -CONT -- -$h" || fail_ "with the clock stepped $step us and its members all told, the group of a stopped holder was not continued: [$out]"
+    case "$out" in *-KILL*) fail_ "with the clock stepped $step us and its members all told, something was killed: [$out]" ;; esac
     out="$(guard_stepped "$step" "g $r $r $rid" m)"
     case "$out" in *" -$r"*) fail_ "with the clock stepped $step us, the group of a holder that runs again, its members all told, was signalled: [$out]" ;; esac
     out="$(guard_stepped "$step" "g $r $r $rid")"

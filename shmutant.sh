@@ -1116,7 +1116,7 @@ _shmutant_kill_tree_guarded() {
     # stopped. The caller verified it just before (_shmutant_held_group), the check the group stop
     # itself relies on; a KILL landing before this leaves it stopped only until the guard ends the
     # group, holder and all. When the members cannot all be told, the holder stays stopped: it
-    # cannot end then, and goes on showing the group is the run's, to the guard and to the KILL.
+    # cannot end then, and goes on showing the group is the run's to this shell's KILL.
     # But first the holder is shown to be the holder again, now that it is stopped, as the root is:
     # one that went between its check and the stop may have given the number away, and the stop
     # reached another group. That stop is undone, and nothing found in that group is taken as the run's.
@@ -1126,10 +1126,8 @@ _shmutant_kill_tree_guarded() {
     elif _shmutant_guard_members "$held"; then
       [ -z "${holder:-}" ] || kill -CONT "$holder" 2>/dev/null
     else
-      # Kept stopped, and the guard is told so: a holder this freeze keeps stopped cannot end, so its
-      # number is still the holder's, and the guard ends the group by it, start or no start, while it
-      # finds it still stopped and in the group.
-      _shmutant_guard_tell k
+      # Kept stopped, and the KILL told the group holds members it may reach alone. The guard, never
+      # told the group whole, continues it unless it can show the holder is the holder.
       group_untold=1
     fi
     SHMUTANT_KILL_GROUP="$held"
@@ -1395,18 +1393,17 @@ _shmutant_elapsed_gap() {
 # shell has gone partway, killed: the guard then stops every recorded pid and the holder, and KILLs,
 # in one kill, every recorded pid that still carries the start it was recorded with, each once, and,
 # named after them with its holder only through it, the group while its holder is shown to be the
-# process it was (_shmutant_holder_state 0), or, with no start to check it by, while the freeze kept it
-# stopped (`k`) and it is still stopped and in the group. Every other recorded pid is continued, never
-# killed and never left stopped. The group is continued when its holder is not shown: while its
-# number is shown to be the run's (a holder still there, stopped and in the group that cannot be
-# checked, or a pid it verified still in it, _shmutant_group_has), and, shown or not, while it may hold
-# a member stopped there that was never told (no `m`), which nothing else would let go: a group a
-# freeze stopped is never left stopped, and the most it sends one not shown to be the run's is a CONT,
-# after every KILL. It is sent nothing only when every member was told, each then killed or continued
-# by its number. It uses no freeze step and no _shmutant_kill_tree, which a freezing shell killed in
+# process it was (_shmutant_holder_state 0). Every other recorded pid is continued, never killed and
+# never left stopped. The group is continued when its holder is not shown: while its number is shown
+# to be the run's (a holder still there, stopped and in the group that cannot be checked, or a pid it
+# verified still in it, _shmutant_group_has), and, shown or not, while it may hold a member stopped
+# there that was never told (no `m`), which nothing else would let go: once it acts, no group a freeze
+# stopped is left stopped, and the most it sends one not shown to be the run's is a CONT, after every
+# KILL. It is sent nothing only when every member was told, each then killed or continued by its
+# number. It uses no freeze step and no _shmutant_kill_tree, which a freezing shell killed in
 # them may have left half-done.
 _shmutant_guard() {
-  local line chunk part="" pg="" ph="" phid="" p pid st gcont="" hs="" kept="" told="" want members cfirst=""
+  local line chunk part="" pg="" ph="" phid="" p pid st gcont="" hs="" told="" want members cfirst=""
   local -a recs=() kills=() conts=() stops=() left=()
   local -A SHMUTANT_START=() killing=()
   # Every process-table read it makes gives up after ten seconds (_shmutant_ps), and reads as one that
@@ -1428,7 +1425,6 @@ _shmutant_guard() {
       line="$part$chunk"; part=""
       case "$line" in
         done) return 0 ;;
-        k) kept=1 ;;
         m) told=1 ;;
         'f '*) case "${line#f }" in e*' '*) guard_gap_ref="${line##* }"; case "${guard_gap_ref#-}" in ''|*[!0-9]*) guard_gap_ref="" ;; esac ;; esac ;;
         'p '*) recs+=("${line#p }") ;;
@@ -1485,11 +1481,9 @@ _shmutant_guard() {
     # A holder that cannot be identified shows the number is still the run's only while it is stopped
     # and in the group: stopped, it cannot end and give its number away, and a process at its number in
     # another group is not it. One the stop above did not reach (not a process this guard may signal)
-    # proves nothing.
+    # proves nothing. It never shows the holder is the holder, even one the freeze kept stopped: this
+    # guard's own stop would show a stranger given its number after a kill from outside stopped too.
     [ "$hs" != 2 ] || { _shmutant_proc_stopped "$ph" && _shmutant_group_has "$pg" "$ph"; } || hs=1
-    # One the freeze kept stopped (`k`) and still shown so is the holder: no start is needed to tell
-    # it, as for a frozen pid.
-    [ -z "$kept" ] || [ "$hs" != 2 ] || hs=0
     # A holder shown to be the holder is the group's only while it is in the group, where the group's
     # members can be read: it is ended through the group's KILL alone, and one outside it would be left
     # stopped. One that is not in it is let go, as a holder not shown is. Where they cannot be read it is
