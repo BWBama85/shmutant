@@ -149,9 +149,11 @@ wait_gone() {
 }
 
 # wait_descendants <pid> <n> — block until <pid> has at least <n> descendants, looking at most 50
-# times a tenth of a second apart; 1 on expiry. The bound counts looks.
+# times a tenth of a second apart; 1 on expiry, 2 for <n> that is not a decimal from 1 to 9999
+# without leading zeros. The bound counts looks.
 wait_descendants() {
   local i n
+  [[ "${2-}" =~ ^[1-9][0-9]{0,3}$ ]] || { echo "wait_descendants: the count must be 1 to 9999, got [${2-}]" >&2; return 2; }
   for (( i = 1; ; i++ )); do
     n="$(_shmutant_descendants "$1" 2>/dev/null | command -p wc -l | command -p tr -d ' ')"
     [ "${n:-0}" -lt "$2" ] || return 0
@@ -3486,7 +3488,7 @@ t_post_run_cleanup_never_signals_a_reaped_root_by_number() {
   kill "$b2" 2>/dev/null; wait "$b2" 2>/dev/null
   # a rejected root's current children are not searched from either
   ( sleep 5; : ) & local b3=$!
-  wait_descendants "$b3" 1
+  wait_descendants "$b3" 1 || { fail_ 'fixture: the root has no child to protect'; _shmutant_kill_tree KILL "$b3" "$b3:"; wait "$b3" 2>/dev/null; return; }
   local kid; kid="$(_shmutant_descendants "$b3" | head -n 1)"
   [ -n "$kid" ] || fail_ 'fixture: the root has no child to protect'
   _shmutant_kill_tree_twice "$b3:not-$(_shmutant_identity "$b3")"; sleep 0.2
@@ -6978,8 +6980,9 @@ t_suite_runs_each_unit_in_a_process_group_of_its_own() {
     trap '' TERM; echo "\$T" > $qt/stubborn.dir
     set -m; bash -c 'while :; do sleep 30 > /dev/null 2>&1 & echo "\$!" >> "\$1/kids"; sleep 0.05; done' _ $qt & echo \$! > $qt/grouped.pid; set +m
     echo \$BASHPID > $qt/stubborn.pid
-    local i; for (( i = 0; i < 50; i++ )); do [ -s $qt/kids ] && break; sleep 0.1; done
-    : > $qt/stubborn.started; sleep 10; : > $qt/stubborn.finished
+    local i; for (( i = 0; i < 100; i++ )); do [ -s $qt/kids ] && break; sleep 0.1; done
+    if [ -s $qt/kids ]; then : > $qt/stubborn.started; else : > $qt/stubborn.nokids; fi
+    sleep 10; : > $qt/stubborn.finished
   }
   t_zz_traps() { trap -p INT TERM HUP > $qt/traps; }
   t_zz_selfkill() { echo "\$T" > $qt/selfkill.dir; kill -KILL "\$BASHPID"; }
@@ -7058,8 +7061,11 @@ EOF
     hasnt "$(cat "$T/slow.out")" '_sweep_up' "no job notice printing the unit's source reached the suite's output ($c)"
   done
   # A second TERM while the suite is ending the unit does not cut that short.
+  # The unit says it has started only once its group's loop has forked: what it forks is the point.
   SHMUTANT_SELECT=t_zz_stubborn bash "$T/suite/test/run.sh" > "$T/stubborn.out" 2>&1 & suite=$!
-  if wait_for "$T/stubborn.started"; then kill -TERM "$suite"; sleep 0.3; kill -TERM "$suite" 2>/dev/null
+  i=0; until [ -e "$T/stubborn.started" ] || [ -e "$T/stubborn.nokids" ]; do i=$((i + 1)); [ "$i" -lt 300 ] || break; sleep 0.1; done
+  if [ -e "$T/stubborn.started" ]; then kill -TERM "$suite"; sleep 0.3; kill -TERM "$suite" 2>/dev/null
+  elif [ -e "$T/stubborn.nokids" ]; then fail_ 'fixture: the process t_zz_stubborn started in a group of its own forked nothing in ten seconds'; kill -KILL "$suite" 2>/dev/null
   else fail_ 'fixture: t_zz_stubborn never started'; kill -KILL "$suite" 2>/dev/null; fi
   rc=0; wait "$suite" 2>/dev/null || rc=$?
   rc_is "$rc" 143 'the suite sent TERM while its unit ignores it still ends by TERM'
@@ -7743,6 +7749,11 @@ t_wait_descendants_waits_for_the_count_and_expires() {
   wait_descendants "$root" 1; rc_is $? 1 'a root with no descendant is waited for until the bound, then reported'
   printf 'go\n' > "$T/gate"
   wait_descendants "$root" 2; rc_is $? 0 'a root that forks two is found to have two'
+  local c
+  for c in '' nope -1 0 01 10000 99999999999999999999; do
+    wait_descendants "$root" "$c" 2>/dev/null; rc_is $? 2 "a count of [$c] is refused"
+  done
+  wait_descendants "$root" 2>/dev/null; rc_is $? 2 'no count is refused'
   _shmutant_kill_tree KILL "$root" "$root:"; wait "$root" 2>/dev/null
 }
 
@@ -7885,8 +7896,12 @@ t_run_gone_fails_and_ends_what_outlives_the_wait() {
       else ( sleep 30 > /dev/null 2>&1 & note_started "$T/unread.id" ); fi
       s="$(cat "$T/unread.id" 2>/dev/null)"; sid="${s#*:}"; s="${s%%:*}"
       [ -n "$s" ] && [ -n "$sid" ] || { fail_ "fixture: the survivor whose identity is not read was not recorded ($c, $g)"; continue; }
-      # Names of their own: the stub runs inside run_gone, whose locals would shadow the unit's.
+      # Names of their own: the stub runs inside run_gone, whose locals would shadow the unit's. Every
+      # signal but -0 sent to the survivor, or to a group it leads, is recorded: a stop let go again at
+      # once leaves no state behind to see.
+      rm -f "$T/signals"
       out="$( stub_pid="$s" stub_mode="$c"; eval "_real_identity() $(declare -f _shmutant_identity | sed 1d)"
+        kill() { [ "${1:-}" = -0 ] || case " $* " in *" $stub_pid "*|*" -$stub_pid "*) printf '%s\n' "$*" >> "$T/signals" ;; esac; builtin kill "$@"; }
         _shmutant_identity() {
           if [ "$1" = "$stub_pid" ] && [ "${FUNCNAME[1]}" != wait_gone ] && { [ "$stub_mode" = never ] || [ ! -s "$T/reads" ]; }; then
             printf 'failed\n' >> "$T/reads"; return 1
@@ -7898,11 +7913,12 @@ t_run_gone_fails_and_ends_what_outlives_the_wait() {
       [ -s "$T/reads" ] || fail_ "fixture: no identity read of the survivor was made to fail ($c, $g)"
       if [ "$c" = once ]; then
         hasnt "$out" 'could not be identified' "a survivor identified on a later read is not reported unidentified ($c, $g)"
+        [ -s "$T/signals" ] || fail_ "fixture: no signal to a survivor identified on a later read was seen ($g)"
         wait_gone "$s" "$sid" 1 || { fail_ "a survivor whose identity read failed once was still running when run_gone returned ($g)"; _shmutant_kill_tree KILL "" "$s:$sid"; }
       else
         has "$out" "FAIL: $_unit: the unread run: $s could not be identified, so it was not killed" "a survivor never identified is reported ($g)"
-        kill -0 "$s" 2>/dev/null; rc_is $? 0 "a survivor never identified is not signalled by its number ($g)"
-        case "$(command -p ps -o stat= -p "$s" 2>/dev/null)" in T*) fail_ "a survivor never identified was left stopped ($g)" ;; esac
+        [ ! -s "$T/signals" ] || fail_ "a survivor never identified was signalled, if only stopped and let go ($g): [$(tr '\n' ';' < "$T/signals")]"
+        kill -0 "$s" 2>/dev/null; rc_is $? 0 "a survivor never identified is still there ($g)"
         _shmutant_kill_tree KILL "" "$s:$sid"; wait_gone "$s" "$sid" || fail_ "fixture: the survivor never identified could not be ended ($g)"
       fi
     done
