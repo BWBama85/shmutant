@@ -4734,8 +4734,8 @@ t_guard_on_pipe_shows_an_end_already_read() {
   ends_twice() { IFS= read -r _; IFS= read -t 2 -r _; printf '%s\n' "$?" > "$T/second"; }
   guard_on_pipe ends_twice
   exec {w}>&-
-  wait_gone "$g" "" 50 || fail_ 'the reader never ended once its input had'
-  kill -KILL "$g" 2>/dev/null; wait "$g" 2>/dev/null
+  wait_gone "$g" "" 50 || { fail_ 'the reader never ended once its input had'; kill -KILL "$g" 2>/dev/null; }
+  wait "$g" 2>/dev/null
   eq "$(cat "$T/second" 2>/dev/null)" 1 'a timed read is shown the end of its input after a read has returned it'
 }
 
