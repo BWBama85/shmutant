@@ -2535,3 +2535,33 @@ shmutant_mut 'the kill ends a holder outside its group through that group' \
   'case "$members" in *" $holder "*) ;; *) hs=1 ;; esac' \
   ':' \
   't_kill_tree_reads_its_checks_last_from_one_table'
+
+# --- guards added for #51: a group a freeze stopped is never left stopped ---
+shmutant_mut 'the guard is not told a group was told whole' \
+  '  _shmutant_guard_tell "${recs[@]}" m || return 1' \
+  '  _shmutant_guard_tell "${recs[@]}" || return 1' \
+  't_freeze_takes_group_members_as_roots_but_not_the_holder'
+shmutant_mut 'a group whose members were all told before is not told whole' \
+  '  if [ "${#recs[@]}" -eq 0 ]; then _shmutant_guard_tell m; return; fi' \
+  '  if [ "${#recs[@]}" -eq 0 ]; then return 0; fi' \
+  't_freeze_takes_group_members_as_roots_but_not_the_holder'
+shmutant_mut 'a group with no member left is not told whole' \
+  '  if [ -z "$out" ]; then _shmutant_guard_tell m; return; fi' \
+  '  if [ -z "$out" ]; then return 0; fi' \
+  't_freeze_takes_group_members_as_roots_but_not_the_holder'
+shmutant_mut 'the guard ignores that a group was told whole' \
+  '        m) told=1 ;;' \
+  '        m) ;;' \
+  't_guard_ends_only_what_it_can_verify'
+shmutant_mut 'the guard leaves a group it was not told whole stopped' \
+  '[ "$hs" = 2 ] || [ -z "$told" ] ||' \
+  '[ "$hs" = 2 ] ||' \
+  't_guard_lets_go_a_group_member_it_was_never_told_of'
+shmutant_mut 'the kill leaves a group stopped with members never told stopped' \
+  '      [ -z "${group_untold:-}" ] || gone_group="$SHMUTANT_KILL_GROUP"' \
+  '      :' \
+  't_group_kill_checks_the_holder_identity'
+shmutant_mut 'the freeze does not say its group holds members never told' \
+  '      group_untold=1' \
+  '      :' \
+  't_freeze_continues_a_group_with_members_it_could_not_record'
