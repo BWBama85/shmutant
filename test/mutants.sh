@@ -2565,3 +2565,7 @@ shmutant_mut 'the kill takes a holder no table shows for one it cannot check' \
   '  [ -n "${SHMUTANT_START[$1]:-}" ] || return 1' \
   '  [ -n "${SHMUTANT_START[$1]:-}" ] || [ "${#SHMUTANT_START[@]}" = 0 ] || return 1; [ -n "${SHMUTANT_START[$1]:-}" ] || return 2' \
   't_kill_tree_reads_its_checks_last_from_one_table'
+shmutant_mut 'a group a process joined between its reads is told whole' \
+  '$2 == g && !index(first, " " $1 " ") { f = 1 } END { exit f }'"'"' || return 1' \
+  '$2 == g && !index(first, " " $1 " ") { f = 1 } END { exit 0 }'"'"' || return 1' \
+  't_freeze_takes_group_members_as_roots_but_not_the_holder'

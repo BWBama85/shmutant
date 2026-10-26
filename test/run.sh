@@ -4450,6 +4450,21 @@ t_freeze_takes_group_members_as_roots_but_not_the_holder() {
 ' "$?" "${frozen[*]}" "${roots[*]}" )"
   if printf '%s\n' "$out" | tr ' =:' '\n\n\n' | grep -qx -- "$stray"; then fail_ "a process the group held for only one of its reads was taken for a member: [$out]"; fi
   case "$(command -p ps -o stat= -p "$stray" 2>/dev/null)" in *T*) fail_ 'a process the group held for only one of its reads was stopped' ;; esac
+  # #51: and one in the second read only (it joined the group between them) was never told, so the
+  # group is not told whole (no `m`), and the call fails.
+  rm -f "$T/reads" "$T/told"
+  out="$( declare -a frozen=() roots=(); declare -A have=(); holder="$h"; exec {guard_w}> "$T/told"
+          command() {
+            if [ "${1:-}" = -p ] && [ "${2:-}" = ps ] && [ "$*" = "-p ps -A -o pid= -o pgid=" ]; then
+              builtin command -p ps -A -o pid= -o pgid=
+              if [ -e "$T/reads" ]; then printf '%s %s\n' "$stray" "$h"; else : > "$T/reads"; fi
+              return 0
+            fi
+            builtin command "$@"
+          }
+          _shmutant_guard_members "$h"; printf 'rc=%s' "$?" )"
+  eq "$out" rc=1 'a group a process joined between its reads fails to be told'
+  if grep -qx m "$T/told" 2>/dev/null; then fail_ "a group a process joined between its reads was told whole (m): [$(tr '\n' ';' < "$T/told")]"; fi
   kill -KILL "$stray" 2>/dev/null; wait "$stray" 2>/dev/null
   end_group "$h" "${known[@]}"; wait_gone "$h" "" 30; wait_gone "$kid" "" 30
 }

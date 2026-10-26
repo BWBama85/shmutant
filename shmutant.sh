@@ -1192,7 +1192,7 @@ _shmutant_kill_tree_guarded() {
 # Fails when not every member could be told (a table, a start or the guard could not be had), and the
 # caller then keeps the holder stopped. Shares its caller's `frozen`, `have` and `roots`.
 _shmutant_guard_members() {
-  local table out p
+  local table out p first
   local -a members=() recs=()
   local -A SHMUTANT_START=()
   table="$(command -p ps -A -o pid= -o pgid= 2>/dev/null)" && [ -n "$table" ] || return 1
@@ -1205,6 +1205,10 @@ _shmutant_guard_members() {
   # (killed, its number perhaps someone else's by the start read) is not told.
   table="$(command -p ps -A -o pid= -o pgid= 2>/dev/null)" && [ -n "$table" ] || return 1
   out="$(set -o pipefail; printf '%s\n' "$table" | command -p awk -v g="$1" '$2 == g { print " " $1 " " }' | command -p tr -d '\n')" || return 1
+  # Nor is the group told whole while the second read holds a member the first did not: a process of
+  # the run's session can join it between them, and that one is never told.
+  first=" "; for p in "${members[@]}"; do first="$first$p "; done
+  printf '%s\n' "$table" | command -p awk -v g="$1" -v first="$first" '$2 == g && !index(first, " " $1 " ") { f = 1 } END { exit f }' || return 1
   for p in "${members[@]}"; do
     [ -n "$p" ] && [ -z "${have[$p]:-}" ] || continue
     case "$out" in *" $p "*) ;; *) continue ;; esac
@@ -1698,8 +1702,8 @@ _shmutant_kill_tree() {
 
 # _shmutant_table_state <pid> <identity> — _shmutant_holder_state's reading of <pid>, its start taken
 # from the identity table already read (SHMUTANT_START) rather than read again: 0 when it is alive and
-# carries <identity>; 2 when it is alive and no identity was given (ps identifies nothing here, and a
-# group is ended by number all the same); 1 when it is gone, carries another identity, or is not in the
+# carries <identity>; 2 when it is alive and no identity was given (ps gave none when its run started,
+# and its group is ended by number all the same: the owner's call, D12); 1 when it is gone, carries another identity, or is not in the
 # table: missing from one that was read (what is at that number now started after it), or with no
 # table at all, when a stranger given its number after a kill from outside would look the same (D12).
 _shmutant_table_state() {
@@ -2823,7 +2827,7 @@ _shmutant_pool_locals_writable() {
     _shmutant_bo _shmutant_so _shmutant_o _shmutant_n _shmutant_pc _shmutant_wrap_left \
     a budget dog e elapsed last leftovers linked lstart old rrc s tampered tmpd tnow victims wroot \
     b chunk conts g gcont gone_group guard_id guard_lost guard_of guard_of_id guard_pid guard_r guard_up guard_w hs kept kills members out pairs part pg ph phid recs rid rootid_pre seen_ck unfrozen w want \
-    SHMUTANT_GUARD SHMUTANT_GUARD_PID SHMUTANT_PS_LSTART SHMUTANT_PS_BOUND c guard_self guard_gap_ref gap ea eb lp le tbl cands guarded jl w fid_now stopped fgap cont_first cfirst told group_untold
+    SHMUTANT_GUARD SHMUTANT_GUARD_PID SHMUTANT_PS_LSTART SHMUTANT_PS_BOUND c guard_self guard_gap_ref gap ea eb lp le tbl cands guarded jl w fid_now stopped fgap cont_first cfirst told group_untold first
 }
 
 # _shmutant_decl_writable <label> — the table's own names, checked by each declaration entry
