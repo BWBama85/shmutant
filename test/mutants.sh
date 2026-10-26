@@ -2398,8 +2398,8 @@ shmutant_mut 'the kill takes a holder gone since its table for the holder' \
   '  :' \
   't_kill_tree_reads_its_checks_last_from_one_table'
 shmutant_mut 'the kill takes a holder missing from the table it read for one it cannot check' \
-  '    [ "${#SHMUTANT_START[@]}" -gt 0 ] || return 2' \
-  '    return 2' \
+  '  [ -n "${SHMUTANT_START[$1]:-}" ] || return 1' \
+  '  [ -n "${SHMUTANT_START[$1]:-}" ] || return 2' \
   't_kill_tree_reads_its_checks_last_from_one_table'
 shmutant_mut 'the kill takes a holder with another start for the holder' \
   '  _shmutant_same_start "${SHMUTANT_START[$1]}" "$2" || return 1' \
@@ -2561,3 +2561,7 @@ shmutant_mut 'the guard takes a stopped holder it cannot check for the holder' \
   '{ _shmutant_proc_stopped "$ph" && _shmutant_group_has "$pg" "$ph"; } || hs=1' \
   '{ _shmutant_proc_stopped "$ph" && _shmutant_group_has "$pg" "$ph"; } || hs=1; [ "$hs" != 2 ] || hs=0' \
   't_guard_reads_a_moved_elapsed_start_as_a_holder_it_cannot_check'
+shmutant_mut 'the kill takes a holder no table shows for one it cannot check' \
+  '  [ -n "${SHMUTANT_START[$1]:-}" ] || return 1' \
+  '  [ -n "${SHMUTANT_START[$1]:-}" ] || [ "${#SHMUTANT_START[@]}" = 0 ] || return 1; [ -n "${SHMUTANT_START[$1]:-}" ] || return 2' \
+  't_kill_tree_reads_its_checks_last_from_one_table'

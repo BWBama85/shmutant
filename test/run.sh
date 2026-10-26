@@ -4461,7 +4461,7 @@ t_freeze_keeps_the_holder_stopped_when_its_members_cannot_be_told() {
   # the guard is never told the group whole. Once the freezing shell is killed, the guard still ends a
   # child that holds nothing of the run's through the group of a holder it can verify; with no start
   # readable at all it can show nothing (#51), and continues that child, never leaving it stopped.
-  local how outer grp holder holderid orphan oid fz fzo i left
+  local how outer grp holder holderid orphan oid fz fzo left
   for how in no-table no-start; do
     mkdir -p "$T/$how"; rm -f "$T/started" "$T/orphan.pid" "$T/freezer.pid" "$T/never"
     ( exec {vf}>|"$T/$how/chan"; SHMUTANT_VERDICT_FD="$vf"
@@ -4495,10 +4495,10 @@ t_freeze_keeps_the_holder_stopped_when_its_members_cannot_be_told() {
       wait_gone "$orphan" "$oid" 50 || fail_ "$how: a member of the stopped group was left $(command -p ps -o stat= -p "$orphan" 2>/dev/null | tr -d ' ')"
       wait_gone "$holder" "$holderid" 50 || fail_ "$how: the holder was left behind"
     else
-      # Read whole each time: a table that could not be read shows nothing stopped and proves nothing.
-      for (( i = 0; i < 50; i++ )); do left="$(stopped_among "$orphan" "$holder")" || left=unread; [ -n "$left" ] || break; sleep 0.1; done
-      [ -z "$left" ] || fail_ "$how: a member of the stopped group, or its holder, was left stopped ($left)"
-      kill -0 "$orphan" 2>/dev/null || fail_ "$how: a member was killed though its group could not be shown to be the run's"
+      left="$(none_stopped 50 "$orphan" "$holder")" || fail_ "$how: a member of the stopped group, or its holder, was left stopped: [$left]"
+      case "$(command -p ps -o stat= -p "$orphan" 2>/dev/null)" in
+        ''|*Z*) fail_ "$how: a member was killed though its group could not be shown to be the run's" ;;
+      esac
     fi
     _shmutant_kill_tree KILL "$fzo" "$fzo:"; wait "$fzo" 2>/dev/null
     _shmutant_kill_tree KILL "$outer" "$outer:"; wait "$outer" 2>/dev/null
@@ -5310,14 +5310,18 @@ t_kill_tree_reads_its_checks_last_from_one_table() {
   if grep -e '^kill -CONT' "$T/log" 2>/dev/null | grep -qw -- "$v"; then fail_ "a pid named twice was continued though it is killed: [$(cat "$T/log")]"; fi
   # A holder alive now but missing from a table that was read started after it, at the holder's number,
   # and one gone since the table showed it may have given its number away: its group is not killed. With
-  # no table at all it cannot be checked, and is taken as it was.
+  # no table at all it cannot be checked: one whose start was read when its run started is not shown,
+  # and its group is not killed but continued where it holds members a freeze could not record (#51);
+  # one no start of which was ever read (ps identifies nothing here) is taken as it was.
   local gone
   sleep 0 & gone=$!; wait "$gone"
-  for out in absent gone none; do
+  for out in absent gone none none-untold never; do
     rm -f "$T/log"
     rm -f "$T/returned"
-    ( holder="$root"; holderid="$(_shmutant_identity "$root")"; SHMUTANT_KILL_GROUP="$root"
+    ( holder="$root"; holderid="$(_shmutant_identity "$root")"; SHMUTANT_KILL_GROUP="$root"; group_untold=""
       case "$out" in
+        none-untold) group_untold=1; _shmutant_identity_table() { SHMUTANT_START=(); } ;;
+        never)  holderid=""; _shmutant_identity_table() { SHMUTANT_START=(); } ;;
         absent) _shmutant_identity_table() { SHMUTANT_START=([1]=x); } ;;
         # The tables were read while it was still there, a member of the group: it has gone since.
         gone)   holder="$gone"; holderid=e1; _shmutant_identity_table() { SHMUTANT_START=(["$gone"]=e1); }
@@ -5328,7 +5332,9 @@ t_kill_tree_reads_its_checks_last_from_one_table() {
       _shmutant_kill_tree KILL "" )
     case "$out" in
       absent|gone) [ ! -s "$T/log" ] || fail_ "$out: the group of a holder the table does not show to be there was signalled: [$(cat "$T/log")]" ;;
-      none)   eq "$(cat "$T/log" 2>/dev/null)" "kill -KILL -- -$root" 'the group of a holder no table could be read for is killed, as with no ps at all' ;;
+      none)   [ ! -s "$T/log" ] || fail_ "none: the group of a holder whose start was read but cannot be now was signalled: [$(cat "$T/log")]" ;;
+      none-untold) eq "$(cat "$T/log" 2>/dev/null)" "kill -CONT -- -$root" 'the group of a holder that cannot be read now, holding members never recorded, is continued, never killed' ;;
+      never)  eq "$(cat "$T/log" 2>/dev/null)" "kill -KILL -- -$root" 'the group of a holder no start of which was ever read is killed, as with no ps at all' ;;
     esac
   done
   # A holder it rejects does not end a caller that has errexit on before its kill: a shell of its own, as

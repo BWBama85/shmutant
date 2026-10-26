@@ -1552,7 +1552,8 @@ _shmutant_guard() {
 # _shmutant_kill_tree <signal> <pid> <pids…> — send <signal> to every descendant of <pid> found
 # now, to each of <pids…> (the descendants found before an earlier signal, which a leader's
 # death may have reparented out of reach of a fresh walk), and to the process group named by
-# SHMUTANT_KILL_GROUP when set, while its holder is still the holder; a group whose holder has gone
+# SHMUTANT_KILL_GROUP when set, while its holder is still the holder (or, where no start of it was
+# ever had, still there); a group whose holder has gone, or is not shown by the table read now,
 # is continued instead while a target is shown to be in it, or while it holds members a freeze stopped
 # there and could not record (the caller's `group_untold`), and otherwise left alone. An empty <pid>
 # means no walk.
@@ -1697,18 +1698,16 @@ _shmutant_kill_tree() {
 
 # _shmutant_table_state <pid> <identity> — _shmutant_holder_state's reading of <pid>, its start taken
 # from the identity table already read (SHMUTANT_START) rather than read again: 0 when it is alive and
-# carries <identity>; 2 when it is alive with nothing to check it by (no identity given, or no table
-# could be read); 1 when it is gone, carries another identity, or is missing from a table that was
-# read (what is at that number now started after it).
+# carries <identity>; 2 when it is alive and no identity was given (ps identifies nothing here, and a
+# group is ended by number all the same); 1 when it is gone, carries another identity, or is not in the
+# table: missing from one that was read (what is at that number now started after it), or with no
+# table at all, when a stranger given its number after a kill from outside would look the same (D12).
 _shmutant_table_state() {
   case "$1" in ''|*[!0-9]*) return 1 ;; esac
   # Gone since the table was read: its entry there is the start of a process no longer at that number.
   if ! kill -0 "$1" 2>/dev/null; then return 1; fi
   [ -n "$2" ] || return 2
-  if [ -z "${SHMUTANT_START[$1]:-}" ]; then
-    [ "${#SHMUTANT_START[@]}" -gt 0 ] || return 2
-    return 1
-  fi
+  [ -n "${SHMUTANT_START[$1]:-}" ] || return 1
   _shmutant_same_start "${SHMUTANT_START[$1]}" "$2" || return 1
   return 0
 }
