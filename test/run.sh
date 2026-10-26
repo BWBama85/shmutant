@@ -4734,7 +4734,9 @@ t_guard_on_pipe_shows_an_end_already_read() {
   ends_twice() { IFS= read -r _; IFS= read -t 2 -r _; printf '%s\n' "$?" > "$T/second"; }
   guard_on_pipe ends_twice
   exec {w}>&-
-  wait_gone "$g" "" 50 || { fail_ 'the reader never ended once its input had'; kill -KILL "$g" 2>/dev/null; }
+  # One that never ends is left to the sweep, which ends a unit's leftovers by their start, never by a
+  # bare number bash may have reaped and handed on since.
+  wait_gone "$g" "" 50 || { fail_ 'the reader never ended once its input had'; return; }
   wait "$g" 2>/dev/null
   eq "$(cat "$T/second" 2>/dev/null)" 1 'a timed read is shown the end of its input after a read has returned it'
 }
@@ -4779,11 +4781,29 @@ t_guard_waits_for_a_freezer_whose_elapsed_start_moved() {
       fi
       builtin command "$@"; }
     _shmutant_now() { local t="$EPOCHREALTIME"; t="${t//[!0-9]/}"; [ ! -e "$T/stepped" ] || t=$(( t + 10000000 )); printf '%s' "$t"; }
+    # What it did and when, for a failure to print (guard_trace): each look for its freezer, read
+    # through, then the table it acts on, and its end. On EPOCHREALTIME, which no stand-in here moves.
+    eval "$(declare -f _shmutant_guard_freezer_there | sed '1s/^_shmutant_guard_freezer_there /_freezer_there_real /')"
+    _shmutant_guard_freezer_there() {
+      local r=0
+      printf '%s look\n' "$EPOCHREALTIME" >> "$T/trace"
+      _freezer_there_real || r=$?
+      printf '%s look read: %s\n' "$EPOCHREALTIME" "$r" >> "$T/trace"
+      return "$r"
+    }
+    eval "$(declare -f _shmutant_identity_table | sed '1s/^_shmutant_identity_table /_identity_table_real /')"
+    _shmutant_identity_table() { printf '%s acts\n' "$EPOCHREALTIME" >> "$T/trace"; _identity_table_real; }
     _shmutant_guard > /dev/null 2>&1
+    printf '%s ended: %s\n' "$EPOCHREALTIME" "$?" >> "$T/trace"
+  }
+  # guard_trace — the case's trace, each line timed from the guard's start, on one line.
+  guard_trace() {
+    command -p awk 'NR == 1 { t = $1 } { sub(/^[^ ]* /, sprintf("%.3fs ", $1 - t), $0); printf "%s%s", (NR > 1 ? "; " : ""), $0 }' "$T/trace" 2>/dev/null
   }
   # Last, `gone`: the freezing shell is killed and reaped while its records stay open, and the guard acts.
   for how in step later told blind gone; do
     rm -f "$T/stepped" "$T/reused" "$T/blind"
+    printf '%s started\n' "$EPOCHREALTIME" > "$T/trace"
     sleep 60 > /dev/null 2>&1 & d=$!
     did="$(SHMUTANT_PROC=0 SHMUTANT_PS_LSTART=0 _shmutant_identity "$d")"
     stop_shown "$d" || fail_ "$how: fixture: what the freezer froze could not be stopped"
@@ -4807,13 +4827,14 @@ t_guard_waits_for_a_freezer_whose_elapsed_start_moved() {
         *) fail_ "$how: the guard took a freezer whose start moved with the clock for gone, and acted while it was there" ;;
       esac
       kill -0 "$g" 2>/dev/null || fail_ "$how: the guard ended while its freezer was still there"
+      printf '%s records end\n' "$EPOCHREALTIME" >> "$T/trace"
       exec {w}>&-
-      wait_gone "$g" "" 100 || fail_ "$how: the guard did not act once its records ended"
+      wait_gone "$g" "" 100 || fail_ "$how: the guard did not act once its records ended [$(guard_trace)]"
       # d's start moved with the clock too: it is let go, never left stopped.
-      left="$(none_stopped 50 "$d")" || fail_ "$how: the guard left [$left] stopped once its records ended"
+      left="$(none_stopped 50 "$d")" || fail_ "$how: the guard left [$left] stopped once its records ended [$(guard_trace)]"
     else
       # Waited on by its start in this host's own form (read on entry): `did` is in the elapsed-time one.
-      wait_gone "$d" "" 50 || fail_ "$how: the guard took another process at its freezer's number for it, and left the victim $(command -p ps -o stat= -p "$d" 2>/dev/null | tr -d ' ')"
+      wait_gone "$d" "" 50 || fail_ "$how: the guard took another process at its freezer's number for it, and left the victim $(command -p ps -o stat= -p "$d" 2>/dev/null | tr -d ' ') [$(guard_trace)]"
       exec {w}>&-
     fi
     kill -KILL "$g" "$d" 2>/dev/null; wait "$g" "$d" 2>/dev/null
