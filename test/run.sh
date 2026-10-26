@@ -119,12 +119,14 @@ wait_for() {
 }
 
 # guard_on_pipe <command>… — start <command>… in the background reading the read end of a pipe, as a
-# freeze's guard reads its records (a coproc's pipe), and set `w` to the write end and `g` to its pid.
+# freeze's guard reads its records (a coproc's pipe), and set `w` to the write end and `g` to its pid;
+# 1, with both empty, when the pipe could not be made.
 # Never a FIFO for a reader that waits on its input's end with `read -t`: on macOS a FIFO's end is shown
 # to select only until a read has returned it, and bash's `read -t` returns a timeout for an end it read
 # at its deadline, so every later read would time out (D11).
 guard_on_pipe() {
-  exec {w}> >("$@")
+  w=""; g=""
+  exec {w}> >("$@") || { w=""; return 1; }
   g=$!
 }
 
@@ -4732,7 +4734,7 @@ t_guard_on_pipe_shows_an_end_already_read() {
   # guard needs whose `read -t` took that end, read at its deadline, for a timeout.
   local w g
   ends_twice() { IFS= read -r _; IFS= read -t 2 -r _; printf '%s\n' "$?" > "$T/second"; }
-  guard_on_pipe ends_twice
+  guard_on_pipe ends_twice || { fail_ 'fixture: no pipe could be made'; return; }
   exec {w}>&-
   # One that never ends is left to the sweep, which ends a unit's leftovers by their start, never by a
   # bare number bash may have reaped and handed on since.
@@ -4785,26 +4787,28 @@ t_guard_waits_for_a_freezer_whose_elapsed_start_moved() {
     # through, each process-table read with its status, the table it acts on, and its end. On
     # EPOCHREALTIME, which no stand-in here moves.
     eval "$(declare -f _shmutant_ps | sed '1s/^_shmutant_ps /_shmutant_ps_real /')"
+    # Each line through trace_, which marks a write that failed (`$T/trace.lost`) for the unit to fail on.
+    trace_() { { printf '%s %s\n' "$EPOCHREALTIME" "$*" >> "$T/trace"; } 2>/dev/null || : >> "$T/trace.lost"; }
     # No local: one would hide a caller's name from the ps (_shmutant_ps).
     _shmutant_ps() {
       _trace_ps_rc=0
-      printf '%s ps %s\n' "$EPOCHREALTIME" "$*" >> "$T/trace"
+      trace_ ps "$*"
       _shmutant_ps_real "$@" || _trace_ps_rc=$?
-      printf '%s ps read: %s\n' "$EPOCHREALTIME" "$_trace_ps_rc" >> "$T/trace"
+      trace_ ps read: "$_trace_ps_rc"
       return "$_trace_ps_rc"
     }
     eval "$(declare -f _shmutant_guard_freezer_there | sed '1s/^_shmutant_guard_freezer_there /_freezer_there_real /')"
     _shmutant_guard_freezer_there() {
       local r=0
-      printf '%s look\n' "$EPOCHREALTIME" >> "$T/trace"
+      trace_ look
       _freezer_there_real || r=$?
-      printf '%s look read: %s\n' "$EPOCHREALTIME" "$r" >> "$T/trace"
+      trace_ look read: "$r"
       return "$r"
     }
     eval "$(declare -f _shmutant_identity_table | sed '1s/^_shmutant_identity_table /_identity_table_real /')"
-    _shmutant_identity_table() { printf '%s acts\n' "$EPOCHREALTIME" >> "$T/trace"; _identity_table_real; }
+    _shmutant_identity_table() { trace_ acts; _identity_table_real; }
     _shmutant_guard > /dev/null 2>&1
-    printf '%s ended: %s\n' "$EPOCHREALTIME" "$?" >> "$T/trace"
+    trace_ ended: "$?"
   }
   # guard_trace — the case's trace, each line timed from the guard's start, on one line.
   guard_trace() {
@@ -4812,13 +4816,13 @@ t_guard_waits_for_a_freezer_whose_elapsed_start_moved() {
   }
   # Last, `gone`: the freezing shell is killed and reaped while its records stay open, and the guard acts.
   for how in step later told blind gone; do
-    rm -f "$T/stepped" "$T/reused" "$T/blind"
+    rm -f "$T/stepped" "$T/reused" "$T/blind" "$T/trace.lost"
     printf '%s started\n' "$EPOCHREALTIME" > "$T/trace" || fail_ "$how: fixture: the guard's trace could not be started"
     sleep 60 > /dev/null 2>&1 & d=$!
     did="$(SHMUTANT_PROC=0 SHMUTANT_PS_LSTART=0 _shmutant_identity "$d")"
     stop_shown "$d" || fail_ "$how: fixture: what the freezer froze could not be stopped"
     # The guard holds no writer of its own records: its end of them is the read end alone.
-    guard_on_pipe freezer_guard
+    guard_on_pipe freezer_guard || { fail_ "$how: fixture: no pipe could be made"; kill -KILL "$d" 2>/dev/null; wait "$d" 2>/dev/null; continue; }
     # The gap as f's shell would read it of itself and the guard (g runs _shmutant_guard as itself).
     gap="$(_shmutant_elapsed_gap "$f" "$g")" || gap=""
     [ -n "$gap" ] || fail_ "$how: fixture: no gap could be read"
@@ -4841,7 +4845,7 @@ t_guard_waits_for_a_freezer_whose_elapsed_start_moved() {
       exec {w}>&-
       if ! wait_gone "$g" "" 100; then fail_ "$how: the guard did not act once its records ended [$(guard_trace)]"
       # A guard that ended on its own wrote its end last: a trace without it lost what it was told to keep.
-      elif ! command -p grep -q ' ended: ' "$T/trace" 2>/dev/null; then fail_ "$how: fixture: the guard's trace was lost [$(guard_trace)]"
+      elif [ -e "$T/trace.lost" ] || ! command -p grep -q ' ended: ' "$T/trace" 2>/dev/null; then fail_ "$how: fixture: the guard's trace was lost [$(guard_trace)]"
       fi
       # d's start moved with the clock too: it is let go, never left stopped.
       left="$(none_stopped 50 "$d")" || fail_ "$how: the guard left [$left] stopped once its records ended [$(guard_trace)]"
