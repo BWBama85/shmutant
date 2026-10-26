@@ -1189,7 +1189,9 @@ _shmutant_kill_tree_guarded() {
 # stopped and still itself: read from one table of groups and one of starts. The caller's holder is
 # told but never taken as frozen: it is let go next, and may end.
 # Once every member is told, the guard is told so (`m`): a group whose members it has every one of is
-# ended by their numbers, and needs no signal by its own that nothing proves is the run's.
+# ended by their numbers, and needs no signal by its own that nothing proves is the run's. Every one
+# is every one the two reads show: a stopped child its parent, outside the group, moves out of it
+# across both reads and back after them is never told (D12).
 # Fails when not every member could be told (a table, a start or the guard could not be had), and the
 # caller then keeps the holder stopped. Shares its caller's `frozen`, `have` and `roots`.
 _shmutant_guard_members() {
