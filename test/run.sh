@@ -155,8 +155,10 @@ wait_descendants() {
   local i n
   [[ "${2-}" =~ ^[1-9][0-9]{0,3}$ ]] || { echo "wait_descendants: the count must be 1 to 9999, got [${2-}]" >&2; return 2; }
   for (( i = 1; ; i++ )); do
-    n="$(_shmutant_descendants "$1" 2>/dev/null | command -p wc -l | command -p tr -d ' ')"
-    [ "${n:-0}" -lt "$2" ] || return 0
+    # A walk that failed, or a count that is not a number, has found nothing yet.
+    n="$(set -o pipefail; _shmutant_descendants "$1" 2>/dev/null | command -p wc -l | command -p tr -d ' ')" || n=0
+    case "$n" in ''|*[!0-9]*) n=0 ;; esac
+    [ "$n" -lt "$2" ] || return 0
     [ "$i" -lt 50 ] || return 1
     sleep 0.1
   done
@@ -283,15 +285,15 @@ left_running() {
   [ "$n" -gt 0 ]
 }
 
-# carries_identity <pid> <identity> — 0 while <pid> runs carrying <identity>; 1 once it has gone or
-# carries another (a reused pid); 2 when, while it ran, its identity could not be read in ten looks a
-# tenth of a second apart: a read that failed is not a process that has gone.
+# carries_identity <pid> <identity> — _shmutant_holder_state, looked at up to ten times a tenth of a
+# second apart while it answers 2: 0 while <pid> carries <identity>, 1 once it has gone or carries
+# another, 2 when its identity could not be read on any look. A read that failed is not a process
+# that has gone.
 carries_identity() {
-  local i now
+  local i rc
   for (( i = 1; ; i++ )); do
-    kill -0 "$1" 2>/dev/null || return 1
-    if now="$(_shmutant_identity "$1" 2>/dev/null)" && [ -n "$now" ]; then _shmutant_same_start "$now" "$2" || return 1; return 0; fi
-    [ "$i" -lt 10 ] || return 2
+    _shmutant_holder_state "$1" "$2" 2>/dev/null; rc=$?
+    [ "$rc" = 2 ] && [ "$i" -lt 10 ] || return "$rc"
     sleep 0.1
   done
 }
@@ -341,19 +343,15 @@ run_gone() {
   own="$(command -p ps -o pgid= -p "$BASHPID" 2>/dev/null)"; own="${own//[[:space:]]/}"
   for p in "${survivors[@]}"; do
     # Every identity the pid was recorded with is tried: the one it still carries is the survivor's.
-    # A read that fails is looked at again, since it is not a process that has gone; one that carries
-    # none of them was reused, and one no longer running has gone.
+    # One that carries none of them was reused, and one no longer running has gone.
     id=""; now=""
-    for (( i = 0; i < 10; i++ )); do
-      kill -0 "$p" 2>/dev/null || break
-      if now="$(_shmutant_identity "$p" 2>/dev/null)" && [ -n "$now" ]; then
-        while IFS= read -r c; do [ -n "$c" ] && _shmutant_same_start "$now" "$c" && { id="$c"; break; }; done <<< "${recorded[$p]}"
-        break
-      fi
-      now=""; sleep 0.1
-    done
+    while IFS= read -r c; do
+      [ -n "$c" ] || continue
+      carries_identity "$p" "$c"
+      case "$?" in 0) id="$c"; break ;; 2) now=unread ;; esac
+    done <<< "${recorded[$p]}"
     if [ -z "$id" ]; then
-      [ -n "$now" ] || ! kill -0 "$p" 2>/dev/null || fail_ "$2: $p could not be identified, so it was not killed"
+      [ -z "$now" ] || fail_ "$2: $p could not be identified, so it was not killed"
       continue
     fi
     pg="$(command -p ps -o pgid= -p "$p" 2>/dev/null)"; pg="${pg//[[:space:]]/}"
@@ -2180,31 +2178,35 @@ t_unbounded_run_still_tracks_descendants() {
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
   shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
-  # The helper forks the escapee into its own group, then lives on until a snapshot of the
-  # watchdog's has named it: the escapee is a descendant of the run only while the helper lives.
-  # The helper has exited before the callback returns, so the run's last snapshot, at its return,
-  # cannot be what named it. Without a watchdog no snapshot ever does, and the helper gives up.
+  # The helper forks the escapee into its own group, then lives on until the watchdog has recorded
+  # it: the escapee is a descendant of the run only while the helper lives. The watchdog's snapshots
+  # run one after another, each read whole before the next starts, so the one after a snapshot that
+  # named the escapee is what says it was recorded. The helper ends before the callback returns, so
+  # the run's last snapshot, at its return, cannot be what named it; and it ends without `exit`,
+  # which the run defines to snapshot the shell that calls it. Without a watchdog no snapshot ever
+  # names it, and the helper gives up.
   eval "_real_snapshot() $(declare -f _shmutant_snapshot | sed 1d)"
   _shmutant_snapshot() {
     local out e
     out="$(_real_snapshot "$@")"
     [ -z "$out" ] || printf '%s\n' "$out"
     [ "${FUNCNAME[1]}" = _shmutant_run_bounded ] || return 0
+    [ ! -e "$T/escapee.sighted" ] || : > "$T/escapee.seen"
     e="$(cat "$T/escaped.id" 2>/dev/null)"; e="${e%%:*}"
     case "$e" in ''|*[!0-9]*) return 0 ;; esac
-    case $'\n'"$out" in *$'\n'"$e:"*) : > "$T/escapee.seen" ;; esac
+    case $'\n'"$out" in *$'\n'"$e:"*) : > "$T/escapee.sighted" ;; esac
     return 0
   }
   escaping_run() {
     ( set -m; bash -c 'sleep 30; touch "$1/escaped"' _ "$T" & note_started "$T/escaped.id"
-      local i; for (( i = 0; i < 100; i++ )); do [ -e "$T/escapee.seen" ] && exit 0; sleep 0.1; done
-      : > "$T/escapee.unseen" )
+      local i; for (( i = 0; i < 100; i++ )); do [ -e "$T/escapee.seen" ] && break; sleep 0.1; done
+      [ -e "$T/escapee.seen" ] || : > "$T/escapee.unseen" )
     bash "$1/test.sh"
   }
   SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=0 pool lbl "$T/wd" toy_prepare escaping_run
   eval "_shmutant_snapshot() $(declare -f _real_snapshot | sed 1d)"
   rc_is "$RC" 0 'the row is killed'
-  [ -e "$T/escapee.unseen" ] && fail_ 'with the timeout disabled, no snapshot of the run named a grandchild while it was still a descendant'
+  [ -e "$T/escapee.unseen" ] && fail_ 'with the timeout disabled, the watchdog never recorded a grandchild while it was still a descendant'
   # what the pool missed is ended by the identity it was started with, never by its number alone
   run_gone "$T/escaped.id" 'with the timeout disabled, a grandchild that left the group before the return' 100
   [ -e "$T/escaped" ] && fail_ 'with the timeout disabled, a grandchild that left the group before the return ran to its end'
@@ -7781,6 +7783,8 @@ t_wait_descendants_waits_for_the_count_and_expires() {
     rm -f "$T/looks"; LATE_AT=4; wait_descendants 1 2; echo "rc=$? looks=$(command -p wc -l < "$T/looks" | tr -d ' ')"
     rm -f "$T/looks"; LATE_AT=99; wait_descendants 1 2; echo "rc=$? looks=$(command -p wc -l < "$T/looks" | tr -d ' ')" ) > "$T/counted"
   eq "$(tr '\n' ' ' < "$T/counted")" 'rc=0 looks=4 rc=1 looks=50 ' 'the wait looks until the count appears, and fifty times when it never does'
+  # A walk that fails, whatever it printed first, has found nothing.
+  ( _shmutant_descendants() { printf '1\n2\n3\n'; return 1; }; wait_descendants 1 2 ); rc_is $? 1 'a walk that failed is never the count reached'
 }
 
 t_wait_gone_takes_a_zombie_as_gone() {
@@ -7905,8 +7909,9 @@ t_run_gone_fails_and_ends_what_outlives_the_wait() {
   s="$(cat "$T/swapped.id" 2>/dev/null)"; sid="${s#*:}"; s="${s%%:*}"
   if [ -z "$s" ] || [ -z "$sid" ] || [ ! -s "$T/ended.id" ]; then fail_ 'fixture: the survivor whose record is replaced was not recorded'
   else
-    out="$( sleep() { cp -f -- "$T/ended.id" "$T/swapped.id"; command sleep "$@"; }
+    out="$( sleep() { cp -f -- "$T/ended.id" "$T/swapped.id" || printf 'the copy failed\n' >> "$T/swap.err"; command sleep "$@"; }
       run_gone "$T/swapped.id" 'the swapped run' 3 )"; rc_is $? 1 'a survivor whose record is replaced during the wait fails'
+    [ ! -s "$T/swap.err" ] && cmp -s -- "$T/ended.id" "$T/swapped.id" || fail_ 'fixture: the record was not replaced during the wait'
     has "$out" "FAIL: $_unit: the swapped run was still running: " 'and is named'
     wait_gone "$s" "$sid" 1 || { fail_ 'a survivor whose record was replaced during the wait was still running when run_gone returned'; _shmutant_kill_tree KILL "" "$s:$sid"; }
   fi
@@ -7950,7 +7955,8 @@ t_run_gone_fails_and_ends_what_outlives_the_wait() {
     done
   done
   # Identified, in the unit's own group, with a child, and its identity unreadable at a check around
-  # the listing of its descendants (call 1 is before the listing, call 2 after it): read once, it is
+  # the listing of its descendants (call 1 identifies it after the wait, call 2 is before the listing,
+  # call 3 after it): read once, it is
   # killed with its child; never read, it is still killed, and its child fails the unit as not killed.
   local mode child cid
   for mode in before-once after-once before-always after-always; do
@@ -7965,9 +7971,13 @@ t_run_gone_fails_and_ends_what_outlives_the_wait() {
     out="$( stub_pid="$s" stub_mode="$mode"; eval "_real_identity() $(declare -f _shmutant_identity | sed 1d)"
       _shmutant_identity() {
         local n
-        if [ "$1" = "$stub_pid" ] && [ "${FUNCNAME[1]}" = carries_identity ] && [ "${FUNCNAME[2]}" = run_gone ]; then
+        if [ "$1" = "$stub_pid" ] && [ "${FUNCNAME[2]}" = carries_identity ] && [ "${FUNCNAME[3]}" = run_gone ]; then
           printf 'call\n' >> "$T/reads"; n="$(command -p wc -l < "$T/reads" | command -p tr -d ' ')"
-          case "$stub_mode:$n" in before-once:1|after-once:2|before-always:*) return 1 ;; after-always:*) [ "$n" = 1 ] || return 1 ;; esac
+          case "$stub_mode:$n" in
+            before-once:2|after-once:3) return 1 ;;
+            before-always:*) [ "$n" -lt 2 ] || return 1 ;;
+            after-always:*) [ "$n" -lt 3 ] || return 1 ;;
+          esac
         fi
         _real_identity "$@"
       }
