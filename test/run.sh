@@ -4782,7 +4782,17 @@ t_guard_waits_for_a_freezer_whose_elapsed_start_moved() {
       builtin command "$@"; }
     _shmutant_now() { local t="$EPOCHREALTIME"; t="${t//[!0-9]/}"; [ ! -e "$T/stepped" ] || t=$(( t + 10000000 )); printf '%s' "$t"; }
     # What it did and when, for a failure to print (guard_trace): each look for its freezer, read
-    # through, then the table it acts on, and its end. On EPOCHREALTIME, which no stand-in here moves.
+    # through, each process-table read with its status, the table it acts on, and its end. On
+    # EPOCHREALTIME, which no stand-in here moves.
+    eval "$(declare -f _shmutant_ps | sed '1s/^_shmutant_ps /_shmutant_ps_real /')"
+    # No local: one would hide a caller's name from the ps (_shmutant_ps).
+    _shmutant_ps() {
+      _trace_ps_rc=0
+      printf '%s ps %s\n' "$EPOCHREALTIME" "$*" >> "$T/trace"
+      _shmutant_ps_real "$@" || _trace_ps_rc=$?
+      printf '%s ps read: %s\n' "$EPOCHREALTIME" "$_trace_ps_rc" >> "$T/trace"
+      return "$_trace_ps_rc"
+    }
     eval "$(declare -f _shmutant_guard_freezer_there | sed '1s/^_shmutant_guard_freezer_there /_freezer_there_real /')"
     _shmutant_guard_freezer_there() {
       local r=0
@@ -4803,7 +4813,7 @@ t_guard_waits_for_a_freezer_whose_elapsed_start_moved() {
   # Last, `gone`: the freezing shell is killed and reaped while its records stay open, and the guard acts.
   for how in step later told blind gone; do
     rm -f "$T/stepped" "$T/reused" "$T/blind"
-    printf '%s started\n' "$EPOCHREALTIME" > "$T/trace"
+    printf '%s started\n' "$EPOCHREALTIME" > "$T/trace" || fail_ "$how: fixture: the guard's trace could not be started"
     sleep 60 > /dev/null 2>&1 & d=$!
     did="$(SHMUTANT_PROC=0 SHMUTANT_PS_LSTART=0 _shmutant_identity "$d")"
     stop_shown "$d" || fail_ "$how: fixture: what the freezer froze could not be stopped"
@@ -4824,12 +4834,15 @@ t_guard_waits_for_a_freezer_whose_elapsed_start_moved() {
       sleep 2.5
       case "$(command -p ps -o stat= -p "$d" 2>/dev/null)" in
         *T*) ;;
-        *) fail_ "$how: the guard took a freezer whose start moved with the clock for gone, and acted while it was there" ;;
+        *) fail_ "$how: the guard took a freezer whose start moved with the clock for gone, and acted while it was there [$(guard_trace)]" ;;
       esac
-      kill -0 "$g" 2>/dev/null || fail_ "$how: the guard ended while its freezer was still there"
+      kill -0 "$g" 2>/dev/null || fail_ "$how: the guard ended while its freezer was still there [$(guard_trace)]"
       printf '%s records end\n' "$EPOCHREALTIME" >> "$T/trace"
       exec {w}>&-
-      wait_gone "$g" "" 100 || fail_ "$how: the guard did not act once its records ended [$(guard_trace)]"
+      if ! wait_gone "$g" "" 100; then fail_ "$how: the guard did not act once its records ended [$(guard_trace)]"
+      # A guard that ended on its own wrote its end last: a trace without it lost what it was told to keep.
+      elif ! command -p grep -q ' ended: ' "$T/trace" 2>/dev/null; then fail_ "$how: fixture: the guard's trace was lost [$(guard_trace)]"
+      fi
       # d's start moved with the clock too: it is let go, never left stopped.
       left="$(none_stopped 50 "$d")" || fail_ "$how: the guard left [$left] stopped once its records ended [$(guard_trace)]"
     else
