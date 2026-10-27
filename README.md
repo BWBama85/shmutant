@@ -191,18 +191,30 @@ read instead of passing it. So
 `test/run.sh` first checks that `ps` runs; where it cannot, it runs no unit, prints one
 `run.sh: ps cannot run here …` line and exits 2.
 
-Each unit runs in a process group of its own, with stdin from `/dev/null`, so nothing a unit leaves
-behind shares the suite's group. The leak check freezes a leftover before it kills it. On macOS, in a
-session launchd started (as on the CI runner), the exit of a member launchd adopted can leave the kernel
-treating its group as newly orphaned, and an orphaned group with a member stopped is hung up whole: in
-the suite's group, that ended the suite with status 129. An INT, TERM or HUP sent to the suite is
-passed on to the unit it is running, which is killed if it has not ended three seconds later and then
-swept as any unit is, so a `^C` at the terminal still ends both. The suite makes each unit's
-directory and removes it once the unit has ended, but only while that path still names the directory
-it made: a unit that puts another directory there fails, and that directory is left alone. A harness
-failure before the unit's leftovers are swept, or a sweep that cannot show them gone, leaves the
-directory in place and names it. A process the unit left that detached between two of the sampler's
-looks is never swept, and could still put another directory there.
+Each unit runs in a process group of its own, with stdin from `/dev/null`, and so does the sampler
+that records the unit's descendants while it runs. The suite's group holds only the suite and the
+short commands it runs itself, so nothing a unit leaves behind, and no sampler a unit stops, shares
+it. The leak check freezes a leftover before it kills it. On macOS, in a session launchd started (as
+on the CI runner), the exit of a member launchd adopted can leave the kernel treating its group as
+newly orphaned, and an orphaned group with a member stopped is hung up whole: in the suite's group,
+that ended the suite with status 129. Once its unit has ended, the sampler is given 30 seconds to end
+too, and no more once it is seen stopped; one that has not ended by then is killed with its whole
+group, and the unit fails. A sampler whose group cannot be killed, or whose holder has not ended 30
+seconds after the suite let it go (or is seen stopped), ends the run as a harness failure (status 2)
+instead of hanging it. An INT, TERM or HUP sent to the suite is passed on to the unit it is
+running, which is killed if it has not ended three seconds later and then swept as any unit is, so a
+`^C` at the terminal still ends both.
+
+The sweep reads two records: what the sampler saw, which ends with a count of its lines, and the
+unit's last snapshot, written by its EXIT trap and ending in `done`. Each is a file whose name is
+removed before the unit runs, read through the suite's own descriptors, so a unit can name neither.
+The suite makes each unit's directory and removes it once the unit has ended, but only while that
+path still names the directory it made, and only when both records reached it whole and the sweep
+showed every leftover gone: a unit that puts another directory there fails, and that directory is
+left alone. A unit killed before its EXIT trap ran, or one whose last snapshot did not arrive, fails,
+and its directory is left in place and named, as on a harness failure before the sweep or a sweep
+that cannot show the leftovers gone. A process the unit left that detached between two of the
+sampler's looks is never swept, and could still put another directory there.
 
 An agent sandbox is the usual cause: on macOS `/bin/ps` is setuid root, and Claude Code's sandbox
 refuses to execute it. This repository's `.claude/settings.json` lists `bash test/run.sh` in
