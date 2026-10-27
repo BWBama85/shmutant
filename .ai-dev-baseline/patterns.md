@@ -481,4 +481,5 @@ One line per resolved review thread, newest last.
 - `check-then-act-race` `shmutant.sh:1600` `69e7549` `PRRT_kwDOUT7q9s6uqr4N` PR #66 2026-10-21 — kill_tree continued by number a member the held-group KILL had just taken
 - `check-then-act-race` `shmutant.sh:1399` `69e7549` `PRRT_kwDOUT7q9s6uqr4S` PR #66 2026-10-21 — guard took its elapsed-gap reference from whatever process held the freezer pid
 - `check-then-act-race` `test/run.sh:8310` `d04dc60` `PRRT_kwDOUT7q9s6v8jcL` PR #69 2026-10-25 — a stop re-entered after the sampler job was released could kill its group once the job had ended
+- `write-failure-swallowed` `shmutant.sh:1200` `e9835d3` `PRRT_kwDOUT7q9s6weJoi` PR #74 2026-10-26 — a printf feeding awk through a pipe without pipefail let a failed write read as an empty, complete group
 <!-- adb:hits:end -->

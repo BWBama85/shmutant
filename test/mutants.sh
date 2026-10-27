@@ -2250,14 +2250,6 @@ shmutant_mut 'a root shown changed once stopped is still taken as frozen' \
   '    if [ -n "$rid" ] && [ -n "${have[$pid]:-}" ] && { _shmutant_holder_state "$pid" "$rid"; [ "$?" = 1 ]; }; then' \
   '    if false; then' \
   't_freeze_checks_its_root_and_holder_after_its_guard_starts'
-shmutant_mut 'a holder the freeze kept stopped does not let the guard end its group' \
-  '    [ -z "$kept" ] || [ "$hs" != 2 ] || hs=0' \
-  '    :' \
-  't_freeze_keeps_the_holder_stopped_when_its_members_cannot_be_told'
-shmutant_mut 'the guard is not told the holder was kept stopped' \
-  '      _shmutant_guard_tell k' \
-  '      :' \
-  't_freeze_keeps_the_holder_stopped_when_its_members_cannot_be_told'
 shmutant_mut 'a process in only one read of the group is taken for a member' \
   '    case "$out" in *" $p "*) ;; *) continue ;; esac' \
   '    :' \
@@ -2406,8 +2398,8 @@ shmutant_mut 'the kill takes a holder gone since its table for the holder' \
   '  :' \
   't_kill_tree_reads_its_checks_last_from_one_table'
 shmutant_mut 'the kill takes a holder missing from the table it read for one it cannot check' \
-  '    [ "${#SHMUTANT_START[@]}" -gt 0 ] || return 2' \
-  '    return 2' \
+  '  [ -n "${SHMUTANT_START[$1]:-}" ] || return 1' \
+  '  [ -n "${SHMUTANT_START[$1]:-}" ] || return 2' \
   't_kill_tree_reads_its_checks_last_from_one_table'
 shmutant_mut 'the kill takes a holder with another start for the holder' \
   '  _shmutant_same_start "${SHMUTANT_START[$1]}" "$2" || return 1' \
@@ -2535,3 +2527,64 @@ shmutant_mut 'the kill ends a holder outside its group through that group' \
   'case "$members" in *" $holder "*) ;; *) hs=1 ;; esac' \
   ':' \
   't_kill_tree_reads_its_checks_last_from_one_table'
+
+# --- guards added for #51: a group a freeze stopped is never left stopped ---
+shmutant_mut 'the guard is not told a group was told whole' \
+  '  _shmutant_guard_tell "${recs[@]}" m || return 1' \
+  '  _shmutant_guard_tell "${recs[@]}" || return 1' \
+  't_freeze_takes_group_members_as_roots_but_not_the_holder'
+shmutant_mut 'a group whose members were all told before is not told whole' \
+  '  if [ "${#recs[@]}" -eq 0 ]; then _shmutant_guard_tell m; return; fi' \
+  '  if [ "${#recs[@]}" -eq 0 ]; then return 0; fi' \
+  't_freeze_takes_group_members_as_roots_but_not_the_holder'
+shmutant_mut 'a group with no member left is not told whole' \
+  '  if [ -z "$out" ]; then _shmutant_guard_tell m; return; fi' \
+  '  if [ -z "$out" ]; then return 0; fi' \
+  't_freeze_takes_group_members_as_roots_but_not_the_holder'
+shmutant_mut 'the guard ignores that a group was told whole' \
+  '        m) told=1 ;;' \
+  '        m) ;;' \
+  't_guard_ends_only_what_it_can_verify'
+shmutant_mut 'the guard leaves a group it was not told whole stopped' \
+  '[ "$hs" = 2 ] || [ -z "$told" ] ||' \
+  '[ "$hs" = 2 ] ||' \
+  't_guard_lets_go_a_group_member_it_was_never_told_of'
+shmutant_mut 'the kill leaves a group stopped with members never told stopped' \
+  '      [ -z "${group_untold:-}" ] || gone_group="$SHMUTANT_KILL_GROUP"' \
+  '      :' \
+  't_group_kill_checks_the_holder_identity'
+shmutant_mut 'the freeze does not say its group holds members never told' \
+  '      group_untold=1' \
+  '      :' \
+  't_freeze_continues_a_group_with_members_it_could_not_record'
+shmutant_mut 'the guard takes a stopped holder it cannot check for the holder' \
+  '{ _shmutant_proc_stopped "$ph" && _shmutant_group_has "$pg" "$ph"; } || hs=1' \
+  '{ _shmutant_proc_stopped "$ph" && _shmutant_group_has "$pg" "$ph"; } || hs=1; [ "$hs" != 2 ] || hs=0' \
+  't_guard_reads_a_moved_elapsed_start_as_a_holder_it_cannot_check'
+shmutant_mut 'the kill takes a holder no table shows for one it cannot check' \
+  '  [ -n "${SHMUTANT_START[$1]:-}" ] || return 1' \
+  '  [ -n "${SHMUTANT_START[$1]:-}" ] || [ "${#SHMUTANT_START[@]}" = 0 ] || return 1; [ -n "${SHMUTANT_START[$1]:-}" ] || return 2' \
+  't_kill_tree_reads_its_checks_last_from_one_table'
+shmutant_mut 'a group a process joined between its reads is told whole' \
+  '$2 == g && !index(first, " " $1 " ") { f = 1 } END { exit f }'"'"' ) || return 1' \
+  '$2 == g && !index(first, " " $1 " ") { f = 1 } END { exit 0 }'"'"' ) || return 1' \
+  't_freeze_takes_group_members_as_roots_but_not_the_holder'
+# (no row on the pipefail of the walks in _shmutant_descendants and of the /proc and lstart walks in
+# _shmutant_descendants_started: those lines are the same text, so no literal names one of them;
+# t_process_table_filters_take_a_failed_write_as_no_table covers each)
+shmutant_mut 'an elapsed-time walk takes a table whose write failed' \
+  '  (set -o pipefail; printf '"'"'%s\n'"'"' "$table" | command -p awk -v root="$1" -v now="$now" '"'"'' \
+  '  ( printf '"'"'%s\n'"'"' "$table" | command -p awk -v root="$1" -v now="$now" '"'"'' \
+  't_process_table_filters_take_a_failed_write_as_no_table'
+shmutant_mut 'a group membership is read from a table whose write failed' \
+  '  (set -o pipefail; printf '"'"'%s\n'"'"' "$table" | command -p awk -v g="$g" -v want="$want"' \
+  '  ( printf '"'"'%s\n'"'"' "$table" | command -p awk -v g="$g" -v want="$want"' \
+  't_process_table_filters_take_a_failed_write_as_no_table'
+shmutant_mut 'the freeze takes a group read from a write that failed for an empty one' \
+  '  out="$(set -o pipefail; printf '"'"'%s\n'"'"' "$table" | command -p awk -v g="$1" '"'"'$2 == g { print $1 }'"'"')" || return 1' \
+  '  out="$(printf '"'"'%s\n'"'"' "$table" | command -p awk -v g="$1" '"'"'$2 == g { print $1 }'"'"')" || return 1' \
+  't_process_table_filters_take_a_failed_write_as_no_table'
+shmutant_mut 'the freeze checks for a joined member in a table whose write failed' \
+  '  (set -o pipefail; printf '"'"'%s\n'"'"' "$table" | command -p awk -v g="$1" -v first="$first"' \
+  '  ( printf '"'"'%s\n'"'"' "$table" | command -p awk -v g="$1" -v first="$first"' \
+  't_process_table_filters_take_a_failed_write_as_no_table'
