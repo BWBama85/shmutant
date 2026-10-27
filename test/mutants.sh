@@ -2588,3 +2588,35 @@ shmutant_mut 'the freeze checks for a joined member in a table whose write faile
   '  (set -o pipefail; printf '"'"'%s\n'"'"' "$table" | command -p awk -v g="$1" -v first="$first"' \
   '  ( printf '"'"'%s\n'"'"' "$table" | command -p awk -v g="$1" -v first="$first"' \
   't_process_table_filters_take_a_failed_write_as_no_table'
+
+# --- diagnostic capture (#75) ---
+shmutant_mut 'a relative diagnostic directory is accepted' \
+  '      *) _shmutant_err "$label: SHMUTANT_DIAG_DIR must be an absolute path, got [$SHMUTANT_DIAG_DIR]"; return 2 ;;' \
+  '      *) ;;' \
+  't_diag_dir_must_be_absolute'
+shmutant_mut 'a diagnostic directory with a newline is accepted' \
+  '      *$'"'"'\n'"'"'*) _shmutant_err "$label: SHMUTANT_DIAG_DIR contains a newline"; return 2 ;;' \
+  '      *$'"'"'\n'"'"'*) ;;' \
+  't_diag_dir_must_be_absolute'
+shmutant_mut 'a diagnostic directory inside the workdir is accepted' \
+  '    if _shmutant_inside "$wd" "$v"; then' \
+  '    if false; then' \
+  't_diag_dir_must_be_absolute'
+shmutant_mut 'a diagnostic directory is compared by its name only' \
+  '    v="$(_shmutant_abs "$SHMUTANT_DIAG_DIR")" || v="$SHMUTANT_DIAG_DIR"' \
+  '    v="$SHMUTANT_DIAG_DIR"' \
+  't_diag_dir_must_be_absolute'
+shmutant_mut 'a run whose group could not be verified leaves no snapshot' \
+  '        _shmutant_diag_snapshot holder-gone "run $pid' \
+  '        : _shmutant_diag_snapshot holder-gone "run $pid' \
+  't_diag_snapshot_records_a_run_whose_group_could_not_be_verified'
+shmutant_mut 'the snapshot carries no timestamp' \
+  '  { command -p date -u '"'"'+%Y-%m-%dT%H:%M:%SZ'"'"'; printf '"'"'%s\n'"'"' "kind: $k" "$@"' \
+  '  { printf '"'"'%s\n'"'"' "kind: $k" "$@"' \
+  't_diag_snapshot_records_a_run_whose_group_could_not_be_verified'
+shmutant_mut 'the snapshot carries no process table' \
+  '    SHMUTANT_PS_BOUND=10 _shmutant_ps -A -o pid,ppid,pgid,sess,stat,lstart,command \' \
+  '    : \' \
+  't_diag_snapshot_records_a_run_whose_group_could_not_be_verified'
+# (no row on the snapshot's empty-setting check, its bound or its fallback table: off, mktemp in / fails
+# for an unprivileged run; a ps that answers needs no bound; both platforms take the first format)
