@@ -6907,6 +6907,8 @@ t_suite_sweeps_what_a_unit_leaves_behind() {
   # A copy's unit whose leftovers its sweep cannot show gone keeps its directory: the copies make
   # theirs in this unit's, which the runner removes.
   mkdir "$T/tmp" && export TMPDIR="$T/tmp" || { fail_ 'fixture: could not make the copies'"'"' TMPDIR'; return; }
+  # t_zz_reparents waits on the copy's sampler through this mirror (seen_by_sampler).
+  export SAMPLE_MIRROR="$T/sampled"
   mkdir -p "$T/suite/test"
   cp -- "$SHMUTANT" "$T/suite/shmutant.sh"
   # The units below are written as source, so this directory goes into them quoted for the shell.
@@ -6940,8 +6942,9 @@ t_suite_sweeps_what_a_unit_leaves_behind() {
   }
   t_zz_late_reparents() { late_await sampling && printf '%s\n' "\$BASHPID" > $qt/late_reparents.flag && late_await stalled && ( sleep 30 > /dev/null 2>&1 & echo \$! > $qt/late_reparents.pid ); }
   t_zz_clean() { sleep 0.2 & wait; }
-main "\$@"
 EOF
+    mirror_samples
+    printf '%s\n' 'main "$@"'
   } > "$T/suite/test/run.sh"
   local out c pid hold unverified dir rc
   for c in leaks leaks_then_exits reparents; do
