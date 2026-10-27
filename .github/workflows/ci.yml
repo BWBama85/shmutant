@@ -83,8 +83,9 @@ jobs:
       # group could not be verified and on a hang-up (#75), kept with the artifact below.
       - name: self-mutation
         run: |
-          mkdir -p "$RUNNER_TEMP/diag"
-          SHMUTANT_DIAG_DIR="$RUNNER_TEMP/diag" perl -e '$SIG{PIPE} = "DEFAULT"; exec @ARGV or die "exec: $!\n"' bash shmutant.sh run test/mutants.sh --workdir "$RUNNER_TEMP/mutants" --keep > mutants.tsv
+          # Best effort: without the directory the run goes ahead with no snapshots.
+          if mkdir -p "$RUNNER_TEMP/diag"; then export SHMUTANT_DIAG_DIR="$RUNNER_TEMP/diag"; fi
+          perl -e '$SIG{PIPE} = "DEFAULT"; exec @ARGV or die "exec: $!\n"' bash shmutant.sh run test/mutants.sh --workdir "$RUNNER_TEMP/mutants" --keep > mutants.tsv
       - name: verdicts
         if: always()
         run: cat mutants.tsv || true
@@ -160,8 +161,9 @@ jobs:
       # group could not be verified and on a hang-up (#75), kept with the artifact below.
       - name: self-mutation
         run: |
-          mkdir -p "$RUNNER_TEMP/diag"
-          SHMUTANT_DIAG_DIR="$RUNNER_TEMP/diag" perl -e '$SIG{PIPE} = "DEFAULT"; exec @ARGV or die "exec: $!\n"' bash shmutant.sh run test/mutants.sh --workdir "$RUNNER_TEMP/mutants" --keep > mutants.tsv
+          # Best effort: without the directory the run goes ahead with no snapshots.
+          if mkdir -p "$RUNNER_TEMP/diag"; then export SHMUTANT_DIAG_DIR="$RUNNER_TEMP/diag"; fi
+          perl -e '$SIG{PIPE} = "DEFAULT"; exec @ARGV or die "exec: $!\n"' bash shmutant.sh run test/mutants.sh --workdir "$RUNNER_TEMP/mutants" --keep > mutants.tsv
       - name: verdicts
         if: always()
         run: cat mutants.tsv || true

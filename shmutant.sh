@@ -42,10 +42,11 @@
 #                        (default 0; needs SHMUTANT_BASELINE=1)
 #   SHMUTANT_KEEP        1 keeps every clone after its run (default: clones are removed)
 #   SHMUTANT_STREAM      file the verdict stream is appended to (default: stdout)
-#   SHMUTANT_DIAG_DIR    absolute path of a directory outside the workdir: a run whose process
-#                        group could not be verified as its own leaves a process-table snapshot
-#                        there, in a new holder-gone.XXXXXX file (default: unset, no snapshot). It
-#                        never changes a verdict: a directory missing or unwritable then gets nothing
+#   SHMUTANT_DIAG_DIR    absolute path of an existing directory outside the workdir: a run whose
+#                        process group could not be verified as its own leaves a process-table
+#                        snapshot there, in a new holder-gone-<run pid>.<n> file (default: unset, no
+#                        snapshot). It never changes a verdict: a directory gone or unwritable by
+#                        then gets nothing
 #   SHMUTANT_RED_PREFIX  see run; SHMUTANT_RED_STATUS  see run
 #
 # Verdict stream (stdout, tab-separated, one record per line; \t \n \\ escaped in fields):
@@ -681,18 +682,29 @@ _shmutant_proc_table() {
     END { flush() }'
 }
 
-# _shmutant_diag_snapshot <kind> <line>… — with SHMUTANT_DIAG_DIR naming a writable directory, a new
-# <kind>.XXXXXX file in it: a UTC timestamp, `kind: <kind>`, each line, then the whole process table
-# (each read given up on after ten seconds). Best effort, status 0 always: it never changes a verdict.
+# _shmutant_diag_snapshot <kind> <id> <line>… — with SHMUTANT_DIAG_DIR set, a new <kind>-<id>.<n>
+# file in it: a UTC timestamp, `kind: <kind>`, each line, then the whole process table (each read
+# given up on after ten seconds). It is written whole in a private directory of its own and then
+# linked in under a name nothing had (ln never replaces, and a name already there, a link or a FIFO
+# included, is passed over), so it is complete or absent and nothing at its name is written through.
+# Nothing reaches stderr, and the status is 0 always: a snapshot never changes a verdict.
 _shmutant_diag_snapshot() {
-  local d="${SHMUTANT_DIAG_DIR:-}" f k="$1"; shift
-  # A directory missing or unwritable fails the mktemp: no file, no table read.
+  local d="${SHMUTANT_DIAG_DIR:-}" f k="$1" n="$2" tbl i tmp; shift 2
   [ -n "$d" ] || return 0
-  f="$(command -p mktemp "$d/$k.XXXXXX" 2>/dev/null)" || return 0
-  { command -p date -u '+%Y-%m-%dT%H:%M:%SZ'; printf '%s\n' "kind: $k" "$@"
-    SHMUTANT_PS_BOUND=10 _shmutant_ps -A -o pid,ppid,pgid,sess,stat,lstart,command \
-      || SHMUTANT_PS_BOUND=10 _shmutant_ps -A -o pid,ppid,pgid,stat,command
-  } >| "$f" 2>/dev/null
+  # The table first: a capture that cannot read one writes nothing.
+  tbl="$(SHMUTANT_PS_BOUND=10 _shmutant_ps -A -o pid,ppid,pgid,sess,stat,lstart,command 2>/dev/null)" \
+    || tbl="$(SHMUTANT_PS_BOUND=10 _shmutant_ps -A -o pid,ppid,pgid,stat,command 2>/dev/null)" || return 0
+  [ -n "$tbl" ] || return 0
+  tmp="$(command -p mktemp -d "$d/.$k-$n.XXXXXX" 2>/dev/null)" || return 0
+  if { command -p date -u '+%Y-%m-%dT%H:%M:%SZ' && printf '%s\n' "kind: $k" "$@" "$tbl"; } > "$tmp/s" 2>/dev/null; then
+    for (( i = 0; i < 5; i++ )); do
+      f="$d/$k-$n.$RANDOM$RANDOM"
+      # ln into a directory at the name would link inside it: a name taken, as anything, is skipped.
+      [ -e "$f" ] || [ -L "$f" ] || ! command -p ln -- "$tmp/s" "$f" 2>/dev/null || break
+    done
+  fi
+  command -p rm -f -- "$tmp/s" 2>/dev/null
+  command -p rmdir -- "$tmp" 2>/dev/null
   return 0
 }
 
@@ -1947,8 +1959,9 @@ _shmutant_run_bounded() {
       _shmutant_held_group "$pid"
       if [ "${#SHMUTANT_HELD[@]}" -eq 0 ]; then
         _shmutant_err "the run's process group could not be verified as its own; what it left behind is not signalled by number" 2>&"$err_fd"
-        _shmutant_diag_snapshot holder-gone "run $pid (its process group), in $dir" \
-          "holder ${holder:-none}, recorded as ${holderid:-unidentified}" "run recorded as ${rootid:-unidentified}" "run status $rc"
+        _shmutant_diag_snapshot holder-gone "$pid" "run $pid (its process group), in $dir" \
+          "holder ${holder:-none}, recorded as ${holderid:-unidentified}" "run recorded as ${rootid:-unidentified}" \
+          "run status $rc" "kill group ${SHMUTANT_KILL_GROUP:-unset}"
       fi
       _shmutant_kill_tree_twice "${SHMUTANT_HELD[@]}" "$pid:$rootid" "${leftovers[@]}"
     fi
@@ -2679,9 +2692,9 @@ _shmutant_validate_settings() {
     _shmutant_err "$label: SHMUTANT_RED_PREFIX is empty — every line would count as a red line"; return 2
   fi
   case "${SHMUTANT_RED_PREFIX:-}" in *$'\n'*) _shmutant_err "$label: SHMUTANT_RED_PREFIX contains a newline — no single line could ever start with it"; return 2 ;; esac
-  # Absolute, so a callback's cd cannot move where a snapshot lands, and outside the workdir, which
-  # the pool clears. Whether it exists is read at the snapshot: a directory gone by then costs the
-  # snapshot, never a verdict.
+  # An absolute, existing directory outside the workdir (which the pool clears), replaced by its
+  # physical form: a callback's cd or a link moved later cannot change where a snapshot lands. One
+  # gone by the time of a snapshot costs the snapshot, never a verdict.
   if [ -n "${SHMUTANT_DIAG_DIR:-}" ]; then
     local v
     case "$SHMUTANT_DIAG_DIR" in
@@ -2689,10 +2702,11 @@ _shmutant_validate_settings() {
       /*) ;;
       *) _shmutant_err "$label: SHMUTANT_DIAG_DIR must be an absolute path, got [$SHMUTANT_DIAG_DIR]"; return 2 ;;
     esac
-    v="$(_shmutant_abs "$SHMUTANT_DIAG_DIR")" || v="$SHMUTANT_DIAG_DIR"
+    v="$(_shmutant_abs "$SHMUTANT_DIAG_DIR")" || { _shmutant_err "$label: SHMUTANT_DIAG_DIR is not a directory: $SHMUTANT_DIAG_DIR"; return 2; }
     if _shmutant_inside "$wd" "$v"; then
       _shmutant_err "$label: SHMUTANT_DIAG_DIR lies inside the workdir ($SHMUTANT_DIAG_DIR) — the pool recreates and removes what is in there"; return 2
     fi
+    _shmutant_canon "$label" SHMUTANT_DIAG_DIR "$v" || return 2
   fi
   if [ -n "${SHMUTANT_STREAM:-}" ]; then
     local sdir

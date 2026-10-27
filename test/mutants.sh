@@ -2598,25 +2598,65 @@ shmutant_mut 'a diagnostic directory with a newline is accepted' \
   '      *$'"'"'\n'"'"'*) _shmutant_err "$label: SHMUTANT_DIAG_DIR contains a newline"; return 2 ;;' \
   '      *$'"'"'\n'"'"'*) ;;' \
   't_diag_dir_must_be_absolute'
+shmutant_mut 'a diagnostic directory that is not there is accepted' \
+  '    v="$(_shmutant_abs "$SHMUTANT_DIAG_DIR")" || { _shmutant_err "$label: SHMUTANT_DIAG_DIR is not a directory: $SHMUTANT_DIAG_DIR"; return 2; }' \
+  '    v="$(_shmutant_abs "$SHMUTANT_DIAG_DIR")" || v="$SHMUTANT_DIAG_DIR"' \
+  't_diag_dir_must_be_absolute'
 shmutant_mut 'a diagnostic directory inside the workdir is accepted' \
   '    if _shmutant_inside "$wd" "$v"; then' \
   '    if false; then' \
   't_diag_dir_must_be_absolute'
-shmutant_mut 'a diagnostic directory is compared by its name only' \
-  '    v="$(_shmutant_abs "$SHMUTANT_DIAG_DIR")" || v="$SHMUTANT_DIAG_DIR"' \
-  '    v="$SHMUTANT_DIAG_DIR"' \
+shmutant_mut 'a diagnostic directory keeps the name it was given' \
+  '    _shmutant_canon "$label" SHMUTANT_DIAG_DIR "$v" || return 2' \
+  '    :' \
   't_diag_dir_must_be_absolute'
 shmutant_mut 'a run whose group could not be verified leaves no snapshot' \
-  '        _shmutant_diag_snapshot holder-gone "run $pid' \
-  '        : _shmutant_diag_snapshot holder-gone "run $pid' \
+  '        _shmutant_diag_snapshot holder-gone "$pid" "run $pid (its process group), in $dir" \' \
+  '        : _shmutant_diag_snapshot holder-gone "$pid" "run $pid (its process group), in $dir" \' \
   't_diag_snapshot_records_a_run_whose_group_could_not_be_verified'
+shmutant_mut 'the snapshot omits the kill group' \
+  '          "run status $rc" "kill group ${SHMUTANT_KILL_GROUP:-unset}"' \
+  '          "run status $rc"' \
+  't_diag_snapshot_records_a_run_whose_group_could_not_be_verified'
+shmutant_mut 'an empty diagnostic setting still reads the process table' \
+  '  [ -n "$d" ] || return 0' \
+  '  :' \
+  't_diag_snapshot_publishes_only_a_file_it_created'
+shmutant_mut 'a snapshot is written with no table' \
+  '  [ -n "$tbl" ] || return 0' \
+  '  :' \
+  't_diag_snapshot_publishes_only_a_file_it_created'
+shmutant_mut 'a snapshot writes through what is at its name' \
+  '      [ -e "$f" ] || [ -L "$f" ] || ! command -p ln -- "$tmp/s" "$f" 2>/dev/null || break' \
+  '      command -p cp -- "$tmp/s" "$f" 2>/dev/null; break' \
+  't_diag_snapshot_publishes_only_a_file_it_created'
+shmutant_mut 'a snapshot gives up at the first name taken' \
+  '    for (( i = 0; i < 5; i++ )); do' \
+  '    for (( i = 0; i < 1; i++ )); do' \
+  't_diag_snapshot_publishes_only_a_file_it_created'
+shmutant_mut 'a snapshot whose write failed is published' \
+  '  if { command -p date -u '"'"'+%Y-%m-%dT%H:%M:%SZ'"'"' && printf '"'"'%s\n'"'"' "kind: $k" "$@" "$tbl"; } > "$tmp/s" 2>/dev/null; then' \
+  '  { command -p date -u '"'"'+%Y-%m-%dT%H:%M:%SZ'"'"' && printf '"'"'%s\n'"'"' "kind: $k" "$@" "$tbl"; } > "$tmp/s" 2>/dev/null; if :; then' \
+  't_diag_snapshot_publishes_only_a_file_it_created'
+shmutant_mut 'a snapshot leaves its private copy' \
+  '  command -p rm -f -- "$tmp/s" 2>/dev/null' \
+  '  :' \
+  't_diag_snapshot_publishes_only_a_file_it_created'
+shmutant_mut 'a snapshot leaves its private directory' \
+  '  command -p rmdir -- "$tmp" 2>/dev/null' \
+  '  :' \
+  't_diag_snapshot_publishes_only_a_file_it_created'
+shmutant_mut 'a snapshot that cannot make its directory says so' \
+  '  tmp="$(command -p mktemp -d "$d/.$k-$n.XXXXXX" 2>/dev/null)" || return 0' \
+  '  tmp="$(command -p mktemp -d "$d/.$k-$n.XXXXXX")" || return 0' \
+  't_diag_snapshot_publishes_only_a_file_it_created'
 shmutant_mut 'the snapshot carries no timestamp' \
-  '  { command -p date -u '"'"'+%Y-%m-%dT%H:%M:%SZ'"'"'; printf '"'"'%s\n'"'"' "kind: $k" "$@"' \
-  '  { printf '"'"'%s\n'"'"' "kind: $k" "$@"' \
+  '  if { command -p date -u '"'"'+%Y-%m-%dT%H:%M:%SZ'"'"' && printf' \
+  '  if { printf' \
   't_diag_snapshot_records_a_run_whose_group_could_not_be_verified'
 shmutant_mut 'the snapshot carries no process table' \
-  '    SHMUTANT_PS_BOUND=10 _shmutant_ps -A -o pid,ppid,pgid,sess,stat,lstart,command \' \
-  '    : \' \
+  '"$@" "$tbl"; } > "$tmp/s"' \
+  '"$@"; } > "$tmp/s"' \
   't_diag_snapshot_records_a_run_whose_group_could_not_be_verified'
-# (no row on the snapshot's empty-setting check, its bound or its fallback table: off, mktemp in / fails
-# for an unprivileged run; a ps that answers needs no bound; both platforms take the first format)
+# (no row on the bound of the snapshot's table reads or on its fallback format: a ps that answers needs
+# no bound, and both platforms take the first format; the bound is _shmutant_ps's own, tested there)
