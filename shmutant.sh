@@ -1405,7 +1405,8 @@ _shmutant_elapsed_gap() {
 # to be the run's (a holder still there, stopped and in the group that cannot be checked, or a pid it
 # verified still in it, _shmutant_group_has), and, shown or not, while it may hold a member stopped
 # there that was never told (no `m`), which nothing else would let go: once it acts, no group a freeze
-# stopped is left stopped, and the most it sends one not shown to be the run's is a CONT, after every
+# stopped is left stopped (but for a member the freezing shell's reads did not show, see
+# _shmutant_guard_members), and the most it sends one not shown to be the run's is a CONT, after every
 # KILL. It is sent nothing only when every member was told, each then killed or continued by its
 # number. It uses no freeze step and no _shmutant_kill_tree, which a freezing shell killed in
 # them may have left half-done.
