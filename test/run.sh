@@ -317,6 +317,22 @@ seen_by_sampler() {
   echo "fixture: the sampler never recorded pid $1"; _failed=1; return 1
 }
 
+# sampling_ended — true once the descendant sampler of the running unit has ended: the sampler's job
+# ($sampler) leads a group of its own and outlives the unit, holding it, so the end looked for is
+# the group holding no member but the job, looked at for at most ten seconds. False on expiry, or
+# when the group's members cannot be read.
+sampling_ended() {
+  local i out m other
+  for (( i = 0; i < 100; i++ )); do
+    out="$(group_members "$sampler")" || return 1
+    other=""
+    while IFS= read -r m; do [ -z "$m" ] || [ "$m" = "$sampler" ] || other=1; done <<< "$out"
+    [ -n "$other" ] || return 0
+    sleep 0.1
+  done
+  return 1
+}
+
 # mirror_samples — the lines a copy of this suite appends to its source so that every line its
 # sampler writes is also appended to the file $SAMPLE_MIRROR names (seen_by_sampler), which the copy
 # empties as it starts: a line from an earlier run is never taken for one of this run's. A mirror
@@ -6924,7 +6940,7 @@ t_suite_sweeps_what_a_unit_leaves_behind() {
     elif [ -n "\${STRICT:-}" ]; then set -euC -o pipefail; IFS=:; shopt -s nocasematch extglob; readonly recorded=7 removed=1 rc=0; exec 1< /dev/null; fi
   }
   t_zz_undeletable() { printf '%s\n' "\$T" > $qt/undeletable.dir; make_unremovable "\$T/held" && printf '%s\n' "\$UNREMOVABLE_HOW" > $qt/undeletable.how; true; }
-  t_zz_reparents() { ( sleep 30 > /dev/null 2>&1 & echo \$! > $qt/reparents.pid; if [ -z "\${UNSAMPLED:-}" ]; then seen_by_sampler \$!; else wait_gone "\$sampler" '' 100 || { echo 'fixture: the sampler never ended'; exit 1; }; fi ) || _failed=1; sleep 0.3; }
+  t_zz_reparents() { ( sleep 30 > /dev/null 2>&1 & echo \$! > $qt/reparents.pid; if [ -z "\${UNSAMPLED:-}" ]; then seen_by_sampler \$!; else sampling_ended || { echo 'fixture: the sampler never ended'; exit 1; }; fi ) || _failed=1; sleep 0.3; }
   late_await() { local i; for (( i = 0; i < 200; i++ )); do command -p grep -qx "\$1" $qt/late_reparents.log 2>/dev/null && return 0; sleep 0.05; done; fail_ "the sampler never logged \$1"; return 1; }
   late_identity() {
     local n i
@@ -7013,6 +7029,7 @@ EOF
   } > "$T/suite-nosampler/test/run.sh"
   rm -f "$T/reparents.pid"
   out="$(UNSAMPLED=1 SHMUTANT_SELECT=t_zz_reparents bash "$T/suite-nosampler/test/run.sh" 2>&1)"; rc_is $? 1 'a unit whose sampler could not start fails'
+  hasnt "$out" 'fixture: ' 'its t_zz_reparents fixture held'
   has "$out" 'FAIL: t_zz_reparents: the descendant sampler could not start' 'and says why'
   pid="$(cat "$T/reparents.pid" 2>/dev/null)"
   [ -z "$pid" ] || { kill -KILL "$pid" 2>/dev/null; wait_gone "$pid"; }
@@ -7110,6 +7127,7 @@ EOF
   for unverified in '' 1; do
     rm -f "$T/reparents.pid"
     out="$(NOWRITE_IN=sample_unit NOWRITE_UNVERIFIED="$unverified" UNSAMPLED=1 SHMUTANT_SELECT=t_zz_reparents bash "$T/suite-snapnowrite/test/run.sh" 2>&1)"; rc_is $? 1 "a sampler that cannot write its snapshot fails the unit (unverified=[$unverified])"
+    hasnt "$out" 'fixture: ' 'its t_zz_reparents fixture held'
     has "$out" 'FAIL: t_zz_reparents: the descendant sampler stopped abnormally (status 1)' "and says so (unverified=[$unverified])"
     pid="$(cat "$T/reparents.pid" 2>/dev/null)"
     [ -z "$pid" ] || { kill -KILL "$pid" 2>/dev/null; wait_gone "$pid"; }
@@ -7172,6 +7190,7 @@ EOF
   } > "$T/suite-noid/test/run.sh"
   rm -f "$T/reparents.pid"
   out="$(UNSAMPLED=1 SHMUTANT_SELECT=t_zz_reparents bash "$T/suite-noid/test/run.sh" 2>&1)"; rc_is $? 1 'a unit that could not read its own identity fails'
+  hasnt "$out" 'fixture: ' 'its t_zz_reparents fixture held'
   has "$out" 'FAIL: t_zz_reparents: the process table could not be read' 'and its leftovers are reported unverified'
   pid="$(cat "$T/reparents.pid" 2>/dev/null)"
   [ -z "$pid" ] || { kill -KILL "$pid" 2>/dev/null; wait_gone "$pid"; }
@@ -7180,6 +7199,7 @@ EOF
   for c in 'NOWRITE=unverified\n' NOOPEN=1; do
     rm -f "$T/reparents.pid" || { fail_ 'could not reset the leftover record'; return; }
     out="$(env "$c" UNSAMPLED=1 SHMUTANT_SELECT=t_zz_reparents bash "$T/suite-noid/test/run.sh" 2>&1)"; rc_is $? 1 "a unit whose unverified mark could not be written fails ($c)"
+    hasnt "$out" 'fixture: ' 'its t_zz_reparents fixture held'
     has "$out" 'FAIL: t_zz_reparents: its own identity could not be read and the sweep record could not say so, so it was not run' "and says why ($c)"
     pid="$(cat "$T/reparents.pid" 2>/dev/null)"
     [ -z "$pid" ] || { kill -KILL "$pid" 2>/dev/null; wait_gone "$pid"; fail_ "a unit whose unverified mark could not be written still ran ($c)"; }
@@ -7193,6 +7213,7 @@ EOF
   } > "$T/suite-nohandshake/test/run.sh"
   rm -f "$T/reparents.pid" || { fail_ 'could not reset the leftover record'; return; }
   out="$(NOWRITE='%s %s\n' UNSAMPLED=1 SHMUTANT_SELECT=t_zz_reparents bash "$T/suite-nohandshake/test/run.sh" 2>&1)"; rc_is $? 1 'a unit whose pid could not be handed to the sampler fails'
+  hasnt "$out" 'fixture: ' 'its t_zz_reparents fixture held'
   has "$out" 'FAIL: t_zz_reparents: its pid could not be handed to the descendant sampler, so it was not run' 'and says why'
   has "$out" 'run.sh: 1 unit(s) ran, 1 failed, 0 leftover process(es) swept' 'and the run still ends with its summary'
   hasnt "$out" 'the descendant sampler stopped abnormally' 'its sampler ended cleanly'
@@ -7226,6 +7247,7 @@ EOF
   } > "$T/suite-killedsampler/test/run.sh"
   rm -f "$T/reparents.pid"
   out="$(UNSAMPLED=1 SHMUTANT_SELECT=t_zz_reparents bash "$T/suite-killedsampler/test/run.sh" 2>&1)"; rc_is $? 1 'a unit whose sampler was killed fails'
+  hasnt "$out" 'fixture: ' 'its t_zz_reparents fixture held'
   has "$out" 'FAIL: t_zz_reparents: the descendant sampler stopped abnormally' 'and says so'
   pid="$(cat "$T/reparents.pid" 2>/dev/null)"
   [ -z "$pid" ] || { kill -KILL "$pid" 2>/dev/null; wait_gone "$pid"; }
@@ -8017,6 +8039,26 @@ t_seen_by_sampler_matches_the_process_now() {
   printf '%s:%s\n' "$p" "$real" >> "$T/mirror"
   rc=0; ( SAMPLE_MIRROR="$T/mirror"; seen_by_sampler "$p" > /dev/null ) || rc=$?
   rc_is "$rc" 0 'the mirrored line carrying the start of the process now at the pid failed the handshake'
+  kill -KILL "$p" 2>/dev/null; wait "$p" 2>/dev/null
+}
+
+t_sampler_state_probe_gives_up_on_a_stalled_ps() {
+  # The two sampler waits look for a sampler held stopped through sampler_stopped, whose process-table
+  # read is bounded: a ps that stalls is given up on and read as no state, never waited on, so neither
+  # wait can hang the run on it. Modelled by a state read whose ps never answers.
+  sleep 60 > /dev/null 2>&1 & local p=$!
+  local t0 t1 rc
+  stop_shown "$p" || fail_ 'fixture: the process could not be stopped'
+  sampler_stopped "$p" || fail_ 'fixture: a stopped process was not shown stopped'
+  t0=$SECONDS
+  ( command() {
+      if [ "${1:-}" = -p ] && [ "${2:-}" = ps ] && case "$*" in *stat=*) true ;; *) false ;; esac; then exec sleep 30; fi
+      builtin command "$@"
+    }
+    sampler_stopped "$p" ); rc=$?
+  t1=$SECONDS
+  rc_is "$rc" 1 'a state read whose ps stalled is read as no state'
+  [ $(( t1 - t0 )) -le 15 ] || fail_ "a state read whose ps stalled was waited on for $(( t1 - t0 )) s"
   kill -KILL "$p" 2>/dev/null; wait "$p" 2>/dev/null
 }
 
@@ -8880,6 +8922,13 @@ suite_job_runs() {
 # the first had read the end it waited for waits for an end that does not come again, and kills the
 # group, still held. A sampler the kill could not reach is waited on as long as a running one is given,
 # then ends the run as a harness failure (exit 2), never hanging it.
+# sampler_stopped <pid> — whether <pid> is stopped now, read through a process table bounded to two
+# seconds (_shmutant_ps): a ps that stalls reads as no state, never as a wait, so neither stop loop
+# below can hang on it.
+sampler_stopped() {
+  SHMUTANT_PS_BOUND=2 _shmutant_proc_stopped "$1"
+}
+
 sampler_stop() {
   local i line part="" w="" ended=""
   [ -n "${sampler:-}" ] || return 0
@@ -8895,7 +8944,7 @@ sampler_stop() {
       part="$part$line"
       suite_job_runs "$sampler" || break
       # Once a second: a sampler held stopped will not end, so it is not waited on.
-      (( i % 10 != 9 )) || [ -z "$w" ] || ! _shmutant_proc_stopped "$w" || break
+      (( i % 10 != 9 )) || [ -z "$w" ] || ! sampler_stopped "$w" || break
     done
     [ -n "$ended" ] || ! suite_job_runs "$sampler" || sampler_kill
   fi
@@ -8913,7 +8962,7 @@ sampler_job_wait() {
   local i
   for (( i = 0; i < 300; i++ )); do
     suite_job_runs "$sampler" || return 0
-    (( i % 10 != 9 )) || ! _shmutant_proc_stopped "$sampler" || break
+    (( i % 10 != 9 )) || ! sampler_stopped "$sampler" || break
     command -p sleep 0.1
   done
   suite_job_runs "$sampler" || return 0
