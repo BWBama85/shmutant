@@ -268,13 +268,14 @@ tmp_names() {
   done
 }
 
-# names_outside <dir> — print each `name=value` line of stdin whose value (quotes and an `inode:`
-# prefix taken off) is neither <dir> nor a path below it, compared byte for byte: <dir> reaches awk
-# through its environment, which keeps a backslash in it as it is.
+# names_outside <dir> — print each `name=value` line of stdin whose value (an `inode:` prefix taken
+# off) is neither <dir> nor a path below it, compared byte for byte: <dir> reaches awk through its
+# environment, which keeps a backslash in it as it is. Values are raw (tmp_names, ls), so a quote is
+# part of the path: `<dir>'` is a different path from <dir>.
 names_outside() {
   NAMES_DIR="$1" command -p awk '
     BEGIN { d = ENVIRON["NAMES_DIR"] }
-    { v = $0; sub(/^[^=]*=/, "", v); gsub(/^\047|\047$/, "", v); sub(/^[0-9]+:/, "", v)
+    { v = $0; sub(/^[^=]*=/, "", v); sub(/^[0-9]+:/, "", v)
       if (v == d || index(v, d "/") == 1) next; print }'
 }
 
@@ -8021,9 +8022,10 @@ t_seen_by_sampler_matches_the_process_now() {
 
 t_names_outside_compares_a_path_byte_for_byte() {
   # A directory whose name holds a backslash is matched as it is, not as awk would read an escape.
+  # A quote is part of a raw value, so a path that only adds one is another path, never inside.
   local d='/tmp/a\tb' got
-  got="$(printf '%s\n' "T=$d" "PWD='$d/sub'" "T_ID=12:$d" "OTHER=/tmp/a	b" "NEAR=${d}c" | names_outside "$d")"
-  eq "$got" "OTHER=/tmp/a	b"$'\n'"NEAR=${d}c" 'only the values outside the directory are named'
+  got="$(printf '%s\n' "T=$d" "PWD=$d/sub" "T_ID=12:$d" "OTHER=/tmp/a	b" "NEAR=${d}c" "QUOTED=${d}'" | names_outside "$d")"
+  eq "$got" "OTHER=/tmp/a	b"$'\n'"NEAR=${d}c"$'\n'"QUOTED=${d}'" 'only the values outside the directory are named'
 }
 
 t_unit_leftovers_fails_closed() {
