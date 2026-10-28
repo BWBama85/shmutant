@@ -11,8 +11,11 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 . "$here/../shmutant.sh" || exit 2
 SHMUTANT="$here/../shmutant.sh"
 
+# The suite's own hang-up snapshot goes where SHMUTANT_DIAG_DIR says (suite_diag_snapshot); no unit
+# or pool it runs inherits the setting, since several reach the snapshot points on purpose.
+SUITE_DIAG_DIR="${SHMUTANT_DIAG_DIR:-}"; SUITE_DIAG_ID=""; export -n SUITE_DIAG_DIR SUITE_DIAG_ID
 unset SHMUTANT_TIMEOUT SHMUTANT_JOBS SHMUTANT_KEEP SHMUTANT_STREAM SHMUTANT_BASELINE \
-  SHMUTANT_RED_PREFIX SHMUTANT_RED_STATUS SHMUTANT_COUNTS SHMUTANT_COUNTS_FD
+  SHMUTANT_RED_PREFIX SHMUTANT_RED_STATUS SHMUTANT_COUNTS SHMUTANT_COUNTS_FD SHMUTANT_DIAG_DIR SHMUTANT_DIAG_ID
 
 # --- assertions: every failure names the unit, so a witness is a unit name ----------------------
 
@@ -5730,6 +5733,160 @@ t_run_group_is_not_signalled_by_number_without_its_holder() {
   [ -e "$T/survivor" ] || fail_ 'a group whose holder was gone was still signalled by number'
 }
 
+t_diag_snapshot_records_a_run_whose_group_could_not_be_verified() {
+  # With SHMUTANT_DIAG_DIR set, a run whose holder is gone by its return leaves one new
+  # holder-gone-<run pid>.XXXXXX/snapshot there: a UTC timestamp, its kind, the run, its holder, its status,
+  # the kill group, and the whole process table. Unset, empty or unwritable, it leaves none, and the
+  # verdict and the report are the same either way.
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  # the holder is the member of the run's own process group that is neither the run nor its child
+  holder_ending_run() { local me=$BASHPID h; while read -r h; do kill -KILL "$h" 2>/dev/null; done < <(ps -A -o pid= -o ppid= -o pgid= | awk -v g="$me" '$3 == g && $1 != g && $2 != g { print $1 }'); bash "$1/test.sh"; }
+  diag_pool() {
+    ( _shmutant_identity() { return 1; }; _shmutant_identity_table() { SHMUTANT_START=(); }; _shmutant_descendants() { :; }; _shmutant_descendants_started() { :; }
+      SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=0 shmutant_pool lbl "$T/wd" toy_prepare holder_ending_run > "$T/out" 2> "$T/err" )
+    printf '%s ' "$?"; awk -F'\t' '$3 == "row" { print $4 }' "$T/out"
+  }
+  local f got want n run
+  mkdir "$T/diag" "$T/shut" || { fail_ 'fixture: could not make the snapshot directories'; return; }
+  want="$(SHMUTANT_DIAG_DIR="$T/diag" diag_pool)"
+  has "$want" 'killed' 'the verdict is the callback'"'"'s own'
+  has "$(cat "$T/err")" 'could not be verified' 'the unverifiable group is reported'
+  eq "$(n_found "$T/diag" -type f -path '*/holder-gone-*/snapshot')" 1 'one snapshot for the one run whose group could not be verified'
+  f="$(find "$T/diag" -type f -path '*/holder-gone-*/snapshot' | head -n 1)"
+  if [ -z "$f" ]; then fail_ 'no snapshot was written'
+  else
+    run="${f%/snapshot}"; run="${run##*/holder-gone-}"; run="${run%%.*}"
+    [[ "$(sed -n 1p "$f")" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || fail_ "the snapshot does not start with a UTC timestamp: [$(sed -n 1p "$f")]"
+    eq "$(sed -n 2p "$f")" 'kind: holder-gone' 'it names its kind'
+    [[ "$run" =~ ^[0-9]+$ ]] || fail_ "the file is not named by the run's pid: [${f##*/}]"
+    eq "$(sed -n 3p "$f")" "run $run (its process group), in $T/wd/mut-0" 'it names the run its name carries, and the run'"'"'s directory'
+    [[ "$(sed -n 4p "$f")" =~ ^holder\ [0-9]+,\ recorded\ as\ unidentified$ ]] || fail_ "it names the holder: [$(sed -n 4p "$f")]"
+    eq "$(sed -n 5p "$f")" 'run recorded as unidentified' 'and the run'"'"'s identity'
+    eq "$(sed -n 6p "$f")" 'run status 1' 'and the run'"'"'s status'
+    eq "$(sed -n 7p "$f")" 'kill group unset' 'and the kill group'
+    [[ "$(sed -n 8p "$f")" =~ ^\ *PID\ +PPID\ +PGID\  ]] || fail_ "the process table follows, with its header: [$(sed -n 8p "$f")]"
+    awk -v p="$$" 'NR > 8 && $1 == p { found = 1 } END { exit !found }' "$f" || fail_ 'the process table is not the whole table: the suite itself is not in it'
+  fi
+  for n in unset empty shut; do
+    case "$n" in
+      unset) got="$(diag_pool)" ;;
+      empty) got="$(SHMUTANT_DIAG_DIR='' diag_pool)" ;;
+      shut)
+        chmod 555 "$T/shut"
+        if [ -w "$T/shut" ]; then echo "note: $_unit: an unwritable directory cannot be made here (root?); that case is not checked"; chmod 755 "$T/shut"; continue; fi
+        got="$(SHMUTANT_DIAG_DIR="$T/shut" diag_pool)"; chmod 755 "$T/shut" ;;
+    esac
+    eq "$got" "$want" "the status and the verdict are the same with the setting $n"
+    has "$(cat "$T/err")" 'could not be verified' "the unverifiable group is still reported ($n)"
+    hasnt "$(cat "$T/err")" 'Permission denied' "nothing of the snapshot reaches the report ($n)"
+  done
+  eq "$(n_found "$T/diag" "$T/shut" -type f)" 1 'no snapshot is written with the setting unset, empty or unwritable'
+}
+
+t_diag_snapshot_publishes_only_a_file_it_created() {
+  # A snapshot is a directory of its own, new and private, holding one file renamed into place once
+  # written whole. A directory replaced since it was checked, a table that cannot be read, and a
+  # write that fails leave nothing; nothing reaches stderr; both table reads are bounded; and with
+  # the setting empty no table is read.
+  local id out f
+  mkdir "$T/d" "$T/elsewhere" || { fail_ 'fixture: could not make the snapshot directories'; return; }
+  id="$(_shmutant_dir_id "$T/d")" || { fail_ 'fixture: the snapshot directory cannot be identified'; return; }
+  # snap <stub body for _shmutant_ps> [directory [identity]] — one snapshot, its status and stderr
+  snap() { ( eval "_shmutant_ps() { $1; }"; SHMUTANT_DIAG_DIR="${2-$T/d}" SHMUTANT_DIAG_ID="${3-$id}" _shmutant_diag_snapshot holder-gone 7 'a line' 2>&1; echo "rc $?" ); }
+  out="$(snap "printf '%s\n' \"\${SHMUTANT_PS_BOUND:-none}\" >> \"\$T/bounds\"; case \" \$* \" in *sess*) return 1 ;; esac; printf '  PID\n    1\n'")"
+  eq "$out" 'rc 0' 'the snapshot returns 0 and prints nothing'
+  eq "$(tr '\n' ' ' < "$T/bounds")" '10 10 ' 'each table read is bounded, the fallback'"'"'s included'
+  eq "$(n_found "$T/d" -mindepth 1 -maxdepth 1 -type d -name 'holder-gone-7.*')" 1 'one directory of its own'
+  f="$(find "$T/d" -mindepth 2 -type f | head -n 1)"
+  eq "${f##*/}" snapshot 'holding one file, renamed into place'
+  eq "$(n_found "$T/d" -mindepth 2)" 1 'and nothing else'
+  [ -n "$f" ] && eq "$(sed -n '2,$p' "$f")" $'kind: holder-gone\na line\n  PID\n    1' 'written whole, from the fallback format'
+  rm -rf "${T:?}/d/"*
+  # replaced by a link to somewhere else since it was checked
+  mv "$T/d" "$T/d.old" && ln -s "$T/elsewhere" "$T/d" || { fail_ 'fixture: could not replace the directory'; return; }
+  eq "$(snap "printf 'PID\n'")" 'rc 0' 'a replaced directory says nothing'
+  eq "$(n_found "$T/elsewhere" -mindepth 1)" 0 'and gets nothing written through it'
+  rm "$T/d" && mv "$T/d.old" "$T/d" || { fail_ 'fixture: could not put the directory back'; return; }
+  # replaced after that check, just before (and just after) the snapshot's own directory is made
+  local when
+  for when in before after; do
+    out="$( command() {
+        if [ "$1 $2 $3" = '-p mktemp -d' ]; then
+          local m
+          [ "$when" = after ] || { mv "$T/d" "$T/d.old" && ln -s "$T/elsewhere" "$T/d"; }
+          m="$(builtin command -p mktemp -d "$4")" || return
+          [ "$when" = before ] || { mv "$T/d" "$T/d.old" && ln -s "$T/elsewhere" "$T/d"; }
+          printf '%s\n' "$m"; return
+        fi
+        builtin command "$@"; }
+      snap "printf 'PID\n'" )"
+    eq "$out" 'rc 0' "a directory replaced $when its snapshot directory is made says nothing"
+    eq "$(n_found "$T/elsewhere" "$T/d.old" -type f)" 0 "and gets no snapshot written anywhere ($when)"
+    rm "$T/d" && mv "$T/d.old" "$T/d" && rm -rf "${T:?}/elsewhere/"* "${T:?}/d/"* || { fail_ "fixture: could not put the directory back ($when)"; return; }
+  done
+  eq "$(snap "printf 'PID\n'" "$T/d" '')" 'rc 0' 'no identity recorded says nothing'
+  eq "$(n_found "$T/d" -mindepth 1)" 0 'and writes nothing'
+  eq "$(snap 'return 1')" 'rc 0' 'a table that cannot be read is no failure'
+  eq "$(n_found "$T/d" -mindepth 1)" 0 'and writes nothing'
+  eq "$(snap ':')" 'rc 0' 'an empty table is no failure'
+  eq "$(n_found "$T/d" -mindepth 1)" 0 'and writes nothing either'
+  # the write fails once the file is open: the date utility is gone
+  out="$( command() { [ "$1" = -p ] && [ "$2" = date ] && return 1; builtin command "$@"; }; snap "printf 'PID\n'" )"
+  eq "$out" 'rc 0' 'a failed write is no failure'
+  eq "$(n_found "$T/d" -mindepth 1)" 0 'and leaves no part of a snapshot, nor its directory'
+  # the snapshot's own directory gone before the file is opened
+  out="$( command() { if [ "$1 $2 $3" = '-p mktemp -d' ]; then local m; m="$(builtin command -p mktemp -d "$4")" && rmdir "$m" && printf '%s\n' "$m"; return; fi; builtin command "$@"; }; snap "printf 'PID\n'" )"
+  eq "$out" 'rc 0' 'a file that cannot be opened says nothing'
+  eq "$(n_found "$T/d" -mindepth 1)" 0 'and leaves nothing'
+  chmod 555 "$T/d"
+  if [ -w "$T/d" ]; then echo "note: $_unit: an unwritable directory cannot be made here (root?); that case is not checked"
+  else eq "$(snap "printf 'PID\n'")" 'rc 0' 'an unwritable directory says nothing'; fi
+  chmod 755 "$T/d"
+  eq "$(snap "printf 'PID\n'" "$T/gone")" 'rc 0' 'a directory gone by then says nothing'
+  eq "$(snap ': > "$T/read"' '')" 'rc 0' 'an empty setting is off'
+  [ ! -e "$T/read" ] || fail_ 'the process table was read with the setting empty'
+}
+
+t_diag_dir_must_be_absolute() {
+  # SHMUTANT_DIAG_DIR is an existing directory named by an absolute path with no newline, outside
+  # the workdir (by its physical name), and is replaced by its physical name; one prepare assigns is
+  # checked too. It is never made.
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  SHMUTANT_DIAG_DIR=diag pool lbl "$T/wd" toy_prepare toy_run
+  rc_is "$RC" 2 'a relative SHMUTANT_DIAG_DIR is refused'
+  has "$ERR" 'SHMUTANT_DIAG_DIR must be an absolute path, got [diag]' 'names it'
+  SHMUTANT_DIAG_DIR="$T/a"$'\n'"b" pool lbl "$T/wd" toy_prepare toy_run
+  rc_is "$RC" 2 'a SHMUTANT_DIAG_DIR with a newline is refused'
+  has "$ERR" 'SHMUTANT_DIAG_DIR contains a newline' 'names it'
+  # shellcheck disable=SC2034
+  relative_diag_prepare() { toy_prepare "$1"; SHMUTANT_DIAG_DIR=rel; }
+  pool lbl "$T/wd" relative_diag_prepare toy_run
+  rc_is "$RC" 2 'a relative SHMUTANT_DIAG_DIR that prepare assigns is refused'
+  has "$ERR" 'SHMUTANT_DIAG_DIR must be an absolute path, got [rel]' 'names it'
+  SHMUTANT_DIAG_DIR="$T/none" pool lbl "$T/wd" toy_prepare toy_run
+  rc_is "$RC" 2 'a directory that is not there is refused'
+  has "$ERR" 'SHMUTANT_DIAG_DIR is not a directory' 'says why'
+  [ ! -e "$T/none" ] || fail_ 'the snapshot directory was made'
+  # inside the workdir, which the pool clears: by name, through a link, and through ..
+  mkdir -p "$T/wd/diag" "$T/out" && ln -s "$T/wd" "$T/wdlink" || { fail_ 'fixture: could not make the directories'; return; }
+  for d in "$T/wd/diag" "$T/wdlink" "$T/wdlink/diag" "$T/out/../wd/diag"; do
+    SHMUTANT_DIAG_DIR="$d" pool lbl "$T/wd" toy_prepare toy_run
+    rc_is "$RC" 2 "a SHMUTANT_DIAG_DIR inside the workdir is refused ($d)"
+    has "$ERR" 'SHMUTANT_DIAG_DIR lies inside the workdir' "says why ($d)"
+  done
+  # the physical name is the one the snapshot uses
+  ln -s "$T/out" "$T/outlink" || { fail_ 'fixture: could not link the directory'; return; }
+  # shellcheck disable=SC2034
+  diag_reporting_prepare() { toy_prepare "$1"; printf '%s\n' "$SHMUTANT_DIAG_DIR" > "$T/seen"; }
+  SHMUTANT_DIAG_DIR="$T/outlink" pool lbl "$T/wd" diag_reporting_prepare toy_run
+  rc_is "$RC" 0 'a directory outside the workdir is accepted'
+  eq "$(cat "$T/seen")" "$(cd -P "$T/out" && pwd -P)" 'and replaced by its physical name'
+}
+
 t_callback_bare_wait_does_not_block_on_the_holder() {
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
@@ -7676,6 +7833,63 @@ EOF
   [ -e "$T/errexit" ] || fail_ 'the errexit a unit turned on stopped it at its first failing command'
 }
 
+t_suite_hup_snapshot_shows_the_unit_before_it_is_ended() {
+  # With SHMUTANT_DIAG_DIR set, a suite sent HUP writes one new suite-hup-<suite pid>.XXXXXX/snapshot
+  # before it ends the unit it is running: a UTC timestamp, its kind, the suite and the unit, and the
+  # whole process table, the unit still in it. A TERM writes none; with the directory unwritable the
+  # suite ends by the HUP all the same and prints the same. Its units do not see the setting, and a
+  # relative one is refused as the harness refuses it.
+  [ "$(tail -n 1 "$here/run.sh")" = 'main "$@"' ] || { fail_ 'run.sh no longer ends with main "$@"'; return; }
+  mkdir "$T/tmp" && export TMPDIR="$T/tmp" || { fail_ 'fixture: could not make the copies'"'"' TMPDIR'; return; }
+  mkdir -p "$T/suite/test" "$T/diag" "$T/shut" || { fail_ 'fixture: could not make the copy'"'"'s directories'; return; }
+  cp -- "$SHMUTANT" "$T/suite/shmutant.sh"
+  local qt f rc pid suite out1 out2; printf -v qt '%q' "$T"
+  { sed '$d' "$here/run.sh"
+    printf '%s\n' "t_zz_slow() { echo \"\${SHMUTANT_DIAG_DIR-unset}\" > $qt/slow.diag; echo \$BASHPID > $qt/slow.pid; : > $qt/slow.started; sleep 10; }" 'main "$@"'
+  } > "$T/suite/test/run.sh"
+  # signalled_suite <signal> <directory> <output> — the copy running t_zz_slow, sent <signal> once
+  # the unit has started; its status. Its pid is left in `suite`.
+  signalled_suite() {
+    local r=0
+    rm -f "$T/slow.pid" "$T/slow.started"
+    SHMUTANT_DIAG_DIR="$2" SHMUTANT_SELECT=t_zz_slow bash "$T/suite/test/run.sh" > "$3" 2>&1 & suite=$!
+    if wait_for "$T/slow.started"; then kill "-$1" "$suite"; else fail_ "fixture: t_zz_slow never started ($1)"; kill -KILL "$suite" 2>/dev/null; fi
+    wait "$suite" 2>/dev/null || r=$?
+    return "$r"
+  }
+  rc=0; signalled_suite HUP "$T/diag" "$T/hup.out" || rc=$?
+  rc_is "$rc" 129 'the suite sent HUP ends by it'
+  eq "$(cat "$T/slow.diag" 2>/dev/null)" unset 'the unit does not inherit SHMUTANT_DIAG_DIR'
+  pid="$(cat "$T/slow.pid" 2>/dev/null)"
+  eq "$(n_found "$T/diag" -type f)" 1 'one snapshot for the one hang-up'
+  f="$(find "$T/diag" -type f -path "*/suite-hup-$suite.*/snapshot" | head -n 1)"
+  if [ -z "$f" ]; then fail_ "no snapshot named by the suite's pid was written"
+  else
+    [[ "$(sed -n 1p "$f")" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || fail_ "the snapshot does not start with a UTC timestamp: [$(sed -n 1p "$f")]"
+    eq "$(sed -n 2p "$f")" 'kind: suite-hup' 'it names its kind'
+    eq "$(sed -n 3p "$f")" "suite $suite, parent $BASHPID" 'it names the suite and its parent'
+    [[ "$(sed -n 4p "$f")" =~ ^unit\ t_zz_slow,\ its\ group\ [0-9]+$ ]] || fail_ "it names the unit and its group: [$(sed -n 4p "$f")]"
+    [[ "$(sed -n 5p "$f")" =~ ^\ *PID\ +PPID\ +PGID\  ]] || fail_ "the process table follows, with its header: [$(sed -n 5p "$f")]"
+    if [ -z "$pid" ]; then fail_ 'fixture: t_zz_slow never recorded its pid'
+    else awk -v p="$pid" 'NR > 5 && $1 == p { found = 1 } END { exit !found }' "$f" || fail_ 'the unit was not in the table: it was taken after the unit was ended'; fi
+  fi
+  rc=0; signalled_suite TERM "$T/diag" "$T/term.out" || rc=$?
+  rc_is "$rc" 143 'the suite sent TERM ends by it'
+  eq "$(n_found "$T/diag" -type f)" 1 'a TERM writes no snapshot'
+  chmod 555 "$T/shut"
+  if [ -w "$T/shut" ]; then echo "note: $_unit: an unwritable directory cannot be made here (root?); that case is not checked"
+  else
+    rc=0; signalled_suite HUP "$T/shut" "$T/shut.out" || rc=$?
+    rc_is "$rc" 129 'with the directory unwritable, the suite sent HUP still ends by it'
+    eq "$(n_found "$T/shut" -type f)" 0 'and writes nothing'
+    out1="$(sed "s/[0-9][0-9]*/N/g" "$T/hup.out")"; out2="$(sed "s/[0-9][0-9]*/N/g" "$T/shut.out")"
+    eq "$out2" "$out1" 'and prints what it prints with a writable one'
+  fi
+  chmod 755 "$T/shut"
+  out1="$(SHMUTANT_DIAG_DIR=diag SHMUTANT_SELECT=t_zz_slow bash "$T/suite/test/run.sh" 2>&1)"; rc_is $? 2 'a relative SHMUTANT_DIAG_DIR is refused'
+  has "$out1" 'run.sh: SHMUTANT_DIAG_DIR must be an absolute path, got [diag]' 'names it'
+}
+
 t_suite_removes_a_unit_directory_only_while_it_is_the_runners() {
   # A copy of this suite with one extra unit, which moves the directory the runner made for it aside
   # and moves a directory of the caller's, holding a file, into that path. However the unit then ends
@@ -9043,6 +9257,16 @@ sampler_report() {
   return 1
 }
 
+# suite_diag_snapshot <unit group or empty> — with SUITE_DIAG_DIR set (main checked it), the
+# harness's snapshot of the process table as the hang-up left it, in suite-hup-<suite pid>.XXXXXX/snapshot
+# there: the suite's pid and parent, the unit and its group. It never changes the suite's
+# status or output.
+suite_diag_snapshot() {
+  [ -n "${SUITE_DIAG_DIR:-}" ] || return 0
+  SHMUTANT_DIAG_DIR="$SUITE_DIAG_DIR" SHMUTANT_DIAG_ID="${SUITE_DIAG_ID:-}" \
+    _shmutant_diag_snapshot suite-hup "$$" "suite $$, parent $PPID" "unit ${u:-none}, its group ${1:-none}"
+}
+
 # suite_signalled <signal> — the suite was sent INT, TERM or HUP. A unit runs in a process group of its
 # own, which a signal sent to the suite's group (a ^C at the terminal) no longer reaches, so the suite
 # ends the unit before itself, ignoring further INT, TERM and HUP meanwhile. The group is led by the
@@ -9062,6 +9286,7 @@ suite_signalled() {
     spawning) [ "$!" = "${sampler:-}" ] || g=$! ;;
     *)        g=$SWEEP_UNIT ;;
   esac
+  [ "$1" != HUP ] || suite_diag_snapshot "$g"
   if [ -n "$g" ] && suite_job_runs "$g"; then
     kill "-$1" -- "-$g" 2>/dev/null
     for (( i = 0; i < 30; i++ )); do suite_job_runs "$g" || break; sleep 0.1; done
@@ -9087,6 +9312,11 @@ main() {
   local units u ran=0 failed=0 swept=0 urc sfd sfd2 ffd ffd2 sw hr hx ufd urd tw f sd left_unverified=0
   local -a left=()
   ps_runs || { echo 'run.sh: ps cannot run here (sandboxed?); the suite needs it, so no unit was run. Run the suite outside the sandbox.' >&2; exit 2; }
+  # Checked as the harness checks it, then hidden from the units again.
+  SHMUTANT_DIAG_DIR="$SUITE_DIAG_DIR"; SHMUTANT_DIAG_ID=""
+  _shmutant_diag_dir_check run.sh || exit 2
+  SUITE_DIAG_DIR="$SHMUTANT_DIAG_DIR"; SUITE_DIAG_ID="$SHMUTANT_DIAG_ID"
+  unset SHMUTANT_DIAG_DIR SHMUTANT_DIAG_ID
   units="$(declare -F | awk '$3 ~ /^t_/ { print $3 }')"
   # Every name the cleanup below reads is this run's own before any handler can run: a T inherited
   # from the environment is someone else's path, a T_ID someone else's directory, and a T_SWEPT or

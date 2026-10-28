@@ -79,8 +79,12 @@ jobs:
       # With SIGPIPE at its default, as under a terminal, cron or systemd: the runner hands every step
       # one already ignored, which bash cannot restore, and under it a row on the freezing shell's own
       # `trap '' PIPE` cannot be witnessed.
+      # SHMUTANT_DIAG_DIR: the process-table snapshots the harness and the suite take on a run whose
+      # group could not be verified and on a hang-up (#75), kept with the artifact below.
       - name: self-mutation
         run: |
+          # Best effort: without the directory the run goes ahead with no snapshots.
+          if mkdir -p "$RUNNER_TEMP/diag"; then export SHMUTANT_DIAG_DIR="$RUNNER_TEMP/diag"; fi
           perl -e '$SIG{PIPE} = "DEFAULT"; exec @ARGV or die "exec: $!\n"' bash shmutant.sh run test/mutants.sh --workdir "$RUNNER_TEMP/mutants" --keep > mutants.tsv
       - name: verdicts
         if: always()
@@ -93,6 +97,7 @@ jobs:
             mutants.tsv
             ${{ runner.temp }}/mutants/*/output
             ${{ runner.temp }}/mutants/*/verdict
+            ${{ runner.temp }}/diag
 
   adapters:
     runs-on: ubuntu-latest
@@ -152,8 +157,12 @@ jobs:
       # With SIGPIPE at its default, as under a terminal, cron or systemd: the runner hands every step
       # one already ignored, which bash cannot restore, and under it a row on the freezing shell's own
       # `trap '' PIPE` cannot be witnessed.
+      # SHMUTANT_DIAG_DIR: the process-table snapshots the harness and the suite take on a run whose
+      # group could not be verified and on a hang-up (#75), kept with the artifact below.
       - name: self-mutation
         run: |
+          # Best effort: without the directory the run goes ahead with no snapshots.
+          if mkdir -p "$RUNNER_TEMP/diag"; then export SHMUTANT_DIAG_DIR="$RUNNER_TEMP/diag"; fi
           perl -e '$SIG{PIPE} = "DEFAULT"; exec @ARGV or die "exec: $!\n"' bash shmutant.sh run test/mutants.sh --workdir "$RUNNER_TEMP/mutants" --keep > mutants.tsv
       - name: verdicts
         if: always()
@@ -166,3 +175,4 @@ jobs:
             mutants.tsv
             ${{ runner.temp }}/mutants/*/output
             ${{ runner.temp }}/mutants/*/verdict
+            ${{ runner.temp }}/diag

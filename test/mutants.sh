@@ -2588,3 +2588,89 @@ shmutant_mut 'the freeze checks for a joined member in a table whose write faile
   '  (set -o pipefail; printf '"'"'%s\n'"'"' "$table" | command -p awk -v g="$1" -v first="$first"' \
   '  ( printf '"'"'%s\n'"'"' "$table" | command -p awk -v g="$1" -v first="$first"' \
   't_process_table_filters_take_a_failed_write_as_no_table'
+
+# --- diagnostic capture (#75) ---
+shmutant_mut 'a relative diagnostic directory is accepted' \
+  '    *) _shmutant_err "$1: SHMUTANT_DIAG_DIR must be an absolute path, got [$SHMUTANT_DIAG_DIR]"; return 2 ;;' \
+  '    *) ;;' \
+  't_diag_dir_must_be_absolute'
+shmutant_mut 'a diagnostic directory with a newline is accepted' \
+  '    *$'"'"'\n'"'"'*) _shmutant_err "$1: SHMUTANT_DIAG_DIR contains a newline"; return 2 ;;' \
+  '    *$'"'"'\n'"'"'*) ;;' \
+  't_diag_dir_must_be_absolute'
+shmutant_mut 'a diagnostic directory that is not there is accepted' \
+  '  v="$(_shmutant_abs "$SHMUTANT_DIAG_DIR")" || { _shmutant_err "$1: SHMUTANT_DIAG_DIR is not a directory: $SHMUTANT_DIAG_DIR"; return 2; }' \
+  '  v="$(_shmutant_abs "$SHMUTANT_DIAG_DIR")" || v="$SHMUTANT_DIAG_DIR"' \
+  't_diag_dir_must_be_absolute'
+shmutant_mut 'a diagnostic directory keeps the name it was given' \
+  '  _shmutant_canon "$1" SHMUTANT_DIAG_DIR "$v" || return 2' \
+  '  :' \
+  't_diag_dir_must_be_absolute'
+shmutant_mut 'the diagnostic directory is not identified' \
+  '  _shmutant_canon "$1" SHMUTANT_DIAG_ID "$v"' \
+  '  :' \
+  't_diag_snapshot_records_a_run_whose_group_could_not_be_verified'
+shmutant_mut 'a diagnostic directory inside the workdir is accepted' \
+  '  if [ -n "${SHMUTANT_DIAG_DIR:-}" ] && _shmutant_inside "$wd" "$SHMUTANT_DIAG_DIR"; then' \
+  '  if false; then' \
+  't_diag_dir_must_be_absolute'
+shmutant_mut 'a run whose group could not be verified leaves no snapshot' \
+  '        _shmutant_diag_snapshot holder-gone "$pid" "run $pid (its process group), in $dir" \' \
+  '        : _shmutant_diag_snapshot holder-gone "$pid" "run $pid (its process group), in $dir" \' \
+  't_diag_snapshot_records_a_run_whose_group_could_not_be_verified'
+shmutant_mut 'the snapshot omits the kill group' \
+  '          "run status $rc" "kill group ${SHMUTANT_KILL_GROUP:-unset}"' \
+  '          "run status $rc"' \
+  't_diag_snapshot_records_a_run_whose_group_could_not_be_verified'
+shmutant_mut 'an empty diagnostic setting still reads the process table' \
+  '  [ -n "$d" ] || return 0' \
+  '  :' \
+  't_diag_snapshot_publishes_only_a_file_it_created'
+shmutant_mut 'the snapshot reads its table unbounded' \
+  '  tbl="$(SHMUTANT_PS_BOUND=10 _shmutant_ps -A -o pid,ppid,pgid,sess,stat,lstart,command 2>/dev/null)" \' \
+  '  tbl="$(_shmutant_ps -A -o pid,ppid,pgid,sess,stat,lstart,command 2>/dev/null)" \' \
+  't_diag_snapshot_publishes_only_a_file_it_created'
+shmutant_mut 'the snapshot reads its fallback table unbounded' \
+  '    || tbl="$(SHMUTANT_PS_BOUND=10 _shmutant_ps -A -o pid,ppid,pgid,stat,command 2>/dev/null)" || return 0' \
+  '    || tbl="$(_shmutant_ps -A -o pid,ppid,pgid,stat,command 2>/dev/null)" || return 0' \
+  't_diag_snapshot_publishes_only_a_file_it_created'
+shmutant_mut 'a snapshot is written with no table' \
+  '  [ -n "$tbl" ] || return 0' \
+  '  :' \
+  't_diag_snapshot_publishes_only_a_file_it_created'
+shmutant_mut 'a snapshot is written to a directory replaced since its check' \
+  '  _shmutant_is_id "$d" "${SHMUTANT_DIAG_ID:-}" || return 0' \
+  '  :' \
+  't_diag_snapshot_publishes_only_a_file_it_created'
+shmutant_mut 'a snapshot that cannot make its directory says so' \
+  '  tmp="$(command -p mktemp -d "$d/$k-$n.XXXXXX" 2>/dev/null)" || return 0' \
+  '  tmp="$(command -p mktemp -d "$d/$k-$n.XXXXXX")" || return 0' \
+  't_diag_snapshot_publishes_only_a_file_it_created'
+shmutant_mut 'a snapshot is written where its directory was moved to' \
+  '    _shmutant_is_id .. "${SHMUTANT_DIAG_ID:-}" || builtin exit 0' \
+  '    :' \
+  't_diag_snapshot_publishes_only_a_file_it_created'
+shmutant_mut 'a snapshot that cannot reach its directory says so' \
+  '    builtin cd .. && command -p rmdir -- "${tmp##*/}" ) 2>/dev/null' \
+  '    builtin cd .. && command -p rmdir -- "${tmp##*/}" )' \
+  't_diag_snapshot_publishes_only_a_file_it_created'
+shmutant_mut 'a snapshot is left under the name it was written to' \
+  '      && command -p mv -- snapshot.part snapshot; then builtin exit 0; fi' \
+  '      ; then builtin exit 0; fi' \
+  't_diag_snapshot_publishes_only_a_file_it_created'
+shmutant_mut 'a snapshot whose write failed is left in part' \
+  '    command -p rm -f -- snapshot.part snapshot' \
+  '    :' \
+  't_diag_snapshot_publishes_only_a_file_it_created'
+shmutant_mut 'a snapshot whose write failed leaves its directory' \
+  '    builtin cd .. && command -p rmdir -- "${tmp##*/}" ) 2>/dev/null' \
+  '    : ) 2>/dev/null' \
+  't_diag_snapshot_publishes_only_a_file_it_created'
+shmutant_mut 'the snapshot carries no timestamp' \
+  '    if { command -p date -u '"'"'+%Y-%m-%dT%H:%M:%SZ'"'"' && printf' \
+  '    if { printf' \
+  't_diag_snapshot_records_a_run_whose_group_could_not_be_verified'
+shmutant_mut 'the snapshot carries no process table' \
+  '"$@" "$tbl"; } > snapshot.part' \
+  '"$@"; } > snapshot.part' \
+  't_diag_snapshot_records_a_run_whose_group_could_not_be_verified'
