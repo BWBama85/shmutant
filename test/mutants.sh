@@ -2646,27 +2646,31 @@ shmutant_mut 'a snapshot that cannot make its directory says so' \
   '  tmp="$(command -p mktemp -d "$d/$k-$n.XXXXXX" 2>/dev/null)" || return 0' \
   '  tmp="$(command -p mktemp -d "$d/$k-$n.XXXXXX")" || return 0' \
   't_diag_snapshot_publishes_only_a_file_it_created'
-shmutant_mut 'a snapshot that cannot open its file says so' \
-  '"$tbl"; } > "$tmp/snapshot.part"; } 2>/dev/null \' \
-  '"$tbl"; } > "$tmp/snapshot.part"; } \' \
+shmutant_mut 'a snapshot is written where its directory was moved to' \
+  '    _shmutant_is_id .. "${SHMUTANT_DIAG_ID:-}" || builtin exit 0' \
+  '    :' \
+  't_diag_snapshot_publishes_only_a_file_it_created'
+shmutant_mut 'a snapshot that cannot reach its directory says so' \
+  '    builtin cd .. && command -p rmdir -- "${tmp##*/}" ) 2>/dev/null' \
+  '    builtin cd .. && command -p rmdir -- "${tmp##*/}" )' \
   't_diag_snapshot_publishes_only_a_file_it_created'
 shmutant_mut 'a snapshot is left under the name it was written to' \
-  '    && command -p mv -- "$tmp/snapshot.part" "$tmp/snapshot" 2>/dev/null; then return 0; fi' \
-  '    ; then return 0; fi' \
+  '      && command -p mv -- snapshot.part snapshot; then builtin exit 0; fi' \
+  '      ; then builtin exit 0; fi' \
   't_diag_snapshot_publishes_only_a_file_it_created'
 shmutant_mut 'a snapshot whose write failed is left in part' \
-  '  command -p rm -f -- "$tmp/snapshot.part" "$tmp/snapshot" 2>/dev/null' \
-  '  :' \
+  '    command -p rm -f -- snapshot.part snapshot' \
+  '    :' \
   't_diag_snapshot_publishes_only_a_file_it_created'
 shmutant_mut 'a snapshot whose write failed leaves its directory' \
-  '  command -p rmdir -- "$tmp" 2>/dev/null' \
-  '  :' \
+  '    builtin cd .. && command -p rmdir -- "${tmp##*/}" ) 2>/dev/null' \
+  '    : ) 2>/dev/null' \
   't_diag_snapshot_publishes_only_a_file_it_created'
 shmutant_mut 'the snapshot carries no timestamp' \
-  '  if { { command -p date -u '"'"'+%Y-%m-%dT%H:%M:%SZ'"'"' && printf' \
-  '  if { { printf' \
+  '    if { command -p date -u '"'"'+%Y-%m-%dT%H:%M:%SZ'"'"' && printf' \
+  '    if { printf' \
   't_diag_snapshot_records_a_run_whose_group_could_not_be_verified'
 shmutant_mut 'the snapshot carries no process table' \
-  '"$@" "$tbl"; } > "$tmp/snapshot.part"' \
-  '"$@"; } > "$tmp/snapshot.part"' \
+  '"$@" "$tbl"; } > snapshot.part' \
+  '"$@"; } > snapshot.part' \
   't_diag_snapshot_records_a_run_whose_group_could_not_be_verified'

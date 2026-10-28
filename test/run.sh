@@ -5809,6 +5809,23 @@ t_diag_snapshot_publishes_only_a_file_it_created() {
   eq "$(snap "printf 'PID\n'")" 'rc 0' 'a replaced directory says nothing'
   eq "$(n_found "$T/elsewhere" -mindepth 1)" 0 'and gets nothing written through it'
   rm "$T/d" && mv "$T/d.old" "$T/d" || { fail_ 'fixture: could not put the directory back'; return; }
+  # replaced after that check, just before (and just after) the snapshot's own directory is made
+  local when
+  for when in before after; do
+    out="$( command() {
+        if [ "$1 $2 $3" = '-p mktemp -d' ]; then
+          local m
+          [ "$when" = after ] || { mv "$T/d" "$T/d.old" && ln -s "$T/elsewhere" "$T/d"; }
+          m="$(builtin command -p mktemp -d "$4")" || return
+          [ "$when" = before ] || { mv "$T/d" "$T/d.old" && ln -s "$T/elsewhere" "$T/d"; }
+          printf '%s\n' "$m"; return
+        fi
+        builtin command "$@"; }
+      snap "printf 'PID\n'" )"
+    eq "$out" 'rc 0' "a directory replaced $when its snapshot directory is made says nothing"
+    eq "$(n_found "$T/elsewhere" "$T/d.old" -type f)" 0 "and gets no snapshot written anywhere ($when)"
+    rm "$T/d" && mv "$T/d.old" "$T/d" && rm -rf "${T:?}/elsewhere/"* "${T:?}/d/"* || { fail_ "fixture: could not put the directory back ($when)"; return; }
+  done
   eq "$(snap "printf 'PID\n'" "$T/d" '')" 'rc 0' 'no identity recorded says nothing'
   eq "$(n_found "$T/d" -mindepth 1)" 0 'and writes nothing'
   eq "$(snap 'return 1')" 'rc 0' 'a table that cannot be read is no failure'

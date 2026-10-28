@@ -703,9 +703,10 @@ _shmutant_diag_dir_check() {
 # _shmutant_diag_snapshot <kind> <id> <line>… — with SHMUTANT_DIAG_DIR set and still the directory
 # SHMUTANT_DIAG_ID records, a new directory <kind>-<id>.XXXXXX in it, made by mktemp and so private
 # and nobody else's, holding one file, `snapshot`: a UTC timestamp, `kind: <kind>`, each line, then
-# the whole process table (each read given up on after ten seconds). The file is renamed into place
-# once written whole; a snapshot that cannot be read or written leaves nothing. Nothing reaches
-# stderr, and the status is 0 always: a snapshot never changes a verdict.
+# the whole process table (each read given up on as _shmutant_ps gives up on one bounded at ten
+# seconds). The file is renamed into place once written whole; a snapshot that cannot be read or
+# written is removed, as far as removing it succeeds. Nothing reaches stderr, and the status is 0
+# always: a snapshot never changes a verdict.
 _shmutant_diag_snapshot() {
   local d="${SHMUTANT_DIAG_DIR:-}" k="$1" n="$2" tbl tmp; shift 2
   [ -n "$d" ] || return 0
@@ -716,10 +717,15 @@ _shmutant_diag_snapshot() {
   # A directory replaced since it was checked (by a link into the workdir, say) gets nothing.
   _shmutant_is_id "$d" "${SHMUTANT_DIAG_ID:-}" || return 0
   tmp="$(command -p mktemp -d "$d/$k-$n.XXXXXX" 2>/dev/null)" || return 0
-  if { { command -p date -u '+%Y-%m-%dT%H:%M:%SZ' && printf '%s\n' "kind: $k" "$@" "$tbl"; } > "$tmp/snapshot.part"; } 2>/dev/null \
-    && command -p mv -- "$tmp/snapshot.part" "$tmp/snapshot" 2>/dev/null; then return 0; fi
-  command -p rm -f -- "$tmp/snapshot.part" "$tmp/snapshot" 2>/dev/null
-  command -p rmdir -- "$tmp" 2>/dev/null
+  # Anchored in the directory mktemp made, and that checked to sit in the one validated: every write
+  # is relative from here, so a path replaced before this point is caught and one replaced after it
+  # changes nothing. Caught, nothing is written, and nothing is removed from where it then points.
+  ( builtin cd -P -- "$tmp" || builtin exit 0
+    _shmutant_is_id .. "${SHMUTANT_DIAG_ID:-}" || builtin exit 0
+    if { command -p date -u '+%Y-%m-%dT%H:%M:%SZ' && printf '%s\n' "kind: $k" "$@" "$tbl"; } > snapshot.part \
+      && command -p mv -- snapshot.part snapshot; then builtin exit 0; fi
+    command -p rm -f -- snapshot.part snapshot
+    builtin cd .. && command -p rmdir -- "${tmp##*/}" ) 2>/dev/null
   return 0
 }
 
