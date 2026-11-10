@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Nightly on main, so #75's SHMUTANT_DIAG_DIR capture gets a chance to fire between pushes.
+  schedule:
+    - cron: "17 7 * * *"
+  workflow_dispatch:
 
 env:
   CI_BASH: "5.3"
