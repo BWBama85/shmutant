@@ -797,6 +797,7 @@ _shmutant_ps_end() {
 # `ps -A -o pid= -o ppid= -o etime=` pass, so each is carried with the identity it had when found.
 # Returns 1 when that process table cannot be read: it always lists the caller, so an empty read is
 # a failed one, which a caller can then tell from a pid with no descendants (0, nothing printed).
+# One read across a clock that bounds no elapsed-time start (_shmutant_etime_gap) is a failed one too.
 _shmutant_descendants_started() {
   local table now before gap
   if [ "${SHMUTANT_PROC:-}" = 1 ]; then
@@ -870,13 +871,15 @@ _shmutant_etime_secs() {
 # readings fall in one second, else `+<g>`, the whole seconds between them. The elapsed time ps
 # printed held at some instant between the readings, so the start is <after> less it, or up to <g>
 # seconds earlier, whichever end of its run the ps took it at and however long it ran. Fails for a
-# read the clock moved back across or more than ten seconds forward (a ps that stalled, a clock that
-# stepped, a host that slept): such a read bounds no start, and its caller takes it as a failed one.
+# read the clock moved back across, by however little, or more than ten seconds forward (a ps that
+# stalled, a clock that stepped, a host that slept), each counted in the microseconds read and not
+# in whole seconds: such a read bounds no start, and its caller takes it as a failed one.
 _shmutant_etime_gap() {
-  local g v
+  local g v d
   for v in "$1" "$2"; do case "$v" in ''|*[!0-9]*) return 1 ;; esac; done
+  d=$(( 10#$2 - 10#$1 ))
+  [ "$d" -ge 0 ] && [ "$d" -le 10000000 ] || return 1
   g=$(( 10#$2 / 1000000 - 10#$1 / 1000000 ))
-  [ "$g" -ge 0 ] && [ "$g" -le 10 ] || return 1
   [ "$g" = 0 ] || printf '+%s' "$g"
 }
 
@@ -916,7 +919,8 @@ _shmutant_identity() {
 
 # _shmutant_identity_table — fill SHMUTANT_START[pid] with the start time of every live process
 # from ONE `ps -A`. A kill that asked per pid spent longer identifying a tree than the tree's
-# earliest members needed to finish.
+# earliest members needed to finish. A read that failed fills nothing, and so does one across a
+# clock that bounds no elapsed-time start (_shmutant_etime_gap).
 _shmutant_identity_table() {
   local line now before gap
   SHMUTANT_START=()

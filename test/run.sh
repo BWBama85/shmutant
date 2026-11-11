@@ -2686,12 +2686,15 @@ t_elapsed_start_is_read_between_two_clock_readings() {
     eq "$(clocked 1000500000 1000900000 "$how")" 'e990 rc=0' "$how: both readings in one second"
     eq "$(clocked 1000500000 1000500000 "$how")" 'e990 rc=0' "$how: a clock that stood still across the read"
     eq "$(clocked 1000900000 1003100000 "$how")" 'e993+3 rc=0' "$how: the later reading less the elapsed time, with the seconds between the two"
-    eq "$(clocked 1000000000 1010999999 "$how")" 'e1000+10 rc=0' "$how: ten seconds across is still a read"
+    eq "$(clocked 1000000000 1010000000 "$how")" 'e1000+10 rc=0' "$how: ten seconds across is still a read"
     # No start: the walk and the identity fail, as for a ps that failed; the table is left empty, with
-    # nothing of an earlier one in it.
+    # nothing of an earlier one in it. Both limits are kept to the microsecond: one more than ten
+    # seconds, and a step back that stays inside one second.
     refused=' rc=1'; [ "$how" != table ] || refused=' rc=0'
+    eq "$(clocked 1000000000 1010000001 "$how")" "$refused" "$how: a read the clock moved a microsecond more than ten seconds across"
     eq "$(clocked 1000000000 1011000000 "$how")" "$refused" "$how: a read the clock moved eleven seconds across"
     eq "$(clocked 1003100000 1000900000 "$how")" "$refused" "$how: a read the clock stepped back across"
+    eq "$(clocked 1000900000 1000100000 "$how")" "$refused" "$how: a read the clock stepped back across within one second"
   done
   # A reading that is no number bounds nothing, and ends no caller (a shell of its own: see
   # t_same_start_compares_recorded_starts_exactly).

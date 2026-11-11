@@ -2721,16 +2721,20 @@ shmutant_mut 'an identity read the clock stepped across is given' \
   '  after="$(_shmutant_now)"; gap="$(_shmutant_etime_gap "$before" "$after")"' \
   't_elapsed_start_is_read_between_two_clock_readings'
 shmutant_mut 'a read the clock stepped back across bounds a start' \
-  '  [ "$g" -ge 0 ] && [ "$g" -le 10 ] || return 1' \
-  '  [ "$g" -le 10 ] || return 1' \
+  '  [ "$d" -ge 0 ] && [ "$d" -le 10000000 ] || return 1' \
+  '  [ "$d" -le 10000000 ] || return 1' \
   't_elapsed_start_is_read_between_two_clock_readings'
 shmutant_mut 'a read the clock moved any distance across bounds a start' \
-  '  [ "$g" -ge 0 ] && [ "$g" -le 10 ] || return 1' \
-  '  [ "$g" -ge 0 ] || return 1' \
+  '  [ "$d" -ge 0 ] && [ "$d" -le 10000000 ] || return 1' \
+  '  [ "$d" -ge 0 ] || return 1' \
   't_elapsed_start_is_read_between_two_clock_readings'
 shmutant_mut 'a read the clock moved ten seconds across bounds no start' \
-  '  [ "$g" -ge 0 ] && [ "$g" -le 10 ] || return 1' \
-  '  [ "$g" -ge 0 ] && [ "$g" -lt 10 ] || return 1' \
+  '  [ "$d" -ge 0 ] && [ "$d" -le 10000000 ] || return 1' \
+  '  [ "$d" -ge 0 ] && [ "$d" -lt 10000000 ] || return 1' \
+  't_elapsed_start_is_read_between_two_clock_readings'
+shmutant_mut 'how far the clock moved across a read is counted in whole seconds' \
+  '  d=$(( 10#$2 - 10#$1 ))' \
+  '  d=$(( (10#$2 / 1000000 - 10#$1 / 1000000) * 1000000 ))' \
   't_elapsed_start_is_read_between_two_clock_readings'
 shmutant_mut 'the seconds a ps was read across are never said' \
   '  [ "$g" = 0 ] || printf '"'"'+%s'"'"' "$g"' \
