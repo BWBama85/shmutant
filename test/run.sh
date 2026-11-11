@@ -2631,6 +2631,136 @@ t_same_start_compares_recorded_starts_exactly() {
   _shmutant_same_start 'Sun Sep 13 07:36:34 2026' 'Sun Sep 13 07:36:34 2026'; rc_is $? 0 'a recorded start time matches itself'
   _shmutant_same_start 'Sun Sep 13 07:36:34 2026' 'Sun Sep 13 07:36:35 2026'; rc_is $? 1 'and not the next second'
   _shmutant_same_start '' 100; rc_is $? 1 'an empty identity matches nothing'
+  # #78: an elapsed-time start read across <g> seconds of the clock (`e<s>+<g>`) is one of the seconds
+  # from <s>-<g> to <s>, and matches what comes within a second of that range, whichever is named first.
+  _shmutant_same_start e102+2 e100; rc_is $? 0 'a start read across two seconds reaches two seconds back'
+  _shmutant_same_start e100 e102+2; rc_is $? 0 'and so named second'
+  _shmutant_same_start e100+2 e97; rc_is $? 0 'and a second past the far end of its range'
+  _shmutant_same_start e100+2 e96; rc_is $? 1 'and no further'
+  _shmutant_same_start e100+2 e103; rc_is $? 1 'the seconds a start was read across reach back only, never past its own second'
+  _shmutant_same_start e103 e100+2; rc_is $? 1 'nor named second'
+  _shmutant_same_start e104+3 e100+1; rc_is $? 0 'two ranges a second apart match'
+  _shmutant_same_start e105+3 e100+1; rc_is $? 1 'and two seconds apart do not'
+  # What is no number matches nothing. A shell of its own: bash abandons the whole command a malformed
+  # number is computed in, and with it the caller.
+  eq "$( _shmutant_same_start e100+x e100 2>/dev/null; printf 'rc=%s' "$?" )" 'rc=1' 'seconds read across that are no number match nothing'
+  eq "$( _shmutant_same_start e100+ e100 2>/dev/null; printf 'rc=%s' "$?" )" 'rc=1' 'nor ones left out after their mark'
+  eq "$( _shmutant_same_start e e100 2>/dev/null; printf 'rc=%s' "$?" )" 'rc=1' 'nor a start with no seconds'
+}
+
+t_elapsed_start_is_read_between_two_clock_readings() {
+  # #78: in the elapsed-time form a start is the clock less the elapsed time a ps printed, which held at
+  # some instant of that ps and at no other. The walk, the identity and the table each read the clock on
+  # both sides of their ps: the start is the later reading less the elapsed time, and carries the whole
+  # seconds between the two readings (`+<g>`), so that the three name one start however long a ps took.
+  # A read the clock stepped back across, or moved more than ten seconds across, gives no start. The
+  # clock and the ps are both stubbed: nothing here waits on a real one.
+  local how refused
+  # clocked <before> <after> <walk|identity|table> — that read of pid 7, a child of pid 1 with 00:10
+  # elapsed, its clock reading <before> first and <after> from then on (microseconds); prints
+  # `<start> rc=<status>`. The first reading leaves a file: each is taken in a substitution, whose own
+  # count of them would be lost.
+  clocked() {
+    ( SHMUTANT_PROC=0 SHMUTANT_PS_LSTART=0
+      local out rc
+      local -A SHMUTANT_START=([7]=stale)
+      rm -f "$T/clock-read"
+      # Names no function under test has a local of: the stubs run inside them.
+      local clock_first="$1" clock_then="$2"
+      _shmutant_now() { if [ -e "$T/clock-read" ]; then printf '%s' "$clock_then"; else : > "$T/clock-read"; printf '%s' "$clock_first"; fi; }
+      command() {
+        case "$*" in
+          '-p ps -A -o pid= -o ppid= -o etime=') printf '    1     0 01:00:00\n    7     1    00:10\n'; return 0 ;;
+          '-p ps -o etime= -p 7')                printf '   00:10\n'; return 0 ;;
+          '-p ps -A -o pid= -o etime=')          printf '    1 01:00:00\n    7    00:10\n'; return 0 ;;
+        esac
+        builtin command "$@"; }
+      case "$3" in
+        walk)     out="$(_shmutant_descendants_started 1)"; rc=$?; out="${out#7 }" ;;
+        identity) out="$(_shmutant_identity 7)"; rc=$? ;;
+        table)    _shmutant_identity_table; rc=$?; out="${SHMUTANT_START[7]:-}" ;;
+      esac
+      printf '%s rc=%s' "$out" "$rc" )
+  }
+  for how in walk identity table; do
+    eq "$(clocked 1000500000 1000900000 "$how")" 'e990 rc=0' "$how: both readings in one second"
+    eq "$(clocked 1000500000 1000500000 "$how")" 'e990 rc=0' "$how: a clock that stood still across the read"
+    eq "$(clocked 1000900000 1003100000 "$how")" 'e993+3 rc=0' "$how: the later reading less the elapsed time, with the seconds between the two"
+    eq "$(clocked 1000000000 1010000000 "$how")" 'e1000+10 rc=0' "$how: ten seconds across is still a read"
+    # No start: the walk and the identity fail, as for a ps that failed; the table is left empty, with
+    # nothing of an earlier one in it. Both limits are kept to the microsecond: one more than ten
+    # seconds, and a step back that stays inside one second.
+    refused=' rc=1'; [ "$how" != table ] || refused=' rc=0'
+    eq "$(clocked 1000000000 1010000001 "$how")" "$refused" "$how: a read the clock moved a microsecond more than ten seconds across"
+    eq "$(clocked 1000000000 1011000000 "$how")" "$refused" "$how: a read the clock moved eleven seconds across"
+    eq "$(clocked 1003100000 1000900000 "$how")" "$refused" "$how: a read the clock stepped back across"
+    eq "$(clocked 1000900000 1000100000 "$how")" "$refused" "$how: a read the clock stepped back across within one second"
+  done
+  # A reading that is no number bounds nothing, and ends no caller (a shell of its own: see
+  # t_same_start_compares_recorded_starts_exactly).
+  eq "$( _shmutant_etime_gap 1000500000 '' 2>/dev/null; printf 'rc=%s' "$?" )" 'rc=1' 'a missing later reading'
+  eq "$( _shmutant_etime_gap x 1000500000 2>/dev/null; printf 'rc=%s' "$?" )" 'rc=1' 'an earlier reading that is no number'
+  # Nor does an elapsed time the table's ps printed with a fraction: it counts for its whole seconds.
+  eq "$( SHMUTANT_PROC=0 SHMUTANT_PS_LSTART=0; declare -A SHMUTANT_START=()
+         _shmutant_now() { printf '1000500000'; }
+         command() { case "$*" in '-p ps -A -o pid= -o etime=') printf '    7 00:10.5\n'; return 0 ;; esac; builtin command "$@"; }
+         _shmutant_identity_table 2>/dev/null; printf '%s rc=%s' "${SHMUTANT_START[7]:-}" "$?" )" 'e990 rc=0' \
+    'a table row whose elapsed time is no whole number of seconds'
+}
+
+t_elapsed_starts_agree_through_a_slow_ps() {
+  # #78 (D14): the same against a real ps and a real clock. Each of the three reads, held two seconds
+  # before its ps starts or after it has ended, still shows a live process with the start a quick read
+  # of another kind shows, and a start twenty seconds off is still another process.
+  local root kid="" i how when out q s far
+  local -a known=()
+  set -m; sh -c 'sleep 60 & wait' < /dev/null > /dev/null 2>&1 & root=$!; set +m
+  for (( i = 0; i < 50; i++ )); do kid="$(_shmutant_descendants "$root" | head -n 1)"; [ -z "$kid" ] || break; sleep 0.1; done
+  mapfile -t known < <(pairs_of "$root" ${kid:+"$kid"})
+  if [ -z "$kid" ]; then fail_ 'fixture: the root never started its child'; end_group "$root" "${known[@]}"; return; fi
+  # held <walk|identity|table> <before|after> — print `<quick start> <held start>` of the child: the
+  # first from a read of another kind made at once, the second from that read with its ps held.
+  held() {
+    ( SHMUTANT_PROC=0 SHMUTANT_PS_LSTART=0
+      # Names no function under test has a local of: the stub runs inside them.
+      local held_args quick slow held_when="$2"
+      local -A SHMUTANT_START=()
+      case "$1" in
+        walk)     held_args="-p ps -A -o pid= -o ppid= -o etime=" ;;
+        identity) held_args="-p ps -o etime= -p $kid" ;;
+        table)    held_args="-p ps -A -o pid= -o etime=" ;;
+      esac
+      if [ "$1" = identity ]; then _shmutant_identity_table; quick="${SHMUTANT_START[$kid]:-}"; else quick="$(_shmutant_identity "$kid")"; fi
+      command() {
+        local rc
+        [ "$*" = "$held_args" ] || { builtin command "$@"; return; }
+        [ "$held_when" != before ] || builtin command -p sleep 2
+        builtin command "$@"; rc=$?
+        [ "$held_when" != after ] || builtin command -p sleep 2
+        return "$rc"; }
+      case "$1" in
+        walk)     slow="$(_shmutant_descendants_started "$root" | command -p awk -v p="$kid" '$1 == p { print $2 }')" ;;
+        identity) slow="$(_shmutant_identity "$kid")" ;;
+        table)    _shmutant_identity_table; slow="${SHMUTANT_START[$kid]:-}" ;;
+      esac
+      printf '%s %s' "$quick" "$slow" )
+  }
+  for how in walk identity table; do
+    for when in before after; do
+      out="$(held "$how" "$when")"; q="${out%% *}"; s="${out#* }"
+      case "$q $s" in
+        e[0-9]*' 'e[0-9]*) ;;
+        *) fail_ "fixture: the $how held $when its ps: no elapsed-time start to compare: [$out]"; continue ;;
+      esac
+      _shmutant_same_start "$s" "$q" && _shmutant_same_start "$q" "$s" \
+        || fail_ "the $how held $when its ps shows a live process with another start: [$s], against [$q] read at once"
+      far="${q#e}"; far="${far%%+*}"
+      if _shmutant_same_start "$s" "e$(( far + 20 ))" || _shmutant_same_start "$s" "e$(( far - 20 ))"; then
+        fail_ "the $how held $when its ps takes a start twenty seconds off for the same: [$s], against [$q]"
+      fi
+    done
+  done
+  end_group "$root" "${known[@]}"; wait_gone "$kid" "" 30
 }
 
 t_stat_less_fingerprint_keeps_names_byte_for_byte() {
@@ -5454,6 +5584,10 @@ t_kill_tree_reads_its_checks_last_from_one_table() {
       case "${3:-}" in nomembers) command() {
         if [ "${1:-}" = -p ] && [ "${2:-}" = ps ]; then printf 'ps %s\n' "${*:3}" >> "$T/log"; [ "$*" != "-p ps -A -o pid= -o pgid=" ] || return 1; fi
         builtin command "$@"; } ;; esac
+      # #78: the table's ps takes two seconds to start.
+      [ "${4:-}" != slow ] || command() {
+        if [ "${1:-}" = -p ] && [ "${2:-}" = ps ]; then printf 'ps %s\n' "${*:3}" >> "$T/log"; [ "$*" != "-p ps -A -o pid= -o etime=" ] || builtin command -p sleep 2; fi
+        builtin command "$@"; }
       # #53: the find recorded as a victim too, and the holder as one.
       if [ "${3:-}" = twice ]; then _shmutant_kill_tree KILL "$root" "$v:$vid" "$kid:$(_shmutant_identity "$kid")" "$root:$holderid"
       else _shmutant_kill_tree KILL "$root" "$v:$vid"
@@ -5463,6 +5597,9 @@ t_kill_tree_reads_its_checks_last_from_one_table() {
   out="$(cat "$T/log" 2>/dev/null)"
   want="$(printf 'ps -A -o pid= -o ppid= -o etime=\nps -A -o pid= -o pgid=\nps -A -o pid= -o etime=\nkill -KILL -- %s %s -%s' "$v" "$kid" "$root")"
   eq "$out" "$want" 'the walk and the group are read first, every check from one table last, then one kill, the group last'
+  # #78: and no less with that table slow to be read: a start is none the older for the wait.
+  rm -f "$T/log"; kill_logged - - - slow
+  eq "$(cat "$T/log" 2>/dev/null)" "$want" 'a table two seconds in the reading licenses the same one kill'
   rm -f "$T/log"; kill_logged moved
   out="$(grep '^kill' "$T/log" 2>/dev/null)"
   eq "$out" "kill -KILL -- $v -$root" 'a find of the walk the table shows with another start is not signalled'
@@ -5486,6 +5623,9 @@ t_kill_tree_reads_its_checks_last_from_one_table() {
   want="$(printf 'ps -A -o pid= -o ppid= -o etime=\nkill -STOP %s\nkill -STOP %s\nkill -STOP %s\nps -A -o pid= -o pgid=\nps -A -o pid= -o etime=\nkill -KILL -- %s %s -%s' "$v" "$kid" "$root" "$v" "$kid" "$root")"
   eq "$out" "$want" 'under a guard, what is checked is stopped before the table, and the kill follows'
   eq "$(awk '{ print $1, $2 }' "$T/told" 2>/dev/null | tr '\n' ' ')" "p $v p $kid " 'under a guard, what is stopped is told to it first'
+  # #78: a table slow to be read lets nothing of it go.
+  rm -f "$T/log" "$T/told"; kill_logged - guarded - slow
+  eq "$(cat "$T/log" 2>/dev/null)" "$want" 'under a guard, a table two seconds in the reading is followed by the same kill'
   # ...and a find the table then shows with another start is not killed by its number. One in the group
   # the KILL takes (here: kid, in the held group) is not continued after it either, by a number that KILL
   # may have freed; outside a group that is killed (here: its holder rejected), it is let go.

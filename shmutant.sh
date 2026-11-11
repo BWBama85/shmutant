@@ -147,7 +147,8 @@ SHMUTANT_VERSION=0.4.0
 # Process identity comes from the kernel's start time in /proc where there is one (Linux):
 # tick resolution, so a reused pid cannot pass for the process it replaced. Elsewhere it is the
 # start time ps recorded (`lstart`, fixed at the fork, which a clock step does not move), and
-# only where ps has no lstart the wall clock less `ps -o etime`, at second resolution.
+# only where ps has no lstart the wall clock less `ps -o etime`: at second resolution, and less
+# exact by as long as that ps took to read (_shmutant_etime_gap).
 SHMUTANT_PROC=0; [[ -r /proc/self/stat ]] && SHMUTANT_PROC=1
 SHMUTANT_ROWS_NAME=(); SHMUTANT_ROWS_FILE=(); SHMUTANT_ROWS_OLD=(); SHMUTANT_ROWS_NEW=()
 SHMUTANT_ROWS_WIT=(); SHMUTANT_ROWS_SEL=()
@@ -796,8 +797,9 @@ _shmutant_ps_end() {
 # `ps -A -o pid= -o ppid= -o etime=` pass, so each is carried with the identity it had when found.
 # Returns 1 when that process table cannot be read: it always lists the caller, so an empty read is
 # a failed one, which a caller can then tell from a pid with no descendants (0, nothing printed).
+# One read across a clock that bounds no elapsed-time start (_shmutant_etime_gap) is a failed one too.
 _shmutant_descendants_started() {
-  local table now
+  local table now before gap
   if [ "${SHMUTANT_PROC:-}" = 1 ]; then
     table="$(_shmutant_proc_table)"; [ -n "$table" ] || return 1
     (set -o pipefail; printf '%s\n' "$table" | command -p awk -v root="$1" '
@@ -826,9 +828,10 @@ _shmutant_descendants_started() {
       }' ) || return 1
     return 0
   fi
+  before="$(_shmutant_now)"
   table="$(command -p ps -A -o pid= -o ppid= -o etime= 2>/dev/null)" && [ -n "$table" ] || return 1
-  now="$(_shmutant_now)"; now=$(( now / 1000000 ))
-  (set -o pipefail; printf '%s\n' "$table" | command -p awk -v root="$1" -v now="$now" '
+  now="$(_shmutant_now)"; gap="$(_shmutant_etime_gap "$before" "$now")" || return 1
+  (set -o pipefail; printf '%s\n' "$table" | command -p awk -v root="$1" -v now="$(( now / 1000000 ))" -v gap="$gap" '
     NF == 3 && $1 ~ /^[0-9]+$/ {
       child[NR] = $1; parent[NR] = $2
       e = $3; d = 0
@@ -837,7 +840,7 @@ _shmutant_descendants_started() {
       if (n == 3) s = t[1] * 3600 + t[2] * 60 + t[3]
       else if (n == 2) s = t[1] * 60 + t[2]
       else s = t[1]
-      start[NR] = "e" (now - (d * 86400 + s))
+      start[NR] = "e" (now - (d * 86400 + s)) gap
     }
     END {
       want[root] = 1
@@ -863,12 +866,30 @@ _shmutant_etime_secs() {
   printf '%s' "$(( 10#$d * 86400 + 10#$h * 3600 + 10#$m * 60 + 10#$sec ))"
 }
 
-# _shmutant_identity <pid> — the process start time in epoch seconds (now minus POSIX
-# `ps -o etime`), or nothing for a dead pid. It is the one identity that survives what a
-# daemonising descendant does to itself (setsid changes its group, exec its command line) and
-# still tells a reused pid apart: the newer process started later.
+# _shmutant_etime_gap <before> <after> — for a `ps -o etime` read between two readings of
+# _shmutant_now, print what the start derived from it carries after its seconds: nothing when both
+# readings fall in one second, else `+<g>`, the whole seconds between them. The elapsed time ps
+# printed held at some instant between the readings, so the start is <after> less it, or up to <g>
+# seconds earlier, whichever end of its run the ps took it at and however long it ran. Fails for a
+# read the clock moved back across, by however little, or more than ten seconds forward (a ps that
+# stalled, a clock that stepped, a host that slept), each counted in the microseconds read and not
+# in whole seconds: such a read bounds no start, and its caller takes it as a failed one.
+_shmutant_etime_gap() {
+  local g v d
+  for v in "$1" "$2"; do case "$v" in ''|*[!0-9]*) return 1 ;; esac; done
+  d=$(( 10#$2 - 10#$1 ))
+  [ "$d" -ge 0 ] && [ "$d" -le 10000000 ] || return 1
+  g=$(( 10#$2 / 1000000 - 10#$1 / 1000000 ))
+  [ "$g" = 0 ] || printf '+%s' "$g"
+}
+
+# _shmutant_identity <pid> — the process start time, or nothing for a dead pid: a /proc tick, an
+# lstart, or `e<seconds>[+<gap>]`, epoch seconds from the clock less POSIX `ps -o etime`
+# (_shmutant_etime_gap). It is the one identity that survives what a daemonising descendant does
+# to itself (setsid changes its group, exec its command line) and still tells a reused pid apart:
+# the newer process started later.
 _shmutant_identity() {
-  local etime now lstart
+  local etime lstart before after gap
   if [ "${SHMUTANT_PROC:-}" = 1 ]; then
     # The kernel's own start time in clock ticks (field 22 of /proc/<pid>/stat, after the LAST
     # `)` of the parenthesised name, which may hold a newline or a `)` of its own; the file is
@@ -889,17 +910,19 @@ _shmutant_identity() {
     if [ -n "$(_shmutant_ps -o lstart= -p "$BASHPID" 2>/dev/null)" ]; then SHMUTANT_PS_LSTART=1; return 1; fi
     SHMUTANT_PS_LSTART=0
   fi
+  before="$(_shmutant_now)"
   etime="$(set -o pipefail; _shmutant_ps -o etime= -p "$1" 2>/dev/null | command -p tr -d ' ')" || return 1
   [ -n "$etime" ] || return 1
-  now="$(_shmutant_now)"
-  printf 'e%s' "$(( now / 1000000 - $(_shmutant_etime_secs "$etime") ))"
+  after="$(_shmutant_now)"; gap="$(_shmutant_etime_gap "$before" "$after")" || return 1
+  printf 'e%s%s' "$(( after / 1000000 - $(_shmutant_etime_secs "$etime") ))" "$gap"
 }
 
 # _shmutant_identity_table — fill SHMUTANT_START[pid] with the start time of every live process
 # from ONE `ps -A`. A kill that asked per pid spent longer identifying a tree than the tree's
-# earliest members needed to finish.
+# earliest members needed to finish. A read that failed fills nothing, and so does one across a
+# clock that bounds no elapsed-time start (_shmutant_etime_gap).
 _shmutant_identity_table() {
-  local line now
+  local line now before gap
   SHMUTANT_START=()
   if [ "${SHMUTANT_PROC:-}" = 1 ]; then
     while IFS= read -r line; do
@@ -919,10 +942,12 @@ _shmutant_identity_table() {
     done <<< "$tbl"
     return 0
   fi
-  now="$(_shmutant_now)"; now=$(( now / 1000000 ))
-  # awk does the etime arithmetic for every row at once; a bash loop over the whole process
-  # table took longer than the tree being frozen had left to live.
-  tbl="$(set -o pipefail; _shmutant_ps -A -o pid= -o etime= 2>/dev/null | command -p awk -v now="$now" '
+  before="$(_shmutant_now)"
+  # awk reads the elapsed seconds of every row at once; a bash loop over the whole process table
+  # took longer than the tree being frozen had left to live. What is left for the loop below is one
+  # subtraction a row, from the clock read once the table is in: of whole numbers only (%d), since
+  # bash abandons the whole command, callers and all, that it computes anything else in.
+  tbl="$(set -o pipefail; _shmutant_ps -A -o pid= -o etime= 2>/dev/null | command -p awk '
     NF == 2 && $1 ~ /^[0-9]+$/ {
       e = $2; d = 0
       if (e ~ /-/) { split(e, a, "-"); d = a[1]; e = a[2] }
@@ -930,16 +955,18 @@ _shmutant_identity_table() {
       if (n == 3) s = t[1] * 3600 + t[2] * 60 + t[3]
       else if (n == 2) s = t[1] * 60 + t[2]
       else s = t[1]
-      print $1, "e" (now - (d * 86400 + s))
+      printf "%s %d\n", $1, d * 86400 + s
     }')" || return 0
+  now="$(_shmutant_now)"; gap="$(_shmutant_etime_gap "$before" "$now")" || return 0
+  now=$(( now / 1000000 ))
   while IFS= read -r line; do
     # shellcheck disable=SC2034
-    [ -z "$line" ] || SHMUTANT_START["${line%% *}"]="${line#* }"
+    [ -z "$line" ] || SHMUTANT_START["${line%% *}"]="e$(( now - ${line#* } ))$gap"
   done <<< "$tbl"
 }
 
 # _shmutant_alive_since <pid> <start-seen> — true when <pid> still started when <start-seen>
-# says, within the one-second resolution of etime. A reused pid started later.
+# says (_shmutant_same_start). A reused pid started later.
 _shmutant_alive_since() {
   local now
   case "$1" in ''|*[!0-9]*) return 1 ;; esac
@@ -950,15 +977,21 @@ _shmutant_alive_since() {
 
 # _shmutant_same_start <a> <b> — the two identities name the same start. A recorded start (a
 # /proc tick, an lstart) matches exactly: a pid reused in the next tick is another process.
-# Only the elapsed-time form, marked with a leading e, carries the one-second resolution of
-# etime, and it matches only its own form.
+# Only the elapsed-time form, marked with a leading e, names a range and matches only its own form:
+# `e<s>+<g>` is a start in the seconds <s>-<g> to <s> (_shmutant_etime_gap; `e<s>` is that second
+# alone), and two match when their ranges come within the one second etime resolves. So a process
+# is read with one start by the walk, the identity and the table, however long each ps took within
+# the ten seconds a read may take, and a pid reused more than a second outside both ranges is not.
 _shmutant_same_start() {
-  local d
+  local d a b ga=0 gb=0 v
   [ -n "$1" ] && [ -n "$2" ] || return 1
   case "$1" in
     e*) case "$2" in e*) ;; *) return 1 ;; esac
-        case "${1#e}${2#e}" in ''|*[!0-9]*) return 1 ;; esac
-        d=$(( ${1#e} - ${2#e} )); [ "$d" -ge -1 ] && [ "$d" -le 1 ] ;;
+        a="${1#e}"; b="${2#e}"
+        case "$a" in *+*) ga="${a#*+}"; a="${a%%+*}" ;; esac
+        case "$b" in *+*) gb="${b#*+}"; b="${b%%+*}" ;; esac
+        for v in "$a" "$b" "$ga" "$gb"; do case "$v" in ''|*[!0-9]*) return 1 ;; esac; done
+        d=$(( 10#$a - 10#$b )); [ "$d" -ge $(( -1 - 10#$gb )) ] && [ "$d" -le $(( 1 + 10#$ga )) ] ;;
     *)  [ "$1" = "$2" ] ;;
   esac
 }
@@ -2903,7 +2936,8 @@ _shmutant_pool_locals_writable() {
     _shmutant_bo _shmutant_so _shmutant_o _shmutant_n _shmutant_pc _shmutant_wrap_left \
     a budget dog e elapsed last leftovers linked lstart old rrc s tampered tmpd tnow victims wroot \
     b chunk conts g gcont gone_group guard_id guard_lost guard_of guard_of_id guard_pid guard_r guard_up guard_w hs kept kills members out pairs part pg ph phid recs rid rootid_pre seen_ck unfrozen w want \
-    SHMUTANT_GUARD SHMUTANT_GUARD_PID SHMUTANT_PS_LSTART SHMUTANT_PS_BOUND c guard_self guard_gap_ref gap ea eb lp le tbl cands guarded jl w fid_now stopped fgap cont_first cfirst told group_untold first
+    SHMUTANT_GUARD SHMUTANT_GUARD_PID SHMUTANT_PS_LSTART SHMUTANT_PS_BOUND c guard_self guard_gap_ref gap ea eb lp le tbl cands guarded jl w fid_now stopped fgap cont_first cfirst told group_untold first \
+    before after ga gb
 }
 
 # _shmutant_decl_writable <label> — the table's own names, checked by each declaration entry
