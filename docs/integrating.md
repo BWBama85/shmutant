@@ -474,7 +474,7 @@ worker or by a sibling, can stand in for it, and a worker that did not exit norm
 included; one that cannot be removed is reported and the run exits 2. What the plan file or a callback
 left running (a helper backgrounded from the plan, a service `prepare` started) is ended with
 KILL when the run ends, whether the pool completed or the plan left early: the plan runs in a
-process group of its own, held until then and ended by a guarded freeze, as a run's group is (a hang-up taken by a substitution of the plan or of `prepare` ends in that group: its holder is the first job of the plan's shell, and bash hangs up a substitution's jobs in the order it lists them), and its descendants are sampled twice a second while
+process group of its own, held until then and ended by a guarded freeze, as a run's group is (a hang-up taken by a substitution of the plan or of `prepare` stays in that group: the plan's shell reads its own group first, as a run's wrapper does), and its descendants are sampled twice a second while
 it lives, so one that left the group (a new session) before the subshell ended is still ended,
 by the identity it had when seen. The plan reads no terminal (its standard input is `/dev/null`).
 A process that detached within half a second of forking is out of reach, as for a timed-out run.

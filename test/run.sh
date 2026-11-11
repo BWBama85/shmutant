@@ -479,32 +479,42 @@ unmake_unremovable() {
 # directory, removed once read), never in a command substitution: bash sends SIGHUP to the process
 # group it has recorded for a substitution's jobs when the substitution is hung up, and a pool's
 # workers are such jobs (#75). A hang-up of the pool's shell is recorded (pool_hup) and ends that
-# shell alone, which RC then shows as 129. A capture file that cannot be made fails the unit, with
-# RC 2 and nothing run.
+# shell alone, which RC then shows as 129. Both captures are opened before the pool starts, each
+# with `>|`: the unit's noclobber must not refuse a file this call has just made, nor the stderr
+# capture a second call. A capture that cannot be made or opened fails the unit with RC 2 and
+# nothing run; one that cannot be read back fails it with RC 2 whatever the pool returned; one
+# that cannot be removed fails it.
 pool() {
-  local po
+  local po pfd="" efd=""
   OUT=""; ERR=""; RC=2
   po="$(mktemp "$T/pool-out.XXXXXX")" || { fail_ 'fixture: pool could not make its capture file'; return 0; }
-  ( trap pool_hup HUP; shmutant_pool "$@" ) > "$po" 2> "$T/err"; RC=$?
-  OUT="$(cat "$po")"; ERR="$(cat "$T/err")"
-  rm -f -- "$po"
+  if ! exec {pfd}>|"$po" {efd}>|"$T/err"; then
+    fail_ 'fixture: pool could not open its captures'
+    [ -z "$pfd" ] || exec {pfd}>&-
+    rm -f -- "$po" || fail_ 'fixture: pool could not remove its capture file'
+    return 0
+  fi
+  ( exec {pfd}>&- {efd}>&-; trap pool_hup HUP; shmutant_pool "$@" ) 1>&"$pfd" 2>&"$efd"; RC=$?
+  exec {pfd}>&- {efd}>&-
+  OUT="$(cat "$po")" || { fail_ 'fixture: pool could not read its capture file'; RC=2; }
+  ERR="$(cat "$T/err")" || { fail_ 'fixture: pool could not read its stderr capture'; RC=2; }
+  rm -f -- "$po" || fail_ 'fixture: pool could not remove its capture file'
+  return 0
 }
 # pool_hup — the HUP trap of pool's subshell. With SUITE_DIAG_DIR set (main checked it), a
-# pool-hup-<pid>.XXXXXX/snapshot there first: the pool's shell and its process group, the unit, and
-# the process table as the hang-up found it. Then the shell ends by the signal, taken at its
+# pool-hup-<pid>.XXXXXX/snapshot there first: the pool's shell, the unit, and the process table as
+# the hang-up found it, read by the snapshot's own bounded read and by nothing here, so a table
+# that stalls cannot hold this handler. Then the shell ends by the signal, taken at its
 # default; further HUPs are ignored meanwhile. A snapshot that cannot be written changes nothing.
 # One wait on a job that ends at once comes first: a second HUP arriving before this handler ran
 # leaves bash returning 129 from the next `wait` of this shell and of every child it then starts,
 # and the snapshot's bounded process-table read would take that for a read that failed.
 pool_hup() {
-  local g
   trap '' HUP
   : & wait "$!"
   if [ -n "${SUITE_DIAG_DIR:-}" ]; then
-    g="$(command -p ps -o pgid= -p "$BASHPID" 2>/dev/null)" || g=""
-    g="${g//[[:space:]]/}"
     SHMUTANT_DIAG_DIR="$SUITE_DIAG_DIR" SHMUTANT_DIAG_ID="${SUITE_DIAG_ID:-}" \
-      _shmutant_diag_snapshot pool-hup "$BASHPID" "pool shell $BASHPID, its group ${g:-unread}" "unit ${_unit:-none}"
+      _shmutant_diag_snapshot pool-hup "$BASHPID" "pool shell $BASHPID" "unit ${_unit:-none}"
   fi
   trap - HUP
   kill -HUP "$BASHPID"
@@ -2676,15 +2686,18 @@ EOF
 
 t_cli_hangup_stays_in_the_plan_group() {
   # #80: the plan subshell runs in a process group of its own and reads it, as a run's wrapper does,
-  # so a hang-up taken by a substitution of prepare (which runs in that shell) stays in the plan's
-  # group. The CLI then finds its plan ended before the pool completed (exit 2) and removes the
-  # workdir it made; this shell, in the CLI's group, is not hung up, nor is a process beside it.
+  # so a hang-up taken by a substitution of prepare stays in the plan's group, whether prepare holds
+  # the substitution itself (in the plan's shell) or in a subshell of its own with an EXIT trap,
+  # which lists none of the plan shell's jobs. The CLI then finds its plan ended before the pool
+  # completed (exit 2) and removes the workdir it made; this shell, in the CLI's group, is not hung
+  # up, nor is a process beside it.
   mk_toy "$T/toy"; rm -rf "$T/tmpd"; mkdir -p "$T/tmpd"
-  local sib sibid cli rc=0 hup=""
+  local sib sibid cli rc form hup=""
   cat > "$T/toy/plan-sub.sh" <<'EOF'
+held() { local o; o="$(sleep 30 & echo "$BASHPID" > "$SUB_PID.part" && mv -f -- "$SUB_PID.part" "$SUB_PID"; wait)"; }
 prepare() {
   shmutant_copy_tree "$SHMUTANT_PLAN_DIR" "$1" || return 1
-  local o; o="$(sleep 30 & echo "$BASHPID" > "$SUB_PID.part" && mv -f -- "$SUB_PID.part" "$SUB_PID"; wait)"
+  if [ "$SUB_FORM" = nested ]; then ( trap : EXIT; held ); else held; fi
 }
 run() { bash "$1/test.sh"; }
 shmutant_target lib.sh
@@ -2693,15 +2706,18 @@ EOF
   trap 'hup=1' HUP
   sleep 60 > /dev/null 2>&1 & sib=$!
   sibid="$(_shmutant_identity "$sib" 2>/dev/null)"
-  SUB_PID="$T/sub.pid" TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-sub.sh" > "$T/cli.out" 2> "$T/cli.err" & cli=$!
-  if wait_for "$T/sub.pid"; then kill -HUP "$(cat "$T/sub.pid")" || fail_ 'fixture: the substitution could not be signalled'
-  else fail_ 'fixture: prepare never started its substitution'; fi
-  wait "$cli" || rc=$?
-  rc_is "$rc" 2 'the CLI reports a plan ended before the pool completed'
-  has "$(cat "$T/cli.err")" 'ended the run before the pool completed (status 129)' 'and says the plan was hung up'
-  [ -z "$hup" ] || fail_ "the hang-up reached the CLI's own process group"
-  wait_gone "$sib" "$sibid" 1 && fail_ "the hang-up reached a process in the CLI's group"
-  eq "$(n_found "$T/tmpd" -mindepth 1 -maxdepth 1)" 0 'the workdir the CLI made is removed'
+  for form in direct nested; do
+    rm -f "$T/sub.pid" "$T/sub.pid.part"; hup=""; rc=0
+    SUB_FORM="$form" SUB_PID="$T/sub.pid" TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-sub.sh" > "$T/cli.out" 2> "$T/cli.err" & cli=$!
+    if wait_for "$T/sub.pid"; then kill -HUP "$(cat "$T/sub.pid")" || fail_ "fixture ($form): the substitution could not be signalled"
+    else fail_ "fixture ($form): prepare never started its substitution"; fi
+    wait "$cli" || rc=$?
+    rc_is "$rc" 2 "($form) the CLI reports a plan ended before the pool completed"
+    has "$(cat "$T/cli.err")" 'ended the run before the pool completed (status 129)' "($form) and says the plan was hung up"
+    [ -z "$hup" ] || fail_ "($form) the hang-up reached the CLI's own process group"
+    wait_gone "$sib" "$sibid" 1 && fail_ "($form) the hang-up reached a process in the CLI's group"
+    eq "$(n_found "$T/tmpd" -mindepth 1 -maxdepth 1)" 0 "($form) the workdir the CLI made is removed"
+  done
   trap - HUP
   kill -KILL "$sib" 2>/dev/null; wait "$sib" 2>/dev/null
 }
@@ -8037,10 +8053,13 @@ t_pool_helper_hangup_ends_only_its_pool() {
   # #75: pool() runs the pool in a plain subshell, never in a command substitution, so a hang-up of the
   # pool's shell is not sent on to anybody: that shell alone ends by it (RC 129) and the unit goes on.
   # With SHMUTANT_DIAG_DIR set the suite's copy writes one pool-hup-<pid>.XXXXXX/snapshot first: a UTC
-  # timestamp, its kind, the pool's shell and group, the unit, and the process table; a second HUP
-  # sent straight after the first changes neither. With none set, or one that cannot be written,
-  # nothing is written and the unit sees the same status. A pool whose capture file cannot be made
-  # runs nothing: the unit fails, with RC 2.
+  # timestamp, its kind, the pool's shell, the unit, and the process table; a second HUP sent
+  # straight after the first changes neither (two adjacent kills, with nothing in bash to say the
+  # first was taken before the second: without the handler's wait this failed three runs of three).
+  # With none set, or one that cannot be written, nothing is written and the unit sees the same
+  # status. A pool whose capture file cannot be made runs nothing: the unit fails, with RC 2. One
+  # whose capture cannot be read back, or removed, fails the unit too; and the unit's noclobber
+  # refuses neither capture, on a first call or a second.
   [ "$(tail -n 1 "$here/run.sh")" = 'main "$@"' ] || { fail_ 'run.sh no longer ends with main "$@"'; return; }
   mkdir "$T/tmp" && export TMPDIR="$T/tmp" || { fail_ 'fixture: could not make the copy'"'"'s TMPDIR'; return; }
   mkdir -p "$T/suite/test" "$T/diag" "$T/shut" || { fail_ 'fixture: could not make the copy'"'"'s directories'; return; }
@@ -8058,6 +8077,14 @@ t_pool_helper_hangup_ends_only_its_pool() {
       "  chmod 555 \"\$T\"; if [ -w \"\$T\" ]; then echo 't_zz_nocapture: skipped'; chmod 755 \"\$T\"; return; fi" \
       "  SHMUTANT_BASELINE=0 pool lbl \"\$T/wd\" toy_prepare zz_mark_run; chmod 755 \"\$T\"" \
       "  echo \"t_zz_nocapture: RC \$RC.\"; }" \
+      "t_zz_noclobber() { mk_toy \"\$T/toy\"; TOY=\"\$T/toy\"; shmutant_reset; shmutant_target lib.sh; shmutant_mut 'a' '\$1 + \$2' '\$1 - \$2' 'add-works'" \
+      "  set -C; SHMUTANT_BASELINE=0 pool lbl \"\$T/wd\" toy_prepare toy_run; echo \"t_zz_noclobber: first RC \$RC, \$(verdict_of a).\"" \
+      "  SHMUTANT_BASELINE=0 pool lbl \"\$T/wd\" toy_prepare toy_run; set +C; echo \"t_zz_noclobber: second RC \$RC, \$(verdict_of a).\"; }" \
+      "t_zz_lostcapture() { mk_toy \"\$T/toy\"; TOY=\"\$T/toy\"; shmutant_reset; shmutant_target lib.sh; shmutant_mut 'a' '\$1 + \$2' '\$1 - \$2' 'add-works'" \
+      "  cat() { case \"\$1\" in */pool-out.*) return 1 ;; *) command cat \"\$@\" ;; esac; }" \
+      "  SHMUTANT_BASELINE=0 pool lbl \"\$T/wd\" toy_prepare toy_run; unset -f cat; echo \"t_zz_lostcapture: unread RC \$RC.\"" \
+      "  rm() { case \"\$*\" in */pool-out.*) return 1 ;; *) command rm \"\$@\" ;; esac; }" \
+      "  SHMUTANT_BASELINE=0 pool lbl \"\$T/wd\" toy_prepare toy_run; unset -f rm; echo \"t_zz_lostcapture: unremoved RC \$RC.\"; }" \
       'main "$@"'
   } > "$T/suite/test/run.sh"
   hung_up_copy t_zz_pool "$T/diag" "$T/diag.out" twice
@@ -8071,7 +8098,7 @@ t_pool_helper_hangup_ends_only_its_pool() {
   else
     [[ "$(sed -n 1p "$f")" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || fail_ "the snapshot does not start with a UTC timestamp: [$(sed -n 1p "$f")]"
     eq "$(sed -n 2p "$f")" 'kind: pool-hup' 'it names its kind'
-    [[ "$(sed -n 3p "$f")" =~ ^pool\ shell\ $pid,\ its\ group\ [0-9]+$ ]] || fail_ "it names the pool's shell and its group: [$(sed -n 3p "$f")]"
+    eq "$(sed -n 3p "$f")" "pool shell $pid" "it names the pool's shell"
     eq "$(sed -n 4p "$f")" 'unit t_zz_pool' 'it names the unit'
     [[ "$(sed -n 5p "$f")" =~ ^\ *PID\ +PPID\ +PGID\  ]] || fail_ "the process table follows, with its header: [$(sed -n 5p "$f")]"
     awk -v p="$pid" 'NR > 5 && $1 == p { found = 1 } END { exit !found }' "$f" || fail_ "the pool's shell was not in the table: it was taken after that shell ended"
@@ -8097,6 +8124,14 @@ t_pool_helper_hangup_ends_only_its_pool() {
        has "$out" 't_zz_nocapture: RC 2.' 'with RC 2'
        [ ! -e "$T/nocapture.ran" ] || fail_ 'the pool ran although its capture file could not be made' ;;
   esac
+  out="$(SHMUTANT_SELECT=t_zz_noclobber bash "$T/suite/test/run.sh" 2>&1)"; rc_is $? 0 "under the unit's noclobber the pool runs and the unit passes"
+  has "$out" 't_zz_noclobber: first RC 0, killed.' 'a first call under noclobber captures its pool'
+  has "$out" 't_zz_noclobber: second RC 0, killed.' 'and so does a second, over the stderr capture the first left'
+  out="$(SHMUTANT_SELECT=t_zz_lostcapture bash "$T/suite/test/run.sh" 2>&1)"; rc_is $? 1 'a pool whose capture is lost fails its unit'
+  has "$out" 'FAIL: t_zz_lostcapture: fixture: pool could not read its capture file' 'a capture that cannot be read back is said'
+  has "$out" 't_zz_lostcapture: unread RC 2.' 'and RC is 2, whatever the pool returned'
+  has "$out" 'FAIL: t_zz_lostcapture: fixture: pool could not remove its capture file' 'a capture that cannot be removed is said'
+  has "$out" 't_zz_lostcapture: unremoved RC 0.' "and RC stays the pool's"
 }
 
 t_suite_removes_a_unit_directory_only_while_it_is_the_runners() {

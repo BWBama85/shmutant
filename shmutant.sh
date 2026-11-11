@@ -3802,13 +3802,14 @@ _shmutant_cli_run() {
   command -p rm -f -- "$seen_file"
   builtin set -m
   (
+    # Job control on and off again, first, as a run's wrapper does: this shell reads the process
+    # group it was moved into, so a hang-up taken by a substitution of the plan or of prepare
+    # stays in the plan's group. Its holder, a job listed under that group, covers a substitution
+    # of this shell alone; a subshell of the plan lists none of this shell's jobs.
+    builtin set -o monitor; builtin set +o monitor
     # `trap -p` in a subshell reports the parent's traps although none is active: the pool
     # would save this shell's abort handler as the plan subshell's own and re-raise into it.
     trap - INT TERM
-    # The holder is a job of this shell, and its first: bash hangs up a hung-up substitution's
-    # listed jobs in order, each through the process group recorded for it, and this one's is the
-    # plan's own. A hang-up taken by a substitution of the plan or of prepare therefore ends in the
-    # plan's group, before bash reaches a job recorded under the CLI's.
     ( read -r _ <&"$hold_r" ) < /dev/null > /dev/null 2>&1 {keep_w}>&- {keep_r}<&- {hold}>&- & printf 'holder %s %s\n' "$!" "$(_shmutant_identity "$!" 2>/dev/null)" >&"$keep_w"
     readonly SHMUTANT_CLI_WD="$wd" SHMUTANT_CLI_KEEP_FD="$keep_w"
     export SHMUTANT_CLI_KEEP_FD
