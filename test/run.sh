@@ -8049,19 +8049,27 @@ t_suite_is_not_hung_up_by_a_substitution_of_its_unit() {
   # for the jobs of the unit's command substitutions is the unit's and not the suite's. A substitution
   # of a unit that holds a job and is sent SIGHUP then hangs up the unit's group: the unit fails, the
   # suite goes on to its report and exits 1, and a process in the suite's own group is untouched.
+  # The suite says how the unit's shell ended (its status, past 128), as it does for a unit that
+  # exits with such a status, and says nothing for one that fails an assertion.
   [ "$(tail -n 1 "$here/run.sh")" = 'main "$@"' ] || { fail_ 'run.sh no longer ends with main "$@"'; return; }
   mkdir "$T/tmp" && export TMPDIR="$T/tmp" || { fail_ 'fixture: could not make the copy'"'"'s TMPDIR'; return; }
   mkdir -p "$T/suite/test" || { fail_ 'fixture: could not make the copy'"'"'s directories'; return; }
   cp -- "$SHMUTANT" "$T/suite/shmutant.sh"
   local qt rc beside; printf -v qt '%q' "$T"
   { sed '$d' "$here/run.sh"
-    printf '%s\n' "t_zz_sub() { local x; x=\"\$(sleep 30 & echo \$BASHPID > \"\$HUP_DIR/target.pid.part\" && mv -f -- \"\$HUP_DIR/target.pid.part\" \"\$HUP_DIR/target.pid\"; wait)\"; echo 't_zz_sub: went on'; }" 'main "$@"'
+    printf '%s\n' "t_zz_sub() { local x; x=\"\$(sleep 30 & echo \$BASHPID > \"\$HUP_DIR/target.pid.part\" && mv -f -- \"\$HUP_DIR/target.pid.part\" \"\$HUP_DIR/target.pid\"; wait)\"; echo 't_zz_sub: went on'; }" \
+      't_zz_exits() { exit 200; }' 't_zz_fails() { fail_ "as any unit fails"; }' 'main "$@"'
   } > "$T/suite/test/run.sh"
   hung_up_copy t_zz_sub '' "$T/sub.out"
   rc_is "$rc" 1 'the suite ends on its own, with the unit failed, and not by the signal'
   has "$(cat "$T/sub.out")" 'run.sh: 1 unit(s) ran, 1 failed, ' 'and reports the unit'
-  has "$(cat "$T/sub.out")" 'run.sh: t_zz_sub: its shell was ended by signal 1 (status 129)' 'and says its shell was ended by a hang-up'
+  has "$(cat "$T/sub.out")" 'run.sh: t_zz_sub: its shell ended with status 129, as one ended by signal 1 does' 'and says how its shell ended'
   hasnt "$(cat "$T/sub.out")" 'FAIL: t_zz_sub' 'without a FAIL line, which would count the unit as a witness gone red'
+  local out
+  out="$(SHMUTANT_SELECT=t_zz_exits bash "$T/suite/test/run.sh" 2>&1)"; rc_is $? 1 'a unit that exits with a status past 128 fails'
+  has "$out" 'run.sh: t_zz_exits: its shell ended with status 200, as one ended by signal 72 does' 'and its status is said, whatever left it'
+  out="$(SHMUTANT_SELECT=t_zz_fails bash "$T/suite/test/run.sh" 2>&1)"; rc_is $? 1 'a unit that fails an assertion fails'
+  hasnt "$out" 'its shell ended with status' 'and nothing is said of how its shell ended'
   eq "$beside" alive "a process in the suite's own group is not hung up"
 }
 
@@ -9690,9 +9698,10 @@ main() {
     set +m
     exec {SWEEP_FINAL_FD}>&-
     wait "$SWEEP_UNIT" || urc=$?
-    # A unit ends with 0 or 1; a status past 128 is a shell ended from outside. Said on stderr and
-    # never as a FAIL line, which would count the unit as a witness gone red (#83).
-    [ "$urc" -le 128 ] || echo "run.sh: $u: its shell was ended by signal $(( urc - 128 )) (status $urc)" >&2
+    # A unit ends with 0 or 1. A status past 128 is what a shell ended by a signal leaves, and
+    # what a unit that exits with one leaves too: the status is said, with the signal it would be.
+    # On stderr and never as a FAIL line, which would count the unit as a witness gone red (#83).
+    [ "$urc" -le 128 ] || echo "run.sh: $u: its shell ended with status $urc, as one ended by signal $(( urc - 128 )) does" >&2
     SWEEP_UNIT=""
     # A sampler that has not ended thirty seconds after the unit (a loaded host can slow a healthy
     # one for a few) is not waited on further, nor one seen stopped.

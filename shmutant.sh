@@ -1052,9 +1052,10 @@ _shmutant_frozen_only() {
 # earliest children finish before their turn. A stopped pid cannot exit, so it cannot be reused
 # either, and frozen pids need no identity. There is no TERM and no grace: continuing a frozen
 # tree to let it handle TERM also lets a handler that ignores it run on, and after a deadline
-# this file continues nothing. The kernel may: a stopped process group whose last parent outside it
-# is killed first is orphaned, and is sent SIGHUP and SIGCONT before its own KILL in the same kill
-# lands. <pids…> are identity-checked victims recorded earlier (the watchdog's,
+# nothing is given time to handle anything. Part of the tree can still run for an instant: a
+# stopped process group whose last parent outside it is killed first is orphaned, and the kernel
+# sends it SIGHUP and SIGCONT before its own KILL in the same kill lands. <pids…> are
+# identity-checked victims recorded earlier (the watchdog's,
 # the wrapper's), frozen and searched from as well: one that still lived could otherwise fork a
 # child out of reach.
 # The freeze is guarded. A shell killed between its first stop and its KILL (a supervisor's TERM,
