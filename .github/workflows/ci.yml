@@ -4,6 +4,14 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+
+# A newer push to a pull request cancels that pull request's run in progress. Every other run has a
+# group of its own (its run id) and is never cancelled or queued behind another: the release driver
+# refuses a commit on main that has a cancelled run.
+concurrency:
+  group: ${{ github.event.pull_request.number && format('ci-pr-{0}', github.event.pull_request.number) || format('ci-run-{0}', github.run_id) }}
+  cancel-in-progress: true
 
 env:
   CI_BASH: "5.3"
@@ -16,6 +24,7 @@ env:
 jobs:
   shellcheck:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7.0.1
       - name: install shellcheck 0.11.0
@@ -27,6 +36,7 @@ jobs:
 
   checksum:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7.0.1
       - name: CHECKSUMS matches shmutant.sh
@@ -37,6 +47,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7.0.1
       - run: /bin/bash --version
@@ -44,8 +55,9 @@ jobs:
       - name: the release driver, against a local origin with gh stubbed
         run: PATH="/bin:$PATH" bash test/release.sh
 
-  linux:
+  linux-suite:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7.0.1
       - name: cache bash ${{ env.CI_BASH }}
@@ -70,12 +82,37 @@ jobs:
       - name: the floor guard re-executes from an old bash
         run: /bin/bash shmutant.sh version
       # Under a TMPDIR whose name holds an apostrophe: a unit that pastes its directory into the
-      # code it generates breaks on it (#25). The macos job keeps an ordinary one.
+      # code it generates breaks on it (#25). The macos-suite job keeps an ordinary one.
       - name: suite, under a TMPDIR with an apostrophe in its name
         run: |
           d="$RUNNER_TEMP/it's tmp"
           mkdir -p "$d"
           TMPDIR="$d" bash test/run.sh
+
+  linux-mutants:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: cache bash ${{ env.CI_BASH }}
+        id: cache-bash
+        uses: actions/cache@v6.1.0
+        with:
+          path: ~/bash-${{ env.CI_BASH }}
+          key: bash-${{ env.CI_BASH }}-${{ env.BASH_SHA256 }}-${{ runner.os }}-${{ runner.arch }}
+      - name: build bash ${{ env.CI_BASH }}
+        if: steps.cache-bash.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSL -o bash.tar.gz "https://ftp.gnu.org/gnu/bash/bash-${CI_BASH}.tar.gz"
+          echo "${BASH_SHA256}  bash.tar.gz" | sha256sum -c -
+          tar -xzf bash.tar.gz
+          cd "bash-${CI_BASH}"
+          ./configure --prefix="$HOME/bash-${CI_BASH}" > /dev/null
+          make -j"$(nproc)" > /dev/null
+          make install > /dev/null
+      - name: put bash ${{ env.CI_BASH }} first on PATH
+        run: echo "$HOME/bash-${CI_BASH}/bin" >> "$GITHUB_PATH"
+      - run: bash --version
       # With SIGPIPE at its default, as under a terminal, cron or systemd: the runner hands every step
       # one already ignored, which bash cannot restore, and under it a row on the freezing shell's own
       # `trap '' PIPE` cannot be witnessed.
@@ -98,6 +135,22 @@ jobs:
             ${{ runner.temp }}/mutants/*/output
             ${{ runner.temp }}/mutants/*/verdict
             ${{ runner.temp }}/diag
+
+  # Branch protection requires a check named `linux`. A skipped job reports success to it, so this
+  # one always runs, and fails unless both halves passed.
+  linux:
+    if: ${{ always() }}
+    needs: [linux-suite, linux-mutants]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: linux-suite and linux-mutants both passed
+        env:
+          SUITE: ${{ needs.linux-suite.result }}
+          MUTANTS: ${{ needs.linux-mutants.result }}
+        run: |
+          echo "linux-suite: $SUITE, linux-mutants: $MUTANTS"
+          [ "$SUITE" = success ] && [ "$MUTANTS" = success ]
 
   adapters:
     runs-on: ubuntu-latest
@@ -142,8 +195,9 @@ jobs:
       - name: the ShellSpec adapter in docs/integrating.md
         run: bash test/adapters/check.sh shellspec
 
-  macos:
+  macos-suite:
     runs-on: macos-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7.0.1
       - run: brew install bash
@@ -154,6 +208,16 @@ jobs:
         run: /bin/bash shmutant.sh version
       - name: suite
         run: bash test/run.sh
+
+  macos-mutants:
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - run: brew install bash
+      - name: put Homebrew bash first on PATH
+        run: echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
+      - run: bash --version
       # With SIGPIPE at its default, as under a terminal, cron or systemd: the runner hands every step
       # one already ignored, which bash cannot restore, and under it a row on the freezing shell's own
       # `trap '' PIPE` cannot be witnessed.
@@ -176,3 +240,18 @@ jobs:
             ${{ runner.temp }}/mutants/*/output
             ${{ runner.temp }}/mutants/*/verdict
             ${{ runner.temp }}/diag
+
+  # Branch protection requires a check named `macos`: as for `linux` above.
+  macos:
+    if: ${{ always() }}
+    needs: [macos-suite, macos-mutants]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: macos-suite and macos-mutants both passed
+        env:
+          SUITE: ${{ needs.macos-suite.result }}
+          MUTANTS: ${{ needs.macos-mutants.result }}
+        run: |
+          echo "macos-suite: $SUITE, macos-mutants: $MUTANTS"
+          [ "$SUITE" = success ] && [ "$MUTANTS" = success ]
