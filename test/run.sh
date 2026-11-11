@@ -487,25 +487,28 @@ unmake_unremovable() {
 pool() {
   local ow="" or="" ew="" er=""
   OUT=""; ERR=""; RC=2
-  if ! pool_capture ow or || ! pool_capture ew er; then
+  if pool_capture; then ow="$POOL_CAPTURE_W"; or="$POOL_CAPTURE_R"; fi
+  if [ -z "$ow" ] || ! pool_capture; then
     fail_ 'fixture: pool could not set up its captures'
     [ -z "$ow" ] || exec {ow}>&- {or}<&-
     return 0
   fi
+  ew="$POOL_CAPTURE_W"; er="$POOL_CAPTURE_R"
   ( exec {ow}>&- {or}<&- {ew}>&- {er}<&-; trap pool_hup HUP; shmutant_pool "$@" ) 1>&"$ow" 2>&"$ew"; RC=$?
   exec {ow}>&- {ew}>&-
   OUT="$(cat <&"$or")" && ERR="$(cat <&"$er")" || { fail_ 'fixture: pool could not read its captures back'; RC=2; }
   exec {or}<&- {er}<&-
   return 0
 }
-# pool_capture <write-fd-name> <read-fd-name> — a descriptor pair on a fresh file under $T whose
-# name is removed before returning; the two names receive the descriptors. Fails, leaving neither
-# open and no file behind, when the file cannot be made, opened or unnamed.
+# pool_capture — a descriptor pair on a fresh file under $T whose name is removed before
+# returning: POOL_CAPTURE_W writes it and POOL_CAPTURE_R reads it. Fails, with both empty, neither
+# descriptor open and no file behind, when the file cannot be made, opened or unnamed.
 pool_capture() {
   local f w="" r=""
+  POOL_CAPTURE_W=""; POOL_CAPTURE_R=""
   f="$(mktemp "$T/pool-capture.XXXXXX")" || return 1
   if exec {w}>|"$f" {r}<"$f" && rm -f -- "$f"; then
-    printf -v "$1" '%s' "$w"; printf -v "$2" '%s' "$r"
+    POOL_CAPTURE_W="$w"; POOL_CAPTURE_R="$r"
     return 0
   fi
   [ -z "$w" ] || exec {w}>&-
@@ -2731,7 +2734,9 @@ EOF
     eq "$(n_found "$T/tmpd" -mindepth 1 -maxdepth 1)" 0 "($form) the workdir the CLI made is removed"
   done
   trap - HUP
-  kill -KILL "$sib" 2>/dev/null; wait "$sib" 2>/dev/null
+  # Through its job, which bash signals only while it has not reaped it: the sleep may have been
+  # hung up above, and its number given to another process since.
+  _shmutant_ps_end "$sib"; wait "$sib" 2>/dev/null
 }
 
 t_pool_refuses_a_prepared_tree_with_a_newline_name() {
@@ -6265,7 +6270,9 @@ t_run_hangup_stays_in_the_run_group() {
     wait_gone "$sib" "$sibid" 1 && fail_ "($form substitution) the hang-up reached a process in the caller's group"
   done
   trap - HUP
-  kill -KILL "$sib" 2>/dev/null; wait "$sib" 2>/dev/null
+  # Through its job, which bash signals only while it has not reaped it: the sleep may have been
+  # hung up above, and its number given to another process since.
+  _shmutant_ps_end "$sib"; wait "$sib" 2>/dev/null
 }
 
 t_pool_refuses_unremovable_pristine() {
