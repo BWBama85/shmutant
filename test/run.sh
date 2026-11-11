@@ -478,20 +478,40 @@ unmake_unremovable() {
 # runs in a plain subshell, never in a command substitution: bash sends SIGHUP to the process
 # group it has recorded for a substitution's jobs when the substitution is hung up, and a pool's
 # workers are such jobs (#75). A hang-up of the pool's shell is recorded (pool_hup) and ends that
-# shell alone, which RC then shows as 129. Its two captures are `out` and `err` in a directory of
-# this call's own (a fresh mktemp name in the unit's directory, removed once read), so neither is
-# a name a unit could have put a link at, and neither exists for the unit's noclobber to refuse.
-# Three things fail the unit: the directory cannot be made (RC 2, nothing run); a capture cannot
-# be read back, which is also what a capture that could not be opened comes to (RC 2, whatever
-# the pool returned); the directory cannot be removed.
+# shell alone, which RC then shows as 129. Each capture is a descriptor pair on a file whose name
+# (a fresh mktemp one, in the unit's directory) is removed before the pool starts, as the pool's
+# own channels are: there is no name for a callback to replace, link or remove, none left to
+# clean up, and none for the unit's noclobber to refuse. Two things fail the unit, both with RC 2:
+# a capture that cannot be set up (nothing is run), and one that cannot be read back (whatever
+# the pool returned).
 pool() {
-  local pd
+  local ow="" or="" ew="" er=""
   OUT=""; ERR=""; RC=2
-  pd="$(mktemp -d "$T/pool.XXXXXX")" || { fail_ 'fixture: pool could not make its capture directory'; return 0; }
-  ( trap pool_hup HUP; shmutant_pool "$@" ) > "$pd/out" 2> "$pd/err"; RC=$?
-  OUT="$(cat "$pd/out")" && ERR="$(cat "$pd/err")" || { fail_ 'fixture: pool could not read its captures back'; RC=2; }
-  rm -rf -- "$pd" || fail_ 'fixture: pool could not remove its capture directory'
+  if ! pool_capture ow or || ! pool_capture ew er; then
+    fail_ 'fixture: pool could not set up its captures'
+    [ -z "$ow" ] || exec {ow}>&- {or}<&-
+    return 0
+  fi
+  ( exec {ow}>&- {or}<&- {ew}>&- {er}<&-; trap pool_hup HUP; shmutant_pool "$@" ) 1>&"$ow" 2>&"$ew"; RC=$?
+  exec {ow}>&- {ew}>&-
+  OUT="$(cat <&"$or")" && ERR="$(cat <&"$er")" || { fail_ 'fixture: pool could not read its captures back'; RC=2; }
+  exec {or}<&- {er}<&-
   return 0
+}
+# pool_capture <write-fd-name> <read-fd-name> — a descriptor pair on a fresh file under $T whose
+# name is removed before returning; the two names receive the descriptors. Fails, leaving neither
+# open and no file behind, when the file cannot be made, opened or unnamed.
+pool_capture() {
+  local f w="" r=""
+  f="$(mktemp "$T/pool-capture.XXXXXX")" || return 1
+  if exec {w}>|"$f" {r}<"$f" && rm -f -- "$f"; then
+    printf -v "$1" '%s' "$w"; printf -v "$2" '%s' "$r"
+    return 0
+  fi
+  [ -z "$w" ] || exec {w}>&-
+  [ -z "$r" ] || exec {r}<&-
+  rm -f -- "$f"
+  return 1
 }
 # pool_hup — the HUP trap of pool's subshell. With SUITE_DIAG_DIR set (main checked it), a
 # pool-hup-<pid>.XXXXXX/snapshot there first: the pool's shell, the unit, and the process table as
@@ -7995,21 +8015,23 @@ t_suite_hup_snapshot_shows_the_unit_before_it_is_ended() {
 }
 
 # hung_up_copy <unit> <diag directory or empty> <output> [twice] — run a copy of this suite
-# ($T/suite) on <unit> in a process group of its own, beside a sleep started first in that group;
-# once the file $T/target.pid appears, send the process it names one SIGHUP, and with `twice` a
-# second straight after it. Sets `rc` to the copy's status and `beside` to `alive` or `gone` for the
-# sleep, then ends what is left of the group.
+# ($T/suite) on <unit> in a process group of its own, beside a sleep started first in that group.
+# The copy is handed a directory made for this call alone (HUP_DIR), so a pid file found there is
+# this call's: once its unit has written `target.pid` there, the process it names is sent one
+# SIGHUP, and with `twice` a second straight after it. Sets `rc` to the copy's status and `beside`
+# to `alive` or `gone` for the sleep, then ends what is left of the group. With no directory to
+# hand over, nothing is started: the unit fails, `beside` stays `unread`.
 hung_up_copy() {
-  local suite sib sibid target
+  local suite sib sibid target hd
   rc=0; beside=unread
-  rm -f "$T/target.pid" "$T/sib.pid"
+  hd="$(mktemp -d "$T/hup.XXXXXX")" || { fail_ "fixture ($1): could not make the copy's pid directory"; return 0; }
   set -m
-  SHMUTANT_DIAG_DIR="$2" SHMUTANT_SELECT="$1" bash -c 'sleep 60 > /dev/null 2>&1 & echo "$!" > "$1/sib.pid.part" && mv -f -- "$1/sib.pid.part" "$1/sib.pid"; exec bash "$1/suite/test/run.sh"' _ "$T" > "$3" 2>&1 < /dev/null & suite=$!
+  HUP_DIR="$hd" SHMUTANT_DIAG_DIR="$2" SHMUTANT_SELECT="$1" bash -c 'sleep 60 > /dev/null 2>&1 & echo "$!" > "$HUP_DIR/sib.pid.part" && mv -f -- "$HUP_DIR/sib.pid.part" "$HUP_DIR/sib.pid"; exec bash "$1/suite/test/run.sh"' _ "$T" > "$3" 2>&1 < /dev/null & suite=$!
   set +m
-  if wait_for "$T/sib.pid" && wait_for "$T/target.pid"; then
-    sib="$(cat "$T/sib.pid")"; sibid="$(_shmutant_identity "$sib" 2>/dev/null)"
+  if wait_for "$hd/sib.pid" && wait_for "$hd/target.pid"; then
+    sib="$(cat "$hd/sib.pid")"; sibid="$(_shmutant_identity "$sib" 2>/dev/null)"
     _shmutant_group_has "$suite" "$sib" || fail_ "fixture ($1): the sleep is not in the copy's process group"
-    target="$(cat "$T/target.pid")"
+    target="$(cat "$hd/target.pid")"
     kill -HUP "$target" || fail_ "fixture ($1): the target could not be signalled"
     [ "${4:-}" != twice ] || kill -HUP "$target" 2>/dev/null
   else
@@ -8033,11 +8055,13 @@ t_suite_is_not_hung_up_by_a_substitution_of_its_unit() {
   cp -- "$SHMUTANT" "$T/suite/shmutant.sh"
   local qt rc beside; printf -v qt '%q' "$T"
   { sed '$d' "$here/run.sh"
-    printf '%s\n' "t_zz_sub() { local x; x=\"\$(sleep 30 & echo \$BASHPID > $qt/target.pid.part && mv -f -- $qt/target.pid.part $qt/target.pid; wait)\"; echo 't_zz_sub: went on'; }" 'main "$@"'
+    printf '%s\n' "t_zz_sub() { local x; x=\"\$(sleep 30 & echo \$BASHPID > \"\$HUP_DIR/target.pid.part\" && mv -f -- \"\$HUP_DIR/target.pid.part\" \"\$HUP_DIR/target.pid\"; wait)\"; echo 't_zz_sub: went on'; }" 'main "$@"'
   } > "$T/suite/test/run.sh"
   hung_up_copy t_zz_sub '' "$T/sub.out"
   rc_is "$rc" 1 'the suite ends on its own, with the unit failed, and not by the signal'
   has "$(cat "$T/sub.out")" 'run.sh: 1 unit(s) ran, 1 failed, ' 'and reports the unit'
+  has "$(cat "$T/sub.out")" 'run.sh: t_zz_sub: its shell was ended by signal 1 (status 129)' 'and says its shell was ended by a hang-up'
+  hasnt "$(cat "$T/sub.out")" 'FAIL: t_zz_sub' 'without a FAIL line, which would count the unit as a witness gone red'
   eq "$beside" alive "a process in the suite's own group is not hung up"
 }
 
@@ -8046,14 +8070,13 @@ t_pool_helper_hangup_ends_only_its_pool() {
   # pool's shell is not sent on to anybody: that shell alone ends by it (RC 129) and the unit goes on.
   # With SHMUTANT_DIAG_DIR set the suite's copy writes one pool-hup-<pid>.XXXXXX/snapshot first: a UTC
   # timestamp, its kind, the pool's shell, the unit, and the process table; a second HUP sent
-  # straight after the first changes neither (two adjacent kills, with nothing in bash to say the
-  # first was taken before the second: without the handler's wait this failed three runs of three).
-  # With none set, or one that cannot be written, nothing is written and the unit sees the same
-  # status. A pool whose capture directory cannot be made runs nothing: the unit fails, with RC 2.
-  # One whose stream or stderr capture cannot be read back fails the unit with RC 2, and one whose
-  # directory cannot be removed fails it; the unit's noclobber refuses neither capture, on a first
-  # call or a second; and a link the unit left at the name the stderr capture once had is not
-  # written through.
+  # straight after the first changes neither (two adjacent kills: bash has nothing to say the first
+  # was taken before the second, so the pair may arrive as one). With none set, or one that cannot
+  # be written, nothing is written and the unit sees the same status. A pool whose captures cannot
+  # be set up runs nothing: the unit fails, with RC 2. One whose stream or stderr capture cannot be
+  # read back fails the unit with RC 2. The unit's noclobber refuses neither capture, on a first
+  # call or a second; a link the unit left at the name the stderr capture once had is not written
+  # through; and a callback finds no capture by name in the unit's directory to replace.
   [ "$(tail -n 1 "$here/run.sh")" = 'main "$@"' ] || { fail_ 'run.sh no longer ends with main "$@"'; return; }
   mkdir "$T/tmp" && export TMPDIR="$T/tmp" || { fail_ 'fixture: could not make the copy'"'"'s TMPDIR'; return; }
   mkdir -p "$T/suite/test" "$T/diag" "$T/shut" || { fail_ 'fixture: could not make the copy'"'"'s directories'; return; }
@@ -8063,7 +8086,7 @@ t_pool_helper_hangup_ends_only_its_pool() {
     printf '%s\n' \
       "t_zz_pool() { mk_toy \"\$T/toy\"; TOY=\"\$T/toy\"; shmutant_reset; shmutant_target lib.sh; shmutant_mut 'a' '\$1 + \$2' '\$1 - \$2' 'add-works'" \
       "  zz_prepare() { echo \$BASHPID > $qt/pool.pid; toy_prepare \"\$1\"; }" \
-      "  zz_run() { cp -- $qt/pool.pid $qt/target.pid.part && mv -f -- $qt/target.pid.part $qt/target.pid; sleep 2; }" \
+      "  zz_run() { cp -- $qt/pool.pid \"\$HUP_DIR/target.pid.part\" && mv -f -- \"\$HUP_DIR/target.pid.part\" \"\$HUP_DIR/target.pid\"; sleep 2; }" \
       "  SHMUTANT_JOBS=1 SHMUTANT_BASELINE=0 pool lbl \"\$T/wd\" zz_prepare zz_run" \
       "  echo \"t_zz_pool: the pool returned \$RC.\"; }" \
       "t_zz_nocapture() { mk_toy \"\$T/toy\"; TOY=\"\$T/toy\"; shmutant_reset; shmutant_target lib.sh; shmutant_mut 'a' '\$1 + \$2' '\$1 - \$2' 'add-works'" \
@@ -8077,12 +8100,12 @@ t_pool_helper_hangup_ends_only_its_pool() {
       "  SHMUTANT_BASELINE=0 pool lbl \"\$T/wd\" toy_prepare toy_run; set +C; echo \"t_zz_noclobber: second RC \$RC, \$(verdict_of a).\"" \
       "  echo \"t_zz_noclobber: the link's target holds [\$(command cat \"\$T/victim\")].\"; }" \
       "t_zz_lostcapture() { mk_toy \"\$T/toy\"; TOY=\"\$T/toy\"; shmutant_reset; shmutant_target lib.sh; shmutant_mut 'a' '\$1 + \$2' '\$1 - \$2' 'add-works'" \
-      "  cat() { case \"\$1\" in */pool.*/out) return 1 ;; *) command cat \"\$@\" ;; esac; }" \
+      "  zz_seen() { find \"\$T\" -maxdepth 1 -name 'pool*' | wc -l | tr -d ' ' > $qt/captures.seen; bash \"\$1/test.sh\"; }" \
+      "  SHMUTANT_BASELINE=0 pool lbl \"\$T/wd0\" toy_prepare zz_seen; echo \"t_zz_lostcapture: intact RC \$RC, \$(verdict_of a).\"" \
+      "  cat() { [ \"\$#\" -eq 0 ] && [ ! -e $qt/cat.once ] && { : > $qt/cat.once; return 1; }; command cat \"\$@\"; }" \
       "  SHMUTANT_BASELINE=0 pool lbl \"\$T/wd\" toy_prepare toy_run; unset -f cat; echo \"t_zz_lostcapture: stream unread RC \$RC.\"" \
-      "  cat() { case \"\$1\" in */pool.*/err) return 1 ;; *) command cat \"\$@\" ;; esac; }" \
-      "  SHMUTANT_BASELINE=0 pool lbl \"\$T/wd\" toy_prepare toy_run; unset -f cat; echo \"t_zz_lostcapture: stderr unread RC \$RC.\"" \
-      "  rm() { case \"\$*\" in */pool.*) return 1 ;; *) command rm \"\$@\" ;; esac; }" \
-      "  SHMUTANT_BASELINE=0 pool lbl \"\$T/wd\" toy_prepare toy_run; unset -f rm; echo \"t_zz_lostcapture: unremoved RC \$RC.\"; }" \
+      "  cat() { [ \"\$#\" -eq 0 ] && [ -e $qt/cat.first ] && return 1; [ \"\$#\" -ne 0 ] || : > $qt/cat.first; command cat \"\$@\"; }" \
+      "  SHMUTANT_BASELINE=0 pool lbl \"\$T/wd\" toy_prepare toy_run; unset -f cat; echo \"t_zz_lostcapture: stderr unread RC \$RC.\"; }" \
       'main "$@"'
   } > "$T/suite/test/run.sh"
   hung_up_copy t_zz_pool "$T/diag" "$T/diag.out" twice
@@ -8118,20 +8141,20 @@ t_pool_helper_hangup_ends_only_its_pool() {
   case "$out" in
     *'t_zz_nocapture: skipped'*) echo "note: $_unit: an unwritable directory cannot be made here (root?); that case is not checked" ;;
     *) rc_is "$rc" 1 'a pool whose capture file cannot be made fails its unit'
-       has "$out" 'FAIL: t_zz_nocapture: fixture: pool could not make its capture directory' 'and says so'
+       has "$out" 'FAIL: t_zz_nocapture: fixture: pool could not set up its captures' 'and says so'
        has "$out" 't_zz_nocapture: RC 2.' 'with RC 2'
-       [ ! -e "$T/nocapture.ran" ] || fail_ 'the pool ran although its capture directory could not be made' ;;
+       [ ! -e "$T/nocapture.ran" ] || fail_ 'the pool ran although its captures could not be set up' ;;
   esac
   out="$(SHMUTANT_SELECT=t_zz_noclobber bash "$T/suite/test/run.sh" 2>&1)"; rc_is $? 0 "under the unit's noclobber the pool runs and the unit passes"
   has "$out" 't_zz_noclobber: first RC 0, killed.' 'a first call under noclobber captures its pool'
   has "$out" 't_zz_noclobber: second RC 0, killed.' 'and so does a second'
   has "$out" "t_zz_noclobber: the link's target holds [precious]." 'a link at the old stderr name is not written through'
   out="$(SHMUTANT_SELECT=t_zz_lostcapture bash "$T/suite/test/run.sh" 2>&1)"; rc_is $? 1 'a pool whose capture is lost fails its unit'
+  has "$out" 't_zz_lostcapture: intact RC 0, killed.' 'a pool whose captures are read back whole reports as it did'
+  eq "$(cat "$T/captures.seen" 2>/dev/null)" 0 "a callback finds no capture by name in the unit's directory"
   eq "$(printf '%s\n' "$out" | grep -c '^FAIL: t_zz_lostcapture: fixture: pool could not read its captures back$')" 2 'a stream or a stderr capture that cannot be read back is said, once each'
   has "$out" 't_zz_lostcapture: stream unread RC 2.' 'RC is 2 for a lost stream, whatever the pool returned'
   has "$out" 't_zz_lostcapture: stderr unread RC 2.' 'and for a lost stderr capture'
-  has "$out" 'FAIL: t_zz_lostcapture: fixture: pool could not remove its capture directory' 'a capture directory that cannot be removed is said'
-  has "$out" 't_zz_lostcapture: unremoved RC 0.' "and RC stays the pool's"
 }
 
 t_suite_removes_a_unit_directory_only_while_it_is_the_runners() {
@@ -9667,6 +9690,9 @@ main() {
     set +m
     exec {SWEEP_FINAL_FD}>&-
     wait "$SWEEP_UNIT" || urc=$?
+    # A unit ends with 0 or 1; a status past 128 is a shell ended from outside. Said on stderr and
+    # never as a FAIL line, which would count the unit as a witness gone red (#83).
+    [ "$urc" -le 128 ] || echo "run.sh: $u: its shell was ended by signal $(( urc - 128 )) (status $urc)" >&2
     SWEEP_UNIT=""
     # A sampler that has not ended thirty seconds after the unit (a loaded host can slow a healthy
     # one for a few) is not waited on further, nor one seen stopped.
