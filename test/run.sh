@@ -474,10 +474,36 @@ unmake_unremovable() {
   esac
 }
 
-# pool <args…> — run shmutant_pool with the stream in OUT, stderr in ERR, status in RC.
+# pool <args…> — run shmutant_pool with the stream in OUT, stderr in ERR, status in RC. The pool
+# runs in a plain subshell writing to a file of its own (a fresh mktemp name in the unit's
+# directory, removed once read), never in a command substitution: bash sends SIGHUP to the process
+# group it has recorded for a substitution's jobs when the substitution is hung up, and a pool's
+# workers are such jobs (#75). A hang-up of the pool's shell is recorded (pool_hup) and ends that
+# shell alone, which RC then shows as 129. A capture file that cannot be made fails the unit, with
+# RC 2 and nothing run.
 pool() {
-  OUT="$(shmutant_pool "$@" 2> "$T/err")"; RC=$?
-  ERR="$(cat "$T/err")"
+  local po
+  OUT=""; ERR=""; RC=2
+  po="$(mktemp "$T/pool-out.XXXXXX")" || { fail_ 'fixture: pool could not make its capture file'; return 0; }
+  ( trap pool_hup HUP; shmutant_pool "$@" ) > "$po" 2> "$T/err"; RC=$?
+  OUT="$(cat "$po")"; ERR="$(cat "$T/err")"
+  rm -f -- "$po"
+}
+# pool_hup — the HUP trap of pool's subshell. With SUITE_DIAG_DIR set (main checked it), a
+# pool-hup-<pid>.XXXXXX/snapshot there first: the pool's shell and its process group, the unit, and
+# the process table as the hang-up found it. Then the shell ends by the signal, taken at its
+# default; further HUPs are ignored meanwhile. A snapshot that cannot be written changes nothing.
+pool_hup() {
+  local g
+  trap '' HUP
+  if [ -n "${SUITE_DIAG_DIR:-}" ]; then
+    g="$(command -p ps -o pgid= -p "$BASHPID" 2>/dev/null)" || g=""
+    g="${g//[[:space:]]/}"
+    SHMUTANT_DIAG_DIR="$SUITE_DIAG_DIR" SHMUTANT_DIAG_ID="${SUITE_DIAG_ID:-}" \
+      _shmutant_diag_snapshot pool-hup "$BASHPID" "pool shell $BASHPID, its group ${g:-unread}" "unit ${_unit:-none}"
+  fi
+  trap - HUP
+  kill -HUP "$BASHPID"
 }
 # verdict_of <row-name> — the verdict field of that row's stream record.
 verdict_of() { printf '%s\n' "$OUT" | awk -F'\t' -v n="$1" '$3 == "row" && $5 == n { print $4 }'; }
@@ -2642,6 +2668,38 @@ EOF
   i=0; while kill -0 "$(cat "$T/left-prep")" 2>/dev/null && [ "$i" -lt 30 ]; do i=$((i + 1)); sleep 0.1; done
   kill -0 "$(cat "$T/left-prep")" 2>/dev/null && { kill -KILL "$(cat "$T/left-prep")" 2>/dev/null; fail_ 'a helper prepare backgrounded outlived the CLI'; }
   true
+}
+
+t_cli_hangup_stays_in_the_plan_group() {
+  # #80: the plan subshell runs in a process group of its own and reads it, as a run's wrapper does,
+  # so a hang-up taken by a substitution of prepare (which runs in that shell) stays in the plan's
+  # group. The CLI then finds its plan ended before the pool completed (exit 2) and removes the
+  # workdir it made; this shell, in the CLI's group, is not hung up, nor is a process beside it.
+  mk_toy "$T/toy"; rm -rf "$T/tmpd"; mkdir -p "$T/tmpd"
+  local sib sibid cli rc=0 hup=""
+  cat > "$T/toy/plan-sub.sh" <<'EOF'
+prepare() {
+  shmutant_copy_tree "$SHMUTANT_PLAN_DIR" "$1" || return 1
+  local o; o="$(sleep 30 & echo "$BASHPID" > "$SUB_PID.part" && mv -f -- "$SUB_PID.part" "$SUB_PID"; wait)"
+}
+run() { bash "$1/test.sh"; }
+shmutant_target lib.sh
+shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+EOF
+  trap 'hup=1' HUP
+  sleep 60 > /dev/null 2>&1 & sib=$!
+  sibid="$(_shmutant_identity "$sib" 2>/dev/null)"
+  SUB_PID="$T/sub.pid" TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-sub.sh" > "$T/cli.out" 2> "$T/cli.err" & cli=$!
+  if wait_for "$T/sub.pid"; then kill -HUP "$(cat "$T/sub.pid")" || fail_ 'fixture: the substitution could not be signalled'
+  else fail_ 'fixture: prepare never started its substitution'; fi
+  wait "$cli" || rc=$?
+  rc_is "$rc" 2 'the CLI reports a plan ended before the pool completed'
+  has "$(cat "$T/cli.err")" 'ended the run before the pool completed (status 129)' 'and says the plan was hung up'
+  [ -z "$hup" ] || fail_ "the hang-up reached the CLI's own process group"
+  wait_gone "$sib" "$sibid" 1 && fail_ "the hang-up reached a process in the CLI's group"
+  eq "$(n_found "$T/tmpd" -mindepth 1 -maxdepth 1)" 0 'the workdir the CLI made is removed'
+  trap - HUP
+  kill -KILL "$sib" 2>/dev/null; wait "$sib" 2>/dev/null
 }
 
 t_pool_refuses_a_prepared_tree_with_a_newline_name() {
@@ -6126,7 +6184,6 @@ t_pool_aborts_running_workers_when_a_dir_cannot_be_recreated() {
   # the worker's last act is the marker
   [ -e "$T/finished" ] && fail_ 'the pool waited on the unbounded worker instead of ending it'
   [ -e "$T/wd/mut-0/tree" ] && fail_ 'the ended worker'"'"'s clone was left behind'
-  [ "${#SHMUTANT_VERDICT_R[@]}" -eq 0 ] || fail_ 'the ended workers'"'"' channels were left open in the caller shell'
   sleep 1
   [ -e "$T/finished" ] && fail_ 'the running worker survived the abort'
   # with a TERM-ignoring escaped descendant, the abort must not return before it is gone. The run
@@ -6142,6 +6199,41 @@ t_pool_aborts_running_workers_when_a_dir_cannot_be_recreated() {
   [ -e "$T/ignoring2" ] || fail_ 'fixture: the stubborn descendant never set its TERM trap, so the abort met none'
   local alive; alive="$(left_running "$T/finished2.id")" || fail_ 'fixture: the stubborn run never recorded its descendant'
   [ -z "$alive" ] || fail_ 'the abort returned while a TERM-ignoring descendant was still alive'
+}
+
+t_run_hangup_stays_in_the_run_group() {
+  # #80: a run executes in a process group of its own, and a hang-up taken inside it stays there.
+  # bash sends SIGHUP to the process group it has recorded for the jobs of a command or process
+  # substitution when that substitution is hung up, and the wrapper reads its own group so that the
+  # one recorded is the run's. Witnessed for both forms by a callback whose substitution holds a job:
+  # sent one SIGHUP, the row is scored aborted (129), and neither this shell (the pool's caller) nor a
+  # process in its group is hung up. The substitution writes its pid only once its job is started, so
+  # the signal never arrives before there is a job to forward it for.
+  mk_toy "$T/toy"; TOY="$T/toy"
+  local sib sibid form h hup=""
+  # A pool's shell is hung up here only when the wrapper leaks, which a mutation row does on
+  # purpose: the suite's own diagnostics directory gets no snapshot of that.
+  local SUITE_DIAG_DIR=""
+  trap 'hup=1' HUP
+  sleep 60 > /dev/null 2>&1 & sib=$!
+  sibid="$(_shmutant_identity "$sib" 2>/dev/null)"
+  command_sub_run() { local o; o="$(sleep 30 & echo "$BASHPID" > "$T/sub.pid.part" && mv -f -- "$T/sub.pid.part" "$T/sub.pid"; wait)"; }
+  process_sub_run() { cat < <(sleep 30 & echo "$BASHPID" > "$T/sub.pid.part" && mv -f -- "$T/sub.pid.part" "$T/sub.pid"; wait); }
+  for form in command process; do
+    rm -f "$T/sub.pid" "$T/sub.pid.part"; hup=""
+    shmutant_reset; shmutant_target lib.sh
+    shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+    ( wait_for "$T/sub.pid" && kill -HUP "$(cat "$T/sub.pid")" ) & h=$!
+    SHMUTANT_JOBS=1 SHMUTANT_BASELINE=0 pool lbl "$T/wd-$form" toy_prepare "${form}_sub_run"
+    wait "$h" || fail_ "fixture ($form substitution): the substitution never started, or could not be signalled"
+    rc_is "$RC" 1 "($form substitution) the pool returns its own status, not a signal's"
+    eq "$(verdict_of a)" aborted "($form substitution) the hung-up run is scored as aborted"
+    has "$(row_detail a)" 'exited 129' "($form substitution) with the status of a hang-up"
+    [ -z "$hup" ] || fail_ "($form substitution) the hang-up reached the shell that called the pool"
+    wait_gone "$sib" "$sibid" 1 && fail_ "($form substitution) the hang-up reached a process in the caller's group"
+  done
+  trap - HUP
+  kill -KILL "$sib" 2>/dev/null; wait "$sib" 2>/dev/null
 }
 
 t_pool_refuses_unremovable_pristine() {
@@ -7890,6 +7982,101 @@ t_suite_hup_snapshot_shows_the_unit_before_it_is_ended() {
   has "$out1" 'run.sh: SHMUTANT_DIAG_DIR must be an absolute path, got [diag]' 'names it'
 }
 
+# hung_up_copy <unit> <diag directory or empty> <output> — run a copy of this suite ($T/suite) on
+# <unit> in a process group of its own, beside a sleep started first in that group; once the file
+# $T/target.pid appears, send the process it names one SIGHUP. Sets `rc` to the copy's status and
+# `beside` to `alive` or `gone` for the sleep, then ends what is left of the group.
+hung_up_copy() {
+  local suite sib sibid
+  rc=0; beside=unread
+  rm -f "$T/target.pid" "$T/sib.pid"
+  set -m
+  SHMUTANT_DIAG_DIR="$2" SHMUTANT_SELECT="$1" bash -c 'sleep 60 > /dev/null 2>&1 & echo "$!" > "$1/sib.pid.part" && mv -f -- "$1/sib.pid.part" "$1/sib.pid"; exec bash "$1/suite/test/run.sh"' _ "$T" > "$3" 2>&1 < /dev/null & suite=$!
+  set +m
+  if wait_for "$T/sib.pid" && wait_for "$T/target.pid"; then
+    sib="$(cat "$T/sib.pid")"; sibid="$(_shmutant_identity "$sib" 2>/dev/null)"
+    _shmutant_group_has "$suite" "$sib" || fail_ "fixture ($1): the sleep is not in the copy's process group"
+    kill -HUP "$(cat "$T/target.pid")" || fail_ "fixture ($1): the target could not be signalled"
+  else
+    fail_ "fixture ($1): the copy never named its target"
+  fi
+  wait "$suite" 2>/dev/null || rc=$?
+  if [ -n "${sib:-}" ]; then
+    if wait_gone "$sib" "$sibid" 1; then beside=gone; else beside=alive; fi
+    end_group "$suite" "$sib:$sibid"
+  fi
+}
+
+t_suite_is_not_hung_up_by_a_substitution_of_its_unit() {
+  # #75: a unit runs in a process group of its own, and reads it, so that the group bash has recorded
+  # for the jobs of the unit's command substitutions is the unit's and not the suite's. A substitution
+  # of a unit that holds a job and is sent SIGHUP then hangs up the unit's group: the unit fails, the
+  # suite goes on to its report and exits 1, and a process in the suite's own group is untouched.
+  [ "$(tail -n 1 "$here/run.sh")" = 'main "$@"' ] || { fail_ 'run.sh no longer ends with main "$@"'; return; }
+  mkdir "$T/tmp" && export TMPDIR="$T/tmp" || { fail_ 'fixture: could not make the copy'"'"'s TMPDIR'; return; }
+  mkdir -p "$T/suite/test" || { fail_ 'fixture: could not make the copy'"'"'s directories'; return; }
+  cp -- "$SHMUTANT" "$T/suite/shmutant.sh"
+  local qt rc beside; printf -v qt '%q' "$T"
+  { sed '$d' "$here/run.sh"
+    printf '%s\n' "t_zz_sub() { local x; x=\"\$(sleep 30 & echo \$BASHPID > $qt/target.pid.part && mv -f -- $qt/target.pid.part $qt/target.pid; wait)\"; echo 't_zz_sub: went on'; }" 'main "$@"'
+  } > "$T/suite/test/run.sh"
+  hung_up_copy t_zz_sub '' "$T/sub.out"
+  rc_is "$rc" 1 'the suite ends on its own, with the unit failed, and not by the signal'
+  has "$(cat "$T/sub.out")" 'run.sh: 1 unit(s) ran, 1 failed' 'and reports the unit'
+  eq "$beside" alive "a process in the suite's own group is not hung up"
+}
+
+t_pool_helper_hangup_ends_only_its_pool() {
+  # #75: pool() runs the pool in a plain subshell, never in a command substitution, so a hang-up of the
+  # pool's shell is not sent on to anybody: that shell alone ends by it (RC 129) and the unit goes on.
+  # With SHMUTANT_DIAG_DIR set the suite's copy writes one pool-hup-<pid>.XXXXXX/snapshot first: a UTC
+  # timestamp, its kind, the pool's shell and group, the unit, and the process table. With none set,
+  # or one that cannot be written, nothing is written and the unit sees the same status.
+  [ "$(tail -n 1 "$here/run.sh")" = 'main "$@"' ] || { fail_ 'run.sh no longer ends with main "$@"'; return; }
+  mkdir "$T/tmp" && export TMPDIR="$T/tmp" || { fail_ 'fixture: could not make the copy'"'"'s TMPDIR'; return; }
+  mkdir -p "$T/suite/test" "$T/diag" "$T/shut" || { fail_ 'fixture: could not make the copy'"'"'s directories'; return; }
+  cp -- "$SHMUTANT" "$T/suite/shmutant.sh"
+  local qt rc beside f pid; printf -v qt '%q' "$T"
+  { sed '$d' "$here/run.sh"
+    printf '%s\n' \
+      "t_zz_pool() { mk_toy \"\$T/toy\"; TOY=\"\$T/toy\"; shmutant_reset; shmutant_target lib.sh; shmutant_mut 'a' '\$1 + \$2' '\$1 - \$2' 'add-works'" \
+      "  zz_prepare() { echo \$BASHPID > $qt/pool.pid; toy_prepare \"\$1\"; }" \
+      "  zz_run() { cp -- $qt/pool.pid $qt/target.pid.part && mv -f -- $qt/target.pid.part $qt/target.pid; sleep 2; }" \
+      "  SHMUTANT_JOBS=1 SHMUTANT_BASELINE=0 pool lbl \"\$T/wd\" zz_prepare zz_run" \
+      "  echo \"t_zz_pool: the pool returned \$RC\"; }" \
+      'main "$@"'
+  } > "$T/suite/test/run.sh"
+  hung_up_copy t_zz_pool "$T/diag" "$T/diag.out"
+  [ "$rc" -le 1 ] || fail_ "the suite ended with status $rc: the hang-up of a pool's shell reached it"
+  has "$(cat "$T/diag.out")" 't_zz_pool: the pool returned 129' 'the unit goes on, and sees its pool ended by the signal'
+  eq "$beside" alive "a process in the suite's own group is not hung up"
+  pid="$(cat "$T/pool.pid" 2>/dev/null)"
+  eq "$(n_found "$T/diag" -type f)" 1 'one snapshot for the one hang-up'
+  f="$(find "$T/diag" -type f -path "*/pool-hup-$pid.*/snapshot" | head -n 1)"
+  if [ -z "$f" ]; then fail_ "no snapshot named by the pool shell's pid was written"
+  else
+    [[ "$(sed -n 1p "$f")" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || fail_ "the snapshot does not start with a UTC timestamp: [$(sed -n 1p "$f")]"
+    eq "$(sed -n 2p "$f")" 'kind: pool-hup' 'it names its kind'
+    [[ "$(sed -n 3p "$f")" =~ ^pool\ shell\ $pid,\ its\ group\ [0-9]+$ ]] || fail_ "it names the pool's shell and its group: [$(sed -n 3p "$f")]"
+    eq "$(sed -n 4p "$f")" 'unit t_zz_pool' 'it names the unit'
+    [[ "$(sed -n 5p "$f")" =~ ^\ *PID\ +PPID\ +PGID\  ]] || fail_ "the process table follows, with its header: [$(sed -n 5p "$f")]"
+    awk -v p="$pid" 'NR > 5 && $1 == p { found = 1 } END { exit !found }' "$f" || fail_ "the pool's shell was not in the table: it was taken after that shell ended"
+  fi
+  hung_up_copy t_zz_pool '' "$T/none.out"
+  [ "$rc" -le 1 ] || fail_ "with no directory set, the suite ended with status $rc"
+  has "$(cat "$T/none.out")" 't_zz_pool: the pool returned 129' 'with no directory set, the unit sees the same status'
+  eq "$(n_found "$T/diag" -type f)" 1 'and nothing more is written'
+  chmod 555 "$T/shut"
+  if [ -w "$T/shut" ]; then echo "note: $_unit: an unwritable directory cannot be made here (root?); that case is not checked"
+  else
+    hung_up_copy t_zz_pool "$T/shut" "$T/shut.out"
+    [ "$rc" -le 1 ] || fail_ "with the directory unwritable, the suite ended with status $rc"
+    has "$(cat "$T/shut.out")" 't_zz_pool: the pool returned 129' 'with the directory unwritable, the unit sees the same status'
+    eq "$(n_found "$T/shut" -type f)" 0 'and writes nothing'
+  fi
+  chmod 755 "$T/shut"
+}
+
 t_suite_removes_a_unit_directory_only_while_it_is_the_runners() {
   # A copy of this suite with one extra unit, which moves the directory the runner made for it aside
   # and moves a directory of the caller's, holding a file, into that path. However the unit then ends
@@ -9391,6 +9578,11 @@ main() {
     SWEEP_OWED=1; SWEEP_UNIT=spawning
     set -m
     { trap '' INT TERM HUP; (
+      # Job control on and off again, first: bash then reads the process group this shell was
+      # moved into. Unread, the group it has recorded for the jobs of the unit's command
+      # substitutions is still the suite's, and a hang-up taken by one of them is sent on to the
+      # suite, shmutant's run wrapper and its holder (D8).
+      set -m; set +m
       # The wrapper's ignore would pass to the unit, and `trap -p` in a subshell reports the suite's
       # handlers although none is active: a unit that saves and restores traps, as the pool does,
       # would install them for real.

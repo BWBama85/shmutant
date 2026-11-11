@@ -1459,6 +1459,14 @@ shmutant_mut 'the plan subshell shares the CLI process group' \
   '  builtin set -m' \
   '  builtin set +m' \
   't_cli_ends_what_the_plan_left_running'
+shmutant_mut "the plan's holder is not a job of the plan subshell" \
+  '    ( read -r _ <&"$hold_r" ) < /dev/null > /dev/null 2>&1 {keep_w}>&- {keep_r}<&- {hold}>&- & printf '"'"'holder %s %s\n'"'"' "$!" "$(_shmutant_identity "$!" 2>/dev/null)" >&"$keep_w"' \
+  '    ( ( read -r _ <&"$hold_r" ) < /dev/null > /dev/null 2>&1 {keep_w}>&- {keep_r}<&- {hold}>&- & printf '"'"'holder %s %s\n'"'"' "$!" "$(_shmutant_identity "$!" 2>/dev/null)" >&"$keep_w" )' \
+  't_cli_hangup_stays_in_the_plan_group'
+shmutant_mut "a run's wrapper does not read its own process group" \
+  '    ( builtin set -o monitor; builtin set +o monitor' \
+  '    ( :' \
+  't_run_hangup_stays_in_the_run_group'
 
 # --- guards added for the forty-fifth review round ---
 shmutant_mut 'a name with a newline is fingerprinted anyway' \

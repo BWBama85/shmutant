@@ -194,10 +194,13 @@ read instead of passing it. So
 Each unit runs in a process group of its own, with stdin from `/dev/null`, and so does the sampler
 that records the unit's descendants while it runs. The suite's group holds only the suite and the
 short commands it runs itself, so nothing a unit leaves behind, and no sampler a unit stops, shares
-it. The leak check freezes a leftover before it kills it. On macOS, in a session launchd started (as
-on the CI runner), the exit of a member launchd adopted can leave the kernel treating its group as
-newly orphaned, and an orphaned group with a member stopped is hung up whole: in the suite's group,
-that ended the suite with status 129. Once its unit has ended, the sampler is given 30 seconds to end
+it. The leak check freezes a leftover before it kills it. A unit's shell also reads the process
+group it runs in before anything else: bash sends SIGHUP to the group it has recorded for the jobs
+of a command substitution when that substitution is hung up, and that record is only as fresh as
+the shell's last read of its own group. Unread, it was still the suite's, so a hang-up inside a
+unit ended the suite with status 129. For the same reason the units' `pool` helper runs a pool in a
+plain subshell, never in a command substitution; a hang-up of that shell ends it alone, and with
+`SHMUTANT_DIAG_DIR` set it is recorded first. Once its unit has ended, the sampler is given 30 seconds to end
 too, and no more once it is seen stopped; one that has not ended by then is killed with its whole
 group, and the unit fails. A sampler whose group cannot be killed, or whose holder has not ended 30
 seconds after the suite let it go (or is seen stopped), ends the run as a harness failure (status 2)
