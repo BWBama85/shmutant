@@ -1052,7 +1052,10 @@ _shmutant_frozen_only() {
 # earliest children finish before their turn. A stopped pid cannot exit, so it cannot be reused
 # either, and frozen pids need no identity. There is no TERM and no grace: continuing a frozen
 # tree to let it handle TERM also lets a handler that ignores it run on, and after a deadline
-# nothing may run at all. <pids…> are identity-checked victims recorded earlier (the watchdog's,
+# nothing is given time to handle anything. Part of the tree can still run for an instant: a
+# stopped process group whose last parent outside it is killed first is orphaned, and the kernel
+# sends it SIGHUP and SIGCONT before its own KILL in the same kill lands. <pids…> are
+# identity-checked victims recorded earlier (the watchdog's,
 # the wrapper's), frozen and searched from as well: one that still lived could otherwise fork a
 # child out of reach.
 # The freeze is guarded. A shell killed between its first stop and its KILL (a supervisor's TERM,
@@ -1859,7 +1862,14 @@ _shmutant_run_bounded() {
     # would otherwise leave it blocked for good. It ends once nothing of the run holds a writer.
     # A bare `exit` keeps the status it would have had: the snapshot runs first and must not
     # replace it.
-    ( _shmutant_wrap_left="$left_w"
+    # Job control on and off again, first: bash records the jobs of a command or process
+    # substitution under the process group it last read for the shell, reads it only when job
+    # control is turned on, and sends that group SIGHUP when a substitution holding a job is hung
+    # up in a shell with an EXIT trap. This shell was moved into its own group after the runner
+    # read the pool's. Read here, a hang-up taken by a substitution of the callback stays in the
+    # run's group; unread, it reaches the pool's.
+    ( builtin set -o monitor; builtin set +o monitor
+      _shmutant_wrap_left="$left_w"
       ( ( read -r _ <&"$hold_r" ) < /dev/null > /dev/null 2>&1 {hold}>&- & printf '%s\n' "$!" >&"$hp" )
       # No plan code until the runner has published this run's group and holder for the abort
       # path: an interrupt before that would find a run it could not name.
@@ -3793,6 +3803,11 @@ _shmutant_cli_run() {
   command -p rm -f -- "$seen_file"
   builtin set -m
   (
+    # Job control on and off again, first, as a run's wrapper does: this shell reads the process
+    # group it was moved into, so a hang-up taken by a substitution of the plan or of prepare
+    # stays in the plan's group. Its holder, a job listed under that group, covers a substitution
+    # of this shell alone; a subshell of the plan lists none of this shell's jobs.
+    builtin set -o monitor; builtin set +o monitor
     # `trap -p` in a subshell reports the parent's traps although none is active: the pool
     # would save this shell's abort handler as the plan subshell's own and re-raise into it.
     trap - INT TERM
