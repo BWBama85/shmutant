@@ -475,33 +475,22 @@ unmake_unremovable() {
 }
 
 # pool <args…> — run shmutant_pool with the stream in OUT, stderr in ERR, status in RC. The pool
-# runs in a plain subshell writing to two files of its own (fresh mktemp names in the unit's
-# directory, removed once read; never a fixed name, which a unit could have put a link at), never in a command substitution: bash sends SIGHUP to the process
+# runs in a plain subshell, never in a command substitution: bash sends SIGHUP to the process
 # group it has recorded for a substitution's jobs when the substitution is hung up, and a pool's
 # workers are such jobs (#75). A hang-up of the pool's shell is recorded (pool_hup) and ends that
-# shell alone, which RC then shows as 129. Both captures are opened before the pool starts, each
-# with `>|`: the unit's noclobber must not refuse a file this call has just made. A capture that
-# cannot be made or opened fails the unit with RC 2 and nothing run; one that cannot be read back
-# fails it with RC 2 whatever the pool returned; one that cannot be removed fails it.
+# shell alone, which RC then shows as 129. Its two captures are `out` and `err` in a directory of
+# this call's own (a fresh mktemp name in the unit's directory, removed once read), so neither is
+# a name a unit could have put a link at, and neither exists for the unit's noclobber to refuse.
+# Three things fail the unit: the directory cannot be made (RC 2, nothing run); a capture cannot
+# be read back, which is also what a capture that could not be opened comes to (RC 2, whatever
+# the pool returned); the directory cannot be removed.
 pool() {
-  local po="" pe="" pfd="" efd=""
+  local pd
   OUT=""; ERR=""; RC=2
-  if ! po="$(mktemp "$T/pool-out.XXXXXX")" || ! pe="$(mktemp "$T/pool-err.XXXXXX")"; then
-    fail_ 'fixture: pool could not make its capture file'
-    [ -z "$po" ] || rm -f -- "$po" || fail_ 'fixture: pool could not remove its capture file'
-    return 0
-  fi
-  if ! exec {pfd}>|"$po" {efd}>|"$pe"; then
-    fail_ 'fixture: pool could not open its captures'
-    [ -z "$pfd" ] || exec {pfd}>&-
-    rm -f -- "$po" "$pe" || fail_ 'fixture: pool could not remove its capture file'
-    return 0
-  fi
-  ( exec {pfd}>&- {efd}>&-; trap pool_hup HUP; shmutant_pool "$@" ) 1>&"$pfd" 2>&"$efd"; RC=$?
-  exec {pfd}>&- {efd}>&-
-  OUT="$(cat "$po")" || { fail_ 'fixture: pool could not read its capture file'; RC=2; }
-  ERR="$(cat "$pe")" || { fail_ 'fixture: pool could not read its stderr capture'; RC=2; }
-  rm -f -- "$po" "$pe" || fail_ 'fixture: pool could not remove its capture file'
+  pd="$(mktemp -d "$T/pool.XXXXXX")" || { fail_ 'fixture: pool could not make its capture directory'; return 0; }
+  ( trap pool_hup HUP; shmutant_pool "$@" ) > "$pd/out" 2> "$pd/err"; RC=$?
+  OUT="$(cat "$pd/out")" && ERR="$(cat "$pd/err")" || { fail_ 'fixture: pool could not read its captures back'; RC=2; }
+  rm -rf -- "$pd" || fail_ 'fixture: pool could not remove its capture directory'
   return 0
 }
 # pool_hup — the HUP trap of pool's subshell. With SUITE_DIAG_DIR set (main checked it), a
@@ -8060,10 +8049,11 @@ t_pool_helper_hangup_ends_only_its_pool() {
   # straight after the first changes neither (two adjacent kills, with nothing in bash to say the
   # first was taken before the second: without the handler's wait this failed three runs of three).
   # With none set, or one that cannot be written, nothing is written and the unit sees the same
-  # status. A pool whose capture file cannot be made runs nothing: the unit fails, with RC 2. One
-  # whose capture cannot be read back, or removed, fails the unit too; the unit's noclobber
-  # refuses neither capture, on a first call or a second; and a link the unit left at the name the
-  # stderr capture once had is not written through.
+  # status. A pool whose capture directory cannot be made runs nothing: the unit fails, with RC 2.
+  # One whose stream or stderr capture cannot be read back fails the unit with RC 2, and one whose
+  # directory cannot be removed fails it; the unit's noclobber refuses neither capture, on a first
+  # call or a second; and a link the unit left at the name the stderr capture once had is not
+  # written through.
   [ "$(tail -n 1 "$here/run.sh")" = 'main "$@"' ] || { fail_ 'run.sh no longer ends with main "$@"'; return; }
   mkdir "$T/tmp" && export TMPDIR="$T/tmp" || { fail_ 'fixture: could not make the copy'"'"'s TMPDIR'; return; }
   mkdir -p "$T/suite/test" "$T/diag" "$T/shut" || { fail_ 'fixture: could not make the copy'"'"'s directories'; return; }
@@ -8087,9 +8077,11 @@ t_pool_helper_hangup_ends_only_its_pool() {
       "  SHMUTANT_BASELINE=0 pool lbl \"\$T/wd\" toy_prepare toy_run; set +C; echo \"t_zz_noclobber: second RC \$RC, \$(verdict_of a).\"" \
       "  echo \"t_zz_noclobber: the link's target holds [\$(command cat \"\$T/victim\")].\"; }" \
       "t_zz_lostcapture() { mk_toy \"\$T/toy\"; TOY=\"\$T/toy\"; shmutant_reset; shmutant_target lib.sh; shmutant_mut 'a' '\$1 + \$2' '\$1 - \$2' 'add-works'" \
-      "  cat() { case \"\$1\" in */pool-out.*) return 1 ;; *) command cat \"\$@\" ;; esac; }" \
-      "  SHMUTANT_BASELINE=0 pool lbl \"\$T/wd\" toy_prepare toy_run; unset -f cat; echo \"t_zz_lostcapture: unread RC \$RC.\"" \
-      "  rm() { case \"\$*\" in */pool-out.*) return 1 ;; *) command rm \"\$@\" ;; esac; }" \
+      "  cat() { case \"\$1\" in */pool.*/out) return 1 ;; *) command cat \"\$@\" ;; esac; }" \
+      "  SHMUTANT_BASELINE=0 pool lbl \"\$T/wd\" toy_prepare toy_run; unset -f cat; echo \"t_zz_lostcapture: stream unread RC \$RC.\"" \
+      "  cat() { case \"\$1\" in */pool.*/err) return 1 ;; *) command cat \"\$@\" ;; esac; }" \
+      "  SHMUTANT_BASELINE=0 pool lbl \"\$T/wd\" toy_prepare toy_run; unset -f cat; echo \"t_zz_lostcapture: stderr unread RC \$RC.\"" \
+      "  rm() { case \"\$*\" in */pool.*) return 1 ;; *) command rm \"\$@\" ;; esac; }" \
       "  SHMUTANT_BASELINE=0 pool lbl \"\$T/wd\" toy_prepare toy_run; unset -f rm; echo \"t_zz_lostcapture: unremoved RC \$RC.\"; }" \
       'main "$@"'
   } > "$T/suite/test/run.sh"
@@ -8126,18 +8118,19 @@ t_pool_helper_hangup_ends_only_its_pool() {
   case "$out" in
     *'t_zz_nocapture: skipped'*) echo "note: $_unit: an unwritable directory cannot be made here (root?); that case is not checked" ;;
     *) rc_is "$rc" 1 'a pool whose capture file cannot be made fails its unit'
-       has "$out" 'FAIL: t_zz_nocapture: fixture: pool could not make its capture file' 'and says so'
+       has "$out" 'FAIL: t_zz_nocapture: fixture: pool could not make its capture directory' 'and says so'
        has "$out" 't_zz_nocapture: RC 2.' 'with RC 2'
-       [ ! -e "$T/nocapture.ran" ] || fail_ 'the pool ran although its capture file could not be made' ;;
+       [ ! -e "$T/nocapture.ran" ] || fail_ 'the pool ran although its capture directory could not be made' ;;
   esac
   out="$(SHMUTANT_SELECT=t_zz_noclobber bash "$T/suite/test/run.sh" 2>&1)"; rc_is $? 0 "under the unit's noclobber the pool runs and the unit passes"
   has "$out" 't_zz_noclobber: first RC 0, killed.' 'a first call under noclobber captures its pool'
   has "$out" 't_zz_noclobber: second RC 0, killed.' 'and so does a second'
   has "$out" "t_zz_noclobber: the link's target holds [precious]." 'a link at the old stderr name is not written through'
   out="$(SHMUTANT_SELECT=t_zz_lostcapture bash "$T/suite/test/run.sh" 2>&1)"; rc_is $? 1 'a pool whose capture is lost fails its unit'
-  has "$out" 'FAIL: t_zz_lostcapture: fixture: pool could not read its capture file' 'a capture that cannot be read back is said'
-  has "$out" 't_zz_lostcapture: unread RC 2.' 'and RC is 2, whatever the pool returned'
-  has "$out" 'FAIL: t_zz_lostcapture: fixture: pool could not remove its capture file' 'a capture that cannot be removed is said'
+  eq "$(printf '%s\n' "$out" | grep -c '^FAIL: t_zz_lostcapture: fixture: pool could not read its captures back$')" 2 'a stream or a stderr capture that cannot be read back is said, once each'
+  has "$out" 't_zz_lostcapture: stream unread RC 2.' 'RC is 2 for a lost stream, whatever the pool returned'
+  has "$out" 't_zz_lostcapture: stderr unread RC 2.' 'and for a lost stderr capture'
+  has "$out" 'FAIL: t_zz_lostcapture: fixture: pool could not remove its capture directory' 'a capture directory that cannot be removed is said'
   has "$out" 't_zz_lostcapture: unremoved RC 0.' "and RC stays the pool's"
 }
 
