@@ -2446,8 +2446,8 @@ shmutant_mut 'what the kill lets go is let go after a group KILL whose members i
   '      :' \
   't_kill_tree_reads_its_checks_last_from_one_table'
 shmutant_mut 'an empty elapsed-time table read fails its caller' \
-  '    [ -z "$line" ] || SHMUTANT_START["${line%% *}"]="${line#* }"' \
-  '    [ -n "$line" ] && SHMUTANT_START["${line%% *}"]="${line#* }"' \
+  '    [ -z "$line" ] || SHMUTANT_START["${line%% *}"]="e$(( now - ${line#* } ))$gap"' \
+  '    [ -n "$line" ] && SHMUTANT_START["${line%% *}"]="e$(( now - ${line#* } ))$gap"' \
   't_process_state_reads_take_a_failed_ps_as_no_state'
 shmutant_mut 'the guard lets go after the group KILL what it could not list the members for' \
   '    else cfirst=1; fi' \
@@ -2581,8 +2581,8 @@ shmutant_mut 'a group a process joined between its reads is told whole' \
 # _shmutant_descendants_started: those lines are the same text, so no literal names one of them;
 # t_process_table_filters_take_a_failed_write_as_no_table covers each)
 shmutant_mut 'an elapsed-time walk takes a table whose write failed' \
-  '  (set -o pipefail; printf '"'"'%s\n'"'"' "$table" | command -p awk -v root="$1" -v now="$now" '"'"'' \
-  '  ( printf '"'"'%s\n'"'"' "$table" | command -p awk -v root="$1" -v now="$now" '"'"'' \
+  '  (set -o pipefail; printf '"'"'%s\n'"'"' "$table" | command -p awk -v root="$1" -v now="$(( now / 1000000 ))" -v gap="$gap" '"'"'' \
+  '  ( printf '"'"'%s\n'"'"' "$table" | command -p awk -v root="$1" -v now="$(( now / 1000000 ))" -v gap="$gap" '"'"'' \
   't_process_table_filters_take_a_failed_write_as_no_table'
 shmutant_mut 'a group membership is read from a table whose write failed' \
   '  (set -o pipefail; printf '"'"'%s\n'"'"' "$table" | command -p awk -v g="$g" -v want="$want"' \
@@ -2682,3 +2682,77 @@ shmutant_mut 'the snapshot carries no process table' \
   '"$@" "$tbl"; } > snapshot.part' \
   '"$@"; } > snapshot.part' \
   't_diag_snapshot_records_a_run_whose_group_could_not_be_verified'
+
+# --- an elapsed-time start is read between two clock readings (#78) ---
+shmutant_mut 'the table takes its starts from the clock read before its ps' \
+  '  now=$(( now / 1000000 ))' \
+  '  now=$(( before / 1000000 ))' \
+  't_elapsed_start_is_read_between_two_clock_readings'
+shmutant_mut 'the table leaves out the seconds its ps was read across' \
+  '    [ -z "$line" ] || SHMUTANT_START["${line%% *}"]="e$(( now - ${line#* } ))$gap"' \
+  '    [ -z "$line" ] || SHMUTANT_START["${line%% *}"]="e$(( now - ${line#* } ))"' \
+  't_elapsed_start_is_read_between_two_clock_readings'
+shmutant_mut 'a table read the clock stepped across is taken' \
+  '  now="$(_shmutant_now)"; gap="$(_shmutant_etime_gap "$before" "$now")" || return 0' \
+  '  now="$(_shmutant_now)"; gap="$(_shmutant_etime_gap "$before" "$now")"' \
+  't_elapsed_start_is_read_between_two_clock_readings'
+shmutant_mut 'the walk takes its starts from the clock read before its ps' \
+  '-v now="$(( now / 1000000 ))" -v gap="$gap"' \
+  '-v now="$(( before / 1000000 ))" -v gap="$gap"' \
+  't_elapsed_start_is_read_between_two_clock_readings'
+shmutant_mut 'the walk leaves out the seconds its ps was read across' \
+  '-v now="$(( now / 1000000 ))" -v gap="$gap"' \
+  '-v now="$(( now / 1000000 ))" -v gap=""' \
+  't_elapsed_start_is_read_between_two_clock_readings'
+shmutant_mut 'a walk the clock stepped across lists what it found' \
+  '  now="$(_shmutant_now)"; gap="$(_shmutant_etime_gap "$before" "$now")" || return 1' \
+  '  now="$(_shmutant_now)"; gap="$(_shmutant_etime_gap "$before" "$now")"' \
+  't_elapsed_start_is_read_between_two_clock_readings'
+shmutant_mut 'the identity takes its start from the clock read before its ps' \
+  '  printf '"'"'e%s%s'"'"' "$(( after / 1000000 - $(_shmutant_etime_secs "$etime") ))" "$gap"' \
+  '  printf '"'"'e%s%s'"'"' "$(( before / 1000000 - $(_shmutant_etime_secs "$etime") ))" "$gap"' \
+  't_elapsed_start_is_read_between_two_clock_readings'
+shmutant_mut 'the identity leaves out the seconds its ps was read across' \
+  '  printf '"'"'e%s%s'"'"' "$(( after / 1000000 - $(_shmutant_etime_secs "$etime") ))" "$gap"' \
+  '  printf '"'"'e%s'"'"' "$(( after / 1000000 - $(_shmutant_etime_secs "$etime") ))"' \
+  't_elapsed_start_is_read_between_two_clock_readings'
+shmutant_mut 'an identity read the clock stepped across is given' \
+  '  after="$(_shmutant_now)"; gap="$(_shmutant_etime_gap "$before" "$after")" || return 1' \
+  '  after="$(_shmutant_now)"; gap="$(_shmutant_etime_gap "$before" "$after")"' \
+  't_elapsed_start_is_read_between_two_clock_readings'
+shmutant_mut 'a read the clock stepped back across bounds a start' \
+  '  [ "$g" -ge 0 ] && [ "$g" -le 10 ] || return 1' \
+  '  [ "$g" -le 10 ] || return 1' \
+  't_elapsed_start_is_read_between_two_clock_readings'
+shmutant_mut 'a read the clock moved any distance across bounds a start' \
+  '  [ "$g" -ge 0 ] && [ "$g" -le 10 ] || return 1' \
+  '  [ "$g" -ge 0 ] || return 1' \
+  't_elapsed_start_is_read_between_two_clock_readings'
+shmutant_mut 'a read the clock moved ten seconds across bounds no start' \
+  '  [ "$g" -ge 0 ] && [ "$g" -le 10 ] || return 1' \
+  '  [ "$g" -ge 0 ] && [ "$g" -lt 10 ] || return 1' \
+  't_elapsed_start_is_read_between_two_clock_readings'
+shmutant_mut 'the seconds a ps was read across are never said' \
+  '  [ "$g" = 0 ] || printf '"'"'+%s'"'"' "$g"' \
+  '  :' \
+  't_elapsed_start_is_read_between_two_clock_readings'
+shmutant_mut 'a clock reading that is no number is computed with' \
+  '  for v in "$1" "$2"; do case "$v" in '"'"''"'"'|*[!0-9]*) return 1 ;; esac; done' \
+  '  :' \
+  't_elapsed_start_is_read_between_two_clock_readings'
+shmutant_mut 'elapsed-time starts match within a second whatever they were read across' \
+  '        d=$(( 10#$a - 10#$b )); [ "$d" -ge $(( -1 - 10#$gb )) ] && [ "$d" -le $(( 1 + 10#$ga )) ] ;;' \
+  '        d=$(( 10#$a - 10#$b )); [ "$d" -ge -1 ] && [ "$d" -le 1 ] ;;' \
+  't_same_start_compares_recorded_starts_exactly'
+shmutant_mut 'the seconds a start was read across reach forward of it' \
+  '        d=$(( 10#$a - 10#$b )); [ "$d" -ge $(( -1 - 10#$gb )) ] && [ "$d" -le $(( 1 + 10#$ga )) ] ;;' \
+  '        d=$(( 10#$a - 10#$b )); [ "$d" -ge $(( -1 - 10#$ga )) ] && [ "$d" -le $(( 1 + 10#$gb )) ] ;;' \
+  't_same_start_compares_recorded_starts_exactly'
+shmutant_mut 'an elapsed-time start that is no number is computed with' \
+  '        for v in "$a" "$b" "$ga" "$gb"; do case "$v" in '"'"''"'"'|*[!0-9]*) return 1 ;; esac; done' \
+  '        :' \
+  't_same_start_compares_recorded_starts_exactly'
+shmutant_mut 'the table subtracts an elapsed time that is no whole number' \
+  '      printf "%s %d\n", $1, d * 86400 + s' \
+  '      print $1, d * 86400 + s' \
+  't_elapsed_start_is_read_between_two_clock_readings'
