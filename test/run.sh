@@ -4185,12 +4185,12 @@ looks_n() {
   printf '%s' "${n:-0}"
 }
 
-# looks_reach <n> — block until that watchdog has taken <n> looks, looking at most 150 times a tenth
+# looks_reach <n> — block until that watchdog has taken <n> looks, looking at most 300 times a tenth
 # of a second apart; false on expiry, and as soon as a look has not found the runner, which is the
 # watchdog's last.
 looks_reach() {
   local i
-  for (( i = 0; i < 150; i++ )); do
+  for (( i = 0; i < 300; i++ )); do
     [ "$(looks_n)" -lt "$1" ] || return 0
     ! runner_missed || return 1
     sleep 0.1
@@ -4220,7 +4220,9 @@ t_watchdog_ends_its_run_once_its_runner_is_gone() {
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
   shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
-  blocking_run() { printf '%s\n' "$BASHPID" > "$T/wrapper"; : > "$T/started"; sleep 300; }
+  # The callback leaves a sleep in a process group of its own as well: out of the run's group, and
+  # ended with the rest all the same.
+  blocking_run() { printf '%s\n' "$BASHPID" > "$T/wrapper"; ( set -m; sleep 300 & wait ) & : > "$T/started"; sleep 300; }
   for to in 0 300; do
     rm -f "$T/started" "$T/wrapper"
     ( SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT="$to" shmutant_pool lbl "$T/wd$to" toy_prepare blocking_run > /dev/null 2>"$T/err$to" ) & pp=$!
@@ -4229,9 +4231,9 @@ t_watchdog_ends_its_run_once_its_runner_is_gone() {
     wrapper="$(cat "$T/wrapper")"; runner=""; worker=""
     runner="$(ppid_of "$wrapper")" && worker="$(ppid_of "$runner")" && [ "$(ppid_of "$worker")" = "$pp" ] \
       || { fail_ "timeout $to: fixture: the run's runner and worker could not be told"; _shmutant_kill_tree KILL "$pp" "$pp:"; wait "$pp" 2>/dev/null; continue; }
-    # The watchdog is started after the callback: the runner then has the callback's shell, its sleep
-    # and the watchdog beneath it.
-    wait_descendants "$runner" 3 || fail_ "timeout $to: fixture: the runner never started its watchdog"
+    # The watchdog is started after the callback: the runner then has beneath it the callback's shell,
+    # the three processes started from it, and the watchdog, a fifth.
+    wait_descendants "$runner" 5 || fail_ "timeout $to: fixture: the runner never started its watchdog"
     # What the run is made of: everything beneath the worker, and the holder, which was reparented at
     # birth and is found in the run's group as its one member that is not the callback's shell or a child of it.
     mapfile -t known < <(_shmutant_snapshot "$worker")
@@ -4241,7 +4243,7 @@ t_watchdog_ends_its_run_once_its_runner_is_gone() {
     done
     [ -n "$holder" ] || fail_ "timeout $to: fixture: the run's holder was not found in its group"
     mapfile -t -O "${#known[@]}" known < <(pairs_of ${holder:+"$holder"})
-    [ "${#known[@]}" -ge 5 ] || fail_ "timeout $to: fixture: only ${#known[@]} of the run's processes were recorded"
+    [ "${#known[@]}" -ge 7 ] || fail_ "timeout $to: fixture: only ${#known[@]} of the run's processes were recorded"
     kill -KILL "$worker" "$runner" 2>/dev/null
     if ! all_gone 50 "${known[@]}"; then
       fail_ "timeout $to: the run outlived its killed runner (pid ppid pgid stat args): $(listed "${STILL[@]}")"
