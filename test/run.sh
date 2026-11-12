@@ -4138,8 +4138,11 @@ all_gone() {
 
 # all_gone_within <seconds> <pid:identity>… — as all_gone, bounded by elapsed time and not by a
 # count of looks: at most <seconds>, counted one look at a time, each look's share clamped between
-# the tenth of a second it sleeps and one second. So a clock set back cannot extend the wait, and one
-# set forward, or a host too loaded to look, cannot cut it by more than a second a look.
+# the tenth of a second it sleeps and five seconds, as the watchdog counts its own deadline. So the
+# time a slow look took counts in full, a clock set back cannot stop the wait from ending, and one
+# set forward cannot cut it by more than five seconds a look: it can refuse too soon, never grant
+# too late. The look that finds them all gone counts too: gone, but seen so only after <seconds>,
+# is refused with STILL empty.
 all_gone_within() {
   local budget=$(( 10#$1 * 1000000 )) elapsed=0 last now d p
   local -a remain=()
@@ -4148,13 +4151,13 @@ all_gone_within() {
     remain=()
     for p in "${STILL[@]}"; do wait_gone "${p%%:*}" "${p#*:}" 1 || remain+=("$p"); done
     STILL=("${remain[@]}")
-    [ "${#STILL[@]}" -gt 0 ] || return 0
-    sleep 0.1
     now="$(_shmutant_now)"; d=$(( now - last )); last=$now
     [ "$d" -ge 100000 ] || d=100000
-    [ "$d" -le 1000000 ] || d=1000000
+    [ "$d" -le 5000000 ] || d=5000000
     elapsed=$(( elapsed + d ))
+    if [ "${#STILL[@]}" -eq 0 ]; then [ "$elapsed" -le "$budget" ]; return; fi
     [ "$elapsed" -lt "$budget" ] || return 1
+    sleep 0.1
   done
 }
 
@@ -4247,8 +4250,10 @@ looks_taken() {
 t_all_gone_within_bounds_elapsed_time() {
   # #81: the wait a unit bounds by seconds is refused once that much time has passed, however quick
   # its looks were, and is granted to what ends inside it. With the clock stopped each look still
-  # counts the tenth of a second it slept, so the wait ends; with one that leaps an hour at every
-  # reading a look counts a second at most, so what ends within a few looks is still seen to.
+  # counts the tenth of a second it slept, so the wait ends, as it does with one that steps an hour
+  # back at every reading; with one that leaps an hour forward a look counts five seconds at most, so
+  # what ends within a few looks is still seen to. And the time a look itself takes counts: looks
+  # that take two seconds each do not let a wait of five seconds grant what ended after six.
   local p q t0 took rc
   local -a STILL=()
   eval "_real_now() $(declare -f _shmutant_now | sed 1d)"
@@ -4262,9 +4267,17 @@ t_all_gone_within_bounds_elapsed_time() {
   all_gone_within 5 "$(pairs_of "$q")"; rc_is $? 0 'a process that ends inside the bound is seen to'
   ( _shmutant_now() { printf '%s' 1000000000000000; }; all_gone_within 1 "$(pairs_of "$p")" ); rc_is $? 1 'with the clock stopped the wait still ends'
   : > "$T/calls"
+  ( _shmutant_now() { local c; c="$(cat "$T/calls")"; c="${c:-0}"; echo "$((c + 1))" > "$T/calls"; printf '%s' "$(( 1000000000000000 - c * 3600000000 ))"; }
+    all_gone_within 1 "$(pairs_of "$p")" ); rc_is $? 1 'with the clock stepping back the wait still ends'
+  : > "$T/calls"
   sleep 0.3 > /dev/null 2>&1 & q=$!
   ( _shmutant_now() { local c; c="$(cat "$T/calls")"; c="${c:-0}"; echo "$((c + 1))" > "$T/calls"; printf '%s' "$(( 1000000000000000 + c * 3600000000 ))"; }
-    all_gone_within 8 "$(pairs_of "$q")" ); rc_is $? 0 'with the clock leaping forward a look counts a second at most'
+    all_gone_within 30 "$(pairs_of "$q")" ); rc_is $? 0 'with the clock leaping forward a look counts five seconds at most'
+  # A process that ends after six seconds, looked at by looks that take two seconds each.
+  sleep 6 > /dev/null 2>&1 & q=$!
+  ( eval "$(declare -f wait_gone | sed '1s/^wait_gone /wait_gone_real /')"
+    wait_gone() { sleep 2; wait_gone_real "$@"; }
+    all_gone_within 5 "$(pairs_of "$q")" ); rc_is $? 1 'looks that are slow do not let the wait grant what ended after it'
   _shmutant_ps_end "$p"; wait "$p" "$q" 2>/dev/null
 }
 
@@ -4309,8 +4322,8 @@ t_watchdog_ends_its_run_once_its_runner_is_gone() {
     [ "${#known[@]}" -ge 7 ] || fail_ "timeout $to: fixture: only ${#known[@]} of the run's processes were recorded"
     kill -KILL "$worker" "$runner" 2>/dev/null
     if ! all_gone_within 5 "${known[@]}"; then
-      fail_ "timeout $to: the run was still there five seconds after its runner was killed (pid ppid pgid stat args): $(listed "${STILL[@]}")"
-      _shmutant_kill_tree KILL "" "${STILL[@]}"
+      fail_ "timeout $to: the run was not seen gone within five seconds of its runner being killed (still there, pid ppid pgid stat args): $(listed "${STILL[@]}")"
+      [ "${#STILL[@]}" -eq 0 ] || _shmutant_kill_tree KILL "" "${STILL[@]}"
     fi
     wait_gone "$pp" "$ppstart" 100 || { fail_ "timeout $to: fixture: the pool did not return once its worker was killed"; end_tree "$pp" "$ppstart"; }
     wait "$pp" 2>/dev/null
@@ -4415,16 +4428,20 @@ t_run_scratch_names_take_no_attribute_of_the_callers() {
   # names they assign are that function's own. A name the shell calling the pool declared an integer
   # is not assigned under that attribute: a start such as `Thu Nov 12 ...` would be an arithmetic
   # error, which ended the runner before the callback ran. The two names that hold a start, where
-  # starts are read through ps.
-  local n
+  # starts are read through ps; and again under a caller's localvar_inherit, where a declaration
+  # alone takes the caller's attribute with it.
+  local n opt
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
   shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
-  for n in rootid runnerid; do
-    ( declare -i "$n=7"
-      SHMUTANT_PROC=0 SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd-$n" toy_prepare toy_run > "$T/o-$n" 2>"$T/e-$n"; echo "rc=$?" > "$T/r-$n" )
-    eq "$(cat "$T/r-$n" 2>/dev/null)" 'rc=0' "the pool runs with the caller's $n declared an integer [$(head -n 2 "$T/e-$n" 2>/dev/null | tr '\n' ';' | cut -c1-200)]"
-    has "$(cat "$T/o-$n" 2>/dev/null)" $'\trow\tkilled\ta\t' "and scores its row, with the caller's $n declared an integer"
+  for opt in default localvar_inherit; do
+    for n in rootid runnerid; do
+      ( [ "$opt" = default ] || shopt -s localvar_inherit
+        declare -i "$n=7"
+        SHMUTANT_PROC=0 SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd-$opt-$n" toy_prepare toy_run > "$T/o-$opt-$n" 2>"$T/e-$opt-$n"; echo "rc=$?" > "$T/r-$opt-$n" )
+      eq "$(cat "$T/r-$opt-$n" 2>/dev/null)" 'rc=0' "($opt) the pool runs with the caller's $n declared an integer [$(head -n 2 "$T/e-$opt-$n" 2>/dev/null | tr '\n' ';' | cut -c1-200)]"
+      has "$(cat "$T/o-$opt-$n" 2>/dev/null)" $'\trow\tkilled\ta\t' "($opt) and scores its row, with the caller's $n declared an integer"
+    done
   done
 }
 
@@ -4433,11 +4450,15 @@ t_bounded_ps_takes_no_attribute_of_the_callers() {
   # #81: a read of the process table that keeps a bound runs its ps and its timer as jobs of a
   # substitution, by names (c, t, w, s) that a caller may have given an attribute: the timer's path
   # under an integer attribute is an arithmetic error, and the read then keeps no bound.
-  local out t0 took
+  local out t0 took opt
   eval "_real_now() $(declare -f _shmutant_now | sed 1d)"
-  out="$( declare -i c=7 t=7 w=7 s=7; SHMUTANT_PS_BOUND=2 _shmutant_ps -o pid= -p "$BASHPID" 2>"$T/e"; echo "rc=$?" )"
-  has "$out" 'rc=0' "a bounded read answers under a caller's integer c, t, w and s [$(head -n 2 "$T/e" | tr '\n' ';' | cut -c1-200)]"
-  [ ! -s "$T/e" ] || fail_ "a bounded read under a caller's integer names said: $(head -n 2 "$T/e" | tr '\n' ';' | cut -c1-200)"
+  # Under a caller's localvar_inherit too, where a declaration alone takes the caller's attribute.
+  for opt in default localvar_inherit; do
+    out="$( [ "$opt" = default ] || shopt -s localvar_inherit
+            declare -i c=7 t=7 w=7 s=7; SHMUTANT_PS_BOUND=2 _shmutant_ps -o pid= -p "$BASHPID" 2>"$T/e"; echo "rc=$?" )"
+    has "$out" 'rc=0' "($opt) a bounded read answers under a caller's integer c, t, w and s [$(head -n 2 "$T/e" | tr '\n' ';' | cut -c1-200)]"
+    [ ! -s "$T/e" ] || fail_ "($opt) a bounded read under a caller's integer names said: $(head -n 2 "$T/e" | tr '\n' ';' | cut -c1-200)"
+  done
   # and the bound is the timer's: a ps that never answers is given up on after it, not after the five
   # seconds more its caller allows a read with no timer
   t0="$(_real_now)"

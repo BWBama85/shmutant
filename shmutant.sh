@@ -749,8 +749,9 @@ _shmutant_ps() {
     # run between a job's listing and its signal could reap the job and start another under its number.
     builtin trap - CHLD DEBUG RETURN ERR
     # This substitution's own names, whatever attribute a caller gave them: the timer's path under
-    # an integer one is an arithmetic error, and the read would keep no bound.
-    builtin local c t w s
+    # an integer one is an arithmetic error, and the read would keep no bound. Unset as well: under
+    # a caller's localvar_inherit a declaration alone takes the caller's attribute with it.
+    builtin local c t w s; builtin unset -v c t w s
     # Job control on and off again before any job: bash then reads this shell's own process group,
     # which a substitution otherwise inherits stale, and starts each job in it, the one form of job
     # its `kill %<job>` signals only while it has not reaped it (_shmutant_ps_end).
@@ -1836,8 +1837,9 @@ _shmutant_run_bounded() {
   local counts counts_w counts_r counts_r2
   # What the runner, the wrapper and the watchdog below assign: they are subshells of this function,
   # and a name declared here is not assigned under an attribute a caller gave it (an integer one
-  # turns a start such as `Thu Nov 12 ...` into an arithmetic error).
-  local budget d dog dog_self done_first elapsed last leftovers orphaned p pid rc rootid rrc runner runner_gap runnerid s seen_ck tampered tnow victims
+  # turns a start such as `Thu Nov 12 ...` into an arithmetic error). Unset as well: under a
+  # caller's localvar_inherit a declaration alone takes the caller's attribute with it.
+  local budget d dog dog_self done_first elapsed last leftovers orphaned p pid rc rootid rrc runner runner_gap runnerid s seen_ck tampered tnow victims; builtin unset -v budget d dog dog_self done_first elapsed last leftovers orphaned p pid rc rootid rrc runner runner_gap runnerid s seen_ck tampered tnow victims
   timeout="$(_shmutant_pos_int "${SHMUTANT_TIMEOUT:-300}")" || timeout=0
   SHMUTANT_RUN_FIRED=0; SHMUTANT_RUN_RED=0; SHMUTANT_RUN_WITNESSED=0; SHMUTANT_RUN_UNSETTLED=0; SHMUTANT_RUN_PUBLISHED=1
   SHMUTANT_RUN_COUNTS=""; SHMUTANT_RUN_COUNTS_BAD=""

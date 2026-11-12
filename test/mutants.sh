@@ -2819,16 +2819,24 @@ shmutant_mut 'the watchdog carries the process group its runner read' \
   '        :' \
   't_watchdog_hangup_stays_in_its_own_group'
 shmutant_mut 'a watchdog cancelled before its first poll signals what its caller named' \
-  '  local budget d dog dog_self done_first elapsed last leftovers orphaned p pid rc rootid rrc runner runner_gap runnerid s seen_ck tampered tnow victims' \
+  '  local budget d dog dog_self done_first elapsed last leftovers orphaned p pid rc rootid rrc runner runner_gap runnerid s seen_ck tampered tnow victims; builtin unset -v budget d dog dog_self done_first elapsed last leftovers orphaned p pid rc rootid rrc runner runner_gap runnerid s seen_ck tampered tnow victims' \
   '  :' \
   't_watchdog_cancelled_at_its_start_signals_nothing_of_its_callers'
 shmutant_mut 'a run assigns its scratch names under the attributes its caller gave them' \
-  '  local budget d dog dog_self done_first elapsed last leftovers orphaned p pid rc rootid rrc runner runner_gap runnerid s seen_ck tampered tnow victims' \
+  '  local budget d dog dog_self done_first elapsed last leftovers orphaned p pid rc rootid rrc runner runner_gap runnerid s seen_ck tampered tnow victims; builtin unset -v budget d dog dog_self done_first elapsed last leftovers orphaned p pid rc rootid rrc runner runner_gap runnerid s seen_ck tampered tnow victims' \
   '  :' \
   't_run_scratch_names_take_no_attribute_of_the_callers'
 shmutant_mut 'a bounded read assigns its scratch names under the attributes its caller gave them' \
-  '    builtin local c t w s' \
+  '    builtin local c t w s; builtin unset -v c t w s' \
   '    :' \
+  't_bounded_ps_takes_no_attribute_of_the_callers'
+shmutant_mut 'a run declares its scratch names and keeps the attributes a caller'"'"'s localvar_inherit hands them' \
+  '  local budget d dog dog_self done_first elapsed last leftovers orphaned p pid rc rootid rrc runner runner_gap runnerid s seen_ck tampered tnow victims; builtin unset -v budget d dog dog_self done_first elapsed last leftovers orphaned p pid rc rootid rrc runner runner_gap runnerid s seen_ck tampered tnow victims' \
+  '  local budget d dog dog_self done_first elapsed last leftovers orphaned p pid rc rootid rrc runner runner_gap runnerid s seen_ck tampered tnow victims' \
+  't_run_scratch_names_take_no_attribute_of_the_callers'
+shmutant_mut 'a bounded read declares its scratch names and keeps the attributes a caller'"'"'s localvar_inherit hands them' \
+  '    builtin local c t w s; builtin unset -v c t w s' \
+  '    builtin local c t w s' \
   't_bounded_ps_takes_no_attribute_of_the_callers'
 shmutant_mut 'the callback is let go before its watchdog is started' \
   '    dog=""' \
