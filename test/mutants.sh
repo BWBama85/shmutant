@@ -2791,7 +2791,7 @@ shmutant_mut 'a gap first read of another process at the runner'"'"'s number vou
   '  :' \
   't_watchdog_tells_a_clock_step_from_another_process_at_its_runners_number'
 shmutant_mut 'a read of the runner that stalls holds the watchdog' \
-  ' guard_gap_ref="${runner_gap:-}" SHMUTANT_PS_BOUND=1' \
+  ' guard_gap_ref="${runner_gap:-}"; SHMUTANT_PS_BOUND=1' \
   ' guard_gap_ref="${runner_gap:-}"' \
   't_watchdog_gives_up_on_a_read_of_its_runner_that_stalls'
 shmutant_mut 'the gap read at the watchdog'"'"'s start is not given up on' \
@@ -2838,6 +2838,14 @@ shmutant_mut 'a bounded read declares its scratch names and keeps the attributes
   '    builtin local c t w s; builtin unset -v c t w s' \
   '    builtin local c t w s' \
   't_bounded_ps_takes_no_attribute_of_the_callers'
+shmutant_mut 'the look for the runner assigns its names under the attributes a caller gave them' \
+  '  local guard_of guard_of_id guard_self guard_gap_ref SHMUTANT_PS_BOUND; builtin unset -v guard_of guard_of_id guard_self guard_gap_ref SHMUTANT_PS_BOUND' \
+  '  :' \
+  't_run_scratch_names_take_no_attribute_of_the_callers'
+shmutant_mut 'the look for the runner declares its names and keeps the attributes a caller'"'"'s localvar_inherit hands them' \
+  '  local guard_of guard_of_id guard_self guard_gap_ref SHMUTANT_PS_BOUND; builtin unset -v guard_of guard_of_id guard_self guard_gap_ref SHMUTANT_PS_BOUND' \
+  '  local guard_of guard_of_id guard_self guard_gap_ref SHMUTANT_PS_BOUND' \
+  't_run_scratch_names_take_no_attribute_of_the_callers'
 shmutant_mut 'the callback is let go before its watchdog is started' \
   '    dog=""' \
   '    printf '"'"'go\n'"'"' >&"$go"; dog=""' \

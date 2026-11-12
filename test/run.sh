@@ -4137,12 +4137,12 @@ all_gone() {
 }
 
 # all_gone_within <seconds> <pid:identity>… — as all_gone, bounded by elapsed time and not by a
-# count of looks: at most <seconds>, counted one look at a time, each look's share clamped between
-# the tenth of a second it sleeps and five seconds, as the watchdog counts its own deadline. So the
-# time a slow look took counts in full, a clock set back cannot stop the wait from ending, and one
-# set forward cannot cut it by more than five seconds a look: it can refuse too soon, never grant
-# too late. The look that finds them all gone counts too: gone, but seen so only after <seconds>,
-# is refused with STILL empty.
+# count of looks: granted only while less than <seconds> have passed, counted one look at a time
+# and including the look that finds them all gone (gone, but seen so only at <seconds> or after, is
+# refused with STILL empty). A look's share is the time it took, at least the tenth of a second it
+# sleeps and at most <seconds>, which already ends the wait: no time a look took is left out. A
+# clock set forward can therefore only refuse too soon. One set back still lets the wait end, a
+# tenth of a second a look, and is the one thing that can make it grant late.
 all_gone_within() {
   local budget=$(( 10#$1 * 1000000 )) elapsed=0 last now d p
   local -a remain=()
@@ -4153,9 +4153,9 @@ all_gone_within() {
     STILL=("${remain[@]}")
     now="$(_shmutant_now)"; d=$(( now - last )); last=$now
     [ "$d" -ge 100000 ] || d=100000
-    [ "$d" -le 5000000 ] || d=5000000
+    [ "$d" -le "$budget" ] || d=$budget
     elapsed=$(( elapsed + d ))
-    if [ "${#STILL[@]}" -eq 0 ]; then [ "$elapsed" -le "$budget" ]; return; fi
+    if [ "${#STILL[@]}" -eq 0 ]; then [ "$elapsed" -lt "$budget" ]; return; fi
     [ "$elapsed" -lt "$budget" ] || return 1
     sleep 0.1
   done
@@ -4251,9 +4251,9 @@ t_all_gone_within_bounds_elapsed_time() {
   # #81: the wait a unit bounds by seconds is refused once that much time has passed, however quick
   # its looks were, and is granted to what ends inside it. With the clock stopped each look still
   # counts the tenth of a second it slept, so the wait ends, as it does with one that steps an hour
-  # back at every reading; with one that leaps an hour forward a look counts five seconds at most, so
-  # what ends within a few looks is still seen to. And the time a look itself takes counts: looks
-  # that take two seconds each do not let a wait of five seconds grant what ended after six.
+  # back at every reading; with one that leaps an hour forward the wait is refused at once, never
+  # granted. And the time a look itself takes counts in full: neither looks that take two seconds
+  # each, nor one look that takes six, let a wait of five seconds grant what was seen gone after it.
   local p q t0 took rc
   local -a STILL=()
   eval "_real_now() $(declare -f _shmutant_now | sed 1d)"
@@ -4270,14 +4270,18 @@ t_all_gone_within_bounds_elapsed_time() {
   ( _shmutant_now() { local c; c="$(cat "$T/calls")"; c="${c:-0}"; echo "$((c + 1))" > "$T/calls"; printf '%s' "$(( 1000000000000000 - c * 3600000000 ))"; }
     all_gone_within 1 "$(pairs_of "$p")" ); rc_is $? 1 'with the clock stepping back the wait still ends'
   : > "$T/calls"
-  sleep 0.3 > /dev/null 2>&1 & q=$!
   ( _shmutant_now() { local c; c="$(cat "$T/calls")"; c="${c:-0}"; echo "$((c + 1))" > "$T/calls"; printf '%s' "$(( 1000000000000000 + c * 3600000000 ))"; }
-    all_gone_within 30 "$(pairs_of "$q")" ); rc_is $? 0 'with the clock leaping forward a look counts five seconds at most'
+    all_gone_within 30 "$(pairs_of "$p")" ); rc_is $? 1 'with the clock leaping forward the wait is refused, not granted'
   # A process that ends after six seconds, looked at by looks that take two seconds each.
   sleep 6 > /dev/null 2>&1 & q=$!
   ( eval "$(declare -f wait_gone | sed '1s/^wait_gone /wait_gone_real /')"
     wait_gone() { sleep 2; wait_gone_real "$@"; }
     all_gone_within 5 "$(pairs_of "$q")" ); rc_is $? 1 'looks that are slow do not let the wait grant what ended after it'
+  # A process that ends after three seconds, seen gone by one look that takes six.
+  sleep 3 > /dev/null 2>&1 & q=$!
+  ( eval "$(declare -f wait_gone | sed '1s/^wait_gone /wait_gone_real /')"
+    wait_gone() { sleep 6; wait_gone_real "$@"; }
+    all_gone_within 5 "$(pairs_of "$q")" ); rc_is $? 1 'one look longer than the wait does not let it grant what that look found gone'
   _shmutant_ps_end "$p"; wait "$p" "$q" 2>/dev/null
 }
 
@@ -4429,16 +4433,20 @@ t_run_scratch_names_take_no_attribute_of_the_callers() {
   # is not assigned under that attribute: a start such as `Thu Nov 12 ...` would be an arithmetic
   # error, which ended the runner before the callback ran. The two names that hold a start, where
   # starts are read through ps; and again under a caller's localvar_inherit, where a declaration
-  # alone takes the caller's attribute with it.
-  local n opt
+  # alone takes the caller's attribute with it. The watchdog's look for its runner holds a start
+  # under a name of its own (`guard_of_id`) as well, and a look that failed there would end the run:
+  # that one with a run long enough to be looked for.
+  local n opt run
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
   shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  looked_for_run() { sleep 2; bash "$1/test.sh"; }
   for opt in default localvar_inherit; do
-    for n in rootid runnerid; do
+    for n in rootid runnerid guard_of_id; do
+      run=toy_run; [ "$n" != guard_of_id ] || run=looked_for_run
       ( [ "$opt" = default ] || shopt -s localvar_inherit
         declare -i "$n=7"
-        SHMUTANT_PROC=0 SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd-$opt-$n" toy_prepare toy_run > "$T/o-$opt-$n" 2>"$T/e-$opt-$n"; echo "rc=$?" > "$T/r-$opt-$n" )
+        SHMUTANT_PROC=0 SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd-$opt-$n" toy_prepare "$run" > "$T/o-$opt-$n" 2>"$T/e-$opt-$n"; echo "rc=$?" > "$T/r-$opt-$n" )
       eq "$(cat "$T/r-$opt-$n" 2>/dev/null)" 'rc=0' "($opt) the pool runs with the caller's $n declared an integer [$(head -n 2 "$T/e-$opt-$n" 2>/dev/null | tr '\n' ';' | cut -c1-200)]"
       has "$(cat "$T/o-$opt-$n" 2>/dev/null)" $'\trow\tkilled\ta\t' "($opt) and scores its row, with the caller's $n declared an integer"
     done

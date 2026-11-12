@@ -2242,7 +2242,11 @@ _shmutant_held_group() {
 # Globals: runner, runnerid (set by _shmutant_run_bounded's runner); dog_self, runner_gap (by its
 # watchdog).
 _shmutant_runner_there() {
-  local guard_of="${runner:-}" guard_of_id="${runnerid:-}" guard_self="${dog_self:-}" guard_gap_ref="${runner_gap:-}" SHMUTANT_PS_BOUND=1
+  # Declared, unset, and only then assigned: under a caller's localvar_inherit a declaration takes
+  # the caller's attribute with it, and a start assigned under an integer one is an arithmetic
+  # error, which would read as a runner that has gone.
+  local guard_of guard_of_id guard_self guard_gap_ref SHMUTANT_PS_BOUND; builtin unset -v guard_of guard_of_id guard_self guard_gap_ref SHMUTANT_PS_BOUND
+  guard_of="${runner:-}"; guard_of_id="${runnerid:-}"; guard_self="${dog_self:-}"; guard_gap_ref="${runner_gap:-}"; SHMUTANT_PS_BOUND=1
   [ -z "$guard_gap_ref" ] || [ "$guard_gap_ref" -ge -1 ] || return 1
   _shmutant_guard_freezer_there || return 1
 }
