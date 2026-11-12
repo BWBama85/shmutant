@@ -2799,6 +2799,14 @@ shmutant_mut 'the gap read at the watchdog'"'"'s start is not given up on' \
   'runner_gap="$(_shmutant_elapsed_gap "$runner" "$dog_self")" || runner_gap=""' \
   't_watchdog_gives_up_on_a_read_of_its_runner_that_stalls'
 shmutant_mut 'the runner hands its watchdog no start' \
-  '    runnerid="$(_shmutant_identity "$runner")" || runnerid=""' \
+  '    runnerid="$(SHMUTANT_PS_BOUND=1 _shmutant_identity "$runner")" || runnerid=""' \
   '    runnerid=""' \
   't_watchdog_tells_a_clock_step_from_another_process_at_its_runners_number'
+shmutant_mut 'the runner'"'"'s read of its own start is not given up on' \
+  '    runnerid="$(SHMUTANT_PS_BOUND=1 _shmutant_identity "$runner")" || runnerid=""' \
+  '    runnerid="$(_shmutant_identity "$runner")" || runnerid=""' \
+  't_watchdog_gives_up_on_a_read_of_its_runner_that_stalls'
+shmutant_mut 'the callback is let go before its watchdog is started' \
+  '    dog=""' \
+  '    printf '"'"'go\n'"'"' >&"$go"; dog=""' \
+  't_watchdog_is_started_before_the_callback_is_let_go'

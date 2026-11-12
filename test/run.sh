@@ -4331,37 +4331,75 @@ t_watchdog_takes_a_zombie_runner_for_gone() {
 }
 
 # shellcheck disable=SC2034
+t_watchdog_is_started_before_the_callback_is_let_go() {
+  # #81: a runner killed just as it lets the callback go must leave a watchdog behind, or the run it
+  # started has none and runs to its own end. The runner here kills itself with the write that lets
+  # the callback go (a printf of its own in its place): the watchdog, started before that, finds it
+  # gone and ends the run.
+  local outer outerid grp="" holder="" kid
+  local -a known=() STILL=()
+  mkdir -p "$T/d"
+  ( exec {vf}>|"$T/d/chan"; SHMUTANT_VERDICT_FD="$vf"
+    printf() {
+      builtin printf "$@"; local _go_rc=$?
+      if [ "$#" = 1 ] && [ "$1" = 'go\n' ] && [ "${FUNCNAME[1]}" = _shmutant_run_bounded ]; then kill -KILL "$BASHPID"; fi
+      return "$_go_rc"
+    }
+    cb() { sleep 300 & builtin printf '%s\n' "$!" > "$T/kid"; : > "$T/started"; wait; }
+    SHMUTANT_TIMEOUT=0 _shmutant_run_bounded "$T/d" cb "$T/d" sel ) > /dev/null 2>&1 & outer=$!
+  outerid="$(_shmutant_identity "$outer")" || outerid=""
+  wait_for "$T/started" || { fail_ 'fixture: the callback was never let go'; end_tree "$outer" "$outerid"; return; }
+  read -r _ grp holder _ < <(awk '$1 == "group" { print; exit }' "$T/d/chan")
+  kid="$(cat "$T/kid")"
+  # Whatever of the run is still there: the callback's shell, its sleep and the holder.
+  mapfile -t known < <(pairs_of ${grp:+"$grp"} ${kid:+"$kid"} ${holder:+"$holder"})
+  if ! all_gone 100 "${known[@]}"; then
+    fail_ "a runner killed as it let the callback go left the run with no watchdog (pid ppid pgid stat args): $(listed "${STILL[@]}")"
+    _shmutant_kill_tree KILL "" "${STILL[@]}"
+  fi
+  end_tree "$outer" "$outerid"
+  wait "$outer" 2>/dev/null
+}
+
+# shellcheck disable=SC2034
 t_watchdog_gives_up_on_a_read_of_its_runner_that_stalls() {
   # #81: a ps that does not answer about the runner must not hold the watchdog: each read of its look
   # is given up on after a second and is then one that could not be made. So a runner killed while
   # those reads stall is still found gone, and the run ended (`gone`); a run whose runner is there is
-  # still ended at its deadline (`deadline`); and a watchdog whose first read, of how much older its
-  # runner is, stalls still starts looking (`gap`, where starts are elapsed times). The ps that
-  # stalls is a sleep in its place, which the read's own bound ends.
+  # still ended at its deadline (`deadline`); a watchdog whose first read, of how much older its
+  # runner is, stalls still starts looking (`gap`, where starts are elapsed times); and a runner whose
+  # read of its own start stalls still starts its run, whose watchdog then does without that start
+  # (`start`, outside /proc, where that read is a ps). The ps that stalls is a sleep in its place, which
+  # the read's own bound ends.
   local how
   local -a known=() STILL=()
   stalling_ps() {
     [ "$how" != gap ] || { SHMUTANT_PROC=0; SHMUTANT_PS_LSTART=0; }
+    [ "$how" != start ] || SHMUTANT_PROC=0
     command() {
       if [ "${1:-}" = -p ] && [ "${2:-}" = ps ] && [ -e "$T/stall" ]; then
         case "$(cat "$T/stall"):$*" in
           runner:*" -p $(cat "$T/runner" 2>/dev/null)") builtin exec sleep 300 ;;
           # The watchdog's own first read alone: a freeze reads a gap of its own, with no bound.
           gap:*) case " ${FUNCNAME[*]} " in *" _shmutant_elapsed_gap _shmutant_run_bounded "*) builtin exec sleep 300 ;; esac ;;
+          # The runner's read of its own start alone: the holder's and the root's are read beside it.
+          start:*) case " ${FUNCNAME[*]} " in *" _shmutant_identity _shmutant_run_bounded "*) [ "${!#}" != "${runner:-none}" ] || builtin exec sleep 300 ;; esac ;;
         esac
       fi
       builtin command "$@"
     }
   }
-  for how in gone deadline gap; do
+  for how in gone deadline gap start; do
     rm -f "$T/stall" "$T/runner"
-    [ "$how" != gap ] || echo gap > "$T/stall"
+    case "$how" in gap|start) echo "$how" > "$T/stall" ;; esac
     if [ "$how" = deadline ]; then run_started "$T/$how" stalling_ps 5 || continue
-    else run_started "$T/$how" stalling_ps || continue
+    elif ! run_started "$T/$how" stalling_ps; then
+      [ "$how" != start ] || fail_ 'start: a read of its own start that stalls kept the runner from starting its run'
+      continue
     fi
     mapfile -t known < <(_shmutant_snapshot "$RUN_RUNNER")
     known+=("$RUN_HOLDER")
-    if [ "$how" != gap ]; then printf '%s\n' "$RUN_RUNNER" > "$T/runner"; echo runner > "$T/stall"; fi
+    case "$how" in gone|deadline) printf '%s\n' "$RUN_RUNNER" > "$T/runner"; echo runner > "$T/stall" ;; esac
     case "$how" in
       deadline)
         all_gone 150 "$RUN_KID" || fail_ "deadline: a read of the runner that stalls kept the run past its deadline: [$(looks_taken)]" ;;
@@ -4568,13 +4606,15 @@ t_pool_killed_while_its_abort_freezes_leaves_nothing_stopped() {
   # pool is stopped and shown to be the process started before its tree is walked or its group
   # signalled (end_group). A pool that ended and was reaped (bash reaps a background job by itself,
   # waited for or not) may have given its number away: then nothing is sent by it, and a stop that
-  # reached another process at it is let go.
+  # reached another process at it is let go. 1 when nothing was sent.
   caller_kill() {
-    if kill -STOP "$pp" 2>/dev/null && _shmutant_alive_since "$pp" "$ppstart"; then
-      _shmutant_kill_tree KILL "$pp"; end_group "$pp" "$pp:$ppid"
+    local sent=1
+    if kill -STOP "$pp" 2>/dev/null && _shmutant_alive_since "$pp" "$ppid"; then
+      _shmutant_kill_tree KILL "$pp"; end_group "$pp" "$pp:$ppid"; sent=0
     else kill -CONT "$pp" 2>/dev/null
     fi
     wait "$pp" 2>/dev/null
+    return "$sent"
   }
   # Made before the pool starts: a callback may write its line before this shell runs again.
   : > "$T/started"; : > "$T/freezing"
@@ -4609,7 +4649,7 @@ t_pool_killed_while_its_abort_freezes_leaves_nothing_stopped() {
   kill -TERM "$pp"
   ok=0; for (( i = 0; i < 100; i++ )); do [ "$(wc -l < "$T/freezing")" -ge 2 ] && { ok=1; break; }; sleep 0.1; done
   [ "$ok" = 1 ] || fail_ 'the abort never reached both freezes'
-  caller_kill
+  caller_kill || fail_ 'fixture: the pool was no longer the process started, so the caller'"'"'s KILL was not sent'
   for g in "${grps[@]}"; do
     for (( i = 0; i < 50; i++ )); do
       members="$(group_members "$g")" || { members=""; fail_ "the process table could not be read, so whether the run's group ended is unverified"; break; }

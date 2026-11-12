@@ -1927,15 +1927,16 @@ _shmutant_run_bounded() {
     # a reaped root by number.
     rootid="$(_shmutant_identity "$pid")" || rootid=""
     # This shell's own pid and start, for the watchdog to look for it by (_shmutant_runner_there).
-    # Read before the callback is let go: a runner killed between that and the watchdog's start
-    # leaves the run with no watchdog, and a read there would widen that instant.
+    # A read given up on after a second, as that look's are: a start that could not be read is one
+    # the watchdog does without.
     runner="$BASHPID"
-    runnerid="$(_shmutant_identity "$runner")" || runnerid=""
+    runnerid="$(SHMUTANT_PS_BOUND=1 _shmutant_identity "$runner")" || runnerid=""
     [ -z "${SHMUTANT_VERDICT_FD:-}" ] || { printf 'group %s %s %s\n' "$pid" "$holder" "$holderid" >&"$SHMUTANT_VERDICT_FD"; } 2>/dev/null
-    printf 'go\n' >&"$go"
     dog=""
     # With or without a deadline: the descendants a run leaves behind are otherwise seen only
     # at its return, and one that reparented out of the group by then is out of reach.
+    # Started before the callback is let go: a runner killed at any moment after that leaves a
+    # watchdog to end the run, and one killed before it leaves a callback that never ran.
     {
       (
         # Descendants are snapshotted every half second while the run is alive, so one that
@@ -2005,6 +2006,7 @@ _shmutant_run_bounded() {
       ) < /dev/null > /dev/null 2>&1 &
       dog=$!
     }
+    printf 'go\n' >&"$go"
     if [ -n "$dog" ]; then
       # Whichever ends first. A watchdog that ends before the leader has fired and failed to
       # finish (or died): the leader may be frozen, and waiting on it would never return, so
