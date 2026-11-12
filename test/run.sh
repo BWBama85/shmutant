@@ -4136,6 +4136,28 @@ all_gone() {
   done
 }
 
+# all_gone_within <seconds> <pid:identity>… — as all_gone, bounded by elapsed time and not by a
+# count of looks: at most <seconds>, counted one look at a time, each look's share clamped between
+# the tenth of a second it sleeps and one second. So a clock set back cannot extend the wait, and one
+# set forward, or a host too loaded to look, cannot cut it by more than a second a look.
+all_gone_within() {
+  local budget=$(( 10#$1 * 1000000 )) elapsed=0 last now d p
+  local -a remain=()
+  shift; STILL=("$@"); last="$(_shmutant_now)"
+  while :; do
+    remain=()
+    for p in "${STILL[@]}"; do wait_gone "${p%%:*}" "${p#*:}" 1 || remain+=("$p"); done
+    STILL=("${remain[@]}")
+    [ "${#STILL[@]}" -gt 0 ] || return 0
+    sleep 0.1
+    now="$(_shmutant_now)"; d=$(( now - last )); last=$now
+    [ "$d" -ge 100000 ] || d=100000
+    [ "$d" -le 1000000 ] || d=1000000
+    elapsed=$(( elapsed + d ))
+    [ "$elapsed" -lt "$budget" ] || return 1
+  done
+}
+
 # listed <pid:identity>… — one line naming each of <pid:identity>… as ps shows it now (pid ppid pgid
 # stat args), for a failure to print.
 listed() {
@@ -4222,6 +4244,31 @@ looks_taken() {
 }
 
 # shellcheck disable=SC2034
+t_all_gone_within_bounds_elapsed_time() {
+  # #81: the wait a unit bounds by seconds is refused once that much time has passed, however quick
+  # its looks were, and is granted to what ends inside it. With the clock stopped each look still
+  # counts the tenth of a second it slept, so the wait ends; with one that leaps an hour at every
+  # reading a look counts a second at most, so what ends within a few looks is still seen to.
+  local p q t0 took rc
+  local -a STILL=()
+  eval "_real_now() $(declare -f _shmutant_now | sed 1d)"
+  sleep 60 > /dev/null 2>&1 & p=$!
+  t0="$(_real_now)"; all_gone_within 2 "$(pairs_of "$p")"; rc=$?; took=$(( ($(_real_now) - t0) / 1000 ))
+  rc_is "$rc" 1 'a process still there after the bound is refused'
+  eq "${STILL[*]%%:*}" "$p" 'and named as still there'
+  [ "$took" -ge 1900 ] || fail_ "the bound of two seconds was given up on after $took ms"
+  [ "$took" -le 5000 ] || fail_ "the bound of two seconds took $took ms"
+  sleep 1 > /dev/null 2>&1 & q=$!
+  all_gone_within 5 "$(pairs_of "$q")"; rc_is $? 0 'a process that ends inside the bound is seen to'
+  ( _shmutant_now() { printf '%s' 1000000000000000; }; all_gone_within 1 "$(pairs_of "$p")" ); rc_is $? 1 'with the clock stopped the wait still ends'
+  : > "$T/calls"
+  sleep 0.3 > /dev/null 2>&1 & q=$!
+  ( _shmutant_now() { local c; c="$(cat "$T/calls")"; c="${c:-0}"; echo "$((c + 1))" > "$T/calls"; printf '%s' "$(( 1000000000000000 + c * 3600000000 ))"; }
+    all_gone_within 8 "$(pairs_of "$q")" ); rc_is $? 0 'with the clock leaping forward a look counts a second at most'
+  _shmutant_ps_end "$p"; wait "$p" "$q" 2>/dev/null
+}
+
+# shellcheck disable=SC2034
 t_watchdog_ends_its_run_once_its_runner_is_gone() {
   # #81: a run's runner is killed from outside together with the worker that started it, as a KILL to
   # a pool's tree lands. Nobody is left to cancel the run's watchdog or to release its holder. The
@@ -4261,8 +4308,8 @@ t_watchdog_ends_its_run_once_its_runner_is_gone() {
     mapfile -t -O "${#known[@]}" known < <(pairs_of ${holder:+"$holder"})
     [ "${#known[@]}" -ge 7 ] || fail_ "timeout $to: fixture: only ${#known[@]} of the run's processes were recorded"
     kill -KILL "$worker" "$runner" 2>/dev/null
-    if ! all_gone 50 "${known[@]}"; then
-      fail_ "timeout $to: the run outlived its killed runner (pid ppid pgid stat args): $(listed "${STILL[@]}")"
+    if ! all_gone_within 5 "${known[@]}"; then
+      fail_ "timeout $to: the run was still there five seconds after its runner was killed (pid ppid pgid stat args): $(listed "${STILL[@]}")"
       _shmutant_kill_tree KILL "" "${STILL[@]}"
     fi
     wait_gone "$pp" "$ppstart" 100 || { fail_ "timeout $to: fixture: the pool did not return once its worker was killed"; end_tree "$pp" "$ppstart"; }
