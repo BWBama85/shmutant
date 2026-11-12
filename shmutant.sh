@@ -748,6 +748,9 @@ _shmutant_ps() {
     # No handler of the caller's runs in here: a DEBUG trap its functrace hands down, or a CHLD trap,
     # run between a job's listing and its signal could reap the job and start another under its number.
     builtin trap - CHLD DEBUG RETURN ERR
+    # This substitution's own names, whatever attribute a caller gave them: the timer's path under
+    # an integer one is an arithmetic error, and the read would keep no bound.
+    builtin local c t w s
     # Job control on and off again before any job: bash then reads this shell's own process group,
     # which a substitution otherwise inherits stale, and starts each job in it, the one form of job
     # its `kill %<job>` signals only while it has not reaped it (_shmutant_ps_end).
@@ -1831,6 +1834,10 @@ _shmutant_run_bounded() {
   local dir="$1" run="$2" root="$3" sel="$4" wit="${5:-}" timeout mark fifo fd left seen outf line
   local left_w left_r seen_w seen_r fired out_w out_r out_r2 hold hold_r hp go holder holderid err_fd l kept
   local counts counts_w counts_r counts_r2
+  # What the runner, the wrapper and the watchdog below assign: they are subshells of this function,
+  # and a name declared here is not assigned under an attribute a caller gave it (an integer one
+  # turns a start such as `Thu Nov 12 ...` into an arithmetic error).
+  local budget d dog dog_self done_first elapsed last leftovers orphaned p pid rc rootid rrc runner runner_gap runnerid s seen_ck tampered tnow victims
   timeout="$(_shmutant_pos_int "${SHMUTANT_TIMEOUT:-300}")" || timeout=0
   SHMUTANT_RUN_FIRED=0; SHMUTANT_RUN_RED=0; SHMUTANT_RUN_WITNESSED=0; SHMUTANT_RUN_UNSETTLED=0; SHMUTANT_RUN_PUBLISHED=1
   SHMUTANT_RUN_COUNTS=""; SHMUTANT_RUN_COUNTS_BAD=""
@@ -1954,8 +1961,9 @@ _shmutant_run_bounded() {
         # to clean up whatever the callback left behind.
         # What the handler names is this shell's own before the handler can run: a watchdog
         # cancelled ahead of its first poll must not signal, or report as seen, what a caller's
-        # variables of these names happened to hold.
-        s=""; declare -A seen=(); tampered=0
+        # variables of these names happened to hold. `s` is declared with this function's names,
+        # empty until the first sleep; `seen` is made here.
+        declare -A seen=(); tampered=0
         trap 'kill "$s" 2>/dev/null; for p in "${!seen[@]}"; do printf "%s:%s\n" "$p" "${seen[$p]}"; done >&"$seen_w"; exit 0' TERM
         # The runner is looked for on every pass as well (_shmutant_runner_there). An elapsed-time
         # start is told from a clock step by how much older the runner is than this shell, read here
@@ -2984,7 +2992,7 @@ _shmutant_pool_locals_writable() {
     SHMUTANT_TARGET SHMUTANT_DECL_ERRORS SHMUTANT_SELECTED_N \
     _shmutant_bo _shmutant_so _shmutant_o _shmutant_n _shmutant_pc _shmutant_wrap_left \
     a budget dog e elapsed last leftovers linked lstart old rrc s tampered tmpd tnow victims wroot \
-    dog_self orphaned runner runner_gap runnerid \
+    dog_self done_first orphaned runner runner_gap runnerid \
     b chunk conts g gcont gone_group guard_id guard_lost guard_of guard_of_id guard_pid guard_r guard_up guard_w hs kept kills members out pairs part pg ph phid recs rid rootid_pre seen_ck unfrozen w want \
     SHMUTANT_GUARD SHMUTANT_GUARD_PID SHMUTANT_PS_LSTART SHMUTANT_PS_BOUND c guard_self guard_gap_ref gap ea eb lp le tbl cands guarded jl w fid_now stopped fgap cont_first cfirst told group_untold first \
     before after ga gb

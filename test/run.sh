@@ -4410,6 +4410,46 @@ t_watchdog_is_started_before_the_callback_is_let_go() {
 }
 
 # shellcheck disable=SC2034
+t_run_scratch_names_take_no_attribute_of_the_callers() {
+  # #81: the runner, the wrapper and the watchdog of a run are subshells of one function, and the
+  # names they assign are that function's own. A name the shell calling the pool declared an integer
+  # is not assigned under that attribute: a start such as `Thu Nov 12 ...` would be an arithmetic
+  # error, which ended the runner before the callback ran. The two names that hold a start, where
+  # starts are read through ps.
+  local n
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  for n in rootid runnerid; do
+    ( declare -i "$n=7"
+      SHMUTANT_PROC=0 SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd-$n" toy_prepare toy_run > "$T/o-$n" 2>"$T/e-$n"; echo "rc=$?" > "$T/r-$n" )
+    eq "$(cat "$T/r-$n" 2>/dev/null)" 'rc=0' "the pool runs with the caller's $n declared an integer [$(head -n 2 "$T/e-$n" 2>/dev/null | tr '\n' ';' | cut -c1-200)]"
+    has "$(cat "$T/o-$n" 2>/dev/null)" $'\trow\tkilled\ta\t' "and scores its row, with the caller's $n declared an integer"
+  done
+}
+
+# shellcheck disable=SC2034
+t_bounded_ps_takes_no_attribute_of_the_callers() {
+  # #81: a read of the process table that keeps a bound runs its ps and its timer as jobs of a
+  # substitution, by names (c, t, w, s) that a caller may have given an attribute: the timer's path
+  # under an integer attribute is an arithmetic error, and the read then keeps no bound.
+  local out t0 took
+  eval "_real_now() $(declare -f _shmutant_now | sed 1d)"
+  out="$( declare -i c=7 t=7 w=7 s=7; SHMUTANT_PS_BOUND=2 _shmutant_ps -o pid= -p "$BASHPID" 2>"$T/e"; echo "rc=$?" )"
+  has "$out" 'rc=0' "a bounded read answers under a caller's integer c, t, w and s [$(head -n 2 "$T/e" | tr '\n' ';' | cut -c1-200)]"
+  [ ! -s "$T/e" ] || fail_ "a bounded read under a caller's integer names said: $(head -n 2 "$T/e" | tr '\n' ';' | cut -c1-200)"
+  # and the bound is the timer's: a ps that never answers is given up on after it, not after the five
+  # seconds more its caller allows a read with no timer
+  t0="$(_real_now)"
+  out="$( declare -i c=7 t=7 w=7 s=7
+          command() { if [ "${1:-}" = -p ] && [ "${2:-}" = ps ]; then builtin exec sleep 30; fi; builtin command "$@"; }
+          SHMUTANT_PS_BOUND=1 _shmutant_ps -o pid= -p "$BASHPID" 2>/dev/null; echo "rc=$?" )"
+  took=$(( ($(_real_now) - t0) / 1000 ))
+  eq "$out" 'rc=124' "a bounded read that stalls is given up on under a caller's integer c, t, w and s"
+  [ "$took" -le 4000 ] || fail_ "a bound of one second was kept only after $took ms under a caller's integer c, t, w and s"
+}
+
+# shellcheck disable=SC2034
 t_watchdog_cancelled_at_its_start_signals_nothing_of_its_callers() {
   # #81: the watchdog's handler for its cancellation ends the watchdog's own sleep, by a name (`s`)
   # that the shell calling the pool may have set too. A run that returns before the watchdog's first
