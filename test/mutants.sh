@@ -2783,9 +2783,21 @@ shmutant_mut 'a runner whose start moved with the clock is taken for gone' \
   '  ! _shmutant_guard_reaped "$guard_of" || return 1; _shmutant_holder_state "$guard_of" "$guard_of_id" || [ "$?" = 2 ]' \
   't_watchdog_tells_a_clock_step_from_another_process_at_its_runners_number'
 shmutant_mut 'the watchdog reads no gap to tell another process at its runner'"'"'s number by' \
-  'runner_gap="$(_shmutant_elapsed_gap "$runner" "$dog_self")" || runner_gap=""' \
+  'runner_gap="$(SHMUTANT_PS_BOUND=1 _shmutant_elapsed_gap "$runner" "$dog_self")" || runner_gap=""' \
   'runner_gap=""' \
   't_watchdog_tells_a_clock_step_from_another_process_at_its_runners_number'
+shmutant_mut 'a gap first read of another process at the runner'"'"'s number vouches for it' \
+  '  [ -z "$guard_gap_ref" ] || [ "$guard_gap_ref" -ge -1 ] || return 1' \
+  '  :' \
+  't_watchdog_tells_a_clock_step_from_another_process_at_its_runners_number'
+shmutant_mut 'a read of the runner that stalls holds the watchdog' \
+  ' guard_gap_ref="${runner_gap:-}" SHMUTANT_PS_BOUND=1' \
+  ' guard_gap_ref="${runner_gap:-}"' \
+  't_watchdog_gives_up_on_a_read_of_its_runner_that_stalls'
+shmutant_mut 'the gap read at the watchdog'"'"'s start is not given up on' \
+  'runner_gap="$(SHMUTANT_PS_BOUND=1 _shmutant_elapsed_gap "$runner" "$dog_self")" || runner_gap=""' \
+  'runner_gap="$(_shmutant_elapsed_gap "$runner" "$dog_self")" || runner_gap=""' \
+  't_watchdog_gives_up_on_a_read_of_its_runner_that_stalls'
 shmutant_mut 'the runner hands its watchdog no start' \
   '    runnerid="$(_shmutant_identity "$runner")" || runnerid=""' \
   '    runnerid=""' \

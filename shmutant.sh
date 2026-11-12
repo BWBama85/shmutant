@@ -1948,9 +1948,9 @@ _shmutant_run_bounded() {
         declare -A seen=(); tampered=0
         # The runner is looked for on every pass as well (_shmutant_runner_there). An elapsed-time
         # start is told from a clock step by how much older the runner is than this shell, read here
-        # of the two in one ps, while the runner is certainly there.
+        # of the two in one ps, which is given up on after a second like every read of that look.
         orphaned=0; dog_self="$BASHPID"; runner_gap=""
-        case "$runnerid" in e*) runner_gap="$(_shmutant_elapsed_gap "$runner" "$dog_self")" || runner_gap="" ;; esac
+        case "$runnerid" in e*) runner_gap="$(SHMUTANT_PS_BOUND=1 _shmutant_elapsed_gap "$runner" "$dog_self")" || runner_gap="" ;; esac
         # The deadline is elapsed time as this loop sees it, one poll at a time, each poll's
         # share clamped to [its own sleep, 5 s]: a clock set back cannot extend the run (a poll
         # counts at least the half second it slept) and one set forward cannot cut it by more
@@ -2210,10 +2210,15 @@ _shmutant_held_group() {
 # (_shmutant_guard_freezer_there): not there once its number is free, a zombie's, or carries
 # another start; there with no start captured or none that can be read now, and with an
 # elapsed-time start that has moved only as far as the watchdog's own (a clock step).
+# Each read of the process table it makes is given up on after a second (_shmutant_ps) and is then
+# one that could not be made: a ps that stalls holds a poll for seconds, never the watchdog for good.
+# The runner is older than the watchdog it started, so a gap that says younger, by more than the
+# second etime resolves, was read of another process at the runner's number: not there.
 # Globals: runner, runnerid (set by _shmutant_run_bounded's runner); dog_self, runner_gap (by its
 # watchdog).
 _shmutant_runner_there() {
-  local guard_of="${runner:-}" guard_of_id="${runnerid:-}" guard_self="${dog_self:-}" guard_gap_ref="${runner_gap:-}"
+  local guard_of="${runner:-}" guard_of_id="${runnerid:-}" guard_self="${dog_self:-}" guard_gap_ref="${runner_gap:-}" SHMUTANT_PS_BOUND=1
+  [ -z "$guard_gap_ref" ] || [ "$guard_gap_ref" -ge -1 ] || return 1
   _shmutant_guard_freezer_there || return 1
 }
 

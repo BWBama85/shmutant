@@ -4142,23 +4142,35 @@ listed() {
   command -p ps -o pid= -o ppid= -o pgid= -o stat= -o args= -p "$(IFS=,; printf '%s' "${*%%:*}")" 2>/dev/null | cut -c1-120 | tr '\n' ';'
 }
 
-# run_started <dir> [<stand-ins>] — start one run with no deadline in <dir>, from a shell of its own
-# that first calls <stand-ins> (a function: what it defines, the runner and its watchdog inherit), and
-# wait until the callback has started its sleep. Each look the watchdog takes for its runner
-# (_shmutant_runner_there) is written, by its status, as a line of $T/looks. Sets RUN_OUTER (that
-# shell, the runner's parent), RUN_RUNNER, RUN_GRP, and RUN_HOLDER and RUN_KID (the holder and the
-# callback's sleep, each `pid:identity`). 1, having said so and ended the run, when it did not start whole.
+# end_tree <pid> <identity> — end <pid> and everything beneath it, only while it is still the process
+# that carried <identity> (a number whose process has ended may be another's by now), then reap it.
+# With no identity nothing is signalled, and nothing is waited for.
+end_tree() {
+  [ -n "$2" ] || return 0
+  _shmutant_kill_tree_twice "$1:$2"
+  wait "$1" 2>/dev/null
+  return 0
+}
+
+# run_started <dir> [<stand-ins> [<timeout>]] — start one run in <dir> with no deadline, or with
+# <timeout>, from a shell of its own that first calls <stand-ins> (a function: what it defines, the
+# runner and its watchdog inherit), and wait until the callback has started its sleep. Each look the
+# watchdog takes for its runner (_shmutant_runner_there) is written, by its status, as a line of
+# $T/looks. Sets RUN_OUTER (that shell, the runner's parent) and RUN_OUTER_ID (its start), RUN_RUNNER,
+# RUN_GRP, and RUN_HOLDER and RUN_KID (the holder and the callback's sleep, each `pid:identity`). 1,
+# having said so and ended the run, when it did not start whole.
 run_started() {
-  local d="$1" standins="${2:-:}" holder="" holderid="" kid
-  RUN_OUTER=""; RUN_RUNNER=""; RUN_GRP=""; RUN_HOLDER=""; RUN_KID=""
+  local d="$1" standins="${2:-:}" to="${3:-0}" holder="" holderid="" kid
+  RUN_OUTER=""; RUN_OUTER_ID=""; RUN_RUNNER=""; RUN_GRP=""; RUN_HOLDER=""; RUN_KID=""
   mkdir -p "$d"; rm -f "$T/started" "$T/kid" "$T/looks"
   ( exec {vf}>|"$d/chan"; SHMUTANT_VERDICT_FD="$vf"
     eval "$(declare -f _shmutant_runner_there | sed '1s/^_shmutant_runner_there /_runner_there_real /')"
     _shmutant_runner_there() { local r=0; _runner_there_real || r=$?; printf '%s\n' "$r" >> "$T/looks"; return "$r"; }
     "$standins"
     cb() { sleep 300 & printf '%s\n' "$!" > "$T/kid"; : > "$T/started"; wait; }
-    SHMUTANT_TIMEOUT=0 _shmutant_run_bounded "$d" cb "$d" sel ) > /dev/null 2>&1 & RUN_OUTER=$!
-  if wait_for "$T/started" && read -r _ RUN_GRP holder holderid < <(awk '$1 == "group" { print; exit }' "$d/chan") \
+    SHMUTANT_TIMEOUT="$to" _shmutant_run_bounded "$d" cb "$d" sel ) > /dev/null 2>&1 & RUN_OUTER=$!
+  RUN_OUTER_ID="$(_shmutant_identity "$RUN_OUTER")" || RUN_OUTER_ID=""
+  if wait_for "$T/started" && [ -n "$RUN_OUTER_ID" ] && read -r _ RUN_GRP holder holderid < <(awk '$1 == "group" { print; exit }' "$d/chan") \
     && [ -n "$holder" ] && RUN_RUNNER="$(ppid_of "$RUN_GRP")" && [ "$(ppid_of "$RUN_RUNNER")" = "$RUN_OUTER" ] \
     && kid="$(cat "$T/kid")" && RUN_KID="$(pairs_of "$kid")" && [ -n "$RUN_KID" ]; then
     # In this host's own form, whatever the run was told to read its starts in.
@@ -4170,11 +4182,12 @@ run_started() {
 }
 
 # run_ended — end what run_started started: its shell and everything beneath it, then the callback's
-# sleep and the holder, each only while it is still the process recorded.
+# sleep and the holder, each only while it is still the process recorded. A run that returned has
+# taken its shell with it, and that shell's number is then signalled nothing.
 run_ended() {
-  [ -z "$RUN_OUTER" ] || { _shmutant_kill_tree KILL "$RUN_OUTER" "$RUN_OUTER:"; wait "$RUN_OUTER" 2>/dev/null; }
+  [ -z "$RUN_OUTER" ] || end_tree "$RUN_OUTER" "$RUN_OUTER_ID"
   _shmutant_kill_tree KILL "" ${RUN_KID:+"$RUN_KID"} ${RUN_HOLDER:+"$RUN_HOLDER"}
-  RUN_OUTER=""
+  RUN_OUTER=""; RUN_OUTER_ID=""
 }
 
 # looks_n — print how many looks for its runner the watchdog of run_started's run has taken.
@@ -4215,7 +4228,7 @@ t_watchdog_ends_its_run_once_its_runner_is_gone() {
   # watchdog looks for its runner at every poll and, once it has gone, ends the run's tree and group
   # and goes itself: with no deadline (0), and with one far off (300) well before it. It reports no
   # deadline, since none was reached.
-  local to pp wrapper runner worker holder p
+  local to pp ppstart wrapper runner worker holder p
   local -a known=() STILL=()
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
@@ -4226,11 +4239,13 @@ t_watchdog_ends_its_run_once_its_runner_is_gone() {
   for to in 0 300; do
     rm -f "$T/started" "$T/wrapper"
     ( SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT="$to" shmutant_pool lbl "$T/wd$to" toy_prepare blocking_run > /dev/null 2>"$T/err$to" ) & pp=$!
-    wait_for "$T/started" || { fail_ "timeout $to: fixture: the run never started"; _shmutant_kill_tree KILL "$pp" "$pp:"; wait "$pp" 2>/dev/null; continue; }
+    # The pool's start, read while it runs: its number is signalled only while it still carries it.
+    ppstart="$(_shmutant_identity "$pp")" || ppstart=""
+    wait_for "$T/started" || { fail_ "timeout $to: fixture: the run never started"; end_tree "$pp" "$ppstart"; continue; }
     # The callback's shell leads the run's group; its parent is the runner, and the runner's the worker.
     wrapper="$(cat "$T/wrapper")"; runner=""; worker=""
     runner="$(ppid_of "$wrapper")" && worker="$(ppid_of "$runner")" && [ "$(ppid_of "$worker")" = "$pp" ] \
-      || { fail_ "timeout $to: fixture: the run's runner and worker could not be told"; _shmutant_kill_tree KILL "$pp" "$pp:"; wait "$pp" 2>/dev/null; continue; }
+      || { fail_ "timeout $to: fixture: the run's runner and worker could not be told"; end_tree "$pp" "$ppstart"; continue; }
     # The watchdog is started after the callback: the runner then has beneath it the callback's shell,
     # the three processes started from it, and the watchdog, a fifth.
     wait_descendants "$runner" 5 || fail_ "timeout $to: fixture: the runner never started its watchdog"
@@ -4249,7 +4264,7 @@ t_watchdog_ends_its_run_once_its_runner_is_gone() {
       fail_ "timeout $to: the run outlived its killed runner (pid ppid pgid stat args): $(listed "${STILL[@]}")"
       _shmutant_kill_tree KILL "" "${STILL[@]}"
     fi
-    wait_gone "$pp" "" 100 || { fail_ "timeout $to: fixture: the pool did not return once its worker was killed"; _shmutant_kill_tree KILL "$pp" "$pp:"; }
+    wait_gone "$pp" "$ppstart" 100 || { fail_ "timeout $to: fixture: the pool did not return once its worker was killed"; end_tree "$pp" "$ppstart"; }
     wait "$pp" 2>/dev/null
     hasnt "$(cat "$T/err$to")" 'still running at the deadline' "timeout $to: a watchdog whose runner has gone reports no deadline"
   done
@@ -4316,6 +4331,53 @@ t_watchdog_takes_a_zombie_runner_for_gone() {
 }
 
 # shellcheck disable=SC2034
+t_watchdog_gives_up_on_a_read_of_its_runner_that_stalls() {
+  # #81: a ps that does not answer about the runner must not hold the watchdog: each read of its look
+  # is given up on after a second and is then one that could not be made. So a runner killed while
+  # those reads stall is still found gone, and the run ended (`gone`); a run whose runner is there is
+  # still ended at its deadline (`deadline`); and a watchdog whose first read, of how much older its
+  # runner is, stalls still starts looking (`gap`, where starts are elapsed times). The ps that
+  # stalls is a sleep in its place, which the read's own bound ends.
+  local how
+  local -a known=() STILL=()
+  stalling_ps() {
+    [ "$how" != gap ] || { SHMUTANT_PROC=0; SHMUTANT_PS_LSTART=0; }
+    command() {
+      if [ "${1:-}" = -p ] && [ "${2:-}" = ps ] && [ -e "$T/stall" ]; then
+        case "$(cat "$T/stall"):$*" in
+          runner:*" -p $(cat "$T/runner" 2>/dev/null)") builtin exec sleep 300 ;;
+          # The watchdog's own first read alone: a freeze reads a gap of its own, with no bound.
+          gap:*) case " ${FUNCNAME[*]} " in *" _shmutant_elapsed_gap _shmutant_run_bounded "*) builtin exec sleep 300 ;; esac ;;
+        esac
+      fi
+      builtin command "$@"
+    }
+  }
+  for how in gone deadline gap; do
+    rm -f "$T/stall" "$T/runner"
+    [ "$how" != gap ] || echo gap > "$T/stall"
+    if [ "$how" = deadline ]; then run_started "$T/$how" stalling_ps 5 || continue
+    else run_started "$T/$how" stalling_ps || continue
+    fi
+    mapfile -t known < <(_shmutant_snapshot "$RUN_RUNNER")
+    known+=("$RUN_HOLDER")
+    if [ "$how" != gap ]; then printf '%s\n' "$RUN_RUNNER" > "$T/runner"; echo runner > "$T/stall"; fi
+    case "$how" in
+      deadline)
+        all_gone 150 "$RUN_KID" || fail_ "deadline: a read of the runner that stalls kept the run past its deadline: [$(looks_taken)]" ;;
+      *)
+        kill -KILL "$RUN_RUNNER" 2>/dev/null
+        if ! all_gone 100 "${known[@]}"; then
+          fail_ "$how: a read that stalls kept the watchdog from ending the run of a killed runner (pid ppid pgid stat args): $(listed "${STILL[@]}") [$(looks_taken)]"
+          _shmutant_kill_tree KILL "" "${STILL[@]}"
+        fi ;;
+    esac
+    run_ended
+    all_gone 50 "$RUN_KID" "$RUN_HOLDER" || fail_ "$how: fixture: the run was left behind: $(listed "${STILL[@]}")"
+  done
+}
+
+# shellcheck disable=SC2034
 t_watchdog_tells_a_clock_step_from_another_process_at_its_runners_number() {
   # #81: where a start is the clock less the elapsed time ps prints (no /proc, no lstart), a step of
   # the clock moves the runner's start, and the watchdog's own with it: the runner is still there and
@@ -4323,7 +4385,9 @@ t_watchdog_tells_a_clock_step_from_another_process_at_its_runners_number() {
   # for each second that passes). Another process at the runner's number is younger than the runner
   # was: its start has moved and the watchdog's has not, so the runner has gone and the run is ended
   # (`reused`: what is read of the runner's number, its start and how much older it is than the
-  # watchdog, is fifty seconds younger; the runner itself stays, to be told from).
+  # watchdog, is fifty seconds younger; the runner itself stays, to be told from). And one that was
+  # already there when the watchdog first read how much older its runner is, is younger than the
+  # watchdog itself: that gap vouches for nothing, and the run is ended (`replaced`).
   local how n
   local -a STILL=()
   eval "_real_now() $(declare -f _shmutant_now | sed 1d)"
@@ -4339,19 +4403,24 @@ t_watchdog_tells_a_clock_step_from_another_process_at_its_runners_number() {
     _shmutant_identity() {
       local id
       id="$(_identity_real "$@")" || return 1
-      if [ "$1" = "$(cat "$T/younger" 2>/dev/null)" ]; then id="${id%%+*}"; id="e$(( ${id#e} + 50 ))"; fi
+      # replaced: only what the watchdog's look reads; the runner's own reading of its start stands.
+      if [ "$1" = "$(cat "$T/younger" 2>/dev/null)" ] \
+        || { [ -e "$T/usurped" ] && [ "${FUNCNAME[1]}" = _shmutant_holder_state ] && [ "$1" = "${runner:-}" ]; }; then
+        id="${id%%+*}"; id="e$(( ${id#e} + 50 ))"
+      fi
       printf '%s' "$id"
     }
     eval "$(declare -f _shmutant_elapsed_gap | sed '1s/^_shmutant_elapsed_gap /_elapsed_gap_real /')"
     _shmutant_elapsed_gap() {
       local g
       g="$(_elapsed_gap_real "$@")" || return 1
-      if [ "$1" = "$(cat "$T/younger" 2>/dev/null)" ]; then g=$(( g - 50 )); fi
+      if [ -e "$T/usurped" ] || [ "$1" = "$(cat "$T/younger" 2>/dev/null)" ]; then g=$(( g - 50 )); fi
       printf '%s' "$g"
     }
   }
-  for how in forward back frozen reused; do
-    rm -f "$T/clock" "$T/younger"
+  for how in forward back frozen reused replaced; do
+    rm -f "$T/clock" "$T/younger" "$T/usurped"
+    [ "$how" != replaced ] || : > "$T/usurped"
     run_started "$T/$how" elapsed_starts || continue
     # One look with the clock as it was and the runner its own, at least.
     looks_reach 1 || fail_ "$how: fixture: the watchdog took no look for its runner"
@@ -4361,8 +4430,8 @@ t_watchdog_tells_a_clock_step_from_another_process_at_its_runners_number() {
       reused) printf '%s\n' "$RUN_RUNNER" > "$T/younger" ;;
     esac
     n="$(looks_n)"
-    if [ "$how" = reused ]; then
-      all_gone 100 "$RUN_KID" || fail_ "reused: the watchdog took another process at its runner's number for its runner, and kept the run: [$(looks_taken)]"
+    if [ "$how" = reused ] || [ "$how" = replaced ]; then
+      all_gone 100 "$RUN_KID" || fail_ "$how: the watchdog took another process at its runner's number for its runner, and kept the run: [$(looks_taken)]"
     # Eight looks are four seconds or more: a frozen clock has by then moved the start past the second
     # two readings of it may differ by.
     elif looks_reach $(( n + 8 )); then
@@ -4501,7 +4570,7 @@ t_pool_killed_while_its_abort_freezes_leaves_nothing_stopped() {
   # waited for or not) may have given its number away: then nothing is sent by it, and a stop that
   # reached another process at it is let go.
   caller_kill() {
-    if kill -STOP "$pp" 2>/dev/null && _shmutant_alive_since "$pp" "$ppid"; then
+    if kill -STOP "$pp" 2>/dev/null && _shmutant_alive_since "$pp" "$ppstart"; then
       _shmutant_kill_tree KILL "$pp"; end_group "$pp" "$pp:$ppid"
     else kill -CONT "$pp" 2>/dev/null
     fi
