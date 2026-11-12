@@ -1574,8 +1574,8 @@ shmutant_mut 'the alias state is put back through a shadowable eval' \
 # (no row on the lstart identity: its witness runs only where /proc is absent, and a row that
 # survives on Linux would read as a defect endured)
 shmutant_mut 'a timed-out run leaves no record of what was still running' \
-  '        { printf '"'"'shmutant: %s: still running at the deadline (pid ppid stat args):\n'"'"' "$dir"' \
-  '        { :' \
+  '          { printf '"'"'shmutant: %s: still running at the deadline (pid ppid stat args):\n'"'"' "$dir"' \
+  '          { :' \
   't_verdict_timeout'
 
 # --- guards added for the fifty-first review round ---
@@ -2760,3 +2760,33 @@ shmutant_mut 'the table subtracts an elapsed time that is no whole number' \
   '      printf "%s %d\n", $1, d * 86400 + s' \
   '      print $1, d * 86400 + s' \
   't_elapsed_start_is_read_between_two_clock_readings'
+
+# --- a watchdog ends its run once its runner has gone (#81) ---
+shmutant_mut 'the watchdog never looks for its runner' \
+  '          _shmutant_runner_there || { orphaned=1; break; }' \
+  '          :' \
+  't_watchdog_ends_its_run_once_its_runner_is_gone'
+shmutant_mut 'a watchdog whose runner has gone reports a deadline' \
+  '        if [ "$orphaned" = 0 ]; then' \
+  '        if :; then' \
+  't_watchdog_ends_its_run_once_its_runner_is_gone'
+shmutant_mut 'a runner whose start cannot be read is taken for gone' \
+  '  _shmutant_guard_freezer_there || return 1' \
+  '  _shmutant_alive_since "$guard_of" "$guard_of_id"' \
+  't_watchdog_keeps_a_run_whose_runner_cannot_be_identified'
+shmutant_mut 'a zombie at the runner'"'"'s number is taken for the runner' \
+  '  _shmutant_guard_freezer_there || return 1' \
+  '  _shmutant_holder_state "$guard_of" "$guard_of_id" || [ "$?" = 2 ] || _shmutant_guard_clock_moved || [ "$?" = 2 ]' \
+  't_watchdog_takes_a_zombie_runner_for_gone'
+shmutant_mut 'a runner whose start moved with the clock is taken for gone' \
+  '  _shmutant_guard_freezer_there || return 1' \
+  '  ! _shmutant_guard_reaped "$guard_of" || return 1; _shmutant_holder_state "$guard_of" "$guard_of_id" || [ "$?" = 2 ]' \
+  't_watchdog_tells_a_clock_step_from_another_process_at_its_runners_number'
+shmutant_mut 'the watchdog reads no gap to tell another process at its runner'"'"'s number by' \
+  'runner_gap="$(_shmutant_elapsed_gap "$runner" "$dog_self")" || runner_gap=""' \
+  'runner_gap=""' \
+  't_watchdog_tells_a_clock_step_from_another_process_at_its_runners_number'
+shmutant_mut 'the runner hands its watchdog no start' \
+  '    runnerid="$(_shmutant_identity "$runner")" || runnerid=""' \
+  '    runnerid=""' \
+  't_watchdog_tells_a_clock_step_from_another_process_at_its_runners_number'

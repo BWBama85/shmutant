@@ -1926,6 +1926,11 @@ _shmutant_run_bounded() {
     # The root's identity while it is certainly alive: the post-run kill must not stop or signal
     # a reaped root by number.
     rootid="$(_shmutant_identity "$pid")" || rootid=""
+    # This shell's own pid and start, for the watchdog to look for it by (_shmutant_runner_there).
+    # Read before the callback is let go: a runner killed between that and the watchdog's start
+    # leaves the run with no watchdog, and a read there would widen that instant.
+    runner="$BASHPID"
+    runnerid="$(_shmutant_identity "$runner")" || runnerid=""
     [ -z "${SHMUTANT_VERDICT_FD:-}" ] || { printf 'group %s %s %s\n' "$pid" "$holder" "$holderid" >&"$SHMUTANT_VERDICT_FD"; } 2>/dev/null
     printf 'go\n' >&"$go"
     dog=""
@@ -1941,6 +1946,11 @@ _shmutant_run_bounded() {
         # to clean up whatever the callback left behind.
         trap 'kill "$s" 2>/dev/null; for p in "${!seen[@]}"; do printf "%s:%s\n" "$p" "${seen[$p]}"; done >&"$seen_w"; exit 0' TERM
         declare -A seen=(); tampered=0
+        # The runner is looked for on every pass as well (_shmutant_runner_there). An elapsed-time
+        # start is told from a clock step by how much older the runner is than this shell, read here
+        # of the two in one ps, while the runner is certainly there.
+        orphaned=0; dog_self="$BASHPID"; runner_gap=""
+        case "$runnerid" in e*) runner_gap="$(_shmutant_elapsed_gap "$runner" "$dog_self")" || runner_gap="" ;; esac
         # The deadline is elapsed time as this loop sees it, one poll at a time, each poll's
         # share clamped to [its own sleep, 5 s]: a clock set back cannot extend the run (a poll
         # counts at least the half second it slept) and one set forward cannot cut it by more
@@ -1964,6 +1974,9 @@ _shmutant_run_bounded() {
             [ -n "${seen[${p%%:*}]:-}" ] && continue
             seen["${p%%:*}"]="${p#*:}"
           done < <(_shmutant_snapshot "$pid")
+          # A runner killed from outside cancels nothing and releases no holder: the run is ended
+          # here, as at a deadline, with what this pass has just seen of it.
+          _shmutant_runner_there || { orphaned=1; break; }
           # The target too, on every pass: a rewrite put back before the run returns would pass
           # the check made afterwards; one that lasts a poll or more is seen here. A sample that
           # could not be read is no match, whatever it printed before the stage that failed.
@@ -1975,12 +1988,16 @@ _shmutant_run_bounded() {
         # Committed: a TERM from the runner (which may have seen the run return in the same
         # instant) must not stop the freeze halfway and leave stopped processes behind.
         trap '' TERM
-        printf 'fired\n' >&"$fired"
-        # What was still there at the deadline, for the record: a run that hangs is diagnosed
-        # from this list, not from an output that stopped.
-        { printf 'shmutant: %s: still running at the deadline (pid ppid stat args):\n' "$dir"
-          command -p ps -o pid= -o ppid= -o stat= -o args= -p "$(IFS=,; printf '%s' "$pid,${!seen[*]}")" 2>/dev/null | command -p head -n 30 | command -p cut -c1-200
-        } 1>&"$err_fd" 2>/dev/null
+        # No deadline was reached when the runner has gone, and nobody is left to read a verdict:
+        # neither is reported.
+        if [ "$orphaned" = 0 ]; then
+          printf 'fired\n' >&"$fired"
+          # What was still there at the deadline, for the record: a run that hangs is diagnosed
+          # from this list, not from an output that stopped.
+          { printf 'shmutant: %s: still running at the deadline (pid ppid stat args):\n' "$dir"
+            command -p ps -o pid= -o ppid= -o stat= -o args= -p "$(IFS=,; printf '%s' "$pid,${!seen[*]}")" 2>/dev/null | command -p head -n 30 | command -p cut -c1-200
+          } 1>&"$err_fd" 2>/dev/null
+        fi
         # An array of pid:identity pairs, never an unquoted expansion.
         victims=()
         for p in "${!seen[@]}"; do victims+=("$p:${seen[$p]}"); done
@@ -2186,6 +2203,18 @@ _shmutant_held_group() {
   # A holder that cannot be checked (2) is taken as it was, as it would be with no ps at all.
   _shmutant_holder_state "$holder" "${holderid:-}" || [ "$?" = 2 ] || return 0
   SHMUTANT_HELD=(-g "$1")
+}
+
+# _shmutant_runner_there — 0 while a run's runner is still the process that started this watchdog,
+# 1 once it is not, read as a freeze's guard reads its freezing shell
+# (_shmutant_guard_freezer_there): not there once its number is free, a zombie's, or carries
+# another start; there with no start captured or none that can be read now, and with an
+# elapsed-time start that has moved only as far as the watchdog's own (a clock step).
+# Globals: runner, runnerid (set by _shmutant_run_bounded's runner); dog_self, runner_gap (by its
+# watchdog).
+_shmutant_runner_there() {
+  local guard_of="${runner:-}" guard_of_id="${runnerid:-}" guard_self="${dog_self:-}" guard_gap_ref="${runner_gap:-}"
+  _shmutant_guard_freezer_there || return 1
 }
 
 # _shmutant_worker_finish <dir> <verdict> <microseconds> <status> — drop the clone unless
@@ -2935,6 +2964,7 @@ _shmutant_pool_locals_writable() {
     SHMUTANT_TARGET SHMUTANT_DECL_ERRORS SHMUTANT_SELECTED_N \
     _shmutant_bo _shmutant_so _shmutant_o _shmutant_n _shmutant_pc _shmutant_wrap_left \
     a budget dog e elapsed last leftovers linked lstart old rrc s tampered tmpd tnow victims wroot \
+    dog_self orphaned runner runner_gap runnerid \
     b chunk conts g gcont gone_group guard_id guard_lost guard_of guard_of_id guard_pid guard_r guard_up guard_w hs kept kills members out pairs part pg ph phid recs rid rootid_pre seen_ck unfrozen w want \
     SHMUTANT_GUARD SHMUTANT_GUARD_PID SHMUTANT_PS_LSTART SHMUTANT_PS_BOUND c guard_self guard_gap_ref gap ea eb lp le tbl cands guarded jl w fid_now stopped fgap cont_first cfirst told group_untold first \
     before after ga gb
