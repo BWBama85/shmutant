@@ -360,7 +360,7 @@ shmutant_mut 'a newline in a witness is accepted' \
   'case "$4${5:-}" in never-matches)' \
   't_mut_validates_rows'
 shmutant_mut 'descendants are snapshotted only at the deadline' \
-  '          done < <(_shmutant_snapshot "$pid")' \
+  '          done < <(SHMUTANT_PS_BOUND=5 _shmutant_snapshot "$pid")' \
   '          done < /dev/null' \
   't_verdict_timeout_kills_a_descendant_seen_before_it_detached'
 shmutant_mut 'clones drop metadata' \
@@ -2805,6 +2805,14 @@ shmutant_mut 'the runner hands its watchdog no start' \
 shmutant_mut 'the runner'"'"'s read of its own start is not given up on' \
   '    runnerid="$(SHMUTANT_PS_BOUND=1 _shmutant_identity "$runner")" || runnerid=""' \
   '    runnerid="$(_shmutant_identity "$runner")" || runnerid=""' \
+  't_watchdog_gives_up_on_a_read_of_its_runner_that_stalls'
+shmutant_mut 'a snapshot that stalls holds the watchdog' \
+  '          done < <(SHMUTANT_PS_BOUND=5 _shmutant_snapshot "$pid")' \
+  '          done < <(_shmutant_snapshot "$pid")' \
+  't_watchdog_gives_up_on_a_read_of_its_runner_that_stalls'
+shmutant_mut 'the walk of descendants is read past its caller'"'"'s bound' \
+  '  table="$(_shmutant_ps -A -o pid= -o ppid= 2>/dev/null)" || return 0' \
+  '  table="$(command -p ps -A -o pid= -o ppid= 2>/dev/null)" || return 0' \
   't_watchdog_gives_up_on_a_read_of_its_runner_that_stalls'
 shmutant_mut 'the callback is let go before its watchdog is started' \
   '    dog=""' \

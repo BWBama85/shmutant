@@ -643,11 +643,12 @@ _shmutant_scan_output() {
 }
 
 # _shmutant_descendants <pid> — print every descendant pid of <pid>, via POSIX `ps -A -o pid= -o ppid=`.
-# Prints nothing when ps is unavailable; the process-group kill still applies then. Fails when the
-# table could not be filtered whole.
+# Prints nothing when ps is unavailable, or does not answer within a bound its caller set
+# (_shmutant_ps); the process-group kill still applies then. Fails when the table could not be
+# filtered whole.
 _shmutant_descendants() {
   local table
-  table="$(command -p ps -A -o pid= -o ppid= 2>/dev/null)" || return 0
+  table="$(_shmutant_ps -A -o pid= -o ppid= 2>/dev/null)" || return 0
   (set -o pipefail; printf '%s\n' "$table" | command -p awk -v root="$1" '
     { child[NR] = $1; parent[NR] = $2 }
     END {
@@ -1927,8 +1928,8 @@ _shmutant_run_bounded() {
     # a reaped root by number.
     rootid="$(_shmutant_identity "$pid")" || rootid=""
     # This shell's own pid and start, for the watchdog to look for it by (_shmutant_runner_there).
-    # A read given up on after a second, as that look's are: a start that could not be read is one
-    # the watchdog does without.
+    # A read given up on as that look's are: a start that could not be read is one the watchdog
+    # does without.
     runner="$BASHPID"
     runnerid="$(SHMUTANT_PS_BOUND=1 _shmutant_identity "$runner")" || runnerid=""
     [ -z "${SHMUTANT_VERDICT_FD:-}" ] || { printf 'group %s %s %s\n' "$pid" "$holder" "$holderid" >&"$SHMUTANT_VERDICT_FD"; } 2>/dev/null
@@ -1949,7 +1950,7 @@ _shmutant_run_bounded() {
         declare -A seen=(); tampered=0
         # The runner is looked for on every pass as well (_shmutant_runner_there). An elapsed-time
         # start is told from a clock step by how much older the runner is than this shell, read here
-        # of the two in one ps, which is given up on after a second like every read of that look.
+        # of the two in one ps, which is given up on like every read of that look.
         orphaned=0; dog_self="$BASHPID"; runner_gap=""
         case "$runnerid" in e*) runner_gap="$(SHMUTANT_PS_BOUND=1 _shmutant_elapsed_gap "$runner" "$dog_self")" || runner_gap="" ;; esac
         # The deadline is elapsed time as this loop sees it, one poll at a time, each poll's
@@ -1974,7 +1975,9 @@ _shmutant_run_bounded() {
             [ -n "$p" ] || continue
             [ -n "${seen[${p%%:*}]:-}" ] && continue
             seen["${p%%:*}"]="${p#*:}"
-          done < <(_shmutant_snapshot "$pid")
+          done < <(SHMUTANT_PS_BOUND=5 _shmutant_snapshot "$pid")
+          # (Each read of that snapshot is given up on after five seconds, and the pass then sees
+          # nothing new: a ps that stalls must not keep this loop from its runner or its deadline.)
           # A runner killed from outside cancels nothing and releases no holder: the run is ended
           # here, as at a deadline, with what this pass has just seen of it.
           _shmutant_runner_there || { orphaned=1; break; }
@@ -2212,8 +2215,9 @@ _shmutant_held_group() {
 # (_shmutant_guard_freezer_there): not there once its number is free, a zombie's, or carries
 # another start; there with no start captured or none that can be read now, and with an
 # elapsed-time start that has moved only as far as the watchdog's own (a clock step).
-# Each read of the process table it makes is given up on after a second (_shmutant_ps) and is then
-# one that could not be made: a ps that stalls holds a poll for seconds, never the watchdog for good.
+# Each read of the process table it makes is given up on after a second (six, should the read's own
+# helper not answer: _shmutant_ps) and is then one that could not be made: a ps that stalls holds a
+# poll for seconds, never the watchdog for good.
 # The runner is older than the watchdog it started, so a gap that says younger, by more than the
 # second etime resolves, was read of another process at the runner's number: not there.
 # Globals: runner, runnerid (set by _shmutant_run_bounded's runner); dog_self, runner_gap (by its

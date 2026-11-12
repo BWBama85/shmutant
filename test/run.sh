@@ -4246,8 +4246,8 @@ t_watchdog_ends_its_run_once_its_runner_is_gone() {
     wrapper="$(cat "$T/wrapper")"; runner=""; worker=""
     runner="$(ppid_of "$wrapper")" && worker="$(ppid_of "$runner")" && [ "$(ppid_of "$worker")" = "$pp" ] \
       || { fail_ "timeout $to: fixture: the run's runner and worker could not be told"; end_tree "$pp" "$ppstart"; continue; }
-    # The watchdog is started after the callback: the runner then has beneath it the callback's shell,
-    # the three processes started from it, and the watchdog, a fifth.
+    # Beneath the runner: the watchdog, the callback's shell, and the three processes started from
+    # it, the last of which may not have been forked yet.
     wait_descendants "$runner" 5 || fail_ "timeout $to: fixture: the runner never started its watchdog"
     # What the run is made of: everything beneath the worker, and the holder, which was reparented at
     # birth and is found in the run's group as its one member that is not the callback's shell or a child of it.
@@ -4369,8 +4369,10 @@ t_watchdog_gives_up_on_a_read_of_its_runner_that_stalls() {
   # still ended at its deadline (`deadline`); a watchdog whose first read, of how much older its
   # runner is, stalls still starts looking (`gap`, where starts are elapsed times); and a runner whose
   # read of its own start stalls still starts its run, whose watchdog then does without that start
-  # (`start`, outside /proc, where that read is a ps). The ps that stalls is a sleep in its place, which
-  # the read's own bound ends.
+  # (`start`, outside /proc, where that read is a ps). Nor must a snapshot of the run's descendants
+  # that does not answer: the watchdog still finds a killed runner gone (`sample`: every read of the
+  # whole table that its snapshots make). The ps that stalls is a sleep in its place, which the
+  # read's own bound ends.
   local how
   local -a known=() STILL=()
   stalling_ps() {
@@ -4384,14 +4386,16 @@ t_watchdog_gives_up_on_a_read_of_its_runner_that_stalls() {
           gap:*) case " ${FUNCNAME[*]} " in *" _shmutant_elapsed_gap _shmutant_run_bounded "*) builtin exec sleep 300 ;; esac ;;
           # The runner's read of its own start alone: the holder's and the root's are read beside it.
           start:*) case " ${FUNCNAME[*]} " in *" _shmutant_identity _shmutant_run_bounded "*) [ "${!#}" != "${runner:-none}" ] || builtin exec sleep 300 ;; esac ;;
+          # The watchdog's snapshots alone (`dog_self` is its own): the callback's shell takes one too.
+          sample:"-p ps -A "*) [ -z "${dog_self:-}" ] || case " ${FUNCNAME[*]} " in *" _shmutant_snapshot "*) builtin exec sleep 300 ;; esac ;;
         esac
       fi
       builtin command "$@"
     }
   }
-  for how in gone deadline gap start; do
+  for how in gone deadline gap start sample; do
     rm -f "$T/stall" "$T/runner"
-    case "$how" in gap|start) echo "$how" > "$T/stall" ;; esac
+    case "$how" in gap|start|sample) echo "$how" > "$T/stall" ;; esac
     if [ "$how" = deadline ]; then run_started "$T/$how" stalling_ps 5 || continue
     elif ! run_started "$T/$how" stalling_ps; then
       [ "$how" != start ] || fail_ 'start: a read of its own start that stalls kept the runner from starting its run'
@@ -4405,7 +4409,8 @@ t_watchdog_gives_up_on_a_read_of_its_runner_that_stalls() {
         all_gone 150 "$RUN_KID" || fail_ "deadline: a read of the runner that stalls kept the run past its deadline: [$(looks_taken)]" ;;
       *)
         kill -KILL "$RUN_RUNNER" 2>/dev/null
-        if ! all_gone 100 "${known[@]}"; then
+        # Two reads of a snapshot that stalls are ten seconds before the watchdog looks again.
+        if ! all_gone 300 "${known[@]}"; then
           fail_ "$how: a read that stalls kept the watchdog from ending the run of a killed runner (pid ppid pgid stat args): $(listed "${STILL[@]}") [$(looks_taken)]"
           _shmutant_kill_tree KILL "" "${STILL[@]}"
         fi ;;
