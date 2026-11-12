@@ -2818,6 +2818,10 @@ shmutant_mut 'the watchdog carries the process group its runner read' \
   '        builtin set -o monitor && builtin set +o monitor' \
   '        :' \
   't_watchdog_hangup_stays_in_its_own_group'
+shmutant_mut 'a watchdog cancelled before its first poll signals what its caller named' \
+  '        s=""; declare -A seen=(); tampered=0' \
+  '        declare -A seen=(); tampered=0' \
+  't_watchdog_cancelled_at_its_start_signals_nothing_of_its_callers'
 shmutant_mut 'the callback is let go before its watchdog is started' \
   '    dog=""' \
   '    printf '"'"'go\n'"'"' >&"$go"; dog=""' \

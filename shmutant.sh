@@ -1952,8 +1952,11 @@ _shmutant_run_bounded() {
         # not reachable this way; that needs a containment mechanism this file does not use.
         # Cancelled (the run returned): what was seen is left for the runner, which still has
         # to clean up whatever the callback left behind.
+        # What the handler names is this shell's own before the handler can run: a watchdog
+        # cancelled ahead of its first poll must not signal, or report as seen, what a caller's
+        # variables of these names happened to hold.
+        s=""; declare -A seen=(); tampered=0
         trap 'kill "$s" 2>/dev/null; for p in "${!seen[@]}"; do printf "%s:%s\n" "$p" "${seen[$p]}"; done >&"$seen_w"; exit 0' TERM
-        declare -A seen=(); tampered=0
         # The runner is looked for on every pass as well (_shmutant_runner_there). An elapsed-time
         # start is told from a clock step by how much older the runner is than this shell, read here
         # of the two in one ps, which is given up on like every read of that look.

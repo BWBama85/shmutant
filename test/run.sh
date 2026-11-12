@@ -4228,7 +4228,7 @@ t_watchdog_ends_its_run_once_its_runner_is_gone() {
   # watchdog looks for its runner at every poll and, once it has gone, ends the run's tree and group
   # and goes itself: with no deadline (0), and with one far off (300) well before it. It reports no
   # deadline, since none was reached.
-  local to pp ppstart wrapper runner worker holder p
+  local to pp ppstart wrapper runner worker holder p par
   local -a known=() STILL=()
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
@@ -4254,7 +4254,8 @@ t_watchdog_ends_its_run_once_its_runner_is_gone() {
     mapfile -t known < <(_shmutant_snapshot "$worker")
     holder=""
     for p in $(group_members "$wrapper"); do
-      [ "$p" != "$wrapper" ] && [ "$(ppid_of "$p")" != "$wrapper" ] && holder="$p"
+      # Only a member whose parent was read: one that could not be is not thereby the holder.
+      [ "$p" != "$wrapper" ] && par="$(ppid_of "$p")" && [ "$par" != "$wrapper" ] && holder="$p"
     done
     [ -n "$holder" ] || fail_ "timeout $to: fixture: the run's holder was not found in its group"
     mapfile -t -O "${#known[@]}" known < <(pairs_of ${holder:+"$holder"})
@@ -4362,13 +4363,36 @@ t_watchdog_is_started_before_the_callback_is_let_go() {
 }
 
 # shellcheck disable=SC2034
+t_watchdog_cancelled_at_its_start_signals_nothing_of_its_callers() {
+  # #81: the watchdog's handler for its cancellation ends the watchdog's own sleep, by a name (`s`)
+  # that the shell calling the pool may have set too. A run that returns before the watchdog's first
+  # poll cancels it with no sleep started yet (here its first read, of how much older its runner is,
+  # takes two seconds: starts are elapsed times, and the callback returns at once), and the handler
+  # then signals nothing: a process the caller had named by `s` is still there.
+  local bystander bid
+  sleep 60 > /dev/null 2>&1 & bystander=$!
+  bid="$(_shmutant_identity "$bystander" 2>/dev/null)"
+  mkdir -p "$T/d"
+  ( s="$bystander"; SHMUTANT_PROC=0; SHMUTANT_PS_LSTART=0
+    eval "$(declare -f _shmutant_elapsed_gap | sed '1s/^_shmutant_elapsed_gap /_elapsed_gap_real /')"
+    _shmutant_elapsed_gap() { : > "$T/gap"; sleep 2; _elapsed_gap_real "$@"; }
+    cb() { : > "$T/returned"; }
+    SHMUTANT_TIMEOUT=0 _shmutant_run_bounded "$T/d" cb "$T/d" sel ) > /dev/null 2>&1
+  [ -e "$T/returned" ] || fail_ 'fixture: the callback never ran'
+  [ -e "$T/gap" ] || fail_ 'fixture: the watchdog never read how much older its runner is'
+  wait_gone "$bystander" "$bid" 1 && fail_ 'a watchdog cancelled before its first poll signalled a process its caller had named'
+  # Through its job, which bash signals only while it has not reaped it.
+  _shmutant_ps_end "$bystander"; wait "$bystander" 2>/dev/null
+}
+
+# shellcheck disable=SC2034
 t_watchdog_hangup_stays_in_its_own_group() {
   # #83: a run's watchdog is a job of its runner's, in a process group of its own, and a hang-up taken
   # in that group stays there. bash sends SIGHUP to the process group it has recorded for the jobs of
   # a substitution that is hung up, and the watchdog reads its own group so that the one recorded is
   # its own and not its caller's. Witnessed by a snapshot of the watchdog's whose command substitution
-  # holds a job (a stand-in, which writes its pid only once the job is started; a process substitution
-  # holding one was seen to send nothing on): hung up by a signal (`signal`), and
+  # holds a job (a stand-in, which writes its pid only once the job is started; a command
+  # substitution, because that is the form that sends a hang-up on): hung up by a signal (`signal`), and
   # by the kernel, which hangs up and continues a stopped group whose last parent outside it is
   # killed, as a freeze of the worker's tree does to the watchdog's (`orphaned`). Neither this shell
   # (the run's caller) nor a process in its group is hung up.
