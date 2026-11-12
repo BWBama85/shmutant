@@ -643,11 +643,12 @@ _shmutant_scan_output() {
 }
 
 # _shmutant_descendants <pid> — print every descendant pid of <pid>, via POSIX `ps -A -o pid= -o ppid=`.
-# Prints nothing when ps is unavailable; the process-group kill still applies then. Fails when the
-# table could not be filtered whole.
+# Prints nothing when ps is unavailable, or does not answer within a bound its caller set
+# (_shmutant_ps); the process-group kill still applies then. Fails when the table could not be
+# filtered whole.
 _shmutant_descendants() {
   local table
-  table="$(command -p ps -A -o pid= -o ppid= 2>/dev/null)" || return 0
+  table="$(_shmutant_ps -A -o pid= -o ppid= 2>/dev/null)" || return 0
   (set -o pipefail; printf '%s\n' "$table" | command -p awk -v root="$1" '
     { child[NR] = $1; parent[NR] = $2 }
     END {
@@ -747,6 +748,10 @@ _shmutant_ps() {
     # No handler of the caller's runs in here: a DEBUG trap its functrace hands down, or a CHLD trap,
     # run between a job's listing and its signal could reap the job and start another under its number.
     builtin trap - CHLD DEBUG RETURN ERR
+    # This substitution's own names, whatever attribute a caller gave them: the timer's path under
+    # an integer one is an arithmetic error, and the read would keep no bound. Unset as well: under
+    # a caller's localvar_inherit a declaration alone takes the caller's attribute with it.
+    builtin local c t w s; builtin unset -v c t w s
     # Job control on and off again before any job: bash then reads this shell's own process group,
     # which a substitution otherwise inherits stale, and starts each job in it, the one form of job
     # its `kill %<job>` signals only while it has not reaped it (_shmutant_ps_end).
@@ -1830,6 +1835,11 @@ _shmutant_run_bounded() {
   local dir="$1" run="$2" root="$3" sel="$4" wit="${5:-}" timeout mark fifo fd left seen outf line
   local left_w left_r seen_w seen_r fired out_w out_r out_r2 hold hold_r hp go holder holderid err_fd l kept
   local counts counts_w counts_r counts_r2
+  # What the runner, the wrapper and the watchdog below assign: they are subshells of this function,
+  # and a name declared here is not assigned under an attribute a caller gave it (an integer one
+  # turns a start such as `Thu Nov 12 ...` into an arithmetic error). Unset as well: under a
+  # caller's localvar_inherit a declaration alone takes the caller's attribute with it.
+  local budget d dog dog_self done_first elapsed last leftovers orphaned p pid rc rootid rrc runner runner_gap runnerid s seen_ck tampered tnow victims; builtin unset -v budget d dog dog_self done_first elapsed last leftovers orphaned p pid rc rootid rrc runner runner_gap runnerid s seen_ck tampered tnow victims
   timeout="$(_shmutant_pos_int "${SHMUTANT_TIMEOUT:-300}")" || timeout=0
   SHMUTANT_RUN_FIRED=0; SHMUTANT_RUN_RED=0; SHMUTANT_RUN_WITNESSED=0; SHMUTANT_RUN_UNSETTLED=0; SHMUTANT_RUN_PUBLISHED=1
   SHMUTANT_RUN_COUNTS=""; SHMUTANT_RUN_COUNTS_BAD=""
@@ -1926,21 +1936,42 @@ _shmutant_run_bounded() {
     # The root's identity while it is certainly alive: the post-run kill must not stop or signal
     # a reaped root by number.
     rootid="$(_shmutant_identity "$pid")" || rootid=""
+    # This shell's own pid and start, for the watchdog to look for it by (_shmutant_runner_there).
+    # A read given up on as that look's are: a start that could not be read is one the watchdog
+    # does without.
+    runner="$BASHPID"
+    runnerid="$(SHMUTANT_PS_BOUND=1 _shmutant_identity "$runner")" || runnerid=""
     [ -z "${SHMUTANT_VERDICT_FD:-}" ] || { printf 'group %s %s %s\n' "$pid" "$holder" "$holderid" >&"$SHMUTANT_VERDICT_FD"; } 2>/dev/null
-    printf 'go\n' >&"$go"
     dog=""
     # With or without a deadline: the descendants a run leaves behind are otherwise seen only
     # at its return, and one that reparented out of the group by then is out of reach.
+    # Started before the callback is let go: a runner killed at any moment after that leaves a
+    # watchdog to end the run, and one killed before it leaves a callback that never ran.
     {
       (
+        # Job control on and off again, first, as the wrapper does: this shell was moved into a
+        # group of its own after the runner read the pool's, and a substitution of it that is hung
+        # up while it holds a job sends SIGHUP to the group bash has recorded. A freeze of the
+        # worker's tree stops this group and KILLs the runner, and the kernel then hangs the group
+        # up. Read here, that hang-up stays in this group; unread, it reaches the pool's.
+        builtin set -o monitor && builtin set +o monitor
         # Descendants are snapshotted every half second while the run is alive, so one that
         # detaches from the leader before the deadline (a new session, a reparented child) is
         # still named at the kill. A double fork whose intermediate lives less than a poll is
         # not reachable this way; that needs a containment mechanism this file does not use.
         # Cancelled (the run returned): what was seen is left for the runner, which still has
         # to clean up whatever the callback left behind.
-        trap 'kill "$s" 2>/dev/null; for p in "${!seen[@]}"; do printf "%s:%s\n" "$p" "${seen[$p]}"; done >&"$seen_w"; exit 0' TERM
+        # What the handler names is this shell's own before the handler can run: a watchdog
+        # cancelled ahead of its first poll must not signal, or report as seen, what a caller's
+        # variables of these names happened to hold. `s` is declared with this function's names,
+        # empty until the first sleep; `seen` is made here.
         declare -A seen=(); tampered=0
+        trap 'kill "$s" 2>/dev/null; for p in "${!seen[@]}"; do printf "%s:%s\n" "$p" "${seen[$p]}"; done >&"$seen_w"; exit 0' TERM
+        # The runner is looked for on every pass as well (_shmutant_runner_there). An elapsed-time
+        # start is told from a clock step by how much older the runner is than this shell, read here
+        # of the two in one ps, which is given up on like every read of that look.
+        orphaned=0; dog_self="$BASHPID"; runner_gap=""
+        case "$runnerid" in e*) runner_gap="$(SHMUTANT_PS_BOUND=1 _shmutant_elapsed_gap "$runner" "$dog_self")" || runner_gap="" ;; esac
         # The deadline is elapsed time as this loop sees it, one poll at a time, each poll's
         # share clamped to [its own sleep, 5 s]: a clock set back cannot extend the run (a poll
         # counts at least the half second it slept) and one set forward cannot cut it by more
@@ -1963,7 +1994,12 @@ _shmutant_run_bounded() {
             [ -n "$p" ] || continue
             [ -n "${seen[${p%%:*}]:-}" ] && continue
             seen["${p%%:*}"]="${p#*:}"
-          done < <(_shmutant_snapshot "$pid")
+          done < <(SHMUTANT_PS_BOUND=5 _shmutant_snapshot "$pid")
+          # (Each read of that snapshot is given up on after five seconds, and the pass then sees
+          # nothing new: a ps that stalls must not keep this loop from its runner or its deadline.)
+          # A runner killed from outside cancels nothing and releases no holder: the run is ended
+          # here, as at a deadline, with what this pass has just seen of it.
+          _shmutant_runner_there || { orphaned=1; break; }
           # The target too, on every pass: a rewrite put back before the run returns would pass
           # the check made afterwards; one that lasts a poll or more is seen here. A sample that
           # could not be read is no match, whatever it printed before the stage that failed.
@@ -1975,12 +2011,16 @@ _shmutant_run_bounded() {
         # Committed: a TERM from the runner (which may have seen the run return in the same
         # instant) must not stop the freeze halfway and leave stopped processes behind.
         trap '' TERM
-        printf 'fired\n' >&"$fired"
-        # What was still there at the deadline, for the record: a run that hangs is diagnosed
-        # from this list, not from an output that stopped.
-        { printf 'shmutant: %s: still running at the deadline (pid ppid stat args):\n' "$dir"
-          command -p ps -o pid= -o ppid= -o stat= -o args= -p "$(IFS=,; printf '%s' "$pid,${!seen[*]}")" 2>/dev/null | command -p head -n 30 | command -p cut -c1-200
-        } 1>&"$err_fd" 2>/dev/null
+        # No deadline was reached when the runner has gone, and nobody is left to read a verdict:
+        # neither is reported.
+        if [ "$orphaned" = 0 ]; then
+          printf 'fired\n' >&"$fired"
+          # What was still there at the deadline, for the record: a run that hangs is diagnosed
+          # from this list, not from an output that stopped.
+          { printf 'shmutant: %s: still running at the deadline (pid ppid stat args):\n' "$dir"
+            command -p ps -o pid= -o ppid= -o stat= -o args= -p "$(IFS=,; printf '%s' "$pid,${!seen[*]}")" 2>/dev/null | command -p head -n 30 | command -p cut -c1-200
+          } 1>&"$err_fd" 2>/dev/null
+        fi
         # An array of pid:identity pairs, never an unquoted expansion.
         victims=()
         for p in "${!seen[@]}"; do victims+=("$p:${seen[$p]}"); done
@@ -1988,6 +2028,7 @@ _shmutant_run_bounded() {
       ) < /dev/null > /dev/null 2>&1 &
       dog=$!
     }
+    printf 'go\n' >&"$go"
     if [ -n "$dog" ]; then
       # Whichever ends first. A watchdog that ends before the leader has fired and failed to
       # finish (or died): the leader may be frozen, and waiting on it would never return, so
@@ -2186,6 +2227,28 @@ _shmutant_held_group() {
   # A holder that cannot be checked (2) is taken as it was, as it would be with no ps at all.
   _shmutant_holder_state "$holder" "${holderid:-}" || [ "$?" = 2 ] || return 0
   SHMUTANT_HELD=(-g "$1")
+}
+
+# _shmutant_runner_there — 0 while a run's runner is still the process that started this watchdog,
+# 1 once it is not, read as a freeze's guard reads its freezing shell
+# (_shmutant_guard_freezer_there): not there once its number is free, a zombie's, or carries
+# another start; there with no start captured or none that can be read now, and with an
+# elapsed-time start that has moved only as far as the watchdog's own (a clock step).
+# Each read of the process table it makes is given up on after a second (six, should the read's own
+# helper not answer: _shmutant_ps) and is then one that could not be made: a ps that stalls holds a
+# poll for seconds, never the watchdog for good.
+# The runner is older than the watchdog it started, so a gap that says younger, by more than the
+# second etime resolves, was read of another process at the runner's number: not there.
+# Globals: runner, runnerid (set by _shmutant_run_bounded's runner); dog_self, runner_gap (by its
+# watchdog).
+_shmutant_runner_there() {
+  # Declared, unset, and only then assigned: under a caller's localvar_inherit a declaration takes
+  # the caller's attribute with it, and a start assigned under an integer one is an arithmetic
+  # error, which would read as a runner that has gone.
+  local guard_of guard_of_id guard_self guard_gap_ref SHMUTANT_PS_BOUND; builtin unset -v guard_of guard_of_id guard_self guard_gap_ref SHMUTANT_PS_BOUND
+  guard_of="${runner:-}"; guard_of_id="${runnerid:-}"; guard_self="${dog_self:-}"; guard_gap_ref="${runner_gap:-}"; SHMUTANT_PS_BOUND=1
+  [ -z "$guard_gap_ref" ] || [ "$guard_gap_ref" -ge -1 ] || return 1
+  _shmutant_guard_freezer_there || return 1
 }
 
 # _shmutant_worker_finish <dir> <verdict> <microseconds> <status> — drop the clone unless
@@ -2935,6 +2998,7 @@ _shmutant_pool_locals_writable() {
     SHMUTANT_TARGET SHMUTANT_DECL_ERRORS SHMUTANT_SELECTED_N \
     _shmutant_bo _shmutant_so _shmutant_o _shmutant_n _shmutant_pc _shmutant_wrap_left \
     a budget dog e elapsed last leftovers linked lstart old rrc s tampered tmpd tnow victims wroot \
+    dog_self done_first orphaned runner runner_gap runnerid \
     b chunk conts g gcont gone_group guard_id guard_lost guard_of guard_of_id guard_pid guard_r guard_up guard_w hs kept kills members out pairs part pg ph phid recs rid rootid_pre seen_ck unfrozen w want \
     SHMUTANT_GUARD SHMUTANT_GUARD_PID SHMUTANT_PS_LSTART SHMUTANT_PS_BOUND c guard_self guard_gap_ref gap ea eb lp le tbl cands guarded jl w fid_now stopped fgap cont_first cfirst told group_untold first \
     before after ga gb

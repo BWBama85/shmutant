@@ -360,7 +360,7 @@ shmutant_mut 'a newline in a witness is accepted' \
   'case "$4${5:-}" in never-matches)' \
   't_mut_validates_rows'
 shmutant_mut 'descendants are snapshotted only at the deadline' \
-  '          done < <(_shmutant_snapshot "$pid")' \
+  '          done < <(SHMUTANT_PS_BOUND=5 _shmutant_snapshot "$pid")' \
   '          done < /dev/null' \
   't_verdict_timeout_kills_a_descendant_seen_before_it_detached'
 shmutant_mut 'clones drop metadata' \
@@ -1574,8 +1574,8 @@ shmutant_mut 'the alias state is put back through a shadowable eval' \
 # (no row on the lstart identity: its witness runs only where /proc is absent, and a row that
 # survives on Linux would read as a defect endured)
 shmutant_mut 'a timed-out run leaves no record of what was still running' \
-  '        { printf '"'"'shmutant: %s: still running at the deadline (pid ppid stat args):\n'"'"' "$dir"' \
-  '        { :' \
+  '          { printf '"'"'shmutant: %s: still running at the deadline (pid ppid stat args):\n'"'"' "$dir"' \
+  '          { :' \
   't_verdict_timeout'
 
 # --- guards added for the fifty-first review round ---
@@ -2760,3 +2760,93 @@ shmutant_mut 'the table subtracts an elapsed time that is no whole number' \
   '      printf "%s %d\n", $1, d * 86400 + s' \
   '      print $1, d * 86400 + s' \
   't_elapsed_start_is_read_between_two_clock_readings'
+
+# --- a watchdog ends its run once its runner has gone (#81) ---
+shmutant_mut 'the watchdog never looks for its runner' \
+  '          _shmutant_runner_there || { orphaned=1; break; }' \
+  '          :' \
+  't_watchdog_ends_its_run_once_its_runner_is_gone'
+shmutant_mut 'a watchdog whose runner has gone reports a deadline' \
+  '        if [ "$orphaned" = 0 ]; then' \
+  '        if :; then' \
+  't_watchdog_ends_its_run_once_its_runner_is_gone'
+shmutant_mut 'a runner whose start cannot be read is taken for gone' \
+  '  _shmutant_guard_freezer_there || return 1' \
+  '  _shmutant_alive_since "$guard_of" "$guard_of_id"' \
+  't_watchdog_keeps_a_run_whose_runner_cannot_be_identified'
+shmutant_mut 'a zombie at the runner'"'"'s number is taken for the runner' \
+  '  _shmutant_guard_freezer_there || return 1' \
+  '  _shmutant_holder_state "$guard_of" "$guard_of_id" || [ "$?" = 2 ] || _shmutant_guard_clock_moved || [ "$?" = 2 ]' \
+  't_watchdog_takes_a_zombie_runner_for_gone'
+shmutant_mut 'a runner whose start moved with the clock is taken for gone' \
+  '  _shmutant_guard_freezer_there || return 1' \
+  '  ! _shmutant_guard_reaped "$guard_of" || return 1; _shmutant_holder_state "$guard_of" "$guard_of_id" || [ "$?" = 2 ]' \
+  't_watchdog_tells_a_clock_step_from_another_process_at_its_runners_number'
+shmutant_mut 'the watchdog reads no gap to tell another process at its runner'"'"'s number by' \
+  'runner_gap="$(SHMUTANT_PS_BOUND=1 _shmutant_elapsed_gap "$runner" "$dog_self")" || runner_gap=""' \
+  'runner_gap=""' \
+  't_watchdog_tells_a_clock_step_from_another_process_at_its_runners_number'
+shmutant_mut 'a gap first read of another process at the runner'"'"'s number vouches for it' \
+  '  [ -z "$guard_gap_ref" ] || [ "$guard_gap_ref" -ge -1 ] || return 1' \
+  '  :' \
+  't_watchdog_tells_a_clock_step_from_another_process_at_its_runners_number'
+shmutant_mut 'a read of the runner that stalls holds the watchdog' \
+  ' guard_gap_ref="${runner_gap:-}"; SHMUTANT_PS_BOUND=1' \
+  ' guard_gap_ref="${runner_gap:-}"' \
+  't_watchdog_gives_up_on_a_read_of_its_runner_that_stalls'
+shmutant_mut 'the gap read at the watchdog'"'"'s start is not given up on' \
+  'runner_gap="$(SHMUTANT_PS_BOUND=1 _shmutant_elapsed_gap "$runner" "$dog_self")" || runner_gap=""' \
+  'runner_gap="$(_shmutant_elapsed_gap "$runner" "$dog_self")" || runner_gap=""' \
+  't_watchdog_gives_up_on_a_read_of_its_runner_that_stalls'
+shmutant_mut 'the runner hands its watchdog no start' \
+  '    runnerid="$(SHMUTANT_PS_BOUND=1 _shmutant_identity "$runner")" || runnerid=""' \
+  '    runnerid=""' \
+  't_watchdog_tells_a_clock_step_from_another_process_at_its_runners_number'
+shmutant_mut 'the runner'"'"'s read of its own start is not given up on' \
+  '    runnerid="$(SHMUTANT_PS_BOUND=1 _shmutant_identity "$runner")" || runnerid=""' \
+  '    runnerid="$(_shmutant_identity "$runner")" || runnerid=""' \
+  't_watchdog_gives_up_on_a_read_of_its_runner_that_stalls'
+shmutant_mut 'a snapshot that stalls holds the watchdog' \
+  '          done < <(SHMUTANT_PS_BOUND=5 _shmutant_snapshot "$pid")' \
+  '          done < <(_shmutant_snapshot "$pid")' \
+  't_watchdog_gives_up_on_a_read_of_its_runner_that_stalls'
+shmutant_mut 'the walk of descendants is read past its caller'"'"'s bound' \
+  '  table="$(_shmutant_ps -A -o pid= -o ppid= 2>/dev/null)" || return 0' \
+  '  table="$(command -p ps -A -o pid= -o ppid= 2>/dev/null)" || return 0' \
+  't_watchdog_gives_up_on_a_read_of_its_runner_that_stalls'
+shmutant_mut 'the watchdog carries the process group its runner read' \
+  '        builtin set -o monitor && builtin set +o monitor' \
+  '        :' \
+  't_watchdog_hangup_stays_in_its_own_group'
+shmutant_mut 'a watchdog cancelled before its first poll signals what its caller named' \
+  '  local budget d dog dog_self done_first elapsed last leftovers orphaned p pid rc rootid rrc runner runner_gap runnerid s seen_ck tampered tnow victims; builtin unset -v budget d dog dog_self done_first elapsed last leftovers orphaned p pid rc rootid rrc runner runner_gap runnerid s seen_ck tampered tnow victims' \
+  '  :' \
+  't_watchdog_cancelled_at_its_start_signals_nothing_of_its_callers'
+shmutant_mut 'a run assigns its scratch names under the attributes its caller gave them' \
+  '  local budget d dog dog_self done_first elapsed last leftovers orphaned p pid rc rootid rrc runner runner_gap runnerid s seen_ck tampered tnow victims; builtin unset -v budget d dog dog_self done_first elapsed last leftovers orphaned p pid rc rootid rrc runner runner_gap runnerid s seen_ck tampered tnow victims' \
+  '  :' \
+  't_run_scratch_names_take_no_attribute_of_the_callers'
+shmutant_mut 'a bounded read assigns its scratch names under the attributes its caller gave them' \
+  '    builtin local c t w s; builtin unset -v c t w s' \
+  '    :' \
+  't_bounded_ps_takes_no_attribute_of_the_callers'
+shmutant_mut 'a run declares its scratch names and keeps the attributes a caller'"'"'s localvar_inherit hands them' \
+  '  local budget d dog dog_self done_first elapsed last leftovers orphaned p pid rc rootid rrc runner runner_gap runnerid s seen_ck tampered tnow victims; builtin unset -v budget d dog dog_self done_first elapsed last leftovers orphaned p pid rc rootid rrc runner runner_gap runnerid s seen_ck tampered tnow victims' \
+  '  local budget d dog dog_self done_first elapsed last leftovers orphaned p pid rc rootid rrc runner runner_gap runnerid s seen_ck tampered tnow victims' \
+  't_run_scratch_names_take_no_attribute_of_the_callers'
+shmutant_mut 'a bounded read declares its scratch names and keeps the attributes a caller'"'"'s localvar_inherit hands them' \
+  '    builtin local c t w s; builtin unset -v c t w s' \
+  '    builtin local c t w s' \
+  't_bounded_ps_takes_no_attribute_of_the_callers'
+shmutant_mut 'the look for the runner assigns its names under the attributes a caller gave them' \
+  '  local guard_of guard_of_id guard_self guard_gap_ref SHMUTANT_PS_BOUND; builtin unset -v guard_of guard_of_id guard_self guard_gap_ref SHMUTANT_PS_BOUND' \
+  '  :' \
+  't_run_scratch_names_take_no_attribute_of_the_callers'
+shmutant_mut 'the look for the runner declares its names and keeps the attributes a caller'"'"'s localvar_inherit hands them' \
+  '  local guard_of guard_of_id guard_self guard_gap_ref SHMUTANT_PS_BOUND; builtin unset -v guard_of guard_of_id guard_self guard_gap_ref SHMUTANT_PS_BOUND' \
+  '  local guard_of guard_of_id guard_self guard_gap_ref SHMUTANT_PS_BOUND' \
+  't_run_scratch_names_take_no_attribute_of_the_callers'
+shmutant_mut 'the callback is let go before its watchdog is started' \
+  '    dog=""' \
+  '    printf '"'"'go\n'"'"' >&"$go"; dog=""' \
+  't_watchdog_is_started_before_the_callback_is_let_go'
