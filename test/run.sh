@@ -4362,6 +4362,63 @@ t_watchdog_is_started_before_the_callback_is_let_go() {
 }
 
 # shellcheck disable=SC2034
+t_watchdog_hangup_stays_in_its_own_group() {
+  # #83: a run's watchdog is a job of its runner's, in a process group of its own, and a hang-up taken
+  # in that group stays there. bash sends SIGHUP to the process group it has recorded for the jobs of
+  # a substitution that is hung up, and the watchdog reads its own group so that the one recorded is
+  # its own and not its caller's. Witnessed by a snapshot of the watchdog's whose command substitution
+  # holds a job (a stand-in, which writes its pid only once the job is started; a process substitution
+  # holding one was seen to send nothing on): hung up by a signal (`signal`), and
+  # by the kernel, which hangs up and continues a stopped group whose last parent outside it is
+  # killed, as a freeze of the worker's tree does to the watchdog's (`orphaned`). Neither this shell
+  # (the run's caller) nor a process in its group is hung up.
+  local how sib sibid hup="" held grp
+  # A caller's shell is hung up here only when the watchdog leaks, which a mutation row does on
+  # purpose: the suite's own diagnostics directory gets no snapshot of that.
+  local SUITE_DIAG_DIR=""
+  trap 'hup=1' HUP
+  holding_snapshot() {
+    eval "$(declare -f _shmutant_snapshot | sed '1s/^_shmutant_snapshot /_snapshot_real /')"
+    _shmutant_snapshot() {
+      # The watchdog's alone (`dog_self` is its own): the callback's shell takes a snapshot too.
+      # In a command substitution, as the snapshot's own reads of the process table are.
+      local held_out
+      if [ -n "${dog_self:-}" ] && [ ! -e "$T/held" ]; then
+        held_out="$(sleep 30 > /dev/null 2>&1 & builtin printf '%s\n' "$BASHPID" > "$T/held.part" && mv -f -- "$T/held.part" "$T/held"; wait)"
+      fi
+      _snapshot_real "$@"
+    }
+  }
+  for how in signal orphaned; do
+    rm -f "$T/held" "$T/held.part"; hup=""
+    sleep 60 > /dev/null 2>&1 & sib=$!
+    sibid="$(_shmutant_identity "$sib" 2>/dev/null)"
+    if run_started "$T/$how" holding_snapshot; then
+      if ! wait_for "$T/held"; then fail_ "$how: fixture: the watchdog took no snapshot"
+      else
+        held="$(cat "$T/held")"; grp="$(pgid_of "$held")" || grp=""
+        if [ -z "$grp" ] || [ "$grp" = "$(pgid_of "$BASHPID")" ] || [ "$grp" = "$RUN_GRP" ]; then
+          fail_ "$how: fixture: the watchdog's snapshot is not in a group of the watchdog's own (${grp:-unread})"
+        else
+          case "$how" in
+            signal)   kill -HUP "$held" 2>/dev/null ;;
+            orphaned) kill -STOP -- -"$grp" 2>/dev/null; kill -KILL "$RUN_RUNNER" 2>/dev/null ;;
+          esac
+          wait_gone "$held" "" 50 || fail_ "$how: fixture: the watchdog's snapshot was not hung up"
+          [ -z "$hup" ] || fail_ "$how: a hang-up of the watchdog's group reached the shell that called the run"
+          wait_gone "$sib" "$sibid" 1 && fail_ "$how: a hang-up of the watchdog's group reached a process in the caller's group"
+        fi
+      fi
+      run_ended
+    fi
+    # Through its job, which bash signals only while it has not reaped it: the sleep may have been
+    # hung up above, and its number given to another process since.
+    _shmutant_ps_end "$sib"; wait "$sib" 2>/dev/null
+  done
+  trap - HUP
+}
+
+# shellcheck disable=SC2034
 t_watchdog_gives_up_on_a_read_of_its_runner_that_stalls() {
   # #81: a ps that does not answer about the runner must not hold the watchdog: each read of its look
   # is given up on after a second and is then one that could not be made. So a runner killed while

@@ -1940,6 +1940,12 @@ _shmutant_run_bounded() {
     # watchdog to end the run, and one killed before it leaves a callback that never ran.
     {
       (
+        # Job control on and off again, first, as the wrapper does: this shell was moved into a
+        # group of its own after the runner read the pool's, and a substitution of it that is hung
+        # up while it holds a job sends SIGHUP to the group bash has recorded. A freeze of the
+        # worker's tree stops this group and KILLs the runner, and the kernel then hangs the group
+        # up. Read here, that hang-up stays in this group; unread, it reaches the pool's.
+        builtin set -o monitor && builtin set +o monitor
         # Descendants are snapshotted every half second while the run is alive, so one that
         # detaches from the leader before the deadline (a new session, a reparented child) is
         # still named at the kill. A double fork whose intermediate lives less than a poll is

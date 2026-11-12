@@ -2814,6 +2814,10 @@ shmutant_mut 'the walk of descendants is read past its caller'"'"'s bound' \
   '  table="$(_shmutant_ps -A -o pid= -o ppid= 2>/dev/null)" || return 0' \
   '  table="$(command -p ps -A -o pid= -o ppid= 2>/dev/null)" || return 0' \
   't_watchdog_gives_up_on_a_read_of_its_runner_that_stalls'
+shmutant_mut 'the watchdog carries the process group its runner read' \
+  '        builtin set -o monitor && builtin set +o monitor' \
+  '        :' \
+  't_watchdog_hangup_stays_in_its_own_group'
 shmutant_mut 'the callback is let go before its watchdog is started' \
   '    dog=""' \
   '    printf '"'"'go\n'"'"' >&"$go"; dog=""' \
