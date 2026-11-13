@@ -140,6 +140,7 @@ tab or newline (they are escaped as `\t` and `\n`).
 shmutant  1  baseline  <select>  <verdict>  <seconds>  <detail>
 shmutant  1  row       <verdict> <name>  <target>  <select>  <seconds>  <detail>
 shmutant  1  summary   <label>   <rows>  <killed>  <jobs>  <seconds>
+shmutant  1  filter    <label>   <selected>  <declared>
 ```
 
 The second field is the stream format version. A baseline record's verdict is `green`, `red`,
@@ -155,7 +156,29 @@ exit "$rc"
 ```
 
 Exit status: 0 when every row was killed, 1 when any row was not, 2 when the harness itself
-could not run.
+could not run, and 3 when the pass was filtered (below) and every row it ran was killed.
+
+### Running named rows alone
+
+After a fix to one row, check that row without running the whole table again:
+
+```sh
+bash shmutant.sh run test/mutants.sh --row 'add multiplies'; rc=$?
+```
+
+`--row` takes one row name, exactly as the plan declares it (commas, spaces and a leading dash
+included), and may be repeated. It sets `SHMUTANT_ONLY`, one name per line, which a library caller
+of `shmutant_pool` sets itself. Only the named rows are cloned and run, and only their selectors get
+a baseline. A name the plan does not declare, or one that two rows share, is refused (status 2)
+before `prepare` runs, so a row that only `prepare` declares cannot be named this way.
+
+A filtered pass is not a verdict on the table. Every check made on the whole table still covers
+every row (an old literal that occurs twice in a row you did not name still refuses the pass),
+but the rows you did not name were not run. The pass says so three ways: it writes a `filter`
+record, `<selected>` of `<declared>` rows, before any other record; its summary's `<rows>` counts
+the selected rows; and its last line ends `filtered: N of M declared row(s) ran`. A filtered pass
+whose rows were all killed exits 3, never 0, so a caller that keeps only the status cannot take it
+for the whole table. A pass without the flag writes no `filter` record and is unchanged.
 
 ## Requirements
 
