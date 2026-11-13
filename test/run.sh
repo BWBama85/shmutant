@@ -2227,7 +2227,7 @@ t_script_carries_its_license() {
   # header ends with, each behind `# `
   local lic="$here/../LICENSE" header
   [ -s "$lic" ] || { fail_ "fixture: no LICENSE at $lic"; return; }
-  header="$(awk 'NR > 1 && !/^#/ { exit } { print }' "$SHMUTANT")"
+  header="$(awk '!/^#/ { exit } { print }' "$SHMUTANT")"
   eq "$(printf '%s\n' "$header" | grep 'SPDX-License-Identifier')" '# SPDX-License-Identifier: MIT' 'the header holds one SPDX tag, a line of its own'
   eq "$(grep -c 'SPDX-License-Identifier' "$SHMUTANT")" 1 'and the file holds no other'
   printf '%s\n' "$header" | awk '$0 == "# MIT License" { on = 1 } on { sub(/^# ?/, ""); print }' > "$T/notice"

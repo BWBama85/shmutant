@@ -21,8 +21,9 @@ and exits 2.
 
 Upgrading is copying a newer file and re-checking the digest.
 
-shmutant is MIT-licensed. The file carries its license notice in its header, so the copy needs no
-`LICENSE` beside it: keep the header as it is.
+shmutant is MIT-licensed. Every release after 0.4.0 carries the license notice in the file's
+header, so a copy of one needs no `LICENSE` beside it: keep the header as it is. The 0.4.0 file and
+the ones before it carry no notice.
 
 ## 2. The adapter contract
 

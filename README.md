@@ -255,5 +255,6 @@ in `CHECKSUMS`. The script's header lists every check.
 
 ## License
 
-MIT: see [LICENSE](LICENSE). `shmutant.sh` carries the same notice in its header, so a copy of the
-file on its own is licensed as the repository is. Keep the header in the copy.
+MIT: see [LICENSE](LICENSE). `shmutant.sh` carries the same notice in its header, in every release
+after 0.4.0, so a copy of the file on its own is licensed as the repository is. Keep the header in
+the copy.
