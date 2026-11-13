@@ -3356,12 +3356,14 @@ _shmutant_report_keep() {
   { printf '%s\n' "${SHMUTANT_KEEP:-0}" >&"$SHMUTANT_CLI_KEEP_FD"; } 2>/dev/null || _shmutant_err "the keep channel could not be written; an interrupt would not know to keep the workdir"
 }
 
-# shmutant_pool <label> <workdir> <prepare> <run> [cap] — run every table row. Prepares the
-# tree once, runs each distinct selector uninjected (SHMUTANT_BASELINE), then every row through a
-# pool of min(SHMUTANT_JOBS or CPUs, cap or 8) workers. Emits the verdict stream and one stderr
-# line per row that was not killed. Returns 0 when every row was killed, 1 when any was not,
-# 2 when the harness itself could not run (a refused declaration, empty table, bad workdir,
-# prepare failed, root outside the workdir, or a verdict-stream write that failed).
+# shmutant_pool <label> <workdir> <prepare> <run> [cap] — run every table row, or only the rows
+# SHMUTANT_ONLY names. Prepares the tree once, runs each distinct selector of those rows
+# uninjected (SHMUTANT_BASELINE), then each of those rows through a pool of min(SHMUTANT_JOBS or
+# CPUs, cap or 8) workers. Emits the verdict stream and one stderr line per row that was not
+# killed. Returns 0 when every row was killed, 1 when any was not, 2 when the harness itself
+# could not run (a refused declaration, empty table, bad workdir, prepare failed, root outside
+# the workdir, a SHMUTANT_ONLY name that names no row or several, or a verdict-stream write that
+# failed), and 3 when a filtered pass killed every row it ran.
 shmutant_pool() {
   # Aliases off for the whole pool, callbacks included (their bodies were parsed when defined);
   # the caller's setting is put back on return.

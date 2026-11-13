@@ -163,7 +163,7 @@ could not run, and 3 when the pass was filtered (below) and every row it ran was
 After a fix to one row, check that row without running the whole table again:
 
 ```sh
-bash shmutant.sh run test/mutants.sh --row 'add multiplies'; rc=$?
+bash shmutant.sh run mutants.sh --row 'add multiplies'; rc=$?
 ```
 
 `--row` takes one row name, exactly as the plan declares it (commas, spaces and a leading dash
@@ -176,9 +176,10 @@ A filtered pass is not a verdict on the table. Every check made on the whole tab
 every row (an old literal that occurs twice in a row you did not name still refuses the pass),
 but the rows you did not name were not run. The pass says so three ways: it writes a `filter`
 record, `<selected>` of `<declared>` rows, before any other record; its summary's `<rows>` counts
-the selected rows; and its last line ends `filtered: N of M declared row(s) ran`. A filtered pass
+the selected rows; and its last line carries `filtered: N of M declared row(s) ran`. A filtered pass
 whose rows were all killed exits 3, never 0, so a caller that keeps only the status cannot take it
-for the whole table. A pass without the flag writes no `filter` record and is unchanged.
+for the whole table. With `SHMUTANT_ONLY` unset (no `--row`, and none inherited from the
+environment) a pass writes no `filter` record and is unchanged.
 
 ## Requirements
 
