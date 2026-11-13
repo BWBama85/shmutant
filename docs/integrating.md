@@ -21,6 +21,10 @@ and exits 2.
 
 Upgrading is copying a newer file and re-checking the digest.
 
+shmutant is MIT-licensed. Every release after 0.4.0 carries the license notice in the file's
+header, so a copy of one needs no `LICENSE` beside it: keep the header as it is. The 0.4.0 file and
+the ones before it carry no notice.
+
 ## 2. The adapter contract
 
 `shmutant` does not know your test framework. It calls two functions you write:

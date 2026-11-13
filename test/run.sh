@@ -2221,6 +2221,20 @@ c"
   eq "$(wc -c < "$T/ckstdout" | tr -d ' ')" 0 'and prints nothing'
 }
 
+t_script_carries_its_license() {
+  # shmutant.sh is copied on its own, so its header (the comment lines it opens with) carries the
+  # license: one SPDX tag naming it, and the text of the repository's LICENSE as the lines the
+  # header ends with, each behind `# `
+  local lic="$here/../LICENSE" header
+  [ -s "$lic" ] || { fail_ "fixture: no LICENSE at $lic"; return; }
+  header="$(awk '!/^#/ { exit } { print }' "$SHMUTANT")"
+  eq "$(printf '%s\n' "$header" | grep 'SPDX-License-Identifier')" '# SPDX-License-Identifier: MIT' 'the header holds one SPDX tag, a line of its own'
+  eq "$(grep -c 'SPDX-License-Identifier' "$SHMUTANT")" 1 'and the file holds no other'
+  printf '%s\n' "$header" | awk '$0 == "# MIT License" { on = 1 } on { sub(/^# ?/, ""); print }' > "$T/notice"
+  diff -- "$lic" "$T/notice" > "$T/notice.diff" 2>&1 \
+    || fail_ "the notice the header ends with is not the text of LICENSE: $(head -n 6 "$T/notice.diff" | tr '\n' '|')"
+}
+
 t_cli_removes_shadows_planted_before_it_ran() {
   # BASH_ENV runs before the script: functions named wait and trap planted there would stand
   # in for the CLI's own control primitives; the CLI removes every such name first

@@ -252,3 +252,9 @@ being cut. `scripts/bump.sh <X.Y.Z | patch | minor | major>` makes the version b
 request on its own before the cut. The driver then tags `main`'s head, publishes the GitHub release with `shmutant.sh` and
 `CHECKSUMS` attached, and verifies that the install URL in `docs/integrating.md` serves the digest
 in `CHECKSUMS`. The script's header lists every check.
+
+## License
+
+MIT: see [LICENSE](LICENSE). `shmutant.sh` carries the same notice in its header, in every release
+after 0.4.0, so a copy of the file on its own is licensed as the repository is. Keep the header in
+the copy.

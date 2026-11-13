@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # shmutant — mutation testing for bash and POSIX shell.
+# SPDX-License-Identifier: MIT
 #
 # Inject one literal defect per row into a throwaway copy of a tree, run only the tests that
 # claim to cover it, and require that test to go RED on its own witness. Vendorable as this one
@@ -63,6 +64,31 @@
 # on INT/TERM, the trees of running workers. Every external command is run through
 # `command -p`: a function a plan defines under a utility's name, a function exported by the
 # invoking environment, or a PATH prepare set to the tree's own bin never stands in for one.
+#
+# License: the notice below is the whole of the repository's LICENSE file, carried here so that a
+# copy of this one file needs nothing beside it. Keep it in every copy.
+#
+# MIT License
+#
+# Copyright (c) 2026 Brent Wilson
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
 
 # A function named builtin — one the CLI inherited as an exported function, or a caller's —
 # would stand in for every qualified call below; it goes first. Tests below are the [[ keyword,

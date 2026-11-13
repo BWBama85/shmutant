@@ -12,6 +12,8 @@ prepare() {
   cp -- "$SHMUTANT_PLAN_DIR/run.sh" "$1/test/" || return 1
   # t_doc_witness_check_refuses_a_row runs a block of the guide as written
   cp -- "$SHMUTANT_PLAN_DIR/../docs/integrating.md" "$1/docs/" || return 1
+  # t_script_carries_its_license compares the notice in shmutant.sh with it
+  cp -- "$SHMUTANT_PLAN_DIR/../LICENSE" "$1/" || return 1
 }
 
 run() { bash "$1/test/run.sh"; }
@@ -2854,3 +2856,17 @@ shmutant_mut 'the callback is let go before its watchdog is started' \
   '    dog=""' \
   '    printf '"'"'go\n'"'"' >&"$go"; dog=""' \
   't_watchdog_is_started_before_the_callback_is_let_go'
+
+# --- the license the file carries (#39) ---
+shmutant_mut 'the SPDX tag names another license' \
+  '# SPDX-License-Identifier: MIT' \
+  '# SPDX-License-Identifier: MIT-0' \
+  't_script_carries_its_license'
+shmutant_mut 'a second SPDX tag, past the header, names another license' \
+  '# would stand in for every qualified call below; it goes first. Tests below are the [[ keyword,' \
+  '# SPDX-License-Identifier: 0BSD' \
+  't_script_carries_its_license'
+shmutant_mut 'the notice in the header is not the text of LICENSE' \
+  'WITHOUT WARRANTY OF ANY KIND' \
+  'WITH WARRANTY OF ANY KIND' \
+  't_script_carries_its_license'
