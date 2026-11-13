@@ -3473,12 +3473,15 @@ t_verdict_timeout() {
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
   shmutant_mut 'hangs' '$1 + $2' '$1 - $2' 'add-works'
-  slow_run() { bash -c 'sleep 3; touch "$1/finished"' _ "$T"; }
+  # The run's process sleeps long and is recorded: the check waits on it rather than on a fixed window,
+  # since the freeze and kill take longer on a loaded host, and a survivor is one still there after.
+  slow_run() { bash -c 'sleep 30; touch "$1/finished"' _ "$T" & note_started "$T/slow.id"; wait "$!"; }
   SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=1 pool lbl "$T/wd" toy_prepare slow_run
   rc_is "$RC" 1 'a timeout fails the pool'
   eq "$(verdict_of 'hangs')" timeout 'verdict is timeout'
   has "$ERR" 'within 1s' 'reports the bound'
-  sleep 3
+  if [ -s "$T/slow.id" ]; then run_gone "$T/slow.id" 'the process of a run, after its timeout'
+  else fail_ 'fixture: the run never recorded its process'; fi
   [ -e "$T/finished" ] && fail_ 'the run outlived its timeout — the process tree was not killed'
   # what was still there at the deadline is listed on stderr, so a hang can be diagnosed
   has "$ERR" 'still running at the deadline' 'the deadline listing is printed'
@@ -3489,15 +3492,16 @@ t_verdict_timeout_kills_a_term_ignoring_descendant() {
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
   shmutant_mut 'hangs' '$1 + $2' '$1 - $2' 'add-works'
-  stubborn_run() { bash -c 'trap "" TERM; : > "$1/ignoring"; sleep 4; touch "$1/finished"' _ "$T" & note_started "$T/stubborn.id"; wait "$!"; }
+  # The descendant sleeps long: the check waits on its record rather than on a fixed window, as in
+  # t_verdict_timeout. One left frozen still runs, and fails the wait as one left alive does.
+  stubborn_run() { bash -c 'trap "" TERM; : > "$1/ignoring"; sleep 30; touch "$1/finished"' _ "$T" & note_started "$T/stubborn.id"; wait "$!"; }
   SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=1 pool lbl "$T/wd" toy_prepare stubborn_run
   eq "$(verdict_of 'hangs')" timeout 'verdict is timeout'
-  sleep 4
+  if [ -s "$T/stubborn.id" ]; then run_gone "$T/stubborn.id" 'a descendant that ignores TERM, after the timeout'
+  else fail_ 'fixture: the run never recorded its descendant'; fi
   [ -e "$T/finished" ] && fail_ 'a descendant that ignores TERM outlived the timeout — the watchdog never reached KILL'
   # written once its trap is set: one ended before that never ignored TERM, and tested nothing
   [ -e "$T/ignoring" ] || fail_ 'fixture: the descendant was ended before it set its TERM trap'
-  local alive; alive="$(left_running "$T/stubborn.id")" || fail_ 'fixture: the run never recorded its descendant'
-  [ -z "$alive" ] || fail_ 'a process of the run is still there (frozen or alive) after the timeout was scored'
 }
 
 t_verdict_timeout_kills_an_escaped_process_group() {

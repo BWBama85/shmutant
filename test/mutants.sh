@@ -651,6 +651,10 @@ shmutant_mut 'a rejected root is still searched from by the final kill' \
   '  else _shmutant_kill_tree KILL "" "${frozen[@]}"' \
   '  else _shmutant_kill_tree KILL "$pid" "${frozen[@]}"' \
   't_post_run_cleanup_never_signals_a_reaped_root_by_number'
+shmutant_mut 'a frozen tree is ended with TERM, which a process can ignore' \
+  '  if [ "$root_ok" = 1 ]; then _shmutant_kill_tree KILL "$pid" "${frozen[@]}" "${unfrozen[@]}"' \
+  '  if [ "$root_ok" = 1 ]; then _shmutant_kill_tree TERM "$pid" "${frozen[@]}" "${unfrozen[@]}"' \
+  't_verdict_timeout_kills_a_term_ignoring_descendant'
 shmutant_mut 'a bare live root needs an identity to be stopped' \
   '  if [ "$spec" = "$pid" ]; then root_ok=1' \
   '  if [ "$spec" = "$pid" ]; then rootid="$(_shmutant_identity "$pid")" && root_ok=1' \
