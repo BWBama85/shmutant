@@ -470,9 +470,11 @@ outside the workdir, a stream write failure, `SHMUTANT_COUNTS=1` without the bas
 Keep `SHMUTANT_KEEP=1` and `--workdir` on a CI failure to upload `mut-<n>/output` as an
 artifact: it is the full output of the run that produced the verdict. A `--workdir` you supply
 is never removed; the pool's `base-<n>`, `mut-<n>` and `pristine` entries inside it are recreated
-on every run, except the `mut-<n>` of a row a filtered pass did not run: that one is left as an
-earlier pass made it, so only a `mut-<n>` whose row has a record in this run's stream is this
-run's. Those entries are only ever removed from a workdir shmutant marked as its own on
+as this run uses them. An entry it does not use is left as an earlier pass made it: the
+`mut-<n>` of a row a filtered pass did not run, and every `base-<n>` past this run's baseline
+runs (a filtered pass runs fewer). So only a `mut-<n>` whose row has a record in this run's
+stream is this run's, and of the `base-<n>` entries only the first, one per baseline record in
+it, in the order of those records. Those entries are only ever removed from a workdir shmutant marked as its own on
 first use (a `.shmutant` file holding exactly the line `shmutant workdir`, its newline included,
 and nothing else): a directory that already holds entries by those names and no marker, or a
 `.shmutant` of the caller's own with anything else in it, is refused, not emptied. Each worker reports its verdict on a descriptor the pool opened

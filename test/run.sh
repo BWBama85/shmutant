@@ -7403,6 +7403,19 @@ t_only_refuses_an_undeclared_name_before_prepare() {
   has "$ERR" "SHMUTANT_ONLY names 'nope'" 'and named'
   [ -e "$T/prepared" ] || fail_ 'fixture: prepare did not run'
   [ -e "$T/wd2/mut-0" ] && fail_ 'a row ran after the name prepare set was refused'
+  # And the table prepare leaves: a name it took away, or gave a second row, is refused before
+  # any baseline.
+  drop_prepare() { shmutant_reset; shmutant_target lib.sh; shmutant_mut 'other' '$1 + $2' '$1 - $2' 'add-works'; toy_prepare "$@"; }
+  SHMUTANT_ONLY=a pool lbl "$T/wd3" drop_prepare toy_run
+  rc_is "$RC" 2 'a name prepare took out of the table is refused'
+  has "$ERR" "SHMUTANT_ONLY names 'a', which no row of the table declares" 'and named'
+  [ -e "$T/wd3/base-0" ] && fail_ 'a baseline ran after prepare took the named row away'
+  shmutant_reset; shmutant_target lib.sh; shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  twin_prepare() { shmutant_mut 'a' '-eq 0' '-ne 0' 'even-works'; toy_prepare "$@"; }
+  SHMUTANT_ONLY=a pool lbl "$T/wd4" twin_prepare toy_run
+  rc_is "$RC" 2 'a name prepare gave a second row is refused'
+  has "$ERR" "SHMUTANT_ONLY names 'a', which 2 rows share" 'and says so'
+  [ -e "$T/wd4/base-0" ] && fail_ 'a baseline ran after prepare gave the named row a twin'
 }
 
 t_only_format_is_checked_with_the_settings() {
