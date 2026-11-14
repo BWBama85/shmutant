@@ -15,7 +15,8 @@ SHMUTANT="$here/../shmutant.sh"
 # or pool it runs inherits the setting, since several reach the snapshot points on purpose.
 SUITE_DIAG_DIR="${SHMUTANT_DIAG_DIR:-}"; SUITE_DIAG_ID=""; export -n SUITE_DIAG_DIR SUITE_DIAG_ID
 unset SHMUTANT_TIMEOUT SHMUTANT_JOBS SHMUTANT_KEEP SHMUTANT_STREAM SHMUTANT_BASELINE \
-  SHMUTANT_RED_PREFIX SHMUTANT_RED_STATUS SHMUTANT_COUNTS SHMUTANT_COUNTS_FD SHMUTANT_DIAG_DIR SHMUTANT_DIAG_ID
+  SHMUTANT_RED_PREFIX SHMUTANT_RED_STATUS SHMUTANT_COUNTS SHMUTANT_COUNTS_FD SHMUTANT_DIAG_DIR SHMUTANT_DIAG_ID \
+  SHMUTANT_ONLY
 
 # --- assertions: every failure names the unit, so a witness is a unit name ----------------------
 
@@ -7305,6 +7306,176 @@ t_pool_runs_baseline_once_per_selector() {
   eq "$(wc -l < "$T/runs" | tr -d ' ')" 5 'two baseline runs plus three rows'
 }
 
+# --- units: SHMUTANT_ONLY, the rows a pass runs ------------------------------------------------------
+
+t_only_runs_the_named_rows_alone() {
+  # Only the named rows are cloned and run, under their original indices, and only their
+  # selectors get a baseline; the stream and the last line say how many of the declared rows ran,
+  # and a pass whose named rows were all killed exits 3, never 0.
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  shmutant_mut 'ab' '$1 + $2' '$1 * $2' 'add-works'
+  shmutant_mut 'c' '-eq 0' '-ne 0' 'even-works'
+  counting_run() { printf '%s\n' "$2" >> "$T/runs"; bash "$1/test.sh"; }
+  # A clone of an unnamed row left by an earlier pass in the same workdir is neither removed nor
+  # read as this pass's.
+  SHMUTANT_BASELINE=0 pool lbl "$T/wd" toy_prepare toy_run
+  rc_is "$RC" 0 'fixture: an earlier, unfiltered pass in the same workdir'
+  printf 'old\n' > "$T/wd/mut-0/planted"; rm -rf "$T/wd/mut-1"
+  SHMUTANT_KEEP=1 SHMUTANT_ONLY=c pool lbl "$T/wd" toy_prepare counting_run
+  rc_is "$RC" 3 'a filtered pass whose named row was killed exits 3'
+  eq "$(cat "$T/runs")" $'even-works\neven-works' "one baseline, for the named row's selector, and one row run"
+  eq "$(printf '%s\n' "$OUT" | awk -F'\t' '$3 == "row" { print $5 }')" c 'a row record for the named row alone'
+  eq "$(printf '%s\n' "$OUT" | head -n 1)" $'shmutant\t1\tfilter\tlbl\t1\t3' 'the filter record comes first: 1 of 3 rows'
+  eq "$(field summary 5) $(field summary 6)" '1 1' 'the summary counts the selected row'
+  has "$ERR" 'lbl: 1/1 mutation(s) killed on their own witness' 'the last line counts the selected row'
+  has "$ERR" 'filtered: 1 of 3 declared row(s) ran' 'and says how many of the declared rows ran'
+  [ -d "$T/wd/mut-2/tree" ] || fail_ 'the named row kept its own index: no mut-2'
+  [ -e "$T/wd/mut-1" ] && fail_ 'an unnamed row was given a directory'
+  eq "$(cat "$T/wd/mut-0/planted" 2>/dev/null)" old "an earlier pass's clone of an unnamed row is left as it was"
+  # Whole names, case and all: 'a' is not 'ab' and 'A' is not 'a', nocasematch on or not.
+  rm -f "$T/runs"
+  shopt -s nocasematch
+  SHMUTANT_ONLY=a pool lbl "$T/wd2" toy_prepare counting_run
+  eq "$(printf '%s\n' "$OUT" | awk -F'\t' '$3 == "row" { print $5 }')" a "'a' selects a alone, not ab"
+  SHMUTANT_ONLY=A pool lbl "$T/wd3" toy_prepare counting_run
+  rc_is "$RC" 2 "'A' names no row, whatever nocasematch says"
+  shopt -u nocasematch
+  # Rows that are not adjacent, and every row named: still a filtered pass.
+  SHMUTANT_ONLY=$'c\na' pool lbl "$T/wd4" toy_prepare toy_run
+  rc_is "$RC" 3 'two rows, not adjacent'
+  eq "$(printf '%s\n' "$OUT" | awk -F'\t' '$3 == "row" { print $5 }' | tr '\n' ' ')" 'a c ' 'run in declaration order, not the order named'
+  SHMUTANT_ONLY=$'a\nab\nc' pool lbl "$T/wd5" toy_prepare toy_run
+  rc_is "$RC" 3 'every row named is still a filtered pass, not the whole table'
+  eq "$(field filter 5) $(field filter 6)" '3 3' 'and its filter record says 3 of 3'
+}
+
+t_only_scores_a_named_survivor() {
+  # A named row that is not killed is 1, as in an unfiltered pass.
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  shmutant_mut 'survivor' '$1 + $2' '$2 + $1' 'add-works'
+  SHMUTANT_ONLY=survivor pool lbl "$T/wd" toy_prepare toy_run
+  rc_is "$RC" 1 'a named survivor exits 1'
+  eq "$(verdict_of survivor)" survived 'scored as it would be in the whole table'
+}
+
+t_only_keeps_the_unselected_reference_for_counts() {
+  # With SHMUTANT_COUNTS=1 the unselected run is still made: every selection is compared with it.
+  mk_counted_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'add subtracts' '$1 + $2' '$1 - $2' 'add-works'
+  shmutant_mut 'even flips' '-eq 0' '-ne 0' 'even-works'
+  SHMUTANT_COUNTS=1 SHMUTANT_ONLY='even flips' pool lbl "$T/wd" toy_prepare toy_run
+  rc_is "$RC" 3 'the named row is killed'
+  eq "$(printf '%s\n' "$OUT" | awk -F'\t' '$3 == "baseline" { print "[" $4 "] " $5 }')" $'[] green\n[even-works] green' 'the unselected reference and the named selector, nothing else'
+}
+
+t_only_refuses_an_undeclared_name_before_prepare() {
+  # A name the table does not hold, or one two rows share, is refused before prepare runs, and
+  # every such name is reported.
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  shmutant_mut 'twin' '$1 + $2' '$1 * $2' 'add-works'
+  shmutant_mut 'twin' '-eq 0' '-ne 0' 'even-works'
+  marking_prepare() { : > "$T/prepared"; toy_prepare "$@"; }
+  SHMUTANT_ONLY=$'nope\na\nalso nope' pool lbl "$T/wd" marking_prepare toy_run
+  rc_is "$RC" 2 'an undeclared name is a harness error'
+  has "$ERR" "SHMUTANT_ONLY names 'nope', which no row of the table declares" 'it is named'
+  has "$ERR" "SHMUTANT_ONLY names 'also nope'" 'and so is every other'
+  has "$ERR" '2 name(s) in SHMUTANT_ONLY refused' 'with the count'
+  [ -e "$T/prepared" ] && fail_ 'prepare ran before an undeclared name was refused'
+  [ -e "$T/wd/pristine" ] && fail_ 'a pristine tree was made before an undeclared name was refused'
+  SHMUTANT_ONLY=twin pool lbl "$T/wd" marking_prepare toy_run
+  rc_is "$RC" 2 'a name two rows share is refused'
+  has "$ERR" "SHMUTANT_ONLY names 'twin', which 2 rows share" 'and says so'
+  [ -e "$T/prepared" ] && fail_ 'prepare ran before a shared name was refused'
+  pool lbl "$T/wd" marking_prepare toy_run
+  rc_is "$RC" 0 'unfiltered, two rows may still share a name'
+  # The table as prepare leaves it, and the setting: prepare may change either.
+  rm -f "$T/prepared"
+  late_prepare() { : > "$T/prepared"; SHMUTANT_ONLY=nope; toy_prepare "$@"; }
+  SHMUTANT_ONLY=a pool lbl "$T/wd2" late_prepare toy_run
+  rc_is "$RC" 2 'a name prepare set is checked after prepare'
+  has "$ERR" "SHMUTANT_ONLY names 'nope'" 'and named'
+  [ -e "$T/prepared" ] || fail_ 'fixture: prepare did not run'
+  [ -e "$T/wd2/mut-0" ] && fail_ 'a row ran after the name prepare set was refused'
+  # And the table prepare leaves: a name it took away, or gave a second row, is refused before
+  # any baseline.
+  drop_prepare() { shmutant_reset; shmutant_target lib.sh; shmutant_mut 'other' '$1 + $2' '$1 - $2' 'add-works'; toy_prepare "$@"; }
+  SHMUTANT_ONLY=a pool lbl "$T/wd3" drop_prepare toy_run
+  rc_is "$RC" 2 'a name prepare took out of the table is refused'
+  has "$ERR" "SHMUTANT_ONLY names 'a', which no row of the table declares" 'and named'
+  [ -e "$T/wd3/base-0" ] && fail_ 'a baseline ran after prepare took the named row away'
+  shmutant_reset; shmutant_target lib.sh; shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  twin_prepare() { shmutant_mut 'a' '-eq 0' '-ne 0' 'even-works'; toy_prepare "$@"; }
+  SHMUTANT_ONLY=a pool lbl "$T/wd4" twin_prepare toy_run
+  rc_is "$RC" 2 'a name prepare gave a second row is refused'
+  has "$ERR" "SHMUTANT_ONLY names 'a', which 2 rows share" 'and says so'
+  [ -e "$T/wd4/base-0" ] && fail_ 'a baseline ran after prepare gave the named row a twin'
+}
+
+t_only_format_is_checked_with_the_settings() {
+  # Set and empty, an empty name and a name given twice are each refused before prepare.
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  marking_prepare() { : > "$T/prepared"; toy_prepare "$@"; }
+  SHMUTANT_ONLY='' pool lbl "$T/wd" marking_prepare toy_run
+  rc_is "$RC" 2 'set and empty is refused, not read as unset'
+  has "$ERR" 'SHMUTANT_ONLY is set and empty' 'and says so'
+  SHMUTANT_ONLY=$'a\n\na' pool lbl "$T/wd" marking_prepare toy_run
+  rc_is "$RC" 2 'an empty name between two is refused'
+  has "$ERR" 'SHMUTANT_ONLY holds an empty name' 'and says so'
+  SHMUTANT_ONLY=$'a\n' pool lbl "$T/wd" marking_prepare toy_run
+  rc_is "$RC" 2 'a trailing newline is an empty name'
+  SHMUTANT_ONLY=$'a\na' pool lbl "$T/wd" marking_prepare toy_run
+  rc_is "$RC" 2 'a name given twice is refused'
+  has "$ERR" "SHMUTANT_ONLY names 'a' twice" 'and named'
+  [ -e "$T/prepared" ] && fail_ 'prepare ran before a malformed SHMUTANT_ONLY was refused'
+  # shellcheck disable=SC2034 # read by the pool after prepare returns
+  bad_prepare() { SHMUTANT_ONLY=''; toy_prepare "$@"; }
+  pool lbl "$T/wd" bad_prepare toy_run
+  rc_is "$RC" 2 'an empty SHMUTANT_ONLY prepare set is refused after prepare'
+  has "$ERR" 'a setting changed by prepare is invalid' 'by the check after prepare'
+}
+
+t_only_keeps_whole_table_checks() {
+  # A row the filter does not name is still checked: its ambiguous old literal refuses the pass.
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  shmutant_mut 'dup' '$(( $1' '$(( 0' 'add-works'
+  SHMUTANT_ONLY=a pool lbl "$T/wd" toy_prepare toy_run
+  rc_is "$RC" 2 'an ambiguous literal outside the filter refuses the pass'
+  has "$ERR" "row 'dup' is refused" 'and names the row'
+  hasnt "$OUT" $'\tfilter\t' 'no filter record: nothing ran'
+}
+
+t_only_leaves_an_unfiltered_stream_as_it_was() {
+  # With SHMUTANT_ONLY unset the stream and the last line are those of the pass before the filter
+  # existed, byte for byte: the durations and the worker count pinned, every record compared.
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  shmutant_mut 'survivor' '$1 + $2' '$2 + $1' 'add-works'
+  shmutant_mut 'c' '-eq 0' '-ne 0' 'even-works'
+  _shmutant_secs() { printf '0.000'; }
+  SHMUTANT_JOBS=1 pool lbl "$T/wd" toy_prepare toy_run
+  rc_is "$RC" 1 'the survivor makes it 1'
+  eq "$OUT" "$(printf '%s\n' \
+    $'shmutant\t1\tbaseline\tadd-works\tgreen\t0.000\tgreen before injection' \
+    $'shmutant\t1\tbaseline\teven-works\tgreen\t0.000\tgreen before injection' \
+    $'shmutant\t1\trow\tkilled\ta\tlib.sh\tadd-works\t0.000\twent red on its witness' \
+    $'shmutant\t1\trow\tsurvived\tsurvivor\tlib.sh\tadd-works\t0.000\tstayed GREEN (exit 0) — nothing selected by [add-works] can detect this defect' \
+    $'shmutant\t1\trow\tkilled\tc\tlib.sh\teven-works\t0.000\twent red on its witness' \
+    $'shmutant\t1\tsummary\tlbl\t3\t2\t1\t0.000')" 'the unfiltered stream, byte for byte'
+  eq "$(printf '%s\n' "$ERR" | tail -n 1)" 'shmutant: lbl: 2/3 mutation(s) killed on their own witness (jobs=1, 0.000s)' 'and the last line'
+}
+
 # --- units: the stream ------------------------------------------------------------------------------------
 
 t_stream_format() {
@@ -7648,6 +7819,33 @@ t_cli_labels_its_stream_and_refuses_bad_arguments() {
   bash "$SHMUTANT" run "$T/toy/plan.sh" --bogus > /dev/null 2>&1; rc_is $? 2 'an unknown option is refused'
   bash "$SHMUTANT" run > /dev/null 2>&1; rc_is $? 2 'run without a plan is usage'
   bash "$SHMUTANT" run "$T/nope.sh" > /dev/null 2>&1; rc_is $? 2 'a missing plan is refused'
+}
+
+t_cli_selects_rows_by_name() {
+  # --row names one row, verbatim (a comma, a leading dash), may be repeated, and replaces an
+  # SHMUTANT_ONLY from the environment; a missing, empty or undeclared name is refused (2) before
+  # the plan's prepare runs, and a filtered pass whose named rows were killed exits 3.
+  mk_cli_toy
+  printf "shmutant_mut 'b, with a comma' '\$1 + \$2' '\$1 * \$2' 'add-works'\nshmutant_mut '--dash' '\$1 + \$2' '\$1 / \$2' 'add-works'\nshmutant_mut 'survivor' '%%' '+' 'uncovered'\n" >> "$T/toy/plan.sh"
+  OUT="$(bash "$SHMUTANT" run "$T/toy/plan.sh" --row 'b, with a comma' --row --dash 2> "$T/err")"; rc_is $? 3 'two named rows, both killed: 3'
+  eq "$(printf '%s\n' "$OUT" | awk -F'\t' '$3 == "row" { print $5 }' | tr '\n' '|')" 'b, with a comma|--dash|' 'exactly those rows ran'
+  eq "$(field filter 5) $(field filter 6)" '2 4' 'the filter record says 2 of 4'
+  has "$(cat "$T/err")" 'filtered: 2 of 4 declared row(s) ran' 'and so does the last line'
+  OUT="$(SHMUTANT_ONLY='--dash' bash "$SHMUTANT" run "$T/toy/plan.sh" 2> /dev/null)"; rc_is $? 3 'SHMUTANT_ONLY from the environment alone filters a CLI pass'
+  eq "$(printf '%s\n' "$OUT" | awk -F'\t' '$3 == "row" { print $5 }')" --dash 'to the row it names'
+  OUT="$(SHMUTANT_ONLY=nope bash "$SHMUTANT" run "$T/toy/plan.sh" --row survivor 2> /dev/null)"; rc_is $? 1 '--row replaces SHMUTANT_ONLY from the environment; the named survivor is 1'
+  eq "$(printf '%s\n' "$OUT" | awk -F'\t' '$3 == "row" { print $5 }')" survivor 'the survivor alone ran'
+  bash "$SHMUTANT" run "$T/toy/plan.sh" --row > /dev/null 2> "$T/e"; rc_is $? 2 '--row without a name is refused'
+  has "$(cat "$T/e")" '--row needs a row name' 'says so'
+  bash "$SHMUTANT" run "$T/toy/plan.sh" --row '' > /dev/null 2> "$T/e"; rc_is $? 2 'an empty --row is refused'
+  has "$(cat "$T/e")" '--row needs a row name' 'by --row itself'
+  bash "$SHMUTANT" run "$T/toy/plan.sh" --row $'a\nb' > /dev/null 2> "$T/e"; rc_is $? 2 'a --row holding a newline is refused'
+  has "$(cat "$T/e")" 'containing a newline cannot be selected' 'says why'
+  sed 's/^prepare() {/prepare() { : > "$SHMUTANT_PLAN_DIR\/prepared";/' "$T/toy/plan.sh" > "$T/toy/plan-mark.sh"
+  bash "$SHMUTANT" run "$T/toy/plan-mark.sh" --row 'b, with' > /dev/null 2> "$T/e"; rc_is $? 2 'a name the plan does not declare is refused'
+  has "$(cat "$T/e")" "SHMUTANT_ONLY names 'b, with', which no row" 'and named: a prefix of a row name is not that row'
+  [ -e "$T/toy/prepared" ] && fail_ "the plan's prepare ran before the undeclared name was refused"
+  return 0
 }
 
 t_cli_removes_only_the_workdir_it_made_unless_kept() {

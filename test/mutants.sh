@@ -2870,3 +2870,93 @@ shmutant_mut 'the notice in the header is not the text of LICENSE' \
   'WITHOUT WARRANTY OF ANY KIND' \
   'WITH WARRANTY OF ANY KIND' \
   't_script_carries_its_license'
+
+# --- SHMUTANT_ONLY and --row: the rows a pass runs (#85) ---
+shmutant_mut 'the format check of SHMUTANT_ONLY is never made' \
+  'if [ -n "${SHMUTANT_ONLY+x}" ]; then _shmutant_only_format "$label" || return 2; fi' \
+  ':' \
+  't_only_format_is_checked_with_the_settings'
+shmutant_mut 'a set and empty SHMUTANT_ONLY is accepted' \
+  '[ -n "$SHMUTANT_ONLY" ] || { _shmutant_err' \
+  '[ -n "x$SHMUTANT_ONLY" ] || { _shmutant_err' \
+  't_only_format_is_checked_with_the_settings'
+shmutant_mut 'an empty name in SHMUTANT_ONLY is accepted' \
+  '[ -n "$name" ] || { _shmutant_err "$label: SHMUTANT_ONLY holds an empty name' \
+  '[ -n "x$name" ] || { _shmutant_err "$label: SHMUTANT_ONLY holds an empty name' \
+  't_only_format_is_checked_with_the_settings'
+shmutant_mut 'a name given twice in SHMUTANT_ONLY is accepted' \
+  '[ "$k" != "$name" ] || { _shmutant_err' \
+  '[ "$k" = "$k" ] || { _shmutant_err' \
+  't_only_format_is_checked_with_the_settings'
+shmutant_mut 'a filter name matches a row whose name it begins' \
+  'if [ "${SHMUTANT_ROWS_NAME[$i]}" = "$name" ]; then hits=$((hits + 1))' \
+  'if [[ "${SHMUTANT_ROWS_NAME[$i]}" == "$name"* ]]; then hits=$((hits + 1))' \
+  't_only_runs_the_named_rows_alone'
+shmutant_mut 'a name no row declares is not refused' \
+  'if [ "$hits" -eq 0 ]; then' \
+  'if [ "$hits" -eq -1 ]; then' \
+  't_only_refuses_an_undeclared_name_before_prepare'
+shmutant_mut 'a name two rows share is not refused' \
+  'elif [ "$hits" -gt 1 ]; then' \
+  'elif [ "$hits" -gt 2 ]; then' \
+  't_only_refuses_an_undeclared_name_before_prepare'
+shmutant_mut 'refused filter names do not refuse the pass' \
+  'if [ "$bad" -ne 0 ]; then _shmutant_err' \
+  'if [ "$bad" -ne "$bad" ]; then _shmutant_err' \
+  't_only_refuses_an_undeclared_name_before_prepare'
+shmutant_mut 'the filter names are first checked after prepare' \
+  '  _shmutant_only_pick "$label" || return 2' \
+  '  :' \
+  't_only_refuses_an_undeclared_name_before_prepare'
+shmutant_mut 'the filter prepare left is not checked again' \
+  '_shmutant_only_pick "$label" || { _shmutant_pool_fail' \
+  'true || { _shmutant_pool_fail' \
+  't_only_refuses_an_undeclared_name_before_prepare'
+shmutant_mut 'a set SHMUTANT_ONLY does not mark the pass filtered' \
+  '[ -z "${SHMUTANT_ONLY+x}" ] || only=1' \
+  '[ -z "${SHMUTANT_ONLY+x}" ] || only=0' \
+  't_only_runs_the_named_rows_alone'
+shmutant_mut 'the filter record is written for an unfiltered pass' \
+  '[ "$only" = 0 ] || _shmutant_emit shmutant 1 filter' \
+  '[ "$only" != 0 ] || _shmutant_emit shmutant 1 filter' \
+  't_only_leaves_an_unfiltered_stream_as_it_was'
+shmutant_mut 'the filter record is never written' \
+  '[ "$only" = 0 ] || _shmutant_emit shmutant 1 filter' \
+  ': || _shmutant_emit shmutant 1 filter' \
+  't_only_runs_the_named_rows_alone'
+shmutant_mut 'an unnamed row gets a baseline for its selector' \
+  '[ "${SHMUTANT_PICK[$i]}" = 1 ] || continue' \
+  ':' \
+  't_only_runs_the_named_rows_alone'
+shmutant_mut 'an unnamed row is cloned and run' \
+  'SHMUTANT_SKIP[i]=2; continue' \
+  'SHMUTANT_SKIP[i]=0; continue' \
+  't_only_runs_the_named_rows_alone'
+shmutant_mut 'an unnamed row gets a row record' \
+  '[ "${SHMUTANT_PICK[i]}" = 1 ] || continue' \
+  ':' \
+  't_only_runs_the_named_rows_alone'
+shmutant_mut 'the summary of a filtered pass counts every declared row' \
+  '"$label" "$SHMUTANT_PICK_N" "$killed"' \
+  '"$label" "$n" "$killed"' \
+  't_only_runs_the_named_rows_alone'
+shmutant_mut 'the last line of an unfiltered pass says it was filtered' \
+  '[ "$only" = 0 ] || scope=' \
+  '[ "$only" = 1 ] || scope=' \
+  't_only_leaves_an_unfiltered_stream_as_it_was'
+shmutant_mut 'a filtered pass whose named rows were killed exits 0' \
+  'if [ "$rc" -eq 0 ] && [ "$only" = 1 ]; then rc=3; fi' \
+  'if [ "$rc" -eq 0 ] && [ "$only" = 1 ]; then rc=0; fi' \
+  't_only_runs_the_named_rows_alone'
+shmutant_mut '--row takes an empty name' \
+  '[ "$#" -ge 2 ] && [ -n "$2" ] || { _shmutant_err "--row needs a row name"' \
+  '[ "$#" -ge 2 ] || { _shmutant_err "--row needs a row name"' \
+  't_cli_selects_rows_by_name'
+shmutant_mut '--row takes a name holding a newline' \
+  'case "$2" in *$'"'"'\n'"'"'*) _shmutant_err "--row: a row name containing' \
+  'case "$2" in *$'"'"'\n\n\n'"'"'*) _shmutant_err "--row: a row name containing' \
+  't_cli_selects_rows_by_name'
+shmutant_mut 'the first --row adds to SHMUTANT_ONLY from the environment' \
+  'plan_holder="" rows_given=0' \
+  'plan_holder="" rows_given=1' \
+  't_cli_selects_rows_by_name'

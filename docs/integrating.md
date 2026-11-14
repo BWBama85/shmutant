@@ -461,14 +461,20 @@ exit "$rc"
 
 Capture the status before the `awk`, and never put `shmutant` on the left of a pipe without
 `pipefail`: the pipeline's status would be `awk`'s. Exit 0 means every row was killed; 1 means
-at least one was not; 2 means the harness did not run (a refused declaration, by
+at least one was not; 3 means a pass filtered by `SHMUTANT_ONLY` (or `--row`) killed every row it
+ran, which says nothing about the rows it did not run; 2 means the harness did not run (a refused declaration, by
 `shmutant_mut` or by the plan's `shmutant_refuse`, an old literal that occurs more than once in
 its target, empty table, prepare failed, a target missing from the tree or a symlink, a root
-outside the workdir, a stream write failure, `SHMUTANT_COUNTS=1` without the baseline).
+outside the workdir, a stream write failure, `SHMUTANT_COUNTS=1` without the baseline, a
+`SHMUTANT_ONLY` name that no row, or more than one row, declares).
 Keep `SHMUTANT_KEEP=1` and `--workdir` on a CI failure to upload `mut-<n>/output` as an
 artifact: it is the full output of the run that produced the verdict. A `--workdir` you supply
 is never removed; the pool's `base-<n>`, `mut-<n>` and `pristine` entries inside it are recreated
-on every run. Those entries are only ever removed from a workdir shmutant marked as its own on
+as this run uses them. An entry it does not use is left as an earlier pass made it: the
+`mut-<n>` of a row a filtered pass did not run, and every `base-<n>` past this run's baseline
+runs (a filtered pass runs fewer). So only a `mut-<n>` whose row has a record in this run's
+stream is this run's, and of the `base-<n>` entries only the first, one per baseline record in
+it, in the order of those records. Those entries are only ever removed from a workdir shmutant marked as its own on
 first use (a `.shmutant` file holding exactly the line `shmutant workdir`, its newline included,
 and nothing else): a directory that already holds entries by those names and no marker, or a
 `.shmutant` of the caller's own with anything else in it, is refused, not emptied. Each worker reports its verdict on a descriptor the pool opened
@@ -492,6 +498,7 @@ A process that detached within half a second of forking is out of reach, as for 
 | `SHMUTANT_BASELINE` | 1 | Run every distinct selector once, uninjected, and require green. Set 0 when the suite was proven green in a previous step. 0 or 1 only. |
 | `SHMUTANT_COUNTS` | 0 | Also run the whole suite once, unselected, and require each selection to report, per unit, the assertion count the whole suite reports (section 3). Costs one full suite run per pass, within `SHMUTANT_TIMEOUT`. Needs `SHMUTANT_BASELINE=1`. 0 or 1 only; set and empty is refused rather than read as 0. |
 | `SHMUTANT_KEEP` | 0 | Keep every clone and the pristine tree. 0 or 1 only. |
+| `SHMUTANT_ONLY` | unset | Run only the rows named, one name per line, each compared whole and case-sensitively with the names the plan declared. `--row <name>`, repeatable, sets it on the command line, replacing a value from the environment. Each name must name exactly one row in the table as it stands before `prepare` runs and again after it returns (`prepare` may change the table or the setting); every name that does not is reported, and the pool exits 2 before `prepare` (or, for a change `prepare` made, before any baseline). Set and empty, an empty name (a blank line, a newline at either end) and a name given twice are refused too. A name holding a newline cannot be given. Only the named rows are cloned, run and recorded, under their declared indices (`mut-<n>`), and only their selectors get a baseline; with `SHMUTANT_COUNTS=1` the unselected reference run is still made, since every selection is compared with it. Every check made on the whole table (targets, hard links, an old literal that occurs more than once) still covers every row. The stream carries a `filter` record, `shmutant 1 filter <label> <selected> <declared>`, before any baseline or row record; the summary's `<rows>` counts the selected rows; the last line carries `— filtered: N of M declared row(s) ran, so this is no verdict on the whole table`; and a pass whose selected rows were all killed exits 3, never 0, even when every row was named. Unset, none of this happens and the stream is what it was before the setting existed. |
 | `SHMUTANT_STREAM` | stdout | Append the verdict stream to a file instead. Its directory must exist; it must be a regular file or absent (no symlink, no FIFO), outside the workdir. It is opened once, before any callback runs, and every record goes to that descriptor; a path `prepare` assigns is validated and opened the same way when it returns. A relative path is resolved where the CLI was invoked. |
 | `SHMUTANT_DIAG_DIR` | unset | Diagnostics; unset or empty is off. Otherwise an existing directory named by an absolute path with no newline, outside the workdir by its physical name (anything else is refused, status 2); it is replaced by its physical name, its identity is recorded, and it is never made. When a run returns and its process group can no longer be verified as its own (the line "the run's process group could not be verified as its own"), a new directory `holder-gone-<run pid>.XXXXXX` there, private and made by `mktemp`, gets one file, `snapshot`: a UTC timestamp, the run and its directory, its holder, its status, `SHMUTANT_KILL_GROUP` and the whole process table (`ps -A`, each read given up on after ten seconds, or fifteen should the read's own helper not answer). The file is written in that directory, anchored there and checked to sit in the one validated, and renamed into place once written whole: a directory replaced since it was checked gets nothing, and a snapshot that cannot be read or written is removed as far as removing it succeeds. shmutant's own suite, given the same setting (checked the same way), does the same on a HUP, in `suite-hup-<suite pid>.XXXXXX/snapshot`, before it ends the unit it is running, and hides the setting from its units; and on a HUP taken by the shell a unit's pool runs in, in `pool-hup-<pid>.XXXXXX/snapshot`, before that shell ends by it. A directory gone or unwritable by then gets nothing: no snapshot ever changes a verdict, a status or the output. |
 | `SHMUTANT_RED_STATUS` | 1 | The exit status that means red, 1 to 255. |

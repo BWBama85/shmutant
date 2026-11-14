@@ -14,8 +14,11 @@
 #   shmutant_refuse <reason>                             refuse a declaration the plan checked
 #                                                        itself; the pool then exits 2
 #   shmutant_reset                                       empty the table
-#   shmutant_pool <label> <workdir> <prepare> <run> [cap] run every row; 0 = every row killed,
-#                                                        1 = a row was not, 2 = harness error
+#   shmutant_pool <label> <workdir> <prepare> <run> [cap] run every row (or the rows
+#                                                        SHMUTANT_ONLY names); 0 = every row
+#                                                        killed, 1 = a row was not, 2 = harness
+#                                                        error, 3 = every named row killed (a
+#                                                        filtered pass, never the whole table)
 #   shmutant_mutate <file> <old> <new>                   0 applied, 1 rewrite failed, 2 no match
 #   shmutant_selected <unit>                             true when <unit> is selected (or nothing is)
 #   shmutant_copy_tree <src> <dst>                       copy a tree, excluding .git
@@ -42,6 +45,11 @@
 #                        to report, per unit, the assertion count the unselected run reported
 #                        (default 0; needs SHMUTANT_BASELINE=1)
 #   SHMUTANT_KEEP        1 keeps every clone after its run (default: clones are removed)
+#   SHMUTANT_ONLY        row names, one per line: only those rows are cloned and run, and only
+#                        their selectors get a baseline. Each must name exactly one row of the
+#                        table as it stands before prepare and again after it; set and empty,
+#                        an empty name or a name given twice is refused. Every whole-table check
+#                        still covers every row (default: unset, every row runs)
 #   SHMUTANT_STREAM      file the verdict stream is appended to (default: stdout)
 #   SHMUTANT_DIAG_DIR    absolute path of an existing directory outside the workdir: a run whose
 #                        process group could not be verified as its own leaves a process-table
@@ -54,6 +62,9 @@
 #   shmutant  1  baseline  <select>  <verdict>  <seconds>  <detail>
 #   shmutant  1  row       <verdict> <name>  <target>  <select>  <seconds>  <detail>
 #   shmutant  1  summary   <label>   <rows>  <killed>  <jobs>  <seconds>
+#   shmutant  1  filter    <label>   <selected>  <declared>
+# A filter record is written only by a pass SHMUTANT_ONLY filtered, before any baseline or row
+# record; <rows> in its summary counts the selected rows.
 # Row verdicts: killed (the only pass), survived, accidental, aborted, unapplied, unprepared,
 # baseline, timeout, unsettled, lost. Baseline verdicts: green (the only pass), red, aborted,
 # timeout, unprepared, unsettled, lost, and incomplete (SHMUTANT_COUNTS=1: green, but its counts
@@ -2655,7 +2666,8 @@ _shmutant_fresh_dir() {
 }
 
 # _shmutant_run_jobs <kind> <count> <workdir> <run> <suffix> <jobs> — run <count> workers of
-# <kind> through a bounded pool; a mut index whose SHMUTANT_SKIP entry is 1 is not started.
+# <kind> through a bounded pool; a mut index whose SHMUTANT_SKIP entry is not 0 is not started
+# (1: its selector's baseline was not green; 2: SHMUTANT_ONLY did not name it).
 # Reaps by pid, so a caller's own background jobs are never consumed by the pool.
 # _shmutant_abort_workers <signal> — on INT or TERM while workers run: kill every active
 # worker's process tree, put the caller's own traps back, and deliver the signal again so the
@@ -2841,6 +2853,7 @@ _shmutant_validate_settings() {
   # (or end the run's shell) under a callback that reads the variable rather than its argument.
   if _shmutant_readonly SHMUTANT_SELECT; then _shmutant_err "$label: SHMUTANT_SELECT is readonly — the pool sets it for every run; leave it writable"; return 2; fi
   case "${SHMUTANT_KEEP:-0}" in 0|1) ;; *) _shmutant_err "$label: SHMUTANT_KEEP must be 0 or 1, got [${SHMUTANT_KEEP:-}]"; return 2 ;; esac
+  if [ -n "${SHMUTANT_ONLY+x}" ]; then _shmutant_only_format "$label" || return 2; fi
   if [ -n "${SHMUTANT_RED_PREFIX+x}" ] && [ -z "$SHMUTANT_RED_PREFIX" ]; then
     _shmutant_err "$label: SHMUTANT_RED_PREFIX is empty — every line would count as a red line"; return 2
   fi
@@ -2871,6 +2884,57 @@ _shmutant_validate_settings() {
     _shmutant_canon "$label" SHMUTANT_STREAM "$sdir/$(command -p basename -- "$SHMUTANT_STREAM")" || return 2
   fi
 
+  return 0
+}
+
+# _shmutant_only_format <label> — SHMUTANT_ONLY, which is set, is one or more names, one per
+# line, none empty and none given twice. Compared with `[ = ]`, which no shell option makes
+# case-insensitive. Returns 2 with a message otherwise.
+_shmutant_only_format() {
+  local label="$1" rest name k
+  local -a names=()
+  [ -n "$SHMUTANT_ONLY" ] || { _shmutant_err "$label: SHMUTANT_ONLY is set and empty — it would select no row; unset it to run the whole table"; return 2; }
+  rest="$SHMUTANT_ONLY"
+  while :; do
+    name="${rest%%$'\n'*}"
+    [ -n "$name" ] || { _shmutant_err "$label: SHMUTANT_ONLY holds an empty name (a blank line, or a newline at its start or end) — every name must be a row's"; return 2; }
+    for k in "${names[@]}"; do
+      [ "$k" != "$name" ] || { _shmutant_err "$label: SHMUTANT_ONLY names '$name' twice"; return 2; }
+    done
+    names+=("$name")
+    case "$rest" in *$'\n'*) rest="${rest#*$'\n'}" ;; *) break ;; esac
+  done
+  return 0
+}
+
+# _shmutant_only_pick <label> — which rows of the table as it stands run: SHMUTANT_PICK[i] is 1
+# for a row that runs and 0 for one that does not, SHMUTANT_PICK_N counts the 1s. Unset
+# SHMUTANT_ONLY picks every row. Each name it holds must name exactly one row, compared whole;
+# every name that does not is reported before it returns 2. Its format was checked already.
+_shmutant_only_pick() {
+  local label="$1" rest name i hits bad=0
+  SHMUTANT_PICK=(); SHMUTANT_PICK_N=0
+  if [ -z "${SHMUTANT_ONLY+x}" ]; then
+    for (( i = 0; i < ${#SHMUTANT_ROWS_NAME[@]}; i++ )); do SHMUTANT_PICK[i]=1; done
+    SHMUTANT_PICK_N="${#SHMUTANT_ROWS_NAME[@]}"
+    return 0
+  fi
+  for (( i = 0; i < ${#SHMUTANT_ROWS_NAME[@]}; i++ )); do SHMUTANT_PICK[i]=0; done
+  rest="$SHMUTANT_ONLY"
+  while :; do
+    name="${rest%%$'\n'*}"; hits=0
+    for (( i = 0; i < ${#SHMUTANT_ROWS_NAME[@]}; i++ )); do
+      if [ "${SHMUTANT_ROWS_NAME[$i]}" = "$name" ]; then hits=$((hits + 1)); SHMUTANT_PICK[i]=1; fi
+    done
+    if [ "$hits" -eq 0 ]; then
+      _shmutant_err "$label: SHMUTANT_ONLY names '$name', which no row of the table declares"; bad=$((bad + 1))
+    elif [ "$hits" -gt 1 ]; then
+      _shmutant_err "$label: SHMUTANT_ONLY names '$name', which $hits rows share — a filter cannot tell which one is meant"; bad=$((bad + 1))
+    fi
+    SHMUTANT_PICK_N=$((SHMUTANT_PICK_N + hits))
+    case "$rest" in *$'\n'*) rest="${rest#*$'\n'}" ;; *) break ;; esac
+  done
+  if [ "$bad" -ne 0 ]; then _shmutant_err "$label: $bad name(s) in SHMUTANT_ONLY refused — nothing was run"; return 2; fi
   return 0
 }
 
@@ -3027,7 +3091,8 @@ _shmutant_pool_locals_writable() {
     dog_self done_first orphaned runner runner_gap runnerid \
     b chunk conts g gcont gone_group guard_id guard_lost guard_of guard_of_id guard_pid guard_r guard_up guard_w hs kept kills members out pairs part pg ph phid recs rid rootid_pre seen_ck unfrozen w want \
     SHMUTANT_GUARD SHMUTANT_GUARD_PID SHMUTANT_PS_LSTART SHMUTANT_PS_BOUND c guard_self guard_gap_ref gap ea eb lp le tbl cands guarded jl w fid_now stopped fgap cont_first cfirst told group_untold first \
-    before after ga gb
+    before after ga gb \
+    bad hits name names only scope SHMUTANT_PICK SHMUTANT_PICK_N
 }
 
 # _shmutant_decl_writable <label> — the table's own names, checked by each declaration entry
@@ -3291,12 +3356,14 @@ _shmutant_report_keep() {
   { printf '%s\n' "${SHMUTANT_KEEP:-0}" >&"$SHMUTANT_CLI_KEEP_FD"; } 2>/dev/null || _shmutant_err "the keep channel could not be written; an interrupt would not know to keep the workdir"
 }
 
-# shmutant_pool <label> <workdir> <prepare> <run> [cap] — run every table row. Prepares the
-# tree once, runs each distinct selector uninjected (SHMUTANT_BASELINE), then every row through a
-# pool of min(SHMUTANT_JOBS or CPUs, cap or 8) workers. Emits the verdict stream and one stderr
-# line per row that was not killed. Returns 0 when every row was killed, 1 when any was not,
-# 2 when the harness itself could not run (a refused declaration, empty table, bad workdir,
-# prepare failed, root outside the workdir, or a verdict-stream write that failed).
+# shmutant_pool <label> <workdir> <prepare> <run> [cap] — run every table row, or only the rows
+# SHMUTANT_ONLY names. Prepares the tree once, runs each distinct selector of those rows
+# uninjected (SHMUTANT_BASELINE), then each of those rows through a pool of min(SHMUTANT_JOBS or
+# CPUs, cap or 8) workers. Emits the verdict stream and one stderr line per row that was not
+# killed. Returns 0 when every row was killed, 1 when any was not, 2 when the harness itself
+# could not run (a refused declaration, empty table, bad workdir, prepare failed, root outside
+# the workdir, a SHMUTANT_ONLY name that names no row or several, or a verdict-stream write that
+# failed), and 3 when a filtered pass killed every row it ran.
 shmutant_pool() {
   # Aliases off for the whole pool, callbacks included (their bodies were parsed when defined);
   # the caller's setting is put back on return.
@@ -3317,7 +3384,7 @@ shmutant_pool() {
 _shmutant_pool_body() {
   if [ "$#" -lt 4 ] || [ "$#" -gt 5 ]; then _shmutant_err "pool: usage: shmutant_pool <label> <workdir> <prepare> <run> [cap] (got $# arguments)"; return 2; fi
   local label="$1" wd="$2" prep="$3" run="$4" cap="${5:-}"
-  local n jobs root suffix i k sel t0 t1 killed=0 rc=0 verdict detail rjrc linked starts ambiguous=0 cwhy links
+  local n jobs root suffix i k sel t0 t1 killed=0 rc=0 verdict detail rjrc linked starts ambiguous=0 cwhy links only=0 scope=""
   local -a base_sel=() base_verdict=() base_why=() row_why=()
   n="${#SHMUTANT_ROWS_NAME[@]}"
   t0="$(_shmutant_now)"
@@ -3350,6 +3417,8 @@ _shmutant_pool_body() {
     *[!0-9]*) _shmutant_err "$label: the pool cap must be a positive integer, got [$cap]"; return 2 ;;
     *) if [ "${#cap}" -gt 4 ] || [ "$cap" -lt 1 ]; then _shmutant_err "$label: the pool cap must be a positive integer of at most four digits, got [$cap]"; return 2; fi ;;
   esac
+  # Before prepare builds anything: a name the loaded table does not hold is refused here.
+  _shmutant_only_pick "$label" || return 2
   _shmutant_open_stream "$label" || return 2
   SHMUTANT_PRISTINE_ID=""
   _shmutant_fresh_dir "$wd/pristine" "$wd" || { _shmutant_pool_fail "$label" "$wd"; _shmutant_err "$label: cannot recreate $wd/pristine — stale contents there would be prepared over"; return 2; }
@@ -3427,6 +3496,9 @@ _shmutant_pool_body() {
   if [ "$n" -eq 0 ]; then _shmutant_err "$label: the mutation table is EMPTY — this harness proves nothing"; _shmutant_pool_fail "$label" "$wd"; return 2; fi
   # prepare ran in this shell and may have assigned any setting; the workers read them next.
   _shmutant_validate_settings "$label" "$wd" || { _shmutant_err "$label: a setting changed by prepare is invalid"; _shmutant_pool_fail "$label" "$wd"; return 2; }
+  # Again over the table and the setting prepare left: either may have changed.
+  _shmutant_only_pick "$label" || { _shmutant_pool_fail "$label" "$wd"; return 2; }
+  only=0; scope=""; [ -z "${SHMUTANT_ONLY+x}" ] || only=1
   jobs="$(_shmutant_jobs "$cap")"
   # The settled SHMUTANT_KEEP, for a CLI parent that may have to clean up after an interrupt.
   _shmutant_report_keep after-prepare
@@ -3483,6 +3555,9 @@ _shmutant_pool_body() {
     _shmutant_err "$label: the prepared tree holds a regular file with more than one hard link (${linked%%$'\n'*}) — a clone cannot keep them joined; prepare a tree without them"
     _shmutant_pool_fail "$label" "$wd"; return 2 ;;
   esac
+  # After every whole-table check and before any result: a stream cut off later still shows that
+  # this pass was filtered.
+  [ "$only" = 0 ] || _shmutant_emit shmutant 1 filter "$label" "$SHMUTANT_PICK_N" "$n"
 
   if [ "${SHMUTANT_BASELINE:-1}" != 0 ]; then
     # With the counts on, the unselected run is base-0: an empty selector, which no row has (a
@@ -3490,6 +3565,7 @@ _shmutant_pool_body() {
     # are compared with, and the longest run, so it starts first.
     [ "${SHMUTANT_COUNTS:-0}" != 1 ] || base_sel=("")
     for (( i = 0; i < n; i++ )); do
+      [ "${SHMUTANT_PICK[$i]}" = 1 ] || continue
       sel="${SHMUTANT_ROWS_SEL[$i]}"
       for k in "${base_sel[@]}"; do [ "$k" = "$sel" ] && continue 2; done
       base_sel+=("$sel")
@@ -3527,6 +3603,8 @@ _shmutant_pool_body() {
 
   SHMUTANT_SKIP=()
   for (( i = 0; i < n; i++ )); do
+    # A row the filter did not name gets no worker, no directory and no verdict.
+    if [ "${SHMUTANT_PICK[$i]}" != 1 ]; then SHMUTANT_SKIP[i]=2; continue; fi
     SHMUTANT_SKIP[i]=0
     for (( k = 0; k < ${#base_sel[@]}; k++ )); do
       if [ "${base_sel[$k]}" = "${SHMUTANT_ROWS_SEL[$i]}" ] && [ "${base_verdict[$k]}" != green ]; then
@@ -3551,6 +3629,7 @@ _shmutant_pool_body() {
   [ "$rjrc" -eq 0 ] || { _shmutant_pool_fail "$label" "$wd"; return 2; }
 
   for (( i = 0; i < n; i++ )); do
+    [ "${SHMUTANT_PICK[i]}" = 1 ] || continue
     SHMUTANT_V_VERDICT="${SHMUTANT_RES_VERDICT[mut-$i]:-lost}"; SHMUTANT_V_US="${SHMUTANT_RES_US[mut-$i]:-0}"; SHMUTANT_V_STATUS="${SHMUTANT_RES_STATUS[mut-$i]:-}"
     verdict="$SHMUTANT_V_VERDICT"
     if [ -n "${row_why[$i]:-}" ]; then detail="${row_why[$i]}"
@@ -3565,8 +3644,9 @@ _shmutant_pool_body() {
     fi
   done
   t1="$(_shmutant_now)"
-  _shmutant_emit shmutant 1 summary "$label" "$n" "$killed" "$jobs" "$(_shmutant_secs "$(( t1 - t0 ))")"
-  _shmutant_err "$label: $killed/$n mutation(s) killed on their own witness (jobs=$jobs, $(_shmutant_secs "$(( t1 - t0 ))")s)"
+  _shmutant_emit shmutant 1 summary "$label" "$SHMUTANT_PICK_N" "$killed" "$jobs" "$(_shmutant_secs "$(( t1 - t0 ))")"
+  [ "$only" = 0 ] || scope=" — filtered: $SHMUTANT_PICK_N of $n declared row(s) ran, so this is no verdict on the whole table"
+  _shmutant_err "$label: $killed/$SHMUTANT_PICK_N mutation(s) killed on their own witness (jobs=$jobs, $(_shmutant_secs "$(( t1 - t0 ))")s)$scope"
   # Read before _shmutant_pool_fail, which hands the caller's CHLD trap back: the check forks.
   local intact=1; _shmutant_stream_intact || intact=0
   _shmutant_pool_cleanup "$label" "$wd"
@@ -3577,6 +3657,8 @@ _shmutant_pool_body() {
   elif [ "$SHMUTANT_EMIT_FAILED" -ne 0 ]; then
     _shmutant_err "$label: the verdict stream could not be written (${SHMUTANT_STREAM:-stdout}) — the records above are incomplete"; rc=2
   fi
+  # A filtered pass in which every named row was killed: never 0, which means the whole table.
+  if [ "$rc" -eq 0 ] && [ "$only" = 1 ]; then rc=3; fi
   # The traps go back only now, with the status settled: nothing of the pool's runs after this
   # but its return.
   _shmutant_release_traps
@@ -3588,6 +3670,7 @@ _shmutant_pool_body() {
 _shmutant_usage() {
   command -p cat <<'EOF'
 usage: shmutant run <plan.sh> [--jobs N] [--workdir DIR] [--keep] [--no-baseline] [--timeout S]
+                    [--row NAME]...
        shmutant version
        shmutant checksum
        shmutant help
@@ -3596,8 +3679,10 @@ A plan is a bash file. It defines two functions, `prepare <dir>` and `run <root>
 and declares its rows with `shmutant_target` and `shmutant_mut`. It is sourced with
 SHMUTANT_PLAN_DIR set to its own directory, in a subshell: a plan that exits, execs or fails
 to load ends the run with status 2. Exit: 0 every row killed, 1 a row was not, 2 the plan or
-the harness could not run. A workdir the run created is removed afterwards unless --keep (or
-SHMUTANT_KEEP=1); a --workdir you supplied is never removed.
+the harness could not run, 3 every row --row named was killed (the rest of the table was not
+run). --row takes one row name, verbatim, and may be repeated; it sets SHMUTANT_ONLY. A
+workdir the run created is removed afterwards unless --keep (or SHMUTANT_KEEP=1); a --workdir
+you supplied is never removed.
 EOF
 }
 
@@ -3821,7 +3906,7 @@ _shmutant_cli_abort() {
 }
 
 _shmutant_cli_run() {
-  local plan="" wd="" keep=0 made=0 rc done_file marker keep_last="" line plan_holder=""
+  local plan="" wd="" keep=0 made=0 rc done_file marker keep_last="" line plan_holder="" rows_given=0
   # Seeded from the environment for the window before the pool settles the value: an interrupt
   # during plan loading or prepare must not discard artifacts the operator asked to keep.
   [ "${SHMUTANT_KEEP:-0}" = 1 ] && keep=1
@@ -3836,6 +3921,12 @@ _shmutant_cli_run() {
                      SHMUTANT_TIMEOUT="$2"; shift 2 ;;
       --keep)        keep=1; SHMUTANT_KEEP=1; shift ;;
       --no-baseline) SHMUTANT_BASELINE=0; shift ;;
+      # A row name is taken as given, a leading dash included: one the plan does not declare is
+      # refused by name before prepare runs. The first --row replaces SHMUTANT_ONLY.
+      --row)         [ "$#" -ge 2 ] && [ -n "$2" ] || { _shmutant_err "--row needs a row name"; return 2; }
+                     case "$2" in *$'\n'*) _shmutant_err "--row: a row name containing a newline cannot be selected"; return 2 ;; esac
+                     if [ "$rows_given" = 1 ]; then SHMUTANT_ONLY+=$'\n'"$2"; else SHMUTANT_ONLY="$2"; rows_given=1; fi
+                     shift 2 ;;
       -*)            _shmutant_err "unknown option: $1"; _shmutant_usage >&2; return 2 ;;
       *)             [ -z "$plan" ] || { _shmutant_err "one plan only"; return 2; }
                      plan="$1"; shift ;;
