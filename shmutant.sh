@@ -769,8 +769,8 @@ _shmutant_diag_snapshot() {
 }
 
 # _shmutant_ps <argument>… — `command -p ps <argument>…`, its output and its status. With
-# SHMUTANT_PS_BOUND set to a whole number of seconds from 1 to 999 (a freeze's guard sets it; any other
-# value is no bound), a ps that has not ended within that bound is given up on: status 124, nothing
+# SHMUTANT_PS_BOUND set to a whole number of seconds from 1 to 999 (a freeze sets it, and its guard,
+# and a watchdog for each read it makes; any other value is no bound), a ps that has not ended within that bound is given up on: status 124, nothing
 # printed, so a process table that stalls reads as one that could not be read. The bound is kept by a
 # process substitution of its own, which ends whichever of the ps and its timer is left (only while
 # bash has not reaped it: _shmutant_ps_end). One that does not answer within five
@@ -805,7 +805,9 @@ _shmutant_ps() {
     _shmutant_ps_end "$c"; wait "$c"; builtin exit 124
   ) || { return 1; }
   p=$!
-  IFS= read -r -d '' -t "$(( b + 5 ))" -u "$fd" out || st=$?
+  # Read whole, in blocks (-N): to a delimiter, bash reads a pipe one byte a call, and a freeze reads
+  # a whole process table at every pass.
+  IFS= read -r -N 2147483647 -t "$(( b + 5 ))" -u "$fd" out || st=$?
   exec {fd}<&-
   [ "$st" -le 128 ] || return 124
   st=0; wait "$p" || st=$?
@@ -837,7 +839,8 @@ _shmutant_ps_end() {
 
 # _shmutant_descendants_started <pid> — print `pid start` for every descendant of <pid>, from one
 # `ps -A -o pid= -o ppid= -o etime=` pass, so each is carried with the identity it had when found.
-# Returns 1 when that process table cannot be read: it always lists the caller, so an empty read is
+# Returns 1 when that process table cannot be read, or does not answer within a bound its caller set
+# (_shmutant_ps): it always lists the caller, so an empty read is
 # a failed one, which a caller can then tell from a pid with no descendants (0, nothing printed).
 # One read across a clock that bounds no elapsed-time start (_shmutant_etime_gap) is a failed one too.
 _shmutant_descendants_started() {
@@ -857,7 +860,7 @@ _shmutant_descendants_started() {
     return 0
   fi
   if [ "${SHMUTANT_PS_LSTART:-}" != 0 ] && _shmutant_identity "$BASHPID" > /dev/null && [ "${SHMUTANT_PS_LSTART:-}" = 1 ]; then
-    table="$(command -p ps -A -o pid= -o ppid= -o lstart= 2>/dev/null)" && [ -n "$table" ] || return 1
+    table="$(_shmutant_ps -A -o pid= -o ppid= -o lstart= 2>/dev/null)" && [ -n "$table" ] || return 1
     (set -o pipefail; printf '%s\n' "$table" | command -p awk -v root="$1" '
       NF > 2 && $1 ~ /^[0-9]+$/ { i++; child[i] = $1; parent[i] = $2; $1 = ""; $2 = ""; sub(/^ +/, ""); start[i] = $0 }
       END {
@@ -871,7 +874,7 @@ _shmutant_descendants_started() {
     return 0
   fi
   before="$(_shmutant_now)"
-  table="$(command -p ps -A -o pid= -o ppid= -o etime= 2>/dev/null)" && [ -n "$table" ] || return 1
+  table="$(_shmutant_ps -A -o pid= -o ppid= -o etime= 2>/dev/null)" && [ -n "$table" ] || return 1
   now="$(_shmutant_now)"; gap="$(_shmutant_etime_gap "$before" "$now")" || return 1
   (set -o pipefail; printf '%s\n' "$table" | command -p awk -v root="$1" -v now="$(( now / 1000000 ))" -v gap="$gap" '
     NF == 3 && $1 ~ /^[0-9]+$/ {
@@ -1152,7 +1155,10 @@ _shmutant_kill_tree_twice() {
 # _shmutant_kill_tree_guarded [-g <pgid>] <pid> <pids…> — the work of _shmutant_kill_tree_twice, in
 # its subshell.
 _shmutant_kill_tree_guarded() {
-  local held=""
+  # Every process-table read of this freeze, its own and those of each step it calls, gives up after
+  # ten seconds (_shmutant_ps) and is then one that could not be read: a ps that does not answer
+  # holds the freeze for that long a read, never for good.
+  local held="" SHMUTANT_PS_BOUND=10
   if [ "${1:-}" = -g ]; then held="$2"; shift 2; fi
   local spec="$1" pid rootid p d rid guard_w="" guard_r="" guard_lost=0 guard_pid="" guard_id=""
   # The guard's way to tell this shell is gone while a helper of it still holds the records open:
@@ -1313,6 +1319,14 @@ _shmutant_kill_tree_guarded() {
   return 0
 }
 
+# _shmutant_group_table — print `pid pgid` for every process, from one ps. Fails when that table
+# cannot be read, or does not answer within a bound its caller set (_shmutant_ps): it always lists
+# the caller, so an empty read is a failed one.
+_shmutant_group_table() {
+  local table
+  table="$(_shmutant_ps -A -o pid= -o pgid= 2>/dev/null)" && [ -n "$table" ] && printf '%s\n' "$table"
+}
+
 # _shmutant_guard_members <pgid> — tell the guard of each member of the stopped group <pgid>, with
 # the start it carries, and take each as frozen (it is stopped, so its number is its own) and as a
 # root of the walk, whose descendants may sit in other groups, once _shmutant_frozen_only shows it
@@ -1328,7 +1342,7 @@ _shmutant_guard_members() {
   local table out p first
   local -a members=() recs=()
   local -A SHMUTANT_START=()
-  table="$(command -p ps -A -o pid= -o pgid= 2>/dev/null)" && [ -n "$table" ] || return 1
+  table="$(_shmutant_group_table)" || return 1
   out="$(set -o pipefail; printf '%s\n' "$table" | command -p awk -v g="$1" '$2 == g { print $1 }')" || return 1
   if [ -z "$out" ]; then _shmutant_guard_tell m; return; fi
   mapfile -t members <<< "$out"
@@ -1336,7 +1350,7 @@ _shmutant_guard_members() {
   # The group read again after the starts: a member still in it is the process both reads saw, since
   # no member forks into a group whose members are all stopped. One gone from it between the reads
   # (killed, its number perhaps someone else's by the start read) is not told.
-  table="$(command -p ps -A -o pid= -o pgid= 2>/dev/null)" && [ -n "$table" ] || return 1
+  table="$(_shmutant_group_table)" || return 1
   out="$(set -o pipefail; printf '%s\n' "$table" | command -p awk -v g="$1" '$2 == g { print " " $1 " " }' | command -p tr -d '\n')" || return 1
   # Nor is the group told whole while the second read holds a member the first did not: a process of
   # the run's session can join it between them, and that one is never told.
@@ -2053,9 +2067,10 @@ _shmutant_run_bounded() {
         if [ "$orphaned" = 0 ]; then
           printf 'fired\n' >&"$fired"
           # What was still there at the deadline, for the record: a run that hangs is diagnosed
-          # from this list, not from an output that stopped.
+          # from this list, not from an output that stopped. A list that does not answer within ten
+          # seconds is left out (_shmutant_ps): it must not keep the freeze below from its run.
           { printf 'shmutant: %s: still running at the deadline (pid ppid stat args):\n' "$dir"
-            command -p ps -o pid= -o ppid= -o stat= -o args= -p "$(IFS=,; printf '%s' "$pid,${!seen[*]}")" 2>/dev/null | command -p head -n 30 | command -p cut -c1-200
+            SHMUTANT_PS_BOUND=10 _shmutant_ps -o pid= -o ppid= -o stat= -o args= -p "$(IFS=,; printf '%s' "$pid,${!seen[*]}")" 2>/dev/null | command -p head -n 30 | command -p cut -c1-200
           } 1>&"$err_fd" 2>/dev/null
         fi
         # An array of pid:identity pairs, never an unquoted expansion.
@@ -2261,8 +2276,9 @@ _shmutant_holder_state() {
 _shmutant_held_group() {
   SHMUTANT_HELD=()
   [ -n "${holder:-}" ] || return 0
-  # A holder that cannot be checked (2) is taken as it was, as it would be with no ps at all.
-  _shmutant_holder_state "$holder" "${holderid:-}" || [ "$?" = 2 ] || return 0
+  # A holder that cannot be checked (2) is taken as it was, as it would be with no ps at all. So is
+  # one whose read does not answer within ten seconds (_shmutant_ps): this is a freeze's first read.
+  SHMUTANT_PS_BOUND=10 _shmutant_holder_state "$holder" "${holderid:-}" || [ "$?" = 2 ] || return 0
   SHMUTANT_HELD=(-g "$1")
 }
 
@@ -3831,7 +3847,8 @@ _shmutant_cli_end_group() {
   local holder="${2%% *}" holderid="" err_fd=2
   case "$2" in *" "*) holderid="${2#* }" ;; esac
   [ -n "$holder" ] || return 0
-  _shmutant_holder_state "$holder" "$holderid" || [ "$?" = 2 ] || return 0
+  # Given up on after ten seconds, as every read of the freeze it licenses is (_shmutant_ps).
+  SHMUTANT_PS_BOUND=10 _shmutant_holder_state "$holder" "$holderid" || [ "$?" = 2 ] || return 0
   _shmutant_kill_tree_twice -g "$1" "$1:"
   return 0
 }

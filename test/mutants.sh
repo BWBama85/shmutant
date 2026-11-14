@@ -718,7 +718,7 @@ shmutant_mut 'a held group is neither stopped nor signalled by number' \
   '  if false; then' \
   't_returned_run_without_an_identity_is_still_cleaned_up'
 shmutant_mut 'a group is signalled by number after its holder is gone' \
-  '  _shmutant_holder_state "$holder" "${holderid:-}" || [ "$?" = 2 ] || return 0' \
+  '  SHMUTANT_PS_BOUND=10 _shmutant_holder_state "$holder" "${holderid:-}" || [ "$?" = 2 ] || return 0' \
   '  :' \
   't_run_group_is_not_signalled_by_number_without_its_holder'
 shmutant_mut 'a bare exit takes the snapshot status' \
@@ -1497,7 +1497,7 @@ shmutant_mut 'a readonly name is assigned when the file is sourced' \
 
 # --- guards added for the forty-sixth review round ---
 shmutant_mut 'the CLI freezes a group whose holder does not verify' \
-  '  _shmutant_holder_state "$holder" "$holderid" || [ "$?" = 2 ] || return 0' \
+  '  SHMUTANT_PS_BOUND=10 _shmutant_holder_state "$holder" "$holderid" || [ "$?" = 2 ] || return 0' \
   '  kill -0 "$holder" 2>/dev/null || return 0' \
   't_cli_end_group_checks_the_holder_identity'
 shmutant_mut 'the line terminator prepare printed is part of the root' \
@@ -1649,12 +1649,12 @@ shmutant_mut 'an unreadable /proc table lists no descendants and succeeds' \
   '    table="$(_shmutant_proc_table)"' \
   't_descendants_started_reports_an_unreadable_table'
 shmutant_mut 'a failed lstart table read lists no descendants and succeeds' \
-  '    table="$(command -p ps -A -o pid= -o ppid= -o lstart= 2>/dev/null)" && [ -n "$table" ] || return 1' \
-  '    table="$(command -p ps -A -o pid= -o ppid= -o lstart= 2>/dev/null)" || return 0' \
+  '    table="$(_shmutant_ps -A -o pid= -o ppid= -o lstart= 2>/dev/null)" && [ -n "$table" ] || return 1' \
+  '    table="$(_shmutant_ps -A -o pid= -o ppid= -o lstart= 2>/dev/null)" || return 0' \
   't_descendants_started_reports_an_unreadable_table'
 shmutant_mut 'a failed etime table read lists no descendants and succeeds' \
-  '  table="$(command -p ps -A -o pid= -o ppid= -o etime= 2>/dev/null)" && [ -n "$table" ] || return 1' \
-  '  table="$(command -p ps -A -o pid= -o ppid= -o etime= 2>/dev/null)" || return 0' \
+  '  table="$(_shmutant_ps -A -o pid= -o ppid= -o etime= 2>/dev/null)" && [ -n "$table" ] || return 1' \
+  '  table="$(_shmutant_ps -A -o pid= -o ppid= -o etime= 2>/dev/null)" || return 0' \
   't_descendants_started_reports_an_unreadable_table'
 
 # --- an old literal occurs once in its target (#15) ---
@@ -2356,8 +2356,8 @@ shmutant_mut 'a bounded ps takes a bound that is not a number' \
   '  case "${SHMUTANT_PS_BOUND:-}" in Q) ;; *) command -p ps "$@"; return ;; esac' \
   't_guard_gives_up_on_a_process_table_that_stalls'
 shmutant_mut 'a bounded ps ends a caller with errexit on at the end of its output' \
-  '  IFS= read -r -d '"'"''"'"' -t "$(( b + 5 ))" -u "$fd" out || st=$?' \
-  '  IFS= read -r -d '"'"''"'"' -t "$(( b + 5 ))" -u "$fd" out; st=$?' \
+  '  IFS= read -r -N 2147483647 -t "$(( b + 5 ))" -u "$fd" out || st=$?' \
+  '  IFS= read -r -N 2147483647 -t "$(( b + 5 ))" -u "$fd" out; st=$?' \
   't_guard_gives_up_on_a_process_table_that_stalls'
 shmutant_mut 'a bounded ps loses the status of the ps' \
   '  st=0; wait "$p" || st=$?' \
@@ -2960,3 +2960,37 @@ shmutant_mut 'the first --row adds to SHMUTANT_ONLY from the environment' \
   'plan_holder="" rows_given=0' \
   'plan_holder="" rows_given=1' \
   't_cli_selects_rows_by_name'
+
+# --- a freeze gives up on a read of the process table that stalls (#86) ---
+shmutant_mut 'a freeze reads its process table without a bound' \
+  '  local held="" SHMUTANT_PS_BOUND=10' \
+  '  local held="" SHMUTANT_PS_BOUND=' \
+  't_freeze_gives_up_on_a_process_table_that_stalls'
+shmutant_mut 'the walk of a freeze reads its recorded starts past the bound' \
+  '    table="$(_shmutant_ps -A -o pid= -o ppid= -o lstart= 2>/dev/null)" && [ -n "$table" ] || return 1' \
+  '    table="$(command -p ps -A -o pid= -o ppid= -o lstart= 2>/dev/null)" && [ -n "$table" ] || return 1' \
+  't_freeze_gives_up_on_a_process_table_that_stalls'
+shmutant_mut 'the walk of a freeze reads its elapsed times past the bound' \
+  '  table="$(_shmutant_ps -A -o pid= -o ppid= -o etime= 2>/dev/null)" && [ -n "$table" ] || return 1' \
+  '  table="$(command -p ps -A -o pid= -o ppid= -o etime= 2>/dev/null)" && [ -n "$table" ] || return 1' \
+  't_freeze_gives_up_on_a_process_table_that_stalls'
+shmutant_mut 'the members of a stopped group are read past the bound' \
+  '  table="$(_shmutant_ps -A -o pid= -o pgid= 2>/dev/null)" && [ -n "$table" ] && printf' \
+  '  table="$(command -p ps -A -o pid= -o pgid= 2>/dev/null)" && [ -n "$table" ] && printf' \
+  't_freeze_gives_up_on_a_process_table_that_stalls'
+shmutant_mut 'an empty table of groups is a group with no member left' \
+  ' 2>/dev/null)" && [ -n "$table" ] && printf' \
+  ' 2>/dev/null)" && printf' \
+  't_freeze_takes_group_members_as_roots_but_not_the_holder'
+shmutant_mut 'the look at a run'"'"'s holder that licenses its freeze has no bound' \
+  '  SHMUTANT_PS_BOUND=10 _shmutant_holder_state "$holder" "${holderid:-}" || [ "$?" = 2 ] || return 0' \
+  '  _shmutant_holder_state "$holder" "${holderid:-}" || [ "$?" = 2 ] || return 0' \
+  't_run_is_ended_through_a_process_table_that_stalls'
+shmutant_mut 'the listing a deadline prints is read without a bound' \
+  '            SHMUTANT_PS_BOUND=10 _shmutant_ps -o pid= -o ppid= -o stat= -o args= -p' \
+  '            command -p ps -o pid= -o ppid= -o stat= -o args= -p' \
+  't_run_is_ended_through_a_process_table_that_stalls'
+shmutant_mut 'the CLI'"'"'s look at its holder has no bound' \
+  '  SHMUTANT_PS_BOUND=10 _shmutant_holder_state "$holder" "$holderid" || [ "$?" = 2 ] || return 0' \
+  '  _shmutant_holder_state "$holder" "$holderid" || [ "$?" = 2 ] || return 0' \
+  't_cli_end_group_checks_the_holder_identity'
