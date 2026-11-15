@@ -818,18 +818,22 @@ _shmutant_ps() {
 }
 
 # _shmutant_ps_gave_up <seconds> — a read that _shmutant_ps gave up on after <seconds> was one of a
-# shell doing a freeze (SHMUTANT_PS_UNSETTLES is 1 there, and nowhere else): that freeze is unsettled,
-# since what the read would have shown was never frozen or never checked. Told to the runner on the
-# descriptor it named, at once and from here: the read may be in a substitution of the freezing
-# shell, which can set nothing in it. Said as well where the freeze reports (_shmutant_freeze_err),
-# and so is a record that could not be written: the descriptor is the one the run's status travels
-# on, so a run whose record stays unwritable is a harness error already, and one whose record took
-# only its status is scored without this. Returns 0 always.
+# shell doing a freeze: that freeze is unsettled, since what the read would have shown was never
+# frozen or never checked. SHMUTANT_PS_UNSETTLES is a descriptor number in such a shell and empty in
+# every other (_shmutant_kill_tree_guarded): a copy of where the freeze reports, made before any
+# reader put a redirection of its own on the read, so the give-up is said there whoever read. The
+# runner is told on the descriptor it named, at once and from here: the read may be in a
+# substitution of the freezing shell, which can set nothing in it. A record that cannot be written
+# there is said too, and told to the pool on the worker's own channel (`unrecorded`), where it makes
+# the pass a harness error: the run must not be scored without it. A ps that itself ends with status
+# 124 is read as one given up on, as it always was. Returns 0 always.
 _shmutant_ps_gave_up() {
-  [ "${SHMUTANT_PS_UNSETTLES:-}" = 1 ] || return 0
-  _shmutant_freeze_err "a read of the process table did not answer within $1 seconds and was given up on, so the process tree being ended is not known to have been frozen whole"
+  case "${SHMUTANT_PS_UNSETTLES:-}" in ''|*[!0-9]*) return 0 ;; esac
+  _shmutant_err "a read of the process table did not answer within $1 seconds and was given up on, so the process tree being ended is not known to have been frozen whole" 2>&"$SHMUTANT_PS_UNSETTLES"
   [ -n "${SHMUTANT_UNSETTLED_FD:-}" ] || return 0
-  { printf 'unsettled\n' >&"$SHMUTANT_UNSETTLED_FD"; } 2>/dev/null || _shmutant_freeze_err "the run could not be told that its freeze is unsettled, and is scored without it"
+  { printf 'unsettled\n' >&"$SHMUTANT_UNSETTLED_FD"; } 2>/dev/null && return 0
+  _shmutant_err "the run could not be told that its freeze is unsettled, so its verdict is not accepted" 2>&"$SHMUTANT_PS_UNSETTLES"
+  [ -z "${SHMUTANT_VERDICT_FD:-}" ] || { printf 'unrecorded\n' >&"$SHMUTANT_VERDICT_FD"; } 2>/dev/null || _shmutant_err "nor could its pool be told" 2>&"$SHMUTANT_PS_UNSETTLES"
   return 0
 }
 
@@ -1175,8 +1179,10 @@ _shmutant_kill_tree_guarded() {
   # Every process-table read of this freeze, its own and those of each step it calls, gives up after
   # ten seconds (_shmutant_ps) and is then one that could not be read: a ps that does not answer
   # holds the freeze for that long a read, never for good. A read given up on leaves the freeze
-  # unsettled (_shmutant_ps_gave_up): the owner's call, D17.
-  local held="" SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES=1
+  # unsettled (_shmutant_ps_gave_up; the owner's call, D17), and is said on a copy, made here, of the
+  # descriptor the freeze reports on, or of this shell's stderr where it has none.
+  local held="" SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES=""
+  exec {SHMUTANT_PS_UNSETTLES}>&"${err_fd:-2}" || SHMUTANT_PS_UNSETTLES=2
   if [ "${1:-}" = -g ]; then held="$2"; shift 2; fi
   local spec="$1" pid rootid p d rid guard_w="" guard_r="" guard_lost=0 guard_pid="" guard_id=""
   # The guard's way to tell this shell is gone while a helper of it still holds the records open:
@@ -1957,7 +1963,9 @@ _shmutant_run_bounded() {
     return 0
   fi
   # An unsettled freeze, from this shell or the watchdog, is reported on the sightings channel.
-  local SHMUTANT_UNSETTLED_FD="$seen_w"
+  # (No read of the runner, the wrapper or the watchdog is one of a freeze: a value of the caller's
+  # in that name must not make one of them unsettle the run.)
+  local SHMUTANT_UNSETTLED_FD="$seen_w" SHMUTANT_PS_UNSETTLES=""
   (
     set -m
     # The snapshot is an EXIT trap of the wrapper, so it runs however the callback ends: a
@@ -2522,7 +2530,7 @@ _shmutant_link_count() {
 # SHMUTANT_RES_*[key] (and SHMUTANT_V_*): the last `verdict <v> <us> <status>` line, or `lost`
 # when there is none, the line is damaged, or the worker did not exit 0. Closes the channel.
 _shmutant_collect() {
-  local dir="$1" key="$2" wstatus="$3" line fd unpublished=0 setup_failed=0 swapped=0 clone_id="" counts="" counts_bad="" counts_end="" counts_got=0
+  local dir="$1" key="$2" wstatus="$3" line fd unpublished=0 setup_failed=0 swapped=0 unrecorded=0 clone_id="" counts="" counts_bad="" counts_end="" counts_got=0
   SHMUTANT_V_VERDICT=lost; SHMUTANT_V_US=0; SHMUTANT_V_STATUS=""
   fd="${SHMUTANT_VERDICT_R[$key]:-}"
   if [ -n "$fd" ]; then
@@ -2537,6 +2545,7 @@ _shmutant_collect() {
         unpublished) unpublished=1 ;;
         setup-failed) setup_failed=1 ;;
         swapped)     swapped=1 ;;
+        unrecorded)  unrecorded=1 ;;
         "count "*)   counts+="${line#count }"$'\n'; counts_got=$((counts_got + 1)) ;;
         "counts-bad "*) counts_bad="${line#counts-bad }" ;;
         "counts-end "*) counts_end="${line#counts-end }" ;;
@@ -2574,6 +2583,9 @@ _shmutant_collect() {
   SHMUTANT_RES_COUNTS["$key"]="${counts%$'\n'}"; SHMUTANT_RES_COUNTS_BAD["$key"]="$counts_bad"
   if [ "$setup_failed" = 1 ]; then
     _shmutant_err "$dir: the run could not be set up (a channel could not be made or opened) — the row was never run"; SHMUTANT_CLEANUP_FAILED=1
+  fi
+  if [ "$unrecorded" = 1 ]; then
+    _shmutant_err "$dir: a freeze gave up on a read of the process table and could not record that it is unsettled — the run's verdict is not accepted"; SHMUTANT_CLEANUP_FAILED=1
   fi
   if [ "$unpublished" = 1 ]; then
     _shmutant_err "$dir/output could not be published — the documented artifact of this run is missing"; SHMUTANT_CLEANUP_FAILED=1
@@ -3104,7 +3116,7 @@ _shmutant_pool_locals_writable() {
     mode ms mutate_aliases n named new nl now out out_r out_r2 out_w outf \
     p parent path pending phys pid pids pool_aliases pout pout_r pout_w prc \
     prep r rc red rel rest ret rjrc root root_ok rootid rootls \
-    roots rounds row_why run s sdir sec seen seen_r seen_w sel sent setup_failed sig size starts nul counts_r2 \
+    roots rounds row_why run s sdir sec seen seen_r seen_w sel sent setup_failed unrecorded sig size starts nul counts_r2 \
     spec st stat_bin state status stillours stillpids stops suffix swapped t t0 t1 \
     table target target_ck targets timeout tmp unpublished us v v_jobs v_red v_timeout \
     verdict vr vw wd who wit wrc wstatus \
