@@ -3014,3 +3014,11 @@ shmutant_mut 'a guard that gave up on a read of its own unsettles its freeze' \
   '  local SHMUTANT_PS_UNSETTLES=""' \
   '  :' \
   't_guard_gives_up_on_a_process_table_that_stalls'
+shmutant_mut 'a give-up whose record could not be written is dropped in silence' \
+  '2>/dev/null || _shmutant_freeze_err "the run could not be told' \
+  '2>/dev/null || : "the run could not be told' \
+  't_freeze_gives_up_on_a_process_table_that_stalls'
+shmutant_mut 'a give-up is said only where the freeze has a descriptor to report on' \
+  '  _shmutant_freeze_err "a read of the process table did not answer within' \
+  '  [ -z "${err_fd:-}" ] || _shmutant_freeze_err "a read of the process table did not answer within' \
+  't_freeze_gives_up_on_a_process_table_that_stalls'

@@ -821,11 +821,15 @@ _shmutant_ps() {
 # shell doing a freeze (SHMUTANT_PS_UNSETTLES is 1 there, and nowhere else): that freeze is unsettled,
 # since what the read would have shown was never frozen or never checked. Told to the runner on the
 # descriptor it named, at once and from here: the read may be in a substitution of the freezing
-# shell, which can set nothing in it. Said as well where the freeze reports. Returns 0 always.
+# shell, which can set nothing in it. Said as well where the freeze reports (_shmutant_freeze_err),
+# and so is a record that could not be written: the descriptor is the one the run's status travels
+# on, so a run whose record stays unwritable is a harness error already, and one whose record took
+# only its status is scored without this. Returns 0 always.
 _shmutant_ps_gave_up() {
   [ "${SHMUTANT_PS_UNSETTLES:-}" = 1 ] || return 0
-  [ -z "${SHMUTANT_UNSETTLED_FD:-}" ] || { printf 'unsettled\n' >&"$SHMUTANT_UNSETTLED_FD"; } 2>/dev/null
-  [ -z "${err_fd:-}" ] || _shmutant_err "a read of the process table did not answer within $1 seconds and was given up on, so the process tree being ended is not known to have been frozen whole" 2>&"$err_fd"
+  _shmutant_freeze_err "a read of the process table did not answer within $1 seconds and was given up on, so the process tree being ended is not known to have been frozen whole"
+  [ -n "${SHMUTANT_UNSETTLED_FD:-}" ] || return 0
+  { printf 'unsettled\n' >&"$SHMUTANT_UNSETTLED_FD"; } 2>/dev/null || _shmutant_freeze_err "the run could not be told that its freeze is unsettled, and is scored without it"
   return 0
 }
 

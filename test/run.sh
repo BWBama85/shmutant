@@ -6321,6 +6321,28 @@ t_freeze_gives_up_on_a_process_table_that_stalls() {
     if [ -n "$h" ]; then end_group "$h" "${known[@]}"; else _shmutant_kill_tree KILL "" "${known[@]}"; wait "$root" 2>/dev/null; fi
     all_gone 50 "${known[@]}" || fail_ "$how: fixture: the processes of the case were left behind: $(listed "${STILL[@]}")"
   done
+  # The report itself (_shmutant_ps_gave_up). It is one line on the descriptor the runner named, and
+  # is said where the freeze reports: on that descriptor of the freeze's, or on stderr without one.
+  local out
+  rm -f "$T/told" "$T/said"
+  out="$( SHMUTANT_PS_UNSETTLES=1; exec {uf}> "$T/told"; SHMUTANT_UNSETTLED_FD="$uf"; _shmutant_ps_gave_up 7 2>&1 )"
+  eq "$(cat "$T/told" 2>/dev/null)" unsettled 'a give-up is one line on the descriptor the runner named'
+  has "$out" 'did not answer within 7 seconds' 'a give-up is said on stderr where the freeze has no descriptor to report on'
+  rm -f "$T/told"
+  out="$( SHMUTANT_PS_UNSETTLES=1; exec {uf}> "$T/told" {ef}> "$T/said"; SHMUTANT_UNSETTLED_FD="$uf"; err_fd="$ef"; _shmutant_ps_gave_up 7 2>&1 )"
+  eq "$out" '' 'a give-up is said on the descriptor of the freeze, not on stderr beside it'
+  has "$(cat "$T/said" 2>/dev/null)" 'did not answer within 7 seconds' 'a give-up is said on the descriptor the freeze reports on'
+  # A record that cannot be written (here the descriptor is open for reading only) is said, never
+  # dropped in silence.
+  out="$( SHMUTANT_PS_UNSETTLES=1; exec {uf}< /dev/null; SHMUTANT_UNSETTLED_FD="$uf"; _shmutant_ps_gave_up 7 2>&1 )"
+  has "$out" 'could not be told that its freeze is unsettled' 'a give-up whose record could not be written says so'
+  # With nowhere to record it (no runner: an abort, the CLI), it is still said.
+  out="$( SHMUTANT_PS_UNSETTLES=1; SHMUTANT_UNSETTLED_FD=""; _shmutant_ps_gave_up 7 2>&1 )"
+  has "$out" 'did not answer within 7 seconds' 'a give-up with no descriptor to record it on is still said'
+  # And a read given up on by any other shell is recorded and said nowhere.
+  rm -f "$T/told"
+  out="$( unset SHMUTANT_PS_UNSETTLES; exec {uf}> "$T/told"; SHMUTANT_UNSETTLED_FD="$uf"; _shmutant_ps_gave_up 7 2>&1 )"
+  eq "$out$(cat "$T/told" 2>/dev/null)" '' 'a give-up of a shell that is not doing a freeze is neither recorded nor said'
 }
 
 # shellcheck disable=SC2034
