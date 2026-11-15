@@ -2360,8 +2360,8 @@ shmutant_mut 'a bounded ps ends a caller with errexit on at the end of its outpu
   '  IFS= read -r -N 2147483647 -t "$(( b + 5 ))" -u "$fd" out; st=$?' \
   't_guard_gives_up_on_a_process_table_that_stalls'
 shmutant_mut 'a bounded ps loses the status of the ps' \
-  '  st=0; wait "$p" || st=$?' \
-  '  st=0; wait "$p" || :' \
+  'else st=0; wait "$p" || st=$?; fi' \
+  'else st=0; wait "$p" || :; fi' \
   't_guard_gives_up_on_a_process_table_that_stalls'
 shmutant_mut 'a bounded ps swallows a failed write of its output' \
   '  printf '"'"'%s'"'"' "$out" || return 1' \
@@ -2966,6 +2966,10 @@ shmutant_mut 'a freeze reads its process table without a bound' \
   '  local held="" SHMUTANT_PS_BOUND=10' \
   '  local held="" SHMUTANT_PS_BOUND=' \
   't_freeze_gives_up_on_a_process_table_that_stalls'
+shmutant_mut 'a freeze is given a bound that is none' \
+  '  local held="" SHMUTANT_PS_BOUND=10' \
+  '  local held="" SHMUTANT_PS_BOUND=0' \
+  't_freeze_gives_up_on_a_process_table_that_stalls'
 shmutant_mut 'the walk of a freeze reads its recorded starts past the bound' \
   '    table="$(_shmutant_ps -A -o pid= -o ppid= -o lstart= 2>/dev/null)" && [ -n "$table" ] || return 1' \
   '    table="$(command -p ps -A -o pid= -o ppid= -o lstart= 2>/dev/null)" && [ -n "$table" ] || return 1' \
@@ -2994,3 +2998,19 @@ shmutant_mut 'the CLI'"'"'s look at its holder has no bound' \
   '  SHMUTANT_PS_BOUND=10 _shmutant_holder_state "$holder" "$holderid" || [ "$?" = 2 ] || return 0' \
   '  _shmutant_holder_state "$holder" "$holderid" || [ "$?" = 2 ] || return 0' \
   't_cli_end_group_checks_the_holder_identity'
+shmutant_mut 'a freeze that gave up on a read is not reported unsettled' \
+  'SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES=1' \
+  'SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES=0' \
+  't_freeze_gives_up_on_a_process_table_that_stalls'
+shmutant_mut 'a read given up on is given up on without a word' \
+  '  [ "$st" != 124 ] || { _shmutant_ps_gave_up "$b"; return 124; }' \
+  '  [ "$st" != 124 ] || return 124' \
+  't_freeze_gives_up_on_a_process_table_that_stalls'
+shmutant_mut 'a read given up on outside a freeze unsettles its run' \
+  '  [ "${SHMUTANT_PS_UNSETTLES:-}" = 1 ] || return 0' \
+  '  :' \
+  't_run_is_ended_through_a_process_table_that_stalls'
+shmutant_mut 'a guard that gave up on a read of its own unsettles its freeze' \
+  '  local SHMUTANT_PS_UNSETTLES=""' \
+  '  :' \
+  't_guard_gives_up_on_a_process_table_that_stalls'

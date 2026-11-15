@@ -4217,11 +4217,17 @@ end_tree() {
 # stall_ps_reads — in the shell that calls it, put a sleep in the place of every `ps` that the
 # caller's function `stalls` picks (given the ps arguments: true for a read that is to stall, and
 # the same answer however often it is asked about one read), its pid appended to $T/stalled. Such a
-# read's bound, where it has one (_shmutant_ps), is cut to a second; one with no bound stays
-# unbounded, and every other read is left as it is, bound and all.
+# read's bound, where it has one that _shmutant_ps keeps (a whole number from 1 to 999), is cut to a
+# second; one with no bound, or with a value that is none, stays unbounded, and every other read is
+# left as it is, bound and all.
 stall_ps_reads() {
   eval "$(declare -f _shmutant_ps | sed '1s/^_shmutant_ps /_shmutant_ps_real /')"
-  _shmutant_ps() { if [ -n "${SHMUTANT_PS_BOUND:-}" ] && stalls "$@"; then SHMUTANT_PS_BOUND=1 _shmutant_ps_real "$@"; else _shmutant_ps_real "$@"; fi; }
+  _shmutant_ps() {
+    case "${SHMUTANT_PS_BOUND:-}" in
+      [1-9]|[1-9][0-9]|[1-9][0-9][0-9]) if stalls "$@"; then SHMUTANT_PS_BOUND=1 _shmutant_ps_real "$@"; return; fi ;;
+    esac
+    _shmutant_ps_real "$@"
+  }
   command() {
     if [ "${1:-}" = -p ] && [ "${2:-}" = ps ] && stalls "${@:3}"; then printf '%s\n' "$BASHPID" >> "$T/stalled"; builtin exec sleep 300; fi
     builtin command "$@"
@@ -4229,16 +4235,17 @@ stall_ps_reads() {
 }
 
 # stalled_ps_ended <label> — every ps that stall_ps_reads put a sleep in the place of has been ended,
-# looked for at most 30 times a tenth of a second apart: one is still there while its number is that
-# sleep's (a number given away since is another command's). Says so for <label> when one is, and when
-# none stalled at all. Nothing is signalled.
+# looked for at most 30 times a tenth of a second apart: one is still there while the command at its
+# number is that sleep, whole (a number given away since is another command's). Says so for <label>
+# when one is, and when none stalled at all. Nothing is signalled.
 stalled_ps_ended() {
-  local sp i
+  local sp i args
   [ -s "$T/stalled" ] || { fail_ "$1: fixture: no read of the process table stalled"; return 0; }
   while IFS= read -r sp; do
     case "$sp" in ''|*[!0-9]*) continue ;; esac
     for (( i = 0; ; i++ )); do
-      case "$(command -p ps -o args= -p "$sp" 2>/dev/null)" in *'sleep 300'*) ;; *) break ;; esac
+      args="$(command -p ps -o args= -p "$sp" 2>/dev/null)"; args="${args%"${args##*[![:space:]]}"}"
+      [ "$args" = 'sleep 300' ] || break
       [ "$i" -lt 30 ] || { fail_ "$1: a ps that stalled was left running (pid $sp)"; break; }
       sleep 0.1
     done
@@ -6126,6 +6133,7 @@ t_ps_end_signals_a_job_only_through_bash_s_record() {
   [ ! -e "$T/trapped" ] || fail_ "a caller's DEBUG trap ran between the bounded read's job listing and its signal"
 }
 
+# shellcheck disable=SC2034
 t_guard_gives_up_on_a_process_table_that_stalls() {
   # #51: once its freezing shell is gone, nothing but the guard bounds its own process-table reads, so
   # each gives up after its bound (_shmutant_ps) and reads as a table that could not be read: what the
@@ -6192,12 +6200,17 @@ t_guard_gives_up_on_a_process_table_that_stalls() {
   # The guard: its table read stalls, and it lets go what it stopped.
   did="$(SHMUTANT_PROC=0 SHMUTANT_PS_LSTART=0 _shmutant_identity "$d")"
   rm -f "$T/stalled.pid"
-  ( SHMUTANT_PROC=0 SHMUTANT_PS_LSTART=0
+  # #86: started by a freezing shell, whose reads given up on leave its freeze unsettled, the guard
+  # says nothing of that freeze for a read of its own.
+  rm -f "$T/guard-unsettled"
+  ( SHMUTANT_PROC=0 SHMUTANT_PS_LSTART=0 SHMUTANT_PS_UNSETTLES=1
+    exec {uf}> "$T/guard-unsettled"; SHMUTANT_UNSETTLED_FD="$uf"
     eval "$(declare -f _shmutant_ps | sed '1s/^_shmutant_ps /_shmutant_ps_real /')"
     _shmutant_ps() { if [ -n "${SHMUTANT_PS_BOUND:-}" ]; then SHMUTANT_PS_BOUND=1 _shmutant_ps_real "$@"; else _shmutant_ps_real "$@"; fi; }
     command() { if [ "$*" = "-p ps -A -o pid= -o etime=" ]; then printf '%s\n' "$BASHPID" > "$T/stalled.pid"; exec sleep 60; fi; builtin command "$@"; }
     printf 'p %s %s\n' "$d" "$did" | _shmutant_guard ) > /dev/null 2>&1 & g=$!
   wait_gone "$g" "" 80 || fail_ 'the guard waited on a process table that stalled'
+  [ ! -s "$T/guard-unsettled" ] || fail_ 'a guard that gave up on a read of its own reported its freeze unsettled'
   sp="$(cat "$T/stalled.pid" 2>/dev/null)"
   [ -n "$sp" ] || fail_ 'fixture: the guard never read its table'
   [ -z "$sp" ] || wait_gone "$sp" "" 30 || { fail_ 'the guard left the ps that stalled running'; kill -KILL "$sp" 2>/dev/null; }
@@ -6216,22 +6229,23 @@ t_freeze_gives_up_on_a_process_table_that_stalls() {
   # (`members`) and at the read after their starts (`members-again`): they cannot be told, the holder
   # is kept stopped, and the group is ended through it. Through one that stalls on the listing a walk
   # reads, by recorded starts (`walk-lstart`) and by elapsed times (`walk-etime`): the root is ended,
-  # what the walk never reached is left running, and the freeze is reported unsettled. Through one
-  # that stalls on how much older the shell is than its guard (`gap`, where starts are elapsed times):
-  # the tree is ended whole, and settled. And through one that stalls on every read the shell makes
-  # (`all`): nothing can then be shown to be the run's, so the group of a holder whose start was read
-  # before is continued, never killed and never left stopped (D12). Each ps that stalls is a sleep in
-  # its place, which the read's own bound ends.
+  # and what the walk never reached is left running. Through one that stalls on how much older the
+  # shell is than its guard (`gap`, where starts are elapsed times): the tree is ended whole. And
+  # through one that stalls on every read the shell makes (`all`): nothing can then be shown to be the
+  # run's, so the group of a holder whose start was read before is continued, never killed and never
+  # left stopped (D12). A freeze that gave up on a read is reported unsettled, whichever read it was
+  # (D17); one none of whose reads stalls ends its tree and is not (`none`). Each ps that stalls is a
+  # sleep in its place, which the read's own bound ends.
   local how h kid root fz left p i
   local -a known=() kids=() STILL=()
-  for how in members members-again walk-lstart walk-etime gap all; do
+  for how in none members members-again walk-lstart walk-etime gap all; do
     if [ "$how" = walk-lstart ] && ! ( SHMUTANT_PROC=0; unset SHMUTANT_PS_LSTART; _shmutant_identity "$BASHPID" > /dev/null; [ "${SHMUTANT_PS_LSTART:-}" = 1 ] ); then
       echo "note: $_unit: ps prints no lstart here; walk-lstart skipped"; continue
     fi
     rm -f "$T/returned" "$T/unsettled" "$T/stalled"
     h=""; root=""; kid=""; known=(); kids=()
     case "$how" in
-      walk-*|gap)
+      walk-*|gap|none)
         ( sleep 60 & sleep 60 & wait ) > /dev/null 2>&1 & root=$!
         wait_descendants "$root" 2
         mapfile -t kids < <(_shmutant_snapshot "$root")
@@ -6282,17 +6296,22 @@ t_freeze_gives_up_on_a_process_table_that_stalls() {
       break
     fi
     wait "$fz" 2>/dev/null
-    stalled_ps_ended "$how"
+    if [ "$how" = none ]; then
+      [ ! -s "$T/unsettled" ] || fail_ 'none: a freeze none of whose reads stalled was reported unsettled'
+    else
+      stalled_ps_ended "$how"
+      grep -qx unsettled "$T/unsettled" 2>/dev/null || fail_ "$how: a freeze that gave up on a read of the process table was not reported unsettled"
+    fi
     case "$how" in
+      none)
+        all_gone 50 "${known[@]}" || fail_ "none: fixture: a freeze none of whose reads stalled left its tree (pid ppid pgid stat args): $(listed "${STILL[@]}")" ;;
       members*)
         all_gone 50 "${known[@]}" || fail_ "$how: a group whose members could not be read was not ended through its holder (pid ppid pgid stat args): $(listed "${STILL[@]}")" ;;
       walk-*)
-        grep -qx unsettled "$T/unsettled" 2>/dev/null || fail_ "$how: a freeze that could not read the listing of its walk was not reported unsettled"
         all_gone 50 "${known[0]}" || fail_ "$how: the root of a walk that could not be read was not ended"
         left="$(none_stopped 30 "${kids[@]%%:*}")" || fail_ "$how: a walk that could not be read left [$left] stopped" ;;
       gap)
-        all_gone 50 "${known[@]}" || fail_ "gap: a freeze that could not read how much older it is than its guard left its tree (pid ppid pgid stat args): $(listed "${STILL[@]}")"
-        [ ! -s "$T/unsettled" ] || fail_ 'gap: a freeze that could not read how much older it is than its guard was reported unsettled' ;;
+        all_gone 50 "${known[@]}" || fail_ "gap: a freeze that could not read how much older it is than its guard left its tree (pid ppid pgid stat args): $(listed "${STILL[@]}")" ;;
       all)
         left="$(none_stopped 50 "${known[@]%%:*}")" || fail_ "all: a group that could not be shown to be the run's was left stopped: [$left]"
         for p in "${known[@]}"; do
@@ -6312,9 +6331,10 @@ t_run_is_ended_through_a_process_table_that_stalls() {
   # the run is ended whole either way. With every read stalling that the freeze and those two make,
   # in a run no start of whose holder was read when it started (as where ps identifies nothing), the
   # run's group is ended by number, at its deadline (`deadline`) and by its watchdog once its runner
-  # has been killed (`orphan`). Each ps that stalls is a sleep in its place, which the read's own
-  # bound ends.
-  local how
+  # has been killed (`orphan`). A run whose freeze gave up on a read is scored unsettled (`deadline`);
+  # one that only gave up on the listing or on that look, which are no read of its freeze, is not
+  # (D17). Each ps that stalls is a sleep in its place, which the read's own bound ends.
+  local how fired unsettled want
   local -a known=() STILL=()
   stalling_table() {
     SHMUTANT_PROC=0; SHMUTANT_PS_LSTART=0
@@ -6352,7 +6372,10 @@ t_run_is_ended_through_a_process_table_that_stalls() {
     fi
     case "$how" in orphan) ;; *)
       wait_for "$T/$how/result" || fail_ "$how: the run did not return to its caller"
-      has "$(cat "$T/$how/result" 2>/dev/null)" 'fired=1' "$how: the run was not scored as one that reached its deadline" ;;
+      fired=""; unsettled=""; read -r fired unsettled _ < "$T/$how/result" 2>/dev/null
+      eq "$fired" fired=1 "$how: the run was not scored as one that reached its deadline"
+      want=unsettled=0; [ "$how" != deadline ] || want=unsettled=1
+      eq "$unsettled" "$want" "$how: the run was not scored as its freeze's reads went" ;;
     esac
     stalled_ps_ended "$how"
     run_ended

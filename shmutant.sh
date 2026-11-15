@@ -771,7 +771,8 @@ _shmutant_diag_snapshot() {
 # _shmutant_ps <argument>… — `command -p ps <argument>…`, its output and its status. With
 # SHMUTANT_PS_BOUND set to a whole number of seconds from 1 to 999 (a freeze sets it, and its guard,
 # and a watchdog for each read it makes; any other value is no bound), a ps that has not ended within that bound is given up on: status 124, nothing
-# printed, so a process table that stalls reads as one that could not be read. The bound is kept by a
+# printed, so a process table that stalls reads as one that could not be read (and, read by a shell
+# doing a freeze, leaves that freeze unsettled: _shmutant_ps_gave_up). The bound is kept by a
 # process substitution of its own, which ends whichever of the ps and its timer is left (only while
 # bash has not reaped it: _shmutant_ps_end). One that does not answer within five
 # seconds more is given up on as well, signalled by nobody. A failed write of the output is a failed
@@ -809,11 +810,23 @@ _shmutant_ps() {
   # a whole process table at every pass.
   IFS= read -r -N 2147483647 -t "$(( b + 5 ))" -u "$fd" out || st=$?
   exec {fd}<&-
-  [ "$st" -le 128 ] || return 124
-  st=0; wait "$p" || st=$?
-  [ "$st" != 124 ] || return 124
+  # A helper that did not answer either is not waited for: the read is given up on as one it ended is.
+  if [ "$st" -gt 128 ]; then st=124; else st=0; wait "$p" || st=$?; fi
+  [ "$st" != 124 ] || { _shmutant_ps_gave_up "$b"; return 124; }
   printf '%s' "$out" || return 1
   return "$st"
+}
+
+# _shmutant_ps_gave_up <seconds> — a read that _shmutant_ps gave up on after <seconds> was one of a
+# shell doing a freeze (SHMUTANT_PS_UNSETTLES is 1 there, and nowhere else): that freeze is unsettled,
+# since what the read would have shown was never frozen or never checked. Told to the runner on the
+# descriptor it named, at once and from here: the read may be in a substitution of the freezing
+# shell, which can set nothing in it. Said as well where the freeze reports. Returns 0 always.
+_shmutant_ps_gave_up() {
+  [ "${SHMUTANT_PS_UNSETTLES:-}" = 1 ] || return 0
+  [ -z "${SHMUTANT_UNSETTLED_FD:-}" ] || { printf 'unsettled\n' >&"$SHMUTANT_UNSETTLED_FD"; } 2>/dev/null
+  [ -z "${err_fd:-}" ] || _shmutant_err "a read of the process table did not answer within $1 seconds and was given up on, so the process tree being ended is not known to have been frozen whole" 2>&"$err_fd"
+  return 0
 }
 
 # _shmutant_ps_end <pid> — KILL <pid> while it is a job of this shell's that bash has not reaped:
@@ -1157,8 +1170,9 @@ _shmutant_kill_tree_twice() {
 _shmutant_kill_tree_guarded() {
   # Every process-table read of this freeze, its own and those of each step it calls, gives up after
   # ten seconds (_shmutant_ps) and is then one that could not be read: a ps that does not answer
-  # holds the freeze for that long a read, never for good.
-  local held="" SHMUTANT_PS_BOUND=10
+  # holds the freeze for that long a read, never for good. A read given up on leaves the freeze
+  # unsettled (_shmutant_ps_gave_up): the owner's call, D17.
+  local held="" SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES=1
   if [ "${1:-}" = -g ]; then held="$2"; shift 2; fi
   local spec="$1" pid rootid p d rid guard_w="" guard_r="" guard_lost=0 guard_pid="" guard_id=""
   # The guard's way to tell this shell is gone while a helper of it still holds the records open:
@@ -1560,8 +1574,10 @@ _shmutant_guard() {
   local -A SHMUTANT_START=() killing=()
   # Every process-table read it makes gives up after ten seconds (_shmutant_ps), and reads as one that
   # could not be read: once its freezing shell is gone nothing else is left to bound a ps that stalls,
-  # and a read that never returns would keep it from sending anything at all.
+  # and a read that never returns would keep it from sending anything at all. Such a read is its own,
+  # not its freezing shell's, and says nothing of that freeze (_shmutant_ps_gave_up).
   local SHMUTANT_PS_BOUND=10
+  local SHMUTANT_PS_UNSETTLES=""
   # Its own process: the caller's errexit would end it at the first refused signal or failed write.
   set +e
   printf 'ready %s\n' "$BASHPID"
@@ -2637,7 +2653,7 @@ _shmutant_detail() {
     baseline)   printf 'the tests selected by [%s] did not come back green BEFORE any defect was injected — a red result here would prove nothing (see the baseline record)' "$4" ;;
     timeout)    printf 'did not finish within %ss — a defect that hangs the suite is endured, not detected' "${SHMUTANT_TIMEOUT:-300}" ;;
     lost)       printf 'produced NO verdict — its worker died without reporting' ;;
-    unsettled)  printf 'its process tree never settled — something kept forking out of reach while it was being ended, or it could not be frozen first, so what it did cannot be trusted' ;;
+    unsettled)  printf 'its process tree never settled — something kept forking out of reach while it was being ended, it could not be frozen first, or the process table did not answer while it was, so what it did cannot be trusted' ;;
     *)          printf 'unknown verdict [%s]' "$1" ;;
   esac
 }
@@ -3106,7 +3122,7 @@ _shmutant_pool_locals_writable() {
     a budget dog e elapsed last leftovers linked lstart old rrc s tampered tmpd tnow victims wroot \
     dog_self done_first orphaned runner runner_gap runnerid \
     b chunk conts g gcont gone_group guard_id guard_lost guard_of guard_of_id guard_pid guard_r guard_up guard_w hs kept kills members out pairs part pg ph phid recs rid rootid_pre seen_ck unfrozen w want \
-    SHMUTANT_GUARD SHMUTANT_GUARD_PID SHMUTANT_PS_LSTART SHMUTANT_PS_BOUND c guard_self guard_gap_ref gap ea eb lp le tbl cands guarded jl w fid_now stopped fgap cont_first cfirst told group_untold first \
+    SHMUTANT_GUARD SHMUTANT_GUARD_PID SHMUTANT_PS_LSTART SHMUTANT_PS_BOUND SHMUTANT_PS_UNSETTLES c guard_self guard_gap_ref gap ea eb lp le tbl cands guarded jl w fid_now stopped fgap cont_first cfirst told group_untold first \
     before after ga gb \
     bad hits name names only scope SHMUTANT_PICK SHMUTANT_PICK_N
 }
