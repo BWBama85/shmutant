@@ -3058,3 +3058,11 @@ shmutant_mut 'an empty value an integer attribute made 0 is taken for a descript
   '  case "${SHMUTANT_PS_UNSETTLES:-}" in '"'"''"'"'|0|*[!0-9]*) return 0 ;; esac' \
   '  case "${SHMUTANT_PS_UNSETTLES:-}" in '"'"''"'"'|*[!0-9]*) return 0 ;; esac' \
   't_freeze_gives_up_on_a_process_table_that_stalls'
+shmutant_mut 'a row whose freeze could not record that it is unsettled keeps the verdict that followed' \
+  '  [ "$unrecorded" != 1 ] || [ "$SHMUTANT_V_VERDICT" = lost ] || SHMUTANT_V_VERDICT=unsettled' \
+  '  :' \
+  't_collect_fails_closed'
+shmutant_mut 'a lost run whose freeze could not record that it is unsettled is scored unsettled' \
+  '  [ "$unrecorded" != 1 ] || [ "$SHMUTANT_V_VERDICT" = lost ] || SHMUTANT_V_VERDICT=unsettled' \
+  '  [ "$unrecorded" != 1 ] || SHMUTANT_V_VERDICT=unsettled' \
+  't_collect_fails_closed'

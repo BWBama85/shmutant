@@ -7238,11 +7238,17 @@ t_collect_fails_closed() {
   eq "$SHMUTANT_V_STATUS" 1 'status read'
   eq "$SHMUTANT_CLEANUP_FAILED" 0 'a clean directory is not a cleanup failure'
   # #86: a worker whose freeze gave up on a read and could not record it says so on the channel: a
-  # harness error, whatever verdict follows it
+  # harness error, and the row is unsettled, whatever verdict follows it
   _shmutant_open_channel "$T" d; printf 'unrecorded\nverdict killed 5 1\n' >&"${SHMUTANT_VERDICT_W[d]}"
   _shmutant_collect "$T/d" d 0 2> "$T/collect-err"
   eq "$SHMUTANT_CLEANUP_FAILED" 1 'a run whose freeze could not record that it is unsettled is a harness error'
   has "$(cat "$T/collect-err" 2>/dev/null)" 'could not record that it is unsettled' 'says why'
+  eq "$SHMUTANT_V_VERDICT ${SHMUTANT_RES_VERDICT[d]}" 'unsettled unsettled' 'and its row is scored unsettled, not by the verdict that followed'
+  SHMUTANT_CLEANUP_FAILED=0
+  # ...but a run with no verdict at all is lost, as any other is
+  _shmutant_open_channel "$T" d; printf 'unrecorded\n' >&"${SHMUTANT_VERDICT_W[d]}"
+  _shmutant_collect "$T/d" d 0 2> /dev/null
+  eq "$SHMUTANT_V_VERDICT" lost 'a run that sent no verdict is lost, unrecorded or not'
   SHMUTANT_CLEANUP_FAILED=0
   # a replaced directory is a harness error
   SHMUTANT_DIR_IDS[d]=999999999

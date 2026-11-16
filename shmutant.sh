@@ -827,7 +827,7 @@ _shmutant_ps() {
 # runner is told on the descriptor it named, at once and from here: the read may be in a
 # substitution of the freezing shell, which can set nothing in it. A record that cannot be written
 # there is said too, and told to the pool on the worker's own channel (`unrecorded`), where it makes
-# the pass a harness error: the run must not be scored without it. A ps that itself ends with status
+# the pass a harness error and the row unsettled: the run must not be scored without it. A ps that itself ends with status
 # 124 is read as one given up on, as it always was. Returns 0 always.
 _shmutant_ps_gave_up() {
   case "${SHMUTANT_PS_UNSETTLES:-}" in ''|0|*[!0-9]*) return 0 ;; esac
@@ -2533,7 +2533,8 @@ _shmutant_link_count() {
 
 # _shmutant_collect <dir> <key> <wait-status> — read a reaped worker's channel into
 # SHMUTANT_RES_*[key] (and SHMUTANT_V_*): the last `verdict <v> <us> <status>` line, or `lost`
-# when there is none, the line is damaged, or the worker did not exit 0. Closes the channel.
+# when there is none, the line is damaged, or the worker did not exit 0; `unsettled` in the place of
+# any other when the worker sent `unrecorded` (_shmutant_ps_gave_up). Closes the channel.
 _shmutant_collect() {
   local dir="$1" key="$2" wstatus="$3" line fd unpublished=0 setup_failed=0 swapped=0 unrecorded=0 clone_id="" counts="" counts_bad="" counts_end="" counts_got=0
   SHMUTANT_V_VERDICT=lost; SHMUTANT_V_US=0; SHMUTANT_V_STATUS=""
@@ -2576,6 +2577,9 @@ _shmutant_collect() {
     fi
   fi
   [ -n "$SHMUTANT_V_VERDICT" ] || SHMUTANT_V_VERDICT=lost
+  # A give-up the runner could not be told of makes the row what that record would have: unsettled,
+  # whatever verdict the worker then sent. A lost one stays lost.
+  [ "$unrecorded" != 1 ] || [ "$SHMUTANT_V_VERDICT" = lost ] || SHMUTANT_V_VERDICT=unsettled
   _shmutant_pos_int "$SHMUTANT_V_US" > /dev/null || SHMUTANT_V_US=0
   SHMUTANT_RES_VERDICT["$key"]="$SHMUTANT_V_VERDICT"; SHMUTANT_RES_US["$key"]="$SHMUTANT_V_US"; SHMUTANT_RES_STATUS["$key"]="$SHMUTANT_V_STATUS"
   # A baseline's counts are whole only up to its end marker: a worker whose writes failed partway
