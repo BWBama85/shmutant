@@ -749,9 +749,10 @@ _shmutant_diag_dir_check() {
 _shmutant_diag_snapshot() {
   local d="${SHMUTANT_DIAG_DIR:-}" k="$1" n="$2" tbl tmp; shift 2
   [ -n "$d" ] || return 0
-  # The table first: a capture that cannot read one writes nothing.
-  tbl="$(SHMUTANT_PS_BOUND=10 _shmutant_ps -A -o pid,ppid,pgid,sess,stat,lstart,command 2>/dev/null)" \
-    || tbl="$(SHMUTANT_PS_BOUND=10 _shmutant_ps -A -o pid,ppid,pgid,stat,command 2>/dev/null)" || return 0
+  # The table first: a capture that cannot read one writes nothing. No freeze's read, whatever the
+  # caller left in SHMUTANT_PS_UNSETTLES: one given up on is reported nowhere.
+  tbl="$(SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES="" _shmutant_ps -A -o pid,ppid,pgid,sess,stat,lstart,command 2>/dev/null)" \
+    || tbl="$(SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES="" _shmutant_ps -A -o pid,ppid,pgid,stat,command 2>/dev/null)" || return 0
   [ -n "$tbl" ] || return 0
   # A directory replaced since it was checked (by a link into the workdir, say) gets nothing.
   _shmutant_is_id "$d" "${SHMUTANT_DIAG_ID:-}" || return 0
@@ -2307,8 +2308,9 @@ _shmutant_held_group() {
   SHMUTANT_HELD=()
   [ -n "${holder:-}" ] || return 0
   # A holder that cannot be checked (2) is taken as it was, as it would be with no ps at all. So is
-  # one whose read does not answer within ten seconds (_shmutant_ps): this is a freeze's first read.
-  SHMUTANT_PS_BOUND=10 _shmutant_holder_state "$holder" "${holderid:-}" || [ "$?" = 2 ] || return 0
+  # one whose read does not answer within ten seconds (_shmutant_ps): the look comes before the
+  # freeze, and is none of its reads whatever the caller left in SHMUTANT_PS_UNSETTLES.
+  SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES="" _shmutant_holder_state "$holder" "${holderid:-}" || [ "$?" = 2 ] || return 0
   SHMUTANT_HELD=(-g "$1")
 }
 
@@ -3881,8 +3883,9 @@ _shmutant_cli_end_group() {
   local holder="${2%% *}" holderid="" err_fd=2
   case "$2" in *" "*) holderid="${2#* }" ;; esac
   [ -n "$holder" ] || return 0
-  # Given up on after ten seconds, as every read of the freeze it licenses is (_shmutant_ps).
-  SHMUTANT_PS_BOUND=10 _shmutant_holder_state "$holder" "$holderid" || [ "$?" = 2 ] || return 0
+  # Given up on after ten seconds, as every read of the freeze it licenses is (_shmutant_ps), and
+  # none of that freeze's reads, whatever the caller left in SHMUTANT_PS_UNSETTLES.
+  SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES="" _shmutant_holder_state "$holder" "$holderid" || [ "$?" = 2 ] || return 0
   _shmutant_kill_tree_twice -g "$1" "$1:"
   return 0
 }

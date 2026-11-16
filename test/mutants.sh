@@ -718,7 +718,7 @@ shmutant_mut 'a held group is neither stopped nor signalled by number' \
   '  if false; then' \
   't_returned_run_without_an_identity_is_still_cleaned_up'
 shmutant_mut 'a group is signalled by number after its holder is gone' \
-  '  SHMUTANT_PS_BOUND=10 _shmutant_holder_state "$holder" "${holderid:-}" || [ "$?" = 2 ] || return 0' \
+  '  SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES="" _shmutant_holder_state "$holder" "${holderid:-}" || [ "$?" = 2 ] || return 0' \
   '  :' \
   't_run_group_is_not_signalled_by_number_without_its_holder'
 shmutant_mut 'a bare exit takes the snapshot status' \
@@ -1497,7 +1497,7 @@ shmutant_mut 'a readonly name is assigned when the file is sourced' \
 
 # --- guards added for the forty-sixth review round ---
 shmutant_mut 'the CLI freezes a group whose holder does not verify' \
-  '  SHMUTANT_PS_BOUND=10 _shmutant_holder_state "$holder" "$holderid" || [ "$?" = 2 ] || return 0' \
+  '  SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES="" _shmutant_holder_state "$holder" "$holderid" || [ "$?" = 2 ] || return 0' \
   '  kill -0 "$holder" 2>/dev/null || return 0' \
   't_cli_end_group_checks_the_holder_identity'
 shmutant_mut 'the line terminator prepare printed is part of the root' \
@@ -2641,11 +2641,11 @@ shmutant_mut 'an empty diagnostic setting still reads the process table' \
   '  :' \
   't_diag_snapshot_publishes_only_a_file_it_created'
 shmutant_mut 'the snapshot reads its table unbounded' \
-  '  tbl="$(SHMUTANT_PS_BOUND=10 _shmutant_ps -A -o pid,ppid,pgid,sess,stat,lstart,command 2>/dev/null)" \' \
+  '  tbl="$(SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES="" _shmutant_ps -A -o pid,ppid,pgid,sess,stat,lstart,command 2>/dev/null)" \' \
   '  tbl="$(_shmutant_ps -A -o pid,ppid,pgid,sess,stat,lstart,command 2>/dev/null)" \' \
   't_diag_snapshot_publishes_only_a_file_it_created'
 shmutant_mut 'the snapshot reads its fallback table unbounded' \
-  '    || tbl="$(SHMUTANT_PS_BOUND=10 _shmutant_ps -A -o pid,ppid,pgid,stat,command 2>/dev/null)" || return 0' \
+  '    || tbl="$(SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES="" _shmutant_ps -A -o pid,ppid,pgid,stat,command 2>/dev/null)" || return 0' \
   '    || tbl="$(_shmutant_ps -A -o pid,ppid,pgid,stat,command 2>/dev/null)" || return 0' \
   't_diag_snapshot_publishes_only_a_file_it_created'
 shmutant_mut 'a snapshot is written with no table' \
@@ -2987,7 +2987,7 @@ shmutant_mut 'an empty table of groups is a group with no member left' \
   ' 2>/dev/null)" && printf' \
   't_freeze_takes_group_members_as_roots_but_not_the_holder'
 shmutant_mut 'the look at a run'"'"'s holder that licenses its freeze has no bound' \
-  '  SHMUTANT_PS_BOUND=10 _shmutant_holder_state "$holder" "${holderid:-}" || [ "$?" = 2 ] || return 0' \
+  '  SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES="" _shmutant_holder_state "$holder" "${holderid:-}" || [ "$?" = 2 ] || return 0' \
   '  _shmutant_holder_state "$holder" "${holderid:-}" || [ "$?" = 2 ] || return 0' \
   't_run_is_ended_through_a_process_table_that_stalls'
 shmutant_mut 'the listing a deadline prints is read without a bound' \
@@ -2995,7 +2995,7 @@ shmutant_mut 'the listing a deadline prints is read without a bound' \
   '            command -p ps -o pid= -o ppid= -o stat= -o args= -p' \
   't_run_is_ended_through_a_process_table_that_stalls'
 shmutant_mut 'the CLI'"'"'s look at its holder has no bound' \
-  '  SHMUTANT_PS_BOUND=10 _shmutant_holder_state "$holder" "$holderid" || [ "$?" = 2 ] || return 0' \
+  '  SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES="" _shmutant_holder_state "$holder" "$holderid" || [ "$?" = 2 ] || return 0' \
   '  _shmutant_holder_state "$holder" "$holderid" || [ "$?" = 2 ] || return 0' \
   't_cli_end_group_checks_the_holder_identity'
 shmutant_mut 'a freeze that gave up on a read is not reported unsettled' \
@@ -3038,3 +3038,19 @@ shmutant_mut 'the pool accepts the verdict of a run whose freeze could not recor
   '        unrecorded)  unrecorded=1 ;;' \
   '        unrecorded)  : ;;' \
   't_collect_fails_closed'
+shmutant_mut 'a value of the caller'"'"'s makes the look at a run'"'"'s holder a read of a freeze' \
+  '  SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES="" _shmutant_holder_state "$holder" "${holderid:-}" || [ "$?" = 2 ] || return 0' \
+  '  SHMUTANT_PS_BOUND=10 _shmutant_holder_state "$holder" "${holderid:-}" || [ "$?" = 2 ] || return 0' \
+  't_give_up_outside_a_freeze_is_no_freeze_s'
+shmutant_mut 'a value of the caller'"'"'s makes the CLI'"'"'s look at its holder a read of a freeze' \
+  '  SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES="" _shmutant_holder_state "$holder" "$holderid" || [ "$?" = 2 ] || return 0' \
+  '  SHMUTANT_PS_BOUND=10 _shmutant_holder_state "$holder" "$holderid" || [ "$?" = 2 ] || return 0' \
+  't_give_up_outside_a_freeze_is_no_freeze_s'
+shmutant_mut 'a value of the caller'"'"'s makes a snapshot'"'"'s table a read of a freeze' \
+  '  tbl="$(SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES="" _shmutant_ps -A -o pid,ppid,pgid,sess,stat,lstart,command 2>/dev/null)" \' \
+  '  tbl="$(SHMUTANT_PS_BOUND=10 _shmutant_ps -A -o pid,ppid,pgid,sess,stat,lstart,command 2>/dev/null)" \' \
+  't_give_up_outside_a_freeze_is_no_freeze_s'
+shmutant_mut 'a value of the caller'"'"'s makes a snapshot'"'"'s fallback table a read of a freeze' \
+  '    || tbl="$(SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES="" _shmutant_ps -A -o pid,ppid,pgid,stat,command 2>/dev/null)" || return 0' \
+  '    || tbl="$(SHMUTANT_PS_BOUND=10 _shmutant_ps -A -o pid,ppid,pgid,stat,command 2>/dev/null)" || return 0' \
+  't_give_up_outside_a_freeze_is_no_freeze_s'

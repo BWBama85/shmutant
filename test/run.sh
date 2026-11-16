@@ -6407,6 +6407,40 @@ t_freeze_gives_up_on_a_process_table_that_stalls() {
 }
 
 # shellcheck disable=SC2034
+t_give_up_outside_a_freeze_is_no_freeze_s() {
+  # #86: SHMUTANT_PS_UNSETTLES is a freeze's own. A bounded read made outside one (the look at a
+  # run's holder before its freeze, the CLI's look at its own, either table of a diagnostic snapshot)
+  # is given up on as nobody's, whatever a caller left in that name: nothing is said where it points,
+  # and no run is told that its freeze is unsettled. The ps here ends with status 124, which
+  # _shmutant_ps reads as one it gave up on; starts are read through it, as where there is no /proc.
+  local how h hid out d id
+  sleep 60 > /dev/null 2>&1 & h=$!
+  hid="$(_shmutant_identity "$h")"
+  mkdir -p "$T/d"; d="$T/d"; id="$(_shmutant_dir_id "$d")"
+  for how in held cli snapshot; do
+    rm -f "$T/said" "$T/told" "$T/asked"
+    out="$( exec {sf}> "$T/said" {uf}> "$T/told"; SHMUTANT_PS_UNSETTLES="$sf"; SHMUTANT_UNSETTLED_FD="$uf"
+            SHMUTANT_PROC=0; SHMUTANT_PS_LSTART=0
+            command() {
+              if [ "${1:-}" = -p ] && [ "${2:-}" = ps ]; then : > "$T/asked"; return 124; fi
+              builtin command "$@"
+            }
+            # The freeze the CLI's look licenses is another matter: its reads are its own.
+            _shmutant_kill_tree_twice() { :; }
+            case "$how" in
+              held)     holder="$h"; holderid="$hid"; _shmutant_held_group "$h" ;;
+              cli)      _shmutant_cli_end_group "$h" "$h $hid" ;;
+              snapshot) SHMUTANT_DIAG_DIR="$d" SHMUTANT_DIAG_ID="$id" _shmutant_diag_snapshot holder-gone 1 'a line' ;;
+            esac 2>&1 )"
+    [ -e "$T/asked" ] || fail_ "$how: fixture: no read of the process table was made"
+    eq "$out$(cat "$T/said" 2>/dev/null)" '' "$how: a read given up on outside a freeze is said nowhere"
+    eq "$(cat "$T/told" 2>/dev/null)" '' "$how: and no run is told that its freeze is unsettled"
+  done
+  eq "$(ls -A "$d" 2>/dev/null)" '' 'a snapshot whose table was given up on writes nothing'
+  kill -KILL "$h" 2>/dev/null; wait "$h" 2>/dev/null
+}
+
+# shellcheck disable=SC2034
 t_run_is_ended_through_a_process_table_that_stalls() {
   # #86: a ps that does not answer must not hold a run past its end. The listing a deadline prints
   # before its freeze is given up on and left out (`listing`), and so is the look at the run's holder
