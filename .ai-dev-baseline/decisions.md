@@ -190,3 +190,12 @@
 - placement: test/run.sh (`t_freeze_gives_up_on_a_process_table_that_stalls`)
 - reason:    reproduced as a launchd job (`launchctl bootstrap gui/<uid>`): a shell in a group of its own, with a subshell and its two children stopped in that group, got SIGHUP when the subshell was killed and then one child, the other still stopped; killed children first, it got none; from a terminal session it got none either way; and with the subshell started under job control it got none, the hang-up landing in the tree's group. The unit itself, twelve times under CPU load in such a job, ended once with status 129 and no `FAIL:` line; with the tree in its own group, 21 of 21 passed. Not established: why the two signals of one KILL are far enough apart for this as often as four runs in twelve on the hosted runner (the unit forces elapsed-time starts, and a start that does not match after the stop leaves that process stopped until after the KILL, which would do it), and whether this is what first hangs up the units of #83, whose trees are a pool's.
 - baseline-issue: n/a
+
+## D19 — the workflow's Linux jobs name `ubuntu-24.04` until both units pass on `ubuntu-26.04`
+- date:      2026-11-16
+- category:  project-delta
+- unknown:   PR #96: `linux-suite` failed on two heads (runs 43689933573 and 43949572330), each time on the `ubuntu-26.04` image that `ubuntu-latest` had begun to hand out, in two units the pull request does not touch: `t_proc_scan_reads_each_stat_file_as_one_record` (a copy of `sleep` under another name is a multi-call binary there, and refuses to start) and `t_counts_reading_fails_closed` (a NUL check through a closed descriptor number came back as no NUL byte; cause not established). `main`'s last run, a day before, was on `ubuntu-24.04` and passed both.
+- decision:  the owner's call, given on 2026-11-16 when asked during the review of PR #96: every Linux job of `ci.yml` runs on `ubuntu-24.04`, and #97 tracks the two units and the return to `ubuntu-latest`.
+- placement: .github/workflows/ci.yml
+- reason:    a pull request cannot be told from a runner image by a check that is red for either. Not chosen: fixing both units in PR #96, since the second failure may be in `_shmutant_read_counts` and needs an `ubuntu-26.04` environment to tell; leaving the check red.
+- baseline-issue: n/a
