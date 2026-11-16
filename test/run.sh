@@ -6327,6 +6327,43 @@ t_freeze_gives_up_on_a_process_table_that_stalls() {
     if [ -n "$h" ]; then end_group "$h" "${known[@]}"; else _shmutant_kill_tree KILL "" "${known[@]}"; wait "$root" 2>/dev/null; fi
     all_gone 50 "${known[@]}" || fail_ "$how: fixture: the processes of the case were left behind: $(listed "${STILL[@]}")"
   done
+  # A freeze whose first read is given up on once the reader of its stderr has gone still records it:
+  # the words cannot be written, and that must not end the read (SIGPIPE) before the record is.
+  local pw sp=0
+  ( exec {pw}> >(:); wait "$!"; echo x >&"$pw" ) 2>/dev/null || sp=$?
+  if [ "$sp" != 141 ]; then
+    echo "note: $_unit: SIGPIPE is ignored here; a give-up said to a reader that has gone is not exercised"
+  else
+    rm -f "$T/returned" "$T/unsettled" "$T/stalled"
+    set -m; ( sleep 60 & sleep 60 & wait ) > /dev/null 2>&1 & root=$!; set +m
+    wait_descendants "$root" 2
+    mapfile -t kids < <(_shmutant_snapshot "$root")
+    mapfile -t known < <(pairs_of "$root"); known+=("${kids[@]}")
+    exec {pw}> >(:); wait "$!" 2>/dev/null
+    ( SHMUTANT_PROC=0; SHMUTANT_PS_LSTART=0
+      # The freezing shell's reads until its guard is up, which its first is among; never the guard's.
+      stalls() {
+        case " ${FUNCNAME[*]} " in
+          *" _shmutant_guard "*) return 1 ;;
+          *" _shmutant_kill_tree_guarded "*) [ -z "${guard_w:-}" ]; return ;;
+        esac
+        return 1
+      }
+      stall_ps_reads
+      exec {uf}> "$T/unsettled"; SHMUTANT_UNSETTLED_FD="$uf"
+      _shmutant_kill_tree_twice "$root:$(_shmutant_identity "$root")"
+      : > "$T/returned" ) > /dev/null 2>&"$pw" & fz=$!
+    exec {pw}>&-
+    if ! wait_gone "$fz" "" 250 || [ ! -e "$T/returned" ]; then
+      fail_ 'first: a freeze whose stderr had no reader waited on a read of the process table that stalled'
+      _shmutant_kill_tree KILL "$fz" "$fz:"
+    fi
+    wait "$fz" 2>/dev/null
+    stalled_ps_ended first
+    grep -qx unsettled "$T/unsettled" 2>/dev/null || fail_ 'first: a give-up that could not be said to a reader that had gone was not recorded'
+    _shmutant_kill_tree KILL "" "${known[@]}"; wait "$root" 2>/dev/null
+    all_gone 50 "${known[@]}" || fail_ "first: fixture: the processes of the case were left behind: $(listed "${STILL[@]}")"
+  fi
   # The report itself (_shmutant_ps_gave_up): one line on the descriptor the runner named, and said
   # on the descriptor its freeze kept for it (SHMUTANT_PS_UNSETTLES), never on the stderr of the read.
   local out v

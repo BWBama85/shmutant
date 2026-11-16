@@ -1182,6 +1182,10 @@ _shmutant_kill_tree_guarded() {
   # unsettled (_shmutant_ps_gave_up; the owner's call, D17), and is said on a copy, made here, of the
   # descriptor the freeze reports on, or of this shell's stderr where it has none.
   local held="" SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES=""
+  # A write to a guard that has gone, or of a give-up's words to a reader that has gone, fails here:
+  # it does not end this shell partway through a freeze, nor a read of it before its give-up is
+  # recorded. So before the first read.
+  trap '' PIPE
   exec {SHMUTANT_PS_UNSETTLES}>&"${err_fd:-2}" || SHMUTANT_PS_UNSETTLES=2
   if [ "${1:-}" = -g ]; then held="$2"; shift 2; fi
   local spec="$1" pid rootid p d rid guard_w="" guard_r="" guard_lost=0 guard_pid="" guard_id=""
@@ -1196,8 +1200,6 @@ _shmutant_kill_tree_guarded() {
   local SHMUTANT_KILL_GROUP="" SHMUTANT_FREEZE_UNSETTLED=0 group_untold=""
   shift
   pid="${spec%%:*}"
-  # A write to a guard that has gone fails here; it does not end this shell partway through a freeze.
-  trap '' PIPE
   # The guard first: its start can take a minute on a loaded host, so whatever is checked to decide
   # what may be stopped and killed is checked after it, just before it is acted on. A root or a
   # holder found alive before that may have ended and given its number away by then.
