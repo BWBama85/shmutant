@@ -6396,9 +6396,10 @@ t_freeze_gives_up_on_a_process_table_that_stalls() {
   has "$(cat "$T/said" 2>/dev/null)" 'did not answer within 7 seconds' 'a give-up with no runner to tell is still said'
   # A read given up on by any other shell (the name empty) is recorded and said nowhere, and so is one
   # under a value of a caller's that names no descriptor: in a directory of its own, where a value
-  # taken for a file's name would leave that file.
+  # taken for a file's name would leave that file. 0 is such a value: it is what the empty one becomes
+  # where a caller's localvar_inherit hands an integer attribute down to the declaration that empties it.
   mkdir -p "$T/nowhere"
-  for v in '' x 1x; do
+  for v in '' 0 x 1x; do
     rm -f "$T/told"
     out="$( cd "$T/nowhere" || exit 9; SHMUTANT_PS_UNSETTLES="$v"; exec {uf}> "$T/told"; SHMUTANT_UNSETTLED_FD="$uf"; _shmutant_ps_gave_up 7 2>&1 )"
     eq "$out$(cat "$T/told" 2>/dev/null)" '' "a give-up under [$v], which names no descriptor, is neither recorded nor said"

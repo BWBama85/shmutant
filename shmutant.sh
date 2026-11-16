@@ -821,7 +821,8 @@ _shmutant_ps() {
 # _shmutant_ps_gave_up <seconds> — a read that _shmutant_ps gave up on after <seconds> was one of a
 # shell doing a freeze: that freeze is unsettled, since what the read would have shown was never
 # frozen or never checked. SHMUTANT_PS_UNSETTLES is a descriptor number in such a shell and empty in
-# every other (_shmutant_kill_tree_guarded): a copy of where the freeze reports, made before any
+# every other (_shmutant_kill_tree_guarded; 0 is read as empty, which is what the empty value becomes
+# under an integer attribute a caller's localvar_inherit hands down): a copy of where the freeze reports, made before any
 # reader put a redirection of its own on the read, so the give-up is said there whoever read. The
 # runner is told on the descriptor it named, at once and from here: the read may be in a
 # substitution of the freezing shell, which can set nothing in it. A record that cannot be written
@@ -829,7 +830,7 @@ _shmutant_ps() {
 # the pass a harness error: the run must not be scored without it. A ps that itself ends with status
 # 124 is read as one given up on, as it always was. Returns 0 always.
 _shmutant_ps_gave_up() {
-  case "${SHMUTANT_PS_UNSETTLES:-}" in ''|*[!0-9]*) return 0 ;; esac
+  case "${SHMUTANT_PS_UNSETTLES:-}" in ''|0|*[!0-9]*) return 0 ;; esac
   _shmutant_err "a read of the process table did not answer within $1 seconds and was given up on, so the process tree being ended is not known to have been frozen whole" 2>&"$SHMUTANT_PS_UNSETTLES"
   [ -n "${SHMUTANT_UNSETTLED_FD:-}" ] || return 0
   { printf 'unsettled\n' >&"$SHMUTANT_UNSETTLED_FD"; } 2>/dev/null && return 0

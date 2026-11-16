@@ -3011,7 +3011,7 @@ shmutant_mut 'a read given up on is given up on without a word' \
   '  [ "$st" != 124 ] || return 124' \
   't_freeze_gives_up_on_a_process_table_that_stalls'
 shmutant_mut 'a read given up on outside a freeze unsettles its run' \
-  '  case "${SHMUTANT_PS_UNSETTLES:-}" in '"'"''"'"'|*[!0-9]*) return 0 ;; esac' \
+  '  case "${SHMUTANT_PS_UNSETTLES:-}" in '"'"''"'"'|0|*[!0-9]*) return 0 ;; esac' \
   '  :' \
   't_run_is_ended_through_a_process_table_that_stalls'
 shmutant_mut 'a value of the caller'"'"'s makes a read of the watchdog unsettle its run' \
@@ -3054,3 +3054,7 @@ shmutant_mut 'a value of the caller'"'"'s makes a snapshot'"'"'s fallback table 
   '    || tbl="$(SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES="" _shmutant_ps -A -o pid,ppid,pgid,stat,command 2>/dev/null)" || return 0' \
   '    || tbl="$(SHMUTANT_PS_BOUND=10 _shmutant_ps -A -o pid,ppid,pgid,stat,command 2>/dev/null)" || return 0' \
   't_give_up_outside_a_freeze_is_no_freeze_s'
+shmutant_mut 'an empty value an integer attribute made 0 is taken for a descriptor to report on' \
+  '  case "${SHMUTANT_PS_UNSETTLES:-}" in '"'"''"'"'|0|*[!0-9]*) return 0 ;; esac' \
+  '  case "${SHMUTANT_PS_UNSETTLES:-}" in '"'"''"'"'|*[!0-9]*) return 0 ;; esac' \
+  't_freeze_gives_up_on_a_process_table_that_stalls'
