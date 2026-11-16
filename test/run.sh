@@ -5633,19 +5633,21 @@ t_process_table_filters_take_a_failed_write_as_no_table() {
       _shmutant_descendants_started "$me" > /dev/null ) && fail_ "$how: a walk of descendants with starts took a table whose write failed"
   done
   ( set +o pipefail; fail_write 1 1; _shmutant_group_has "$pg" "$me" ) && fail_ 'a group membership was read from a table whose write failed'
-  # The freeze's reads of a stopped group: the first (a write that fails having written nothing reads
-  # as an empty group) and the check for a member that joined between them (one that reads nothing
-  # finds none) never tell the guard the group is whole.
+  # The freeze's reads of a stopped group never tell the guard the group is whole, whichever of their
+  # writes fails: each table of groups handed back by its reader (1, 3), the first filter (2: a write
+  # that fails having written nothing reads as an empty group), the second (4) and the check for a
+  # member that joined between them (5: one that reads nothing finds none).
   rm -f "$T/hk"
   set -m; sh -c 'sleep 60 & echo "$!" > "$1"; exec sleep 60' _ "$T/hk" < /dev/null > /dev/null 2>&1 & h=$!; set +m
   for (( i = 0; i < 50; i++ )); do [ -s "$T/hk" ] && break; sleep 0.1; done
   hk="$(cat "$T/hk" 2>/dev/null)"
-  for at in 1 3; do
+  for at in 1 2 3 4 5; do
     rm -f "$T/told"
     out="$( set +o pipefail; declare -a frozen=() roots=(); declare -A have=(); holder="$h"; exec {guard_w}> "$T/told"
             fail_write "$at" 0; _shmutant_guard_members "$h"; builtin printf 'rc=%s' "$?" )"
     eq "$out" rc=1 "write $at of the group's reads failed, and the group was still read"
     if grep -qx m "$T/told" 2>/dev/null; then fail_ "write $at of the group's reads failed, and the group was told whole: [$(tr '\n' ';' < "$T/told")]"; fi
+    eq "$(cat "$T/pf.n" 2>/dev/null)" "$at" "fixture: the group's reads made write $at, and stopped at it"
   done
   mapfile -t known < <(pairs_of "$h" ${hk:+"$hk"})
   end_group "$h" "${known[@]}"; wait_gone "$h" "" 30; [ -z "$hk" ] || wait_gone "$hk" "" 30
@@ -6248,7 +6250,9 @@ t_freeze_gives_up_on_a_process_table_that_stalls() {
     h=""; root=""; kid=""; known=(); kids=()
     case "$how" in
       walk-*|gap|none)
-        ( sleep 60 & sleep 60 & wait ) > /dev/null 2>&1 & root=$!
+        # In a process group of its own (job control, for this spawn only): where an orphan that ends
+        # beside a stopped member of its group has the kernel hang that group up, it is not the unit's.
+        set -m; ( sleep 60 & sleep 60 & wait ) > /dev/null 2>&1 & root=$!; set +m
         wait_descendants "$root" 2
         mapfile -t kids < <(_shmutant_snapshot "$root")
         mapfile -t known < <(pairs_of "$root"); known+=("${kids[@]}")
