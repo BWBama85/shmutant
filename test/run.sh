@@ -4512,7 +4512,8 @@ t_run_scratch_names_take_no_attribute_of_the_callers() {
   # is not assigned under that attribute: a start such as `Thu Nov 12 ...` would be an arithmetic
   # error, which ended the runner before the callback ran. The two names that hold a start, where
   # starts are read through ps; and again under a caller's localvar_inherit, where a declaration
-  # alone takes the caller's attribute with it. The watchdog's look for its runner holds a start
+  # alone would take the caller's attribute with it (the pool turns the option off for its own
+  # run, #88). The watchdog's look for its runner holds a start
   # under a name of its own (`guard_of_id`) as well, and a look that failed there would end the run:
   # that one with a run long enough to be looked for.
   local n opt run
@@ -4555,6 +4556,192 @@ t_bounded_ps_takes_no_attribute_of_the_callers() {
   took=$(( ($(_real_now) - t0) / 1000 ))
   eq "$out" 'rc=124' "a bounded read that stalls is given up on under a caller's integer c, t, w and s"
   [ "$took" -le 4000 ] || fail_ "a bound of one second was kept only after $took ms under a caller's integer c, t, w and s"
+}
+
+# pool_names — every lower-case name of the pool's preflight list (what the pool and what it runs
+# declare or assign), one a line, and the names three sites once kept their state in.
+pool_names() {
+  declare -f _shmutant_pool_locals_writable | tr -s ' \t\\;' '\n\n\n\n' \
+    | LC_ALL=C grep -E '^([a-z][A-Za-z0-9_]*|_shmutant_pool_[a-z0-9_]+|_shmutant_wrap_left)$' \
+    | LC_ALL=C grep -vxE '_shmutant_pool_locals_writable' | LC_ALL=C sort -u
+  printf '%s\n' _shmutant_bo _shmutant_so _shmutant_o _shmutant_n _shmutant_pc ret dbg st
+}
+
+# shellcheck disable=SC2034,SC2086
+t_pool_names_take_no_attribute_of_the_callers() {
+  # #88: no name the pool, or what it runs, assigns is assigned under an attribute the calling
+  # shell gave a variable of that name, nor through a nameref of its: a path under an integer
+  # attribute is an arithmetic error, which drops the rest of the caller's command list. Every
+  # name of the pool's preflight list at once, and the names the option snapshot, the alias save
+  # and the pool's last trap handler once kept their state in: integers and namerefs declared in
+  # the calling function, arrays in the global scope. The pool scores its row, says nothing but
+  # its summary, and leaves each of those variables, each referent and every shell option as it
+  # was. Then again under the caller's localvar_inherit, where a declaration alone would take the
+  # caller's attribute with it: the pool turns the option off for its own run and puts it back.
+  local u_names u_kind u_opt u_n u_tag u_before u_after
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  # prepare says what it ran under: the option is off for callbacks too, as the guide says.
+  seeing_prepare() { shopt -p localvar_inherit > "$T/seen"; toy_prepare "$@"; }
+  u_names="$(pool_names)"
+  [ "$(printf '%s\n' "$u_names" | grep -c .)" -ge 200 ] || { fail_ "fixture: only $(printf '%s\n' "$u_names" | grep -c .) names were read from the preflight list"; return; }
+  for u_opt in default localvar_inherit; do
+    for u_kind in integer array assoc nameref; do
+      u_tag="$u_opt-$u_kind"
+      ( [ "$u_opt" = default ] || shopt -s localvar_inherit
+        for u_n in $u_names; do
+          case "$u_kind" in
+            integer) declare -i "$u_n=7" ;;
+            array)   declare -ga "$u_n=(7 8)" ;;
+            assoc)   declare -gA "$u_n=([k]=7)" ;;
+            nameref) declare "u_ref_$u_n=7"; declare -n "$u_n=u_ref_$u_n" 2>/dev/null ;;
+          esac
+        done
+        u_before="$(declare -p $u_names 2>&1; [ "$u_kind" != nameref ] || declare -p u_ref_${u_names//$'\n'/$'\n'u_ref_} 2>&1; shopt -p; set +o)"
+        SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd-$u_tag" seeing_prepare toy_run > "$T/o-$u_tag" 2>"$T/e-$u_tag"; echo "rc=$?" > "$T/r-$u_tag"
+        u_after="$(declare -p $u_names 2>&1; [ "$u_kind" != nameref ] || declare -p u_ref_${u_names//$'\n'/$'\n'u_ref_} 2>&1; shopt -p; set +o)"
+        [ "$u_before" != "$u_after" ] || echo same > "$T/s-$u_tag" )
+      eq "$(cat "$T/r-$u_tag" 2>/dev/null)" 'rc=0' "($u_tag) the pool returns to a caller that declared its names so [$(head -n 2 "$T/e-$u_tag" 2>/dev/null | tr '\n' ';' | cut -c1-300)]"
+      has "$(cat "$T/o-$u_tag" 2>/dev/null)" $'\trow\tkilled\ta\t' "($u_tag) and scores its row"
+      eq "$(grep -vc 'mutation(s) killed on their own witness' "$T/e-$u_tag" 2>/dev/null)" 0 "($u_tag) and says nothing but its summary [$(grep -v 'mutation(s) killed on their own witness' "$T/e-$u_tag" 2>/dev/null | head -n 2 | tr '\n' ';' | cut -c1-300)]"
+      [ -e "$T/s-$u_tag" ] || fail_ "($u_tag) a variable of the caller's, a nameref's referent or a shell option was not as the caller left it after the pool"
+      eq "$(cat "$T/seen" 2>/dev/null)" 'shopt -u localvar_inherit' "($u_tag) prepare ran with localvar_inherit off"
+      rm -f "$T/seen"
+    done
+  done
+}
+
+# shellcheck disable=SC2034,SC2086
+t_public_helpers_take_no_attribute_of_the_callers() {
+  # #88: shmutant_copy_tree and shmutant_mutate, called on their own under a caller's
+  # localvar_inherit with every name of their preflight lists declared an integer: each turns the
+  # option off for its own run, keeps what it saved in a name that took nothing of the caller's,
+  # and puts the option back.
+  local u_names u_opt u_n u_before u_after u_fn
+  mkdir -p "$T/src"; printf 'one two\n' > "$T/src/f"
+  for u_opt in default localvar_inherit; do
+    for u_fn in copy_tree mutate; do
+      u_names="$(declare -f "shmutant_$u_fn" | sed -n 's/.*"the calling shell made" \(.*\) || .*/\1/p' | tr -s ' ' '\n')"
+      [ "$(printf '%s\n' "$u_names" | grep -c .)" -ge 10 ] || { fail_ "fixture: the preflight list of shmutant_$u_fn was not read"; return; }
+      ( [ "$u_opt" = default ] || shopt -s localvar_inherit
+        for u_n in $u_names; do declare -i "$u_n=7"; done
+        u_before="$(declare -p $u_names 2>&1; shopt -p; set +o)"
+        if [ "$u_fn" = copy_tree ]; then shmutant_copy_tree "$T/src" "$T/dst-$u_opt" 2>"$T/e-$u_opt-$u_fn"
+        else shmutant_mutate "$T/dst-$u_opt/f" one three 2>"$T/e-$u_opt-$u_fn"; fi
+        echo "rc=$?" > "$T/r-$u_opt-$u_fn"
+        u_after="$(declare -p $u_names 2>&1; shopt -p; set +o)"
+        [ "$u_before" != "$u_after" ] || echo same > "$T/s-$u_opt-$u_fn" )
+      eq "$(cat "$T/r-$u_opt-$u_fn" 2>/dev/null)" 'rc=0' "($u_opt) shmutant_$u_fn returns to a caller that declared its names integers [$(head -n 2 "$T/e-$u_opt-$u_fn" 2>/dev/null | tr '\n' ';' | cut -c1-300)]"
+      [ ! -s "$T/e-$u_opt-$u_fn" ] || fail_ "($u_opt) shmutant_$u_fn said: $(head -n 2 "$T/e-$u_opt-$u_fn" | tr '\n' ';' | cut -c1-300)"
+      [ -e "$T/s-$u_opt-$u_fn" ] || fail_ "($u_opt) a variable of the caller's or a shell option was not as the caller left it after shmutant_$u_fn"
+    done
+    eq "$(cat "$T/dst-$u_opt/f" 2>/dev/null)" 'three two' "($u_opt) the tree was copied and its file rewritten"
+  done
+}
+
+# shellcheck disable=SC2034,SC2086
+t_pool_turns_off_a_localvar_inherit_prepare_turned_on() {
+  # #88: prepare runs in the pool's own shell, and one that turns localvar_inherit on would have
+  # every declaration after it take what the caller's variable of that name holds. The pool turns
+  # the option off again as prepare returns, and the caller gets its own setting back.
+  local u_names u_n
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  inheriting_prepare() { shopt -s localvar_inherit; shmutant_copy_tree "$TOY" "$1"; }
+  u_names="$(pool_names)"
+  ( for u_n in $u_names; do declare -i "$u_n=7"; done
+    SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd" inheriting_prepare toy_run > "$T/o" 2>"$T/e"; echo "rc=$?" > "$T/r"
+    shopt -p localvar_inherit > "$T/opt" )
+  eq "$(cat "$T/r" 2>/dev/null)" 'rc=0' "the pool returns after a prepare that turned localvar_inherit on [$(head -n 2 "$T/e" 2>/dev/null | tr '\n' ';' | cut -c1-300)]"
+  has "$(cat "$T/o" 2>/dev/null)" $'\trow\tkilled\ta\t' 'and scores its row'
+  eq "$(grep -vc 'mutation(s) killed on their own witness' "$T/e" 2>/dev/null)" 0 "and says nothing but its summary [$(grep -v 'mutation(s) killed on their own witness' "$T/e" 2>/dev/null | head -n 2 | tr '\n' ';' | cut -c1-300)]"
+  eq "$(cat "$T/opt" 2>/dev/null)" 'shopt -u localvar_inherit' 'and the caller has its own setting back, not the one prepare left'
+}
+
+# shellcheck disable=SC2034
+t_run_leftover_record_follows_no_nameref_of_the_callers() {
+  # #88: the wrapper keeps the descriptor of its leftover record under a name of its own. A
+  # nameref the calling shell declared on that name would have the record written wherever the
+  # callback last pointed the referent, and what the run left running would outlive its verdict.
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  moving_run() { moved=1; set -m; bash -c 'sleep 4; touch "$1/escaped"' _ "$T" & set +m; bash "$1/test.sh"; }
+  ( declare -n _shmutant_wrap_left=moved
+    SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd" toy_prepare moving_run > "$T/o" 2>"$T/e"; echo "rc=$?" > "$T/r" )
+  eq "$(cat "$T/r" 2>/dev/null)" 'rc=0' "the pool runs with the caller's _shmutant_wrap_left a nameref [$(head -n 2 "$T/e" 2>/dev/null | tr '\n' ';' | cut -c1-300)]"
+  has "$(cat "$T/o" 2>/dev/null)" $'\trow\tkilled\ta\t' 'and scores its row'
+  sleep 5
+  [ ! -e "$T/escaped" ] || fail_ 'a helper the run left outlived the verdict: its record went where the caller'"'"'s nameref pointed'
+}
+
+# shellcheck disable=SC2034,SC2086
+t_run_that_turns_localvar_inherit_on_has_its_leftovers_recorded() {
+  # #88: a run that turns localvar_inherit on is snapshotted with it off. With it on, the
+  # snapshot's declarations would take the attributes the calling shell gave variables of their
+  # names, the first value that did not fit would end the snapshot, and what the run left running
+  # would outlive its verdict.
+  local u_names u_n
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  inheriting_run() { shopt -s localvar_inherit; set -m; bash -c 'sleep 4; touch "$1/escaped"' _ "$T" & set +m; bash "$1/test.sh"; }
+  u_names="$(pool_names)"
+  # In the global scope, as a script's own declarations are: one made in a function goes out of
+  # scope with it when an error drops the wrapper's commands, and the wrapper's EXIT trap, which
+  # snapshots again, would then find nothing to take.
+  ( for u_n in $u_names; do declare -gi "$u_n=7"; done
+    SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd" toy_prepare inheriting_run > "$T/o" 2>"$T/e"; echo "rc=$?" > "$T/r" )
+  eq "$(cat "$T/r" 2>/dev/null)" 'rc=0' "the pool returns after a run that turned localvar_inherit on [$(head -n 2 "$T/e" 2>/dev/null | tr '\n' ';' | cut -c1-300)]"
+  has "$(cat "$T/o" 2>/dev/null)" $'\trow\tkilled\ta\t' 'and scores its row'
+  sleep 5
+  [ ! -e "$T/escaped" ] || fail_ 'a helper the run left outlived the verdict: the snapshot took the attributes of the caller'"'"'s variables'
+  # The option is back on as a snapshot returns: one is taken of a plan's shell before the plan's
+  # `exec`, and that shell goes on when the exec did not replace it.
+  eq "$( shopt -s localvar_inherit; _shmutant_snapshot "$BASHPID" > /dev/null 2>&1; shopt -p localvar_inherit )" 'shopt -s localvar_inherit' 'a snapshot leaves localvar_inherit as it found it'
+}
+
+t_run_that_aborts_on_an_arithmetic_error_has_its_leftovers_recorded() {
+  # #88: an arithmetic error in the callback drops the rest of the wrapper's commands and, with
+  # them, the function whose names the wrapper declared: its EXIT trap then runs where the name
+  # that held the record's descriptor is out of scope. The trap carries the number itself, so
+  # what such a run left running is still recorded and ended.
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  # shellcheck disable=SC2004
+  aborting_run() { local v='1 +'; set -m; bash -c 'sleep 4; touch "$1/escaped"' _ "$T" & set +m; : $(( v )); bash "$1/test.sh"; }
+  SHMUTANT_BASELINE=0 pool lbl "$T/wd" toy_prepare aborting_run
+  eq "$(verdict_of a)" aborted 'a run that ended on an arithmetic error is one that aborted'
+  hasnt "$ERR" 'Bad file descriptor' 'the wrapper'"'"'s last snapshot had its descriptor'
+  sleep 5
+  [ ! -e "$T/escaped" ] || fail_ 'a helper the run left outlived the verdict: the snapshot of a run that aborted was lost'
+}
+
+t_cli_declares_under_no_localvar_inherit_of_its_environment() {
+  # #88: the CLI's process can be handed localvar_inherit, and variables of the names it declares,
+  # by a BASH_ENV file (or BASHOPTS). It turns the option off before its first declaration: a plan
+  # path declared under an integer attribute would be an arithmetic error.
+  mk_toy "$T/toy"
+  cat > "$T/toy/plan.sh" <<'EOF'
+prepare() { shmutant_copy_tree "$SHMUTANT_PLAN_DIR" "$1"; }
+run() { bash "$1/test.sh"; }
+shmutant_target lib.sh
+shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+EOF
+  printf 'shopt -s localvar_inherit\ndeclare -i plan=7 wd=7 line=7 marker=7 done_file=7\n' > "$T/env.sh"
+  local out; out="$(BASH_ENV="$T/env.sh" bash "$SHMUTANT" run "$T/toy/plan.sh" --no-baseline --workdir "$T/wd" 2>"$T/e"; echo "rc=$?")"
+  has "$out" 'rc=0' "the CLI ran its plan under a BASH_ENV that turned localvar_inherit on [$(head -n 2 "$T/e" | tr '\n' ';' | cut -c1-300)]"
+  has "$out" $'\trow\tkilled\ta\t' 'and scored its row'
+  # A plan can turn the option on as well, and the CLI's guard of its EXIT trap runs before each
+  # of the plan's commands: the trap's text is kept in no name the plan could have given an
+  # attribute.
+  { printf 'shopt -s localvar_inherit\ndeclare -i t=7\n'; cat "$T/toy/plan.sh"; } > "$T/toy/plan-inherit.sh"
+  out="$(bash "$SHMUTANT" run "$T/toy/plan-inherit.sh" --no-baseline --workdir "$T/wd2" 2>"$T/e2"; echo "rc=$?")"
+  has "$out" 'rc=0' "the CLI ran a plan that turned localvar_inherit on and declared t an integer [$(head -n 2 "$T/e2" | tr '\n' ';' | cut -c1-300)]"
+  has "$out" $'\trow\tkilled\ta\t' 'and scored its row'
 }
 
 # shellcheck disable=SC2034

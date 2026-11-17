@@ -309,7 +309,16 @@ refused (status 2) before any worker starts. Inside `shmutant_pool`, `shmutant_c
 `shmutant_mutate` the shell's `expand_aliases` is off (bash parses a command substitution when
 it runs it, so a caller's alias would otherwise reach the library at run time); callbacks run
 there too, with the bodies they were given when defined; the caller's setting is put back on
-return. The two helpers also make the pool's shadow check on entry and refuse (status 1) a
+return. `localvar_inherit` is off there as well, callbacks included, and put back on return:
+with it on, every `local` in the library would take the value and the attributes of your
+variable of the same name. A `prepare` that turns it on has it turned off again as it returns,
+and the setting the pool hands back is the one it was called with; a `run` that turns it on
+keeps it for its own commands only. A callback that needs the option turns it on inside its own
+functions. Without the option, an attribute you gave a variable of your own (`declare -i`, an
+array, a nameref) does not reach the names the pool and the two helpers assign: each is declared
+by the library before it is assigned, so your variable is neither written nor read in its place
+(the `SHMUTANT_*` globals are the library's own state). The CLI turns the
+option off for its own process, where `BASHOPTS` or a `BASH_ENV` file could have set it. The two helpers also make the pool's shadow check on entry and refuse (status 1) a
 shell whose function stands in for a builtin they rely on. All three, the pool included,
 refuse first (status 2 for the pool, 1 for the helpers) a shell that made one of the names they
 keep their own state in readonly: bash refuses a local over a readonly global, and the assignment

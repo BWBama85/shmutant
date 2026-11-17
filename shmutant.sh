@@ -353,16 +353,19 @@ shmutant_selected() {
 # in this file would expand the caller's alias at run time; the prologue covers only parse time.
 # The first word is quoted, so this switch itself is beyond alias expansion. <site> only labels
 # the call.
-# _shmutant_aliases_off <variable> — save the caller's expand_aliases setting into <variable>
-# (the entry point's own local, so a helper called from inside a pool's callback does not
-# overwrite the pool's) and turn the option off; _shmutant_aliases_back <saved> puts it back.
+# _shmutant_aliases_off <variable> — save the caller's expand_aliases and localvar_inherit
+# settings into <variable> (the entry point's own local, so a helper called from inside a pool's
+# callback does not overwrite the pool's) and turn both options off; _shmutant_aliases_back
+# <saved> puts them back. With localvar_inherit on, every `local` in this file would take the
+# value and the attributes of a caller's variable of the same name: a path declared under an
+# integer attribute is an arithmetic error, and a name declared to be empty is not.
 _shmutant_aliases_off() {
-  # `; :` — shopt -p exits 1 for an option that is off, which a caller's errexit would act on.
-  local st; st="$(\builtin shopt -p expand_aliases; :)"
+  # Straight into <variable>, with no name of this function's own: one declared here, while
+  # localvar_inherit is still on, would take a caller's attribute with it.
   # The builtin and the keyword: this runs before (and after) the shadow check, and a caller's
-  # printf or [ function would otherwise leave the setting unsaved or unrestored.
-  \builtin printf -v "$1" '%s' "$st"
-  \builtin shopt -u expand_aliases
+  # printf or [ function would otherwise leave the settings unsaved or unrestored.
+  \builtin printf -v "$1" '%s' "$(\builtin shopt -p expand_aliases localvar_inherit)"
+  \builtin shopt -u expand_aliases localvar_inherit
 }
 _shmutant_aliases_back() {
   [[ -z "$1" ]] || \builtin eval "$1"
@@ -372,7 +375,9 @@ shmutant_copy_tree() {
   # Before any local: bash refuses a local over a readonly global, and the assignment that
   # follows would end a non-interactive caller's shell. The names are this helper's locals.
   _shmutant_locals_writable copy_tree "the calling shell made" adst asrc comp copy_tree_aliases d dst entry frc kinds linked m made n name norm out probe probe2 rc rest rootls src st t who || \builtin return 1
-  local rc copy_tree_aliases; _shmutant_aliases_off copy_tree_aliases
+  # Declared, unset, and only then assigned: under a caller's localvar_inherit, still on here,
+  # the declaration takes the caller's attribute with it.
+  local rc copy_tree_aliases; \builtin unset -v rc copy_tree_aliases; _shmutant_aliases_off copy_tree_aliases
   # The same shadow check as the pool's: a caller's function named printf, cd or [ would
   # otherwise decide what this helper does, with no pool around to refuse it.
   _shmutant_no_shadows copy_tree || { _shmutant_aliases_back "$copy_tree_aliases"; builtin return 1; }
@@ -525,7 +530,8 @@ shmutant_mutate() {
   # Before any local: bash refuses a local over a readonly global, and the assignment that
   # follows would end a non-interactive caller's shell. The names are this helper's locals.
   _shmutant_locals_writable mutate "the calling shell made" dir dirmode f kinds m mode mutate_aliases n nl out rc st t tmp who || \builtin return 1
-  local rc mutate_aliases; _shmutant_aliases_off mutate_aliases
+  # Declared, unset, and only then assigned, as in shmutant_copy_tree.
+  local rc mutate_aliases; \builtin unset -v rc mutate_aliases; _shmutant_aliases_off mutate_aliases
   _shmutant_no_shadows mutate || { _shmutant_aliases_back "$mutate_aliases"; builtin return 1; }
   # A plain call, not a condition: a callback's own errexit is honoured inside, as documented.
   _shmutant_mutate_body "$@"; rc=$?
@@ -1895,7 +1901,17 @@ _shmutant_table_state() {
 }
 
 # _shmutant_snapshot <pid> — print `pid:identity` for every live descendant of <pid> now.
+# localvar_inherit is off while it reads, for a run or a plan that turned it on: the declarations
+# of every read would otherwise take what the calling shell's variables of their names hold, and
+# the record of what the run left would be lost to the first that did not fit. It is back on as
+# the snapshot returns: the shell of a plan whose `exec` did not replace it goes on.
 _shmutant_snapshot() {
+  if builtin shopt -q localvar_inherit; then
+    builtin shopt -u localvar_inherit; _shmutant_snapshot_now "$1"; builtin shopt -s localvar_inherit
+  else _shmutant_snapshot_now "$1"
+  fi
+}
+_shmutant_snapshot_now() {
   local p
   local -A SHMUTANT_START=()
   _shmutant_identity_table
@@ -1918,9 +1934,9 @@ _shmutant_run_bounded() {
   local counts counts_w counts_r counts_r2
   # What the runner, the wrapper and the watchdog below assign: they are subshells of this function,
   # and a name declared here is not assigned under an attribute a caller gave it (an integer one
-  # turns a start such as `Thu Nov 12 ...` into an arithmetic error). Unset as well: under a
-  # caller's localvar_inherit a declaration alone takes the caller's attribute with it.
-  local budget d dog dog_self done_first elapsed last leftovers orphaned p pid rc rootid rrc runner runner_gap runnerid s seen_ck tampered tnow victims; builtin unset -v budget d dog dog_self done_first elapsed last leftovers orphaned p pid rc rootid rrc runner runner_gap runnerid s seen_ck tampered tnow victims
+  # turns a start such as `Thu Nov 12 ...` into an arithmetic error). The declaration takes
+  # nothing of the caller's with it: localvar_inherit is off from the pool's entry.
+  local budget d dog dog_self done_first elapsed last leftovers orphaned p pid rc rootid rrc runner runner_gap runnerid s seen_ck tampered tnow victims
   timeout="$(_shmutant_pos_int "${SHMUTANT_TIMEOUT:-300}")" || timeout=0
   SHMUTANT_RUN_FIRED=0; SHMUTANT_RUN_RED=0; SHMUTANT_RUN_WITNESSED=0; SHMUTANT_RUN_UNSETTLED=0; SHMUTANT_RUN_PUBLISHED=1
   SHMUTANT_RUN_COUNTS=""; SHMUTANT_RUN_COUNTS_BAD=""
@@ -1994,13 +2010,18 @@ _shmutant_run_bounded() {
     # up in a shell with an EXIT trap. This shell was moved into its own group after the runner
     # read the pool's. Read here, a hang-up taken by a substitution of the callback stays in the
     # run's group; unread, it reaches the pool's.
+    # The record's descriptor under a name of the wrapper's own, declared: a nameref of the
+    # calling shell's on that name would have the snapshot written wherever the callback last
+    # pointed its referent. The EXIT trap carries the number itself: an arithmetic error in the
+    # callback drops the rest of this subshell's commands and this function's names with them,
+    # and the trap then runs where the declared name is out of scope.
     ( builtin set -o monitor; builtin set +o monitor
-      _shmutant_wrap_left="$left_w"
+      builtin local _shmutant_wrap_left="$left_w"
       ( ( read -r _ <&"$hold_r" ) < /dev/null > /dev/null 2>&1 {hold}>&- & printf '%s\n' "$!" >&"$hp" )
       # No plan code until the runner has published this run's group and holder for the abort
       # path: an interrupt before that would find a run it could not name.
       read -t 30 -r _ <&"$go" || builtin exit 127
-      trap '_shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"' EXIT
+      trap '_shmutant_snapshot "$BASHPID" >&'"$_shmutant_wrap_left" EXIT
       exit() { local s=$?; _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; if [ "$#" -eq 0 ]; then builtin exit "$s"; else builtin exit "$@"; fi; }
       # The counter describes this run: what the sourcing shell counted before the pool is not
       # this callback's, and a suite that refuses to pass on zero must be able to see zero.
@@ -2328,10 +2349,9 @@ _shmutant_held_group() {
 # Globals: runner, runnerid (set by _shmutant_run_bounded's runner); dog_self, runner_gap (by its
 # watchdog).
 _shmutant_runner_there() {
-  # Declared, unset, and only then assigned: under a caller's localvar_inherit a declaration takes
-  # the caller's attribute with it, and a start assigned under an integer one is an arithmetic
-  # error, which would read as a runner that has gone.
-  local guard_of guard_of_id guard_self guard_gap_ref SHMUTANT_PS_BOUND; builtin unset -v guard_of guard_of_id guard_self guard_gap_ref SHMUTANT_PS_BOUND
+  # Declared, then assigned: a start assigned under an integer attribute of a caller's is an
+  # arithmetic error, which would read as a runner that has gone.
+  local guard_of guard_of_id guard_self guard_gap_ref SHMUTANT_PS_BOUND
   guard_of="${runner:-}"; guard_of_id="${runnerid:-}"; guard_self="${dog_self:-}"; guard_gap_ref="${runner_gap:-}"; SHMUTANT_PS_BOUND=1
   [ -z "$guard_gap_ref" ] || [ "$guard_gap_ref" -ge -1 ] || return 1
   _shmutant_guard_freezer_there || return 1
@@ -2423,6 +2443,10 @@ _shmutant_worker() {
     # its path), then to the target's directory relative to that, re-checked to be inside this
     # clone physically, naming the target by its base name alone: nothing named by path after
     # the identity check can be redirected by a sibling.
+    # The two names the rewrite assigns are this function's own: undeclared, they would be
+    # assigned under whatever attribute the calling shell gave a variable of that name (a path
+    # under an integer one is an arithmetic error, and the row would read as unprepared).
+    local wroot base
     ( builtin cd -P -- "$dir" 2>/dev/null || exit 4
       _shmutant_is_id . "${SHMUTANT_DIR_IDS[$kind-$i]:-}" || exit 4
       wroot="$(builtin pwd -P)"
@@ -2776,10 +2800,13 @@ _shmutant_release_traps() {
 # go back here, when the pool's status is already settled and no harness command follows —
 # whatever a handler does now cannot change what the pool returned. DEBUG last of all.
 _shmutant_traps_last() {
-  local ret="${SHMUTANT_TRAP_RETURN_PENDING:-}" dbg="${SHMUTANT_TRAP_DEBUG_PENDING:-}"
+  # The two declarations in positional parameters, not in names of this function's: it runs after
+  # the caller's localvar_inherit is back, where a declared name takes a caller's attribute (an
+  # empty declaration under an integer one is `0`, which would be evaluated as a command).
+  builtin set -- "${SHMUTANT_TRAP_RETURN_PENDING:-}" "${SHMUTANT_TRAP_DEBUG_PENDING:-}"
   builtin unset SHMUTANT_TRAP_RETURN_PENDING SHMUTANT_TRAP_DEBUG_PENDING SHMUTANT_TRAPS_PENDING
-  if [[ -n "$ret" ]]; then builtin eval "$ret"; else builtin trap - RETURN; fi
-  if [[ -n "$dbg" ]]; then builtin eval "$dbg"; else builtin trap - DEBUG; fi
+  if [[ -n "$1" ]]; then builtin eval "$1"; else builtin trap - RETURN; fi
+  if [[ -n "$2" ]]; then builtin eval "$2"; else builtin trap - DEBUG; fi
 }
 
 # _shmutant_saved_trap <signal> — the caller's current trap declaration for <signal> as
@@ -3101,7 +3128,11 @@ _shmutant_locals_writable_in() {
 # held and only when prepare did not make that name readonly (dynamic scope reaches it, and the
 # assignment would end a non-interactive caller). The status arrives as a positional parameter,
 # which no callback can mark readonly. Refuses with status 1.
+# localvar_inherit goes off again first, for a prepare that turned it on: every declaration from
+# here to the pool's return would otherwise take what a variable of its name holds at the scope
+# before it.
 _shmutant_pool_stash() {
+  \builtin shopt -u localvar_inherit
   _shmutant_hold_traps
   # if/else, not a return: a `return` function prepare defined would fall through to the
   # assignment; the shadow check that refuses it comes after this.
@@ -3118,13 +3149,13 @@ _shmutant_pool_locals_writable() {
   _shmutant_locals_writable "$1" "$2" \
     SHMUTANT_FREEZE_UNSETTLED SHMUTANT_KILL_GROUP SHMUTANT_START SHMUTANT_UNSETTLED_FD _shmutant_pool_cap _shmutant_pool_errexit _shmutant_pool_label _shmutant_pool_n _shmutant_pool_pout_r _shmutant_pool_pout_w _shmutant_pool_prc _shmutant_pool_run \
     _shmutant_pool_t0 _shmutant_pool_wd after_ck ambiguous base base_sel base_verdict base_why cap cksum_bin clone_id comp copy counts counts_bad counts_end counts_got counts_r counts_w cwhy d \
-    dbg depth detail dir dirmode done_pid err_fd errexit_before etime f fd fifo \
+    depth detail dir dirmode done_pid err_fd errexit_before etime f fd fifo \
     fired fmt found frozen go got grp h have held helpers here \
     hms hold hold_r holder holderid hp i id intact jobs jp js k kept key \
     killed killing kind kinds l label left left_r left_w line links ls_bin m mark \
     mode ms mutate_aliases n named new nl now out out_r out_r2 out_w outf \
     p parent path pending phys pid pids pool_aliases pout pout_r pout_w prc \
-    prep r rc red rel rest ret rjrc root root_ok rootid rootls \
+    prep r rc red rel rest rjrc root root_ok rootid rootls \
     roots rounds row_why run s sdir sec seen seen_r seen_w sel sent setup_failed unrecorded sig size starts nul counts_r2 \
     spec st stat_bin state status stillours stillpids stops suffix swapped t t0 t1 \
     table target target_ck targets timeout tmp unpublished us v v_jobs v_red v_timeout \
@@ -3143,7 +3174,7 @@ _shmutant_pool_locals_writable() {
     SHMUTANT_VERDICT_W SHMUTANT_V_STATUS SHMUTANT_V_US SHMUTANT_V_VERDICT SHMUTANT_WD_ID \
     SHMUTANT_ROWS_NAME SHMUTANT_ROWS_FILE SHMUTANT_ROWS_OLD SHMUTANT_ROWS_NEW SHMUTANT_ROWS_WIT SHMUTANT_ROWS_SEL \
     SHMUTANT_TARGET SHMUTANT_DECL_ERRORS SHMUTANT_SELECTED_N \
-    _shmutant_bo _shmutant_so _shmutant_o _shmutant_n _shmutant_pc _shmutant_wrap_left \
+    _shmutant_wrap_left \
     a budget dog e elapsed last leftovers linked lstart old rrc s tampered tmpd tnow victims wroot \
     dog_self done_first orphaned runner runner_gap runnerid \
     b chunk conts g gcont gone_group guard_id guard_lost guard_of guard_of_id guard_pid guard_r guard_up guard_w hs kept kills members out pairs part pg ph phid recs rid rootid_pre seen_ck unfrozen w want \
@@ -3324,39 +3355,35 @@ _shmutant_pool_cleanup() {
 # named return included) is refused through `builtin …`, never removed. Leaving posix mode resets shell options wholesale
 # (expand_aliases off, inherit_errexit left on, …), so every option that changed is put back
 # from BASHOPTS and SHELLOPTS, read before and after — variables, which nothing shadows — with
-# the real builtin, which is real again by then. No `local`: that name is not yet checked.
-_shmutant_drop_builtin_fn() {
-  _shmutant_bo="$BASHOPTS"; _shmutant_so="$SHELLOPTS"; _shmutant_pc="${POSIXLY_CORRECT+set}:${POSIXLY_CORRECT-}"
+# the real builtin, which is real again by then. No `local`: that name is not yet checked. What
+# was read before is kept in positional parameters, which take no attribute and belong to no
+# caller: a name assigned here would be assigned under whatever attribute the calling shell gave
+# it, and written through a nameref of the calling shell's.
+_shmutant_drop_builtin_fn() { _shmutant_drop_builtin_fn_from "$BASHOPTS" "$SHELLOPTS" "${POSIXLY_CORRECT+set}:${POSIXLY_CORRECT-}"; }
+# _shmutant_drop_builtin_fn_from <BASHOPTS> <SHELLOPTS> <set:value, or : when unset> — the
+# removal, then the options and POSIXLY_CORRECT put back as the three arguments recorded them.
+_shmutant_drop_builtin_fn_from() {
   POSIXLY_CORRECT=1; unset -f builtin 2>/dev/null; unset POSIXLY_CORRECT
-  _shmutant_o="$_shmutant_bo"
-  while [[ -n "$_shmutant_o" ]]; do
-    _shmutant_n="${_shmutant_o%%:*}"; case "$_shmutant_o" in *:*) _shmutant_o="${_shmutant_o#*:}" ;; *) _shmutant_o="" ;; esac
-    case ":$BASHOPTS:" in *":$_shmutant_n:"*) ;; *) builtin shopt -s "$_shmutant_n" 2>/dev/null ;; esac
-  done
-  _shmutant_o="$BASHOPTS"
-  while [[ -n "$_shmutant_o" ]]; do
-    _shmutant_n="${_shmutant_o%%:*}"; case "$_shmutant_o" in *:*) _shmutant_o="${_shmutant_o#*:}" ;; *) _shmutant_o="" ;; esac
-    case ":$_shmutant_bo:" in *":$_shmutant_n:"*) ;; *) builtin shopt -u "$_shmutant_n" 2>/dev/null ;; esac
-  done
-  _shmutant_o="$_shmutant_so"
-  while [[ -n "$_shmutant_o" ]]; do
-    _shmutant_n="${_shmutant_o%%:*}"; case "$_shmutant_o" in *:*) _shmutant_o="${_shmutant_o#*:}" ;; *) _shmutant_o="" ;; esac
-    case ":$SHELLOPTS:" in *":$_shmutant_n:"*) ;; *) builtin set -o "$_shmutant_n" 2>/dev/null ;; esac
-  done
-  _shmutant_o="$SHELLOPTS"
-  while [[ -n "$_shmutant_o" ]]; do
-    _shmutant_n="${_shmutant_o%%:*}"; case "$_shmutant_o" in *:*) _shmutant_o="${_shmutant_o#*:}" ;; *) _shmutant_o="" ;; esac
-    case ":$_shmutant_so:" in *":$_shmutant_n:"*) ;; *) builtin set +o "$_shmutant_n" 2>/dev/null ;; esac
-  done
+  _shmutant_opts_put shopt -s "$BASHOPTS" "$1"
+  _shmutant_opts_put shopt -u "$1" "$BASHOPTS"
+  _shmutant_opts_put set -o "$SHELLOPTS" "$2"
+  _shmutant_opts_put set +o "$2" "$SHELLOPTS"
   # Two options BASHOPTS does not report reliably around this toggle: leaving posix mode turns
   # expand_aliases off, and leaves inherit_errexit on when errexit is on. Both from before.
-  case ":$_shmutant_bo:" in *:expand_aliases:*) builtin shopt -s expand_aliases ;; *) builtin shopt -u expand_aliases ;; esac
-  case ":$_shmutant_bo:" in *:inherit_errexit:*) builtin shopt -s inherit_errexit ;; *) builtin shopt -u inherit_errexit ;; esac
+  case ":$1:" in *:expand_aliases:*) builtin shopt -s expand_aliases ;; *) builtin shopt -u expand_aliases ;; esac
+  case ":$1:" in *:inherit_errexit:*) builtin shopt -s inherit_errexit ;; *) builtin shopt -u inherit_errexit ;; esac
   # POSIXLY_CORRECT exactly as the caller had it: `set -o posix` above recreates it as `y`, and
   # the caller's own value, or its absence, is what the caller's later commands read. Unset only
   # when it is set: unsetting it leaves posix mode, which turns expand_aliases off again.
-  case "$_shmutant_pc" in set:*) POSIXLY_CORRECT="${_shmutant_pc#set:}" ;; *) [[ -z "${POSIXLY_CORRECT+set}" ]] || builtin unset -v POSIXLY_CORRECT ;; esac
-  builtin unset -v _shmutant_bo _shmutant_so _shmutant_o _shmutant_n _shmutant_pc
+  case "$3" in set:*) POSIXLY_CORRECT="${3#set:}" ;; *) [[ -z "${POSIXLY_CORRECT+set}" ]] || builtin unset -v POSIXLY_CORRECT ;; esac
+}
+# _shmutant_opts_put <shopt|set> <flag> <have> <list> — <flag> given to the builtin for each
+# option of the colon-separated <list> that the colon-separated <have> does not hold. One option
+# per call, by recursion, in positional parameters only.
+_shmutant_opts_put() {
+  [[ -n "$4" ]] || builtin return 0
+  case ":$3:" in *":${4%%:*}:"*) ;; *) builtin "$1" "$2" "${4%%:*}" 2>/dev/null ;; esac
+  case "$4" in *:*) _shmutant_opts_put "$1" "$2" "$3" "${4#*:}" ;; esac
 }
 
 # _shmutant_no_shadows <label> — refuse to run while a builtin this harness signals, waits and
@@ -3382,7 +3409,9 @@ _shmutant_no_shadows() {
 # mut-N) are removed only from a workdir shmutant marked as its own on first use; a caller's
 # directory that happens to carry those names is refused, not emptied.
 _shmutant_workdir_owned() {
-  local label="$1" wd="$2" line="" size=""
+  # e: the name the loop below walks the workdir's entries by. Undeclared, it would be assigned
+  # under an attribute of the calling shell's, and an entry read as `0` is one that is not there.
+  local label="$1" wd="$2" line="" size="" e
   if [ -f "$wd/.shmutant" ] && [ ! -L "$wd/.shmutant" ]; then
     # The marker is exactly the line shmutant writes, its newline included and nothing after it:
     # a caller's own .shmutant (a config, a sentinel, one that merely begins with that line) does
@@ -3422,12 +3451,13 @@ _shmutant_report_keep() {
 # the workdir, a SHMUTANT_ONLY name that names no row or several, or a verdict-stream write that
 # failed), and 3 when a filtered pass killed every row it ran.
 shmutant_pool() {
-  # Aliases off for the whole pool, callbacks included (their bodies were parsed when defined);
-  # the caller's setting is put back on return.
+  # Aliases and localvar_inherit off for the whole pool, callbacks included (their bodies were
+  # parsed when defined); the caller's settings are put back on return.
   # Before any local: bash refuses a local over a readonly global, and the assignment that
   # follows would end a non-interactive caller's shell.
   _shmutant_pool_locals_writable pool "the calling shell made" || \builtin return 2
-  local rc pool_aliases; _shmutant_aliases_off pool_aliases
+  # Declared, unset, and only then assigned, as in shmutant_copy_tree.
+  local rc pool_aliases; \builtin unset -v rc pool_aliases; _shmutant_aliases_off pool_aliases
   # A plain call, not a condition: a callback's own errexit is honoured inside, as documented.
   _shmutant_pool_body "$@"; rc=$?
   _shmutant_aliases_back "$pool_aliases"
@@ -3852,15 +3882,17 @@ _shmutant_cli_leave() {
 # `_shmutant_cli_leave` at the head of the EXIT trap, ahead of one the plan installed (or put
 # it back after the plan removed it), so the keep in force is reported however the plan ends.
 _shmutant_cli_keep_exit_trap() {
-  local t
   # An exec with a program word replaces this shell without running its EXIT trap: the leave
   # report is made before the command that is about to do that. An exec that only redirects
   # (`exec 3>f`, `exec {fd}>f`, `exec >f`) replaces nothing and is not one.
   case "$BASH_COMMAND" in exec|exec\ [!'{<>&'0-9]*) _shmutant_cli_leave before-exec ;; esac
-  t="$(trap -p EXIT)"
-  case "$t" in *_shmutant_cli_leave*) return 0 ;; esac
-  if [ -z "$t" ]; then trap '_shmutant_cli_leave at-exit' EXIT; return 0; fi
-  eval "set -- $t"
+  # The trap's text in a positional parameter, not in a name of this function's: the plan may
+  # have turned localvar_inherit on by now, and a declared name would take the attribute the plan
+  # gave a variable of that name.
+  set -- "$(trap -p EXIT)"
+  case "$1" in *_shmutant_cli_leave*) return 0 ;; esac
+  if [ -z "$1" ]; then trap '_shmutant_cli_leave at-exit' EXIT; return 0; fi
+  eval "set -- $1"
   # Expanded now on purpose: the plan's own command text becomes part of the trap.
   # shellcheck disable=SC2064
   trap "_shmutant_cli_leave at-exit; $3" EXIT
@@ -4148,7 +4180,9 @@ shmutant_main() {
   # Options inherited through SHELLOPTS/BASHOPTS/POSIXLY_CORRECT (errexit, nounset, noclobber,
   # posix mode) are reset before anything else runs.
   set +e +u +C +o posix; unset POSIXLY_CORRECT
-  \builtin shopt -u expand_aliases
+  # localvar_inherit too, which BASHOPTS can hand this process: a declaration would take the
+  # value of an environment variable of its name.
+  \builtin shopt -u expand_aliases; \builtin shopt -u localvar_inherit
   case "${1:-}" in
     run)          shift; _shmutant_cli_run "$@" ;;
     version)      printf 'shmutant %s\n' "$SHMUTANT_VERSION" ;;

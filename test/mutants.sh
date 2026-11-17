@@ -624,8 +624,8 @@ shmutant_mut 'the baseline arrays are not reset after prepare' \
 
 # --- guards added for the eighteenth review round ---
 shmutant_mut 'the wrapper snapshot runs after the callback, not from an EXIT trap' \
-  '>&"$_shmutant_wrap_left"'"'"' EXIT' \
-  '>&"$_shmutant_wrap_left"'"'"' USR2' \
+  '>&'"'"'"$_shmutant_wrap_left" EXIT' \
+  '>&'"'"'"$_shmutant_wrap_left" USR2' \
   't_run_errexit_failure_still_snapshots_leftovers'
 shmutant_mut 'a verdict is read from whatever directory has the name' \
   '  if [ -L "$dir" ] || ! _shmutant_is_id "$dir" "${SHMUTANT_DIR_IDS[$key]:-}"; then' \
@@ -1177,21 +1177,17 @@ shmutant_mut 'a link chain is followed one hop only' \
   '        pending=""' \
   't_target_through_a_link_chain_to_an_absolute_link_is_refused'
 shmutant_mut 'the pool runs with the caller aliases expanding at run time' \
-  '  local rc pool_aliases; _shmutant_aliases_off pool_aliases' \
-  '  local rc pool_aliases' \
+  '  local rc pool_aliases; \builtin unset -v rc pool_aliases; _shmutant_aliases_off pool_aliases' \
+  '  local rc pool_aliases; \builtin unset -v rc pool_aliases' \
   't_library_is_immune_to_aliases_at_parse_time'
 shmutant_mut 'copy_tree runs with the caller aliases expanding at run time' \
-  '  local rc copy_tree_aliases; _shmutant_aliases_off copy_tree_aliases' \
-  '  local rc copy_tree_aliases' \
+  '  local rc copy_tree_aliases; \builtin unset -v rc copy_tree_aliases; _shmutant_aliases_off copy_tree_aliases' \
+  '  local rc copy_tree_aliases; \builtin unset -v rc copy_tree_aliases' \
   't_public_helpers_are_immune_to_aliases_at_run_time'
 shmutant_mut 'mutate runs with the caller aliases expanding at run time' \
-  '  local rc mutate_aliases; _shmutant_aliases_off mutate_aliases' \
-  '  local rc mutate_aliases' \
+  '  local rc mutate_aliases; \builtin unset -v rc mutate_aliases; _shmutant_aliases_off mutate_aliases' \
+  '  local rc mutate_aliases; \builtin unset -v rc mutate_aliases' \
   't_public_helpers_are_immune_to_aliases_at_run_time'
-shmutant_mut 'saving the alias setting ends a caller that has errexit on' \
-  '  local st; st="$(\builtin shopt -p expand_aliases; :)"' \
-  '  local st; st="$(\builtin shopt -p expand_aliases)"' \
-  't_pool_reads_the_table_prepare_declared'
 
 # --- guards added for the thirty-fourth review round ---
 shmutant_mut 'exact timestamps are left out of the fingerprint' \
@@ -1207,7 +1203,7 @@ shmutant_mut 'the alias state is never put back' \
   '  :' \
   't_public_helpers_are_immune_to_aliases_at_run_time'
 shmutant_mut 'the alias state put back is always off' \
-  '  \builtin printf -v "$1" '"'"'%s'"'"' "$st"' \
+  '  \builtin printf -v "$1" '"'"'%s'"'"' "$(\builtin shopt -p expand_aliases localvar_inherit)"' \
   '  \builtin printf -v "$1" '"'"'%s'"'"' "shopt -u expand_aliases"' \
   't_public_helpers_are_immune_to_aliases_at_run_time'
 shmutant_mut 'a worker directory is made in whatever sits at the workdir path' \
@@ -1233,8 +1229,8 @@ shmutant_mut 'the stat form is probed through whatever the name resolves to' \
   '  local st; st="$(command -pv stat 2>/dev/null)" || { SHMUTANT_STAT_STYLE=none; return 0; }' \
   't_pool_refuses_a_modified_pristine_tree'
 shmutant_mut 'the alias setting is saved through a caller printf' \
-  '  \builtin printf -v "$1" '"'"'%s'"'"' "$st"' \
-  '  printf -v "$1" '"'"'%s'"'"' "$st"' \
+  '  \builtin printf -v "$1" '"'"'%s'"'"' "$(\builtin shopt -p expand_aliases localvar_inherit)"' \
+  '  printf -v "$1" '"'"'%s'"'"' "$(\builtin shopt -p expand_aliases localvar_inherit)"' \
   't_public_helpers_are_immune_to_aliases_at_run_time'
 shmutant_mut 'the alias setting is put back through a caller [' \
   '  [[ -z "$1" ]] || \builtin eval "$1"' \
@@ -1430,7 +1426,7 @@ shmutant_mut 'the bootstrap drops a builtin function through an alias-expandable
   'unset -f builtin 2>/dev/null' \
   't_bootstrap_is_immune_to_a_builtin_alias'
 shmutant_mut 'POSIXLY_CORRECT is left as set -o posix wrote it' \
-  '  case "$_shmutant_pc" in set:*) POSIXLY_CORRECT="${_shmutant_pc#set:}" ;; *) [[ -z "${POSIXLY_CORRECT+set}" ]] || builtin unset -v POSIXLY_CORRECT ;; esac' \
+  '  case "$3" in set:*) POSIXLY_CORRECT="${3#set:}" ;; *) [[ -z "${POSIXLY_CORRECT+set}" ]] || builtin unset -v POSIXLY_CORRECT ;; esac' \
   '  :' \
   't_helpers_restore_posixly_correct'
 # (no row on the POSIXLY_CORRECT unset guard: its only effect, expand_aliases turned off, is put
@@ -2825,37 +2821,111 @@ shmutant_mut 'the watchdog carries the process group its runner read' \
   '        :' \
   't_watchdog_hangup_stays_in_its_own_group'
 shmutant_mut 'a watchdog cancelled before its first poll signals what its caller named' \
-  '  local budget d dog dog_self done_first elapsed last leftovers orphaned p pid rc rootid rrc runner runner_gap runnerid s seen_ck tampered tnow victims; builtin unset -v budget d dog dog_self done_first elapsed last leftovers orphaned p pid rc rootid rrc runner runner_gap runnerid s seen_ck tampered tnow victims' \
+  '  local budget d dog dog_self done_first elapsed last leftovers orphaned p pid rc rootid rrc runner runner_gap runnerid s seen_ck tampered tnow victims' \
   '  :' \
   't_watchdog_cancelled_at_its_start_signals_nothing_of_its_callers'
 shmutant_mut 'a run assigns its scratch names under the attributes its caller gave them' \
-  '  local budget d dog dog_self done_first elapsed last leftovers orphaned p pid rc rootid rrc runner runner_gap runnerid s seen_ck tampered tnow victims; builtin unset -v budget d dog dog_self done_first elapsed last leftovers orphaned p pid rc rootid rrc runner runner_gap runnerid s seen_ck tampered tnow victims' \
+  '  local budget d dog dog_self done_first elapsed last leftovers orphaned p pid rc rootid rrc runner runner_gap runnerid s seen_ck tampered tnow victims' \
   '  :' \
   't_run_scratch_names_take_no_attribute_of_the_callers'
 shmutant_mut 'a bounded read assigns its scratch names under the attributes its caller gave them' \
   '    builtin local c t w s; builtin unset -v c t w s' \
   '    :' \
   't_bounded_ps_takes_no_attribute_of_the_callers'
-shmutant_mut 'a run declares its scratch names and keeps the attributes a caller'"'"'s localvar_inherit hands them' \
-  '  local budget d dog dog_self done_first elapsed last leftovers orphaned p pid rc rootid rrc runner runner_gap runnerid s seen_ck tampered tnow victims; builtin unset -v budget d dog dog_self done_first elapsed last leftovers orphaned p pid rc rootid rrc runner runner_gap runnerid s seen_ck tampered tnow victims' \
-  '  local budget d dog dog_self done_first elapsed last leftovers orphaned p pid rc rootid rrc runner runner_gap runnerid s seen_ck tampered tnow victims' \
-  't_run_scratch_names_take_no_attribute_of_the_callers'
 shmutant_mut 'a bounded read declares its scratch names and keeps the attributes a caller'"'"'s localvar_inherit hands them' \
   '    builtin local c t w s; builtin unset -v c t w s' \
   '    builtin local c t w s' \
   't_bounded_ps_takes_no_attribute_of_the_callers'
 shmutant_mut 'the look for the runner assigns its names under the attributes a caller gave them' \
-  '  local guard_of guard_of_id guard_self guard_gap_ref SHMUTANT_PS_BOUND; builtin unset -v guard_of guard_of_id guard_self guard_gap_ref SHMUTANT_PS_BOUND' \
-  '  :' \
-  't_run_scratch_names_take_no_attribute_of_the_callers'
-shmutant_mut 'the look for the runner declares its names and keeps the attributes a caller'"'"'s localvar_inherit hands them' \
-  '  local guard_of guard_of_id guard_self guard_gap_ref SHMUTANT_PS_BOUND; builtin unset -v guard_of guard_of_id guard_self guard_gap_ref SHMUTANT_PS_BOUND' \
   '  local guard_of guard_of_id guard_self guard_gap_ref SHMUTANT_PS_BOUND' \
+  '  :' \
   't_run_scratch_names_take_no_attribute_of_the_callers'
 shmutant_mut 'the callback is let go before its watchdog is started' \
   '    dog=""' \
   '    printf '"'"'go\n'"'"' >&"$go"; dog=""' \
   't_watchdog_is_started_before_the_callback_is_let_go'
+
+# --- names take no attribute of the calling shell's (#88) ---
+shmutant_mut 'the rewrite assigns the worker root under the attribute its caller gave that name' \
+  '    local wroot base' \
+  '    local base' \
+  't_pool_names_take_no_attribute_of_the_callers'
+shmutant_mut 'the rewrite assigns the target base name under the attribute its caller gave that name' \
+  '    local wroot base' \
+  '    local wroot' \
+  't_pool_names_take_no_attribute_of_the_callers'
+shmutant_mut 'the workdir check walks its entries under the attribute its caller gave that name' \
+  '  local label="$1" wd="$2" line="" size="" e' \
+  '  local label="$1" wd="$2" line="" size=""' \
+  't_pool_names_take_no_attribute_of_the_callers'
+shmutant_mut 'the option snapshot keeps BASHOPTS in a name of the calling shell' \
+  '_shmutant_drop_builtin_fn() { _shmutant_drop_builtin_fn_from "$BASHOPTS" "$SHELLOPTS" "${POSIXLY_CORRECT+set}:${POSIXLY_CORRECT-}"; }' \
+  '_shmutant_drop_builtin_fn() { _shmutant_bo="$BASHOPTS"; _shmutant_drop_builtin_fn_from "$_shmutant_bo" "$SHELLOPTS" "${POSIXLY_CORRECT+set}:${POSIXLY_CORRECT-}"; }' \
+  't_pool_names_take_no_attribute_of_the_callers'
+shmutant_mut 'the option snapshot keeps SHELLOPTS in a name of the calling shell' \
+  '_shmutant_drop_builtin_fn() { _shmutant_drop_builtin_fn_from "$BASHOPTS" "$SHELLOPTS" "${POSIXLY_CORRECT+set}:${POSIXLY_CORRECT-}"; }' \
+  '_shmutant_drop_builtin_fn() { _shmutant_so="$SHELLOPTS"; _shmutant_drop_builtin_fn_from "$BASHOPTS" "$_shmutant_so" "${POSIXLY_CORRECT+set}:${POSIXLY_CORRECT-}"; }' \
+  't_pool_names_take_no_attribute_of_the_callers'
+shmutant_mut 'the option snapshot keeps POSIXLY_CORRECT in a name of the calling shell' \
+  '_shmutant_drop_builtin_fn() { _shmutant_drop_builtin_fn_from "$BASHOPTS" "$SHELLOPTS" "${POSIXLY_CORRECT+set}:${POSIXLY_CORRECT-}"; }' \
+  '_shmutant_drop_builtin_fn() { _shmutant_pc="${POSIXLY_CORRECT+set}:${POSIXLY_CORRECT-}"; _shmutant_drop_builtin_fn_from "$BASHOPTS" "$SHELLOPTS" "$_shmutant_pc"; }' \
+  't_pool_names_take_no_attribute_of_the_callers'
+shmutant_mut 'the entry points run with the localvar_inherit their caller set' \
+  '  \builtin shopt -u expand_aliases localvar_inherit' \
+  '  \builtin shopt -u expand_aliases' \
+  't_pool_names_take_no_attribute_of_the_callers'
+shmutant_mut 'the localvar_inherit of the calling shell is not put back' \
+  '"$(\builtin shopt -p expand_aliases localvar_inherit)"' \
+  '"$(\builtin shopt -p expand_aliases)"' \
+  't_pool_names_take_no_attribute_of_the_callers'
+shmutant_mut 'the option save keeps its answer in a name declared under the localvar_inherit of its caller' \
+  '  \builtin printf -v "$1" '"'"'%s'"'"' "$(\builtin shopt -p expand_aliases localvar_inherit)"' \
+  '  local st; st="$(\builtin shopt -p expand_aliases localvar_inherit; :)"; \builtin printf -v "$1" '"'"'%s'"'"' "$st"' \
+  't_pool_names_take_no_attribute_of_the_callers'
+shmutant_mut 'the pool keeps the saved options in a name that took an attribute of its caller' \
+  '  local rc pool_aliases; \builtin unset -v rc pool_aliases; _shmutant_aliases_off pool_aliases' \
+  '  local rc pool_aliases; _shmutant_aliases_off pool_aliases' \
+  't_pool_names_take_no_attribute_of_the_callers'
+shmutant_mut 'copy_tree keeps the saved options in a name that took an attribute of its caller' \
+  '  local rc copy_tree_aliases; \builtin unset -v rc copy_tree_aliases; _shmutant_aliases_off copy_tree_aliases' \
+  '  local rc copy_tree_aliases; _shmutant_aliases_off copy_tree_aliases' \
+  't_public_helpers_take_no_attribute_of_the_callers'
+shmutant_mut 'mutate keeps the saved options in a name that took an attribute of its caller' \
+  '  local rc mutate_aliases; \builtin unset -v rc mutate_aliases; _shmutant_aliases_off mutate_aliases' \
+  '  local rc mutate_aliases; _shmutant_aliases_off mutate_aliases' \
+  't_public_helpers_take_no_attribute_of_the_callers'
+shmutant_mut 'the last trap handler of the pool keeps a declaration in a name that took an attribute of its caller' \
+  '  builtin set -- "${SHMUTANT_TRAP_RETURN_PENDING:-}" "${SHMUTANT_TRAP_DEBUG_PENDING:-}"' \
+  '  local ret="${SHMUTANT_TRAP_RETURN_PENDING:-}"; builtin set -- "$ret" "${SHMUTANT_TRAP_DEBUG_PENDING:-}"' \
+  't_pool_names_take_no_attribute_of_the_callers'
+shmutant_mut 'a localvar_inherit prepare turned on stays on for the rest of the pool' \
+  '  \builtin shopt -u localvar_inherit' \
+  '  :' \
+  't_pool_turns_off_a_localvar_inherit_prepare_turned_on'
+shmutant_mut 'a run that turned localvar_inherit on is snapshotted with it on' \
+  '    builtin shopt -u localvar_inherit; _shmutant_snapshot_now "$1"; builtin shopt -s localvar_inherit' \
+  '    _shmutant_snapshot_now "$1"' \
+  't_run_that_turns_localvar_inherit_on_has_its_leftovers_recorded'
+shmutant_mut 'a snapshot leaves localvar_inherit off in a shell that goes on' \
+  '_shmutant_snapshot_now "$1"; builtin shopt -s localvar_inherit' \
+  '_shmutant_snapshot_now "$1"' \
+  't_run_that_turns_localvar_inherit_on_has_its_leftovers_recorded'
+shmutant_mut 'the wrapper keeps its record descriptor in a name the calling shell made a nameref' \
+  '      builtin local _shmutant_wrap_left="$left_w"' \
+  '      _shmutant_wrap_left="$left_w"' \
+  't_run_leftover_record_follows_no_nameref_of_the_callers'
+shmutant_mut 'the EXIT trap of the wrapper reads a name that an abort put out of scope' \
+  '      trap '"'"'_shmutant_snapshot "$BASHPID" >&'"'"'"$_shmutant_wrap_left" EXIT' \
+  '      trap '"'"'_shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"'"'"' EXIT' \
+  't_run_that_aborts_on_an_arithmetic_error_has_its_leftovers_recorded'
+shmutant_mut 'the guard of the EXIT trap keeps its text in a name the plan gave an attribute' \
+  '  set -- "$(trap -p EXIT)"' \
+  '  local t; t="$(trap -p EXIT)"; set -- "$t"' \
+  't_cli_declares_under_no_localvar_inherit_of_its_environment'
+shmutant_mut 'the CLI declares under the localvar_inherit its environment set' \
+  'expand_aliases; \builtin shopt -u localvar_inherit' \
+  'expand_aliases; \builtin :' \
+  't_cli_declares_under_no_localvar_inherit_of_its_environment'
 
 # --- the license the file carries (#39) ---
 shmutant_mut 'the SPDX tag names another license' \
