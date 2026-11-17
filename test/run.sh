@@ -4701,30 +4701,34 @@ t_run_that_turns_localvar_inherit_on_has_its_leftovers_recorded() {
   # The option is back on as a snapshot returns: one is taken of a plan's shell before the plan's
   # `exec`, and that shell goes on when the exec did not replace it.
   eq "$( shopt -s localvar_inherit; _shmutant_snapshot "$BASHPID" > /dev/null 2>&1; shopt -p localvar_inherit )" 'shopt -s localvar_inherit' 'a snapshot leaves localvar_inherit as it found it'
-  # And it returns with the option on what it returns with it off: one descendant to name (a
-  # stand-in, so the line written last is the one that fails) and nowhere to write it, then
-  # somewhere.
+  # And it returns 1 when a line could not be written, under either setting: two descendants to
+  # name (stand-ins), the first with a start and the second with none, so the line that fails is
+  # followed by one that is skipped; then with somewhere to write.
   for u_n in -u -s; do
     eq "$( shopt "$u_n" localvar_inherit
-           _shmutant_descendants() { printf '4242\n'; }; _shmutant_identity_table() { SHMUTANT_START[4242]=x; }
-           _shmutant_snapshot "$BASHPID" >&- 2>/dev/null; echo "rc=$?"; _shmutant_snapshot "$BASHPID" > /dev/null 2>&1; echo "rc=$?" )" $'rc=1\nrc=0' "the status of a snapshot is the same under either setting (shopt $u_n localvar_inherit)"
+           _shmutant_descendants() { printf '4242\n4343\n'; }; _shmutant_identity_table() { SHMUTANT_START[4242]=x; }
+           _shmutant_snapshot "$BASHPID" >&- 2>/dev/null; echo "rc=$?"; _shmutant_snapshot "$BASHPID" > /dev/null 2>&1; echo "rc=$?" )" $'rc=1\nrc=0' "a snapshot says that a line could not be written (shopt $u_n localvar_inherit)"
   done
-  # Under errexit a snapshot that failed ends its shell, with the option back on before it does:
-  # an EXIT handler, a plan's or a callback's, runs under the setting it was written for.
-  # shellcheck disable=SC2016
-  eq "$("$BASH" -c '. "$1" || exit 9
-                   shopt -s localvar_inherit
-                   _shmutant_descendants() { printf "4242\n"; }; _shmutant_identity_table() { SHMUTANT_START[4242]=x; }
-                   trap "shopt -p localvar_inherit >&3" EXIT; set -e
-                   _shmutant_snapshot "$$" >&- 2>/dev/null; echo not-reached >&3' _ "$SHMUTANT" 3>&1)" \
-     'shopt -s localvar_inherit' 'a snapshot that failed under errexit ended its shell with localvar_inherit back on'
+  # Under errexit such a snapshot ends its shell with that status, under either setting, and the
+  # option is as the shell had it before it does: an EXIT handler, a plan's or a callback's, runs
+  # under the setting it was written for.
+  for u_n in -u -s; do
+    # shellcheck disable=SC2016
+    eq "$("$BASH" -c '. "$1" || exit 9
+                     shopt "$2" localvar_inherit
+                     _shmutant_descendants() { printf "4242\n4343\n"; }; _shmutant_identity_table() { SHMUTANT_START[4242]=x; }
+                     trap "shopt -p localvar_inherit >&3" EXIT; set -e
+                     _shmutant_snapshot "$$" >&- 2>/dev/null; echo not-reached >&3' _ "$SHMUTANT" "$u_n" 3>&1; echo "rc=$?")" \
+       "shopt $u_n localvar_inherit"$'\n''rc=1' "a snapshot that failed under errexit ended its shell with status 1 and localvar_inherit as it was (shopt $u_n)"
+  done
 }
 
 t_run_that_aborts_on_an_arithmetic_error_has_its_leftovers_recorded() {
   # #88: an arithmetic error in the callback drops the rest of the wrapper's commands and, with
   # them, the function whose names the wrapper declared: its EXIT trap then runs where the name
-  # that held the record's descriptor is out of scope. The trap carries the number itself, so
-  # what such a run left running is still recorded and ended.
+  # that held the record's descriptor is out of scope, and so does its exit function when an
+  # EXIT trap of the callback's own calls it. Both carry the number itself, so what such a run
+  # left running is still recorded and ended.
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
   shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
@@ -4733,8 +4737,14 @@ t_run_that_aborts_on_an_arithmetic_error_has_its_leftovers_recorded() {
   SHMUTANT_BASELINE=0 pool lbl "$T/wd" toy_prepare aborting_run
   eq "$(verdict_of a)" aborted 'a run that ended on an arithmetic error is one that aborted'
   hasnt "$ERR" 'Bad file descriptor' 'the wrapper'"'"'s last snapshot had its descriptor'
+  # shellcheck disable=SC2004
+  trapping_run() { local v='1 +'; trap 'exit 3' EXIT; set -m; bash -c 'sleep 4; touch "$1/escaped-exit"' _ "$T" & set +m; : $(( v )); bash "$1/test.sh"; }
+  SHMUTANT_BASELINE=0 pool lbl "$T/wd2" toy_prepare trapping_run
+  eq "$(verdict_of a)" aborted 'a run that ended on an arithmetic error and left through its own EXIT trap is one that aborted'
+  hasnt "$ERR" 'Bad file descriptor' 'the wrapper'"'"'s exit function had its descriptor'
   sleep 5
   [ ! -e "$T/escaped" ] || fail_ 'a helper the run left outlived the verdict: the snapshot of a run that aborted was lost'
+  [ ! -e "$T/escaped-exit" ] || fail_ 'a helper the run left outlived the verdict: the snapshot of a run that aborted and left through its own EXIT trap was lost'
 }
 
 t_cli_declares_under_no_localvar_inherit_of_its_environment() {

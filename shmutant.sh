@@ -1901,12 +1901,12 @@ _shmutant_table_state() {
   return 0
 }
 
-# _shmutant_snapshot <pid> — print `pid:identity` for every live descendant of <pid> now.
+# _shmutant_snapshot <pid> — print `pid:identity` for every live descendant of <pid> now. Returns
+# 1 when a line could not be written, whichever line it was, and 0 otherwise.
 # localvar_inherit is off while it reads, for a run or a plan that turned it on: the declarations
 # of every read would otherwise take what the calling shell's variables of their names hold, and
 # the record of what the run left would be lost to the first that did not fit. It is back on as
-# the snapshot returns: the shell of a plan whose `exec` did not replace it goes on. The status
-# returned is the one the snapshot returns with the option off.
+# the snapshot returns: the shell of a plan whose `exec` did not replace it goes on.
 _shmutant_snapshot() {
   if builtin shopt -q localvar_inherit; then
     builtin shopt -u localvar_inherit
@@ -1917,15 +1917,20 @@ _shmutant_snapshot() {
   else _shmutant_snapshot_now "$1"
   fi
 }
+# _shmutant_snapshot_now <pid> — the snapshot itself. A write that failed is kept in the second
+# positional parameter, so a line skipped after it does not end the loop with 0, and so the
+# status is the same where errexit is on as where it is not.
 _shmutant_snapshot_now() {
   local p
   local -A SHMUTANT_START=()
+  builtin set -- "$1" 0
   _shmutant_identity_table
   while IFS= read -r p; do
     [ -n "$p" ] || continue
     [ -n "${SHMUTANT_START[$p]:-}" ] || continue
-    printf '%s:%s\n' "$p" "${SHMUTANT_START[$p]}"
+    printf '%s:%s\n' "$p" "${SHMUTANT_START[$p]}" || builtin set -- "$1" 1
   done < <(_shmutant_descendants "$1")
+  builtin return "$2"
 }
 
 # _shmutant_run_bounded <dir> <run> <root> <select> — run the adapter with stdout+stderr in
@@ -2018,9 +2023,10 @@ _shmutant_run_bounded() {
     # run's group; unread, it reaches the pool's.
     # The record's descriptor under a name of the wrapper's own, declared: a nameref of the
     # calling shell's on that name would have the snapshot written wherever the callback last
-    # pointed its referent. The EXIT trap carries the number itself: an arithmetic error in the
-    # callback drops the rest of this subshell's commands and this function's names with them,
-    # and the trap then runs where the declared name is out of scope.
+    # pointed its referent. The EXIT trap and the exit function carry the number itself: an
+    # arithmetic error in the callback drops the rest of this subshell's commands and this
+    # function's names with them, and the trap (or the exit function, called from an EXIT trap
+    # of the callback's own) then runs where the declared name is out of scope.
     ( builtin set -o monitor; builtin set +o monitor
       builtin local _shmutant_wrap_left="$left_w"
       ( ( read -r _ <&"$hold_r" ) < /dev/null > /dev/null 2>&1 {hold}>&- & printf '%s\n' "$!" >&"$hp" )
@@ -2028,7 +2034,7 @@ _shmutant_run_bounded() {
       # path: an interrupt before that would find a run it could not name.
       read -t 30 -r _ <&"$go" || builtin exit 127
       trap '_shmutant_snapshot "$BASHPID" >&'"$_shmutant_wrap_left" EXIT
-      exit() { local s=$?; _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; if [ "$#" -eq 0 ]; then builtin exit "$s"; else builtin exit "$@"; fi; }
+      builtin eval 'exit() { local s=$?; _shmutant_snapshot "$BASHPID" >&'"$_shmutant_wrap_left"'; if [ "$#" -eq 0 ]; then builtin exit "$s"; else builtin exit "$@"; fi; }'
       # The counter describes this run: what the sourcing shell counted before the pool is not
       # this callback's, and a suite that refuses to pass on zero must be able to see zero.
       # The count descriptor is this run's own, by number; with the counts off there is none, so

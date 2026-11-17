@@ -672,7 +672,7 @@ shmutant_mut 'the pool reads its positionals before checking their count' \
 
 # --- guards added for the twentieth review round ---
 shmutant_mut 'a callback that leaves by exit skips the snapshot' \
-  '      exit() { local s=$?; _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; if [ "$#" -eq 0 ]; then builtin exit "$s"; else builtin exit "$@"; fi; }' \
+  '      builtin eval '"'"'exit() { local s=$?; _shmutant_snapshot "$BASHPID" >&'"'"'"$_shmutant_wrap_left"'"'"'; if [ "$#" -eq 0 ]; then builtin exit "$s"; else builtin exit "$@"; fi; }'"'"'' \
   '      :' \
   't_run_cannot_lose_the_leftover_record_by_locking_its_dir'
 shmutant_mut 'a verified holder yields no group to signal' \
@@ -722,8 +722,8 @@ shmutant_mut 'a group is signalled by number after its holder is gone' \
   '  :' \
   't_run_group_is_not_signalled_by_number_without_its_holder'
 shmutant_mut 'a bare exit takes the snapshot status' \
-  '      exit() { local s=$?; _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; if [ "$#" -eq 0 ]; then builtin exit "$s"; else builtin exit "$@"; fi; }' \
-  '      exit() { _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; builtin exit "$@"; }' \
+  '      builtin eval '"'"'exit() { local s=$?; _shmutant_snapshot "$BASHPID" >&'"'"'"$_shmutant_wrap_left"'"'"'; if [ "$#" -eq 0 ]; then builtin exit "$s"; else builtin exit "$@"; fi; }'"'"'' \
+  '      builtin eval '"'"'exit() { _shmutant_snapshot "$BASHPID" >&'"'"'"$_shmutant_wrap_left"'"'"'; builtin exit "$@"; }'"'"'' \
   't_verdict_aborted_status'
 shmutant_mut 'dot components in the destination are created as typed' \
   '  rest="$norm"' \
@@ -2914,6 +2914,10 @@ shmutant_mut 'a snapshot taken with localvar_inherit on returns 0 whatever it ca
   'if _shmutant_snapshot_now "$1"; then builtin set -- 0; else builtin set -- "$?"; fi' \
   'if _shmutant_snapshot_now "$1"; then builtin set -- 0; else builtin set -- 0; fi' \
   't_run_that_turns_localvar_inherit_on_has_its_leftovers_recorded'
+shmutant_mut 'a snapshot whose write failed before a line it skipped returns 0' \
+  '"${SHMUTANT_START[$p]}" || builtin set -- "$1" 1' \
+  '"${SHMUTANT_START[$p]}"' \
+  't_run_that_turns_localvar_inherit_on_has_its_leftovers_recorded'
 shmutant_mut 'a snapshot that fails under errexit ends its shell with localvar_inherit still off' \
   '    if _shmutant_snapshot_now "$1"; then builtin set -- 0; else builtin set -- "$?"; fi' \
   '    _shmutant_snapshot_now "$1"; builtin set -- "$?"' \
@@ -2930,6 +2934,10 @@ shmutant_mut 'the guard of the EXIT trap keeps its text in a name the plan gave 
   '  set -- "$(trap -p EXIT)"' \
   '  local t; t="$(trap -p EXIT)"; set -- "$t"' \
   't_cli_declares_under_no_localvar_inherit_of_its_environment'
+shmutant_mut 'the exit function of the wrapper reads a name that an abort put out of scope' \
+  '"$BASHPID" >&'"'"'"$_shmutant_wrap_left"'"'"'; if [ "$#" -eq 0 ]' \
+  '"$BASHPID" >&"$_shmutant_wrap_left"; if [ "$#" -eq 0 ]' \
+  't_run_that_aborts_on_an_arithmetic_error_has_its_leftovers_recorded'
 shmutant_mut 'the CLI declares under the localvar_inherit its environment set' \
   'expand_aliases; \builtin shopt -u localvar_inherit' \
   'expand_aliases; \builtin :' \
