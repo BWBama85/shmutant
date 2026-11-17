@@ -310,8 +310,8 @@ refused (status 2) before any worker starts. Inside `shmutant_pool`, `shmutant_c
 it runs it, so a caller's alias would otherwise reach the library at run time); callbacks run
 there too, with the bodies they were given when defined; the caller's setting is put back on
 return. `localvar_inherit` is off there as well, callbacks included, and put back on return:
-with it on, every `local` in the library would take the value and the attributes of your
-variable of the same name. A `prepare` that turns it on has it turned off again as it returns,
+with it on, every `local` in the library would take the value and the attributes (all but
+nameref, which bash does not hand down) of your variable of the same name. A `prepare` that turns it on has it turned off again as it returns,
 and the setting the pool hands back is the one it was called with; a `run` that turns it on
 keeps it for its own commands only. A callback that needs the option turns it on inside its own
 functions. Without the option, an attribute you gave a variable of your own (`declare -i`, an

@@ -357,8 +357,9 @@ shmutant_selected() {
 # settings into <variable> (the entry point's own local, so a helper called from inside a pool's
 # callback does not overwrite the pool's) and turn both options off; _shmutant_aliases_back
 # <saved> puts them back. With localvar_inherit on, every `local` in this file would take the
-# value and the attributes of a caller's variable of the same name: a path declared under an
-# integer attribute is an arithmetic error, and a name declared to be empty is not.
+# value and the attributes (all but nameref) of a caller's variable of the same name: a path
+# declared under an integer attribute is an arithmetic error, and a name declared to be empty is
+# not.
 _shmutant_aliases_off() {
   # Straight into <variable>, with no name of this function's own: one declared here, while
   # localvar_inherit is still on, would take a caller's attribute with it.
@@ -1904,10 +1905,11 @@ _shmutant_table_state() {
 # localvar_inherit is off while it reads, for a run or a plan that turned it on: the declarations
 # of every read would otherwise take what the calling shell's variables of their names hold, and
 # the record of what the run left would be lost to the first that did not fit. It is back on as
-# the snapshot returns: the shell of a plan whose `exec` did not replace it goes on.
+# the snapshot returns: the shell of a plan whose `exec` did not replace it goes on. The status is
+# the snapshot's own either way: a record that could not be written is said.
 _shmutant_snapshot() {
   if builtin shopt -q localvar_inherit; then
-    builtin shopt -u localvar_inherit; _shmutant_snapshot_now "$1"; builtin shopt -s localvar_inherit
+    builtin shopt -u localvar_inherit; _shmutant_snapshot_now "$1"; builtin set -- "$?"; builtin shopt -s localvar_inherit; builtin return "$1"
   else _shmutant_snapshot_now "$1"
   fi
 }

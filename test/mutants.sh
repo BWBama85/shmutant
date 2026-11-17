@@ -2903,12 +2903,16 @@ shmutant_mut 'a localvar_inherit prepare turned on stays on for the rest of the 
   '  :' \
   't_pool_turns_off_a_localvar_inherit_prepare_turned_on'
 shmutant_mut 'a run that turned localvar_inherit on is snapshotted with it on' \
-  '    builtin shopt -u localvar_inherit; _shmutant_snapshot_now "$1"; builtin shopt -s localvar_inherit' \
+  '    builtin shopt -u localvar_inherit; _shmutant_snapshot_now "$1"; builtin set -- "$?"; builtin shopt -s localvar_inherit; builtin return "$1"' \
   '    _shmutant_snapshot_now "$1"' \
   't_run_that_turns_localvar_inherit_on_has_its_leftovers_recorded'
 shmutant_mut 'a snapshot leaves localvar_inherit off in a shell that goes on' \
+  'builtin set -- "$?"; builtin shopt -s localvar_inherit; builtin return "$1"' \
+  'builtin set -- "$?"; builtin return "$1"' \
+  't_run_that_turns_localvar_inherit_on_has_its_leftovers_recorded'
+shmutant_mut 'a snapshot that put localvar_inherit back returns that, not what its record came to' \
+  '_shmutant_snapshot_now "$1"; builtin set -- "$?"; builtin shopt -s localvar_inherit; builtin return "$1"' \
   '_shmutant_snapshot_now "$1"; builtin shopt -s localvar_inherit' \
-  '_shmutant_snapshot_now "$1"' \
   't_run_that_turns_localvar_inherit_on_has_its_leftovers_recorded'
 shmutant_mut 'the wrapper keeps its record descriptor in a name the calling shell made a nameref' \
   '      builtin local _shmutant_wrap_left="$left_w"' \

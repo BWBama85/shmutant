@@ -4701,6 +4701,13 @@ t_run_that_turns_localvar_inherit_on_has_its_leftovers_recorded() {
   # The option is back on as a snapshot returns: one is taken of a plan's shell before the plan's
   # `exec`, and that shell goes on when the exec did not replace it.
   eq "$( shopt -s localvar_inherit; _shmutant_snapshot "$BASHPID" > /dev/null 2>&1; shopt -p localvar_inherit )" 'shopt -s localvar_inherit' 'a snapshot leaves localvar_inherit as it found it'
+  # And its status is the record's, under either setting: one descendant to name (a stand-in, so
+  # the last line written is the one that fails) and nowhere to write it.
+  for u_n in -u -s; do
+    eq "$( shopt "$u_n" localvar_inherit
+           _shmutant_descendants() { printf '4242\n'; }; _shmutant_identity_table() { SHMUTANT_START[4242]=x; }
+           _shmutant_snapshot "$BASHPID" >&- 2>/dev/null; echo "rc=$?" )" 'rc=1' "a snapshot whose record could not be written says so (shopt $u_n localvar_inherit)"
+  done
 }
 
 t_run_that_aborts_on_an_arithmetic_error_has_its_leftovers_recorded() {
