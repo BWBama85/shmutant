@@ -21,9 +21,11 @@ env:
   SHELLSPEC_VERSION: "0.28.1"
   SHELLSPEC_SHA256: 350d3de04ba61505c54eda31a3c2ee912700f1758b1a80a284bc08fd8b6c5992
 
+# Every Linux job names its image: ubuntu-latest hands some runs ubuntu-26.04, where two units of the
+# suite fail (#97).
 jobs:
   shellcheck:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7.0.1
@@ -35,7 +37,7 @@ jobs:
       - run: shellcheck --severity=warning -e SC1091 shmutant.sh test/run.sh test/mutants.sh test/adapters/check.sh test/adapters/bats/test/mutants.sh test/adapters/bats/lib/parse.sh test/adapters/shellspec/spec/mutants.sh test/adapters/shellspec/lib/parse.sh scripts/release.sh scripts/bump.sh test/release.sh
 
   checksum:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7.0.1
@@ -45,7 +47,7 @@ jobs:
   release:
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-24.04, macos-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
@@ -56,7 +58,7 @@ jobs:
         run: PATH="/bin:$PATH" bash test/release.sh
 
   linux-suite:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7.0.1
@@ -90,7 +92,7 @@ jobs:
           TMPDIR="$d" bash test/run.sh
 
   linux-mutants:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7.0.1
@@ -141,7 +143,7 @@ jobs:
   linux:
     if: ${{ always() }}
     needs: [linux-suite, linux-mutants]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: linux-suite and linux-mutants both passed
@@ -153,7 +155,7 @@ jobs:
           [ "$SUITE" = success ] && [ "$MUTANTS" = success ]
 
   adapters:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7.0.1
@@ -245,7 +247,7 @@ jobs:
   macos:
     if: ${{ always() }}
     needs: [macos-suite, macos-mutants]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: macos-suite and macos-mutants both passed
