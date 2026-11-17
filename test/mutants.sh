@@ -835,8 +835,8 @@ shmutant_mut 'errtrace is mistaken for errexit under nocasematch' \
   '  case "$-" in *[eE]*) errexit_before=1 ;; esac' \
   't_mode_spec_is_immune_to_nocasematch'
 shmutant_mut 'aliases in the sourcing shell are baked into the library' \
-  '; :)"; \builtin shopt -u expand_aliases' \
-  '; :)"; \builtin :' \
+  'expand_aliases'"'"'; \builtin shopt -u expand_aliases' \
+  'expand_aliases'"'"'; \builtin :' \
   't_library_is_immune_to_aliases_at_parse_time'
 shmutant_mut 'the alias setting of the sourcing shell is not put back' \
   '\builtin eval "$_shmutant_alias_state"; \builtin unset -v _shmutant_alias_state' \
@@ -935,8 +935,8 @@ shmutant_mut 'a shadow prepare introduced is not rechecked' \
   '  :' \
   't_pool_refuses_shadowed_builtins_and_posix_mode'
 shmutant_mut 'sourcing the library fails a caller under errexit' \
-  '_shmutant_alias_state="$(\builtin shopt -p expand_aliases; :)"' \
-  '_shmutant_alias_state="$(\builtin shopt -p expand_aliases)"' \
+  '\builtin shopt -q expand_aliases && _shmutant_alias_state='"'"'shopt -s expand_aliases'"'"'' \
+  '\builtin shopt -q expand_aliases; _shmutant_alias_state='"'"'shopt -s expand_aliases'"'"'' \
   't_library_sources_under_errexit'
 
 # --- guards added for the twenty-fifth review round ---
@@ -975,8 +975,8 @@ shmutant_mut 'a relative copy destination is rebased on the PWD variable' \
 
 # --- guards added for the twenty-sixth review round ---
 shmutant_mut 'the prologue runs whatever shopt the caller aliased' \
-  '; :)"; \builtin shopt -u expand_aliases' \
-  '; :)"; shopt -u expand_aliases' \
+  'expand_aliases'"'"'; \builtin shopt -u expand_aliases' \
+  'expand_aliases'"'"'; shopt -u expand_aliases' \
   't_library_is_immune_to_aliases_at_parse_time'
 shmutant_mut 'a builtin disabled with enable passes the shadow check' \
   '    kinds="$(builtin type -at -- "$n" 2>/dev/null)"' \
@@ -1199,12 +1199,12 @@ shmutant_mut 'the stat form is never detected' \
   '  SHMUTANT_STAT_STYLE=none; return 0' \
   't_pool_refuses_a_modified_pristine_tree'
 shmutant_mut 'the alias state is never put back' \
-  '  [[ -z "$1" ]] || \builtin eval "$1"' \
+  '  case "$1" in s?) \builtin shopt -s expand_aliases ;; u?) \builtin shopt -u expand_aliases ;; esac' \
   '  :' \
   't_public_helpers_are_immune_to_aliases_at_run_time'
 shmutant_mut 'the alias state put back is always off' \
-  '  \builtin printf -v "$1" '"'"'%s'"'"' "$(\builtin shopt -p expand_aliases localvar_inherit)"' \
-  '  \builtin printf -v "$1" '"'"'%s'"'"' "shopt -u expand_aliases"' \
+  '  if \builtin shopt -q expand_aliases; then \builtin set -- "$1" s "$3"; fi' \
+  '  :' \
   't_public_helpers_are_immune_to_aliases_at_run_time'
 shmutant_mut 'a worker directory is made in whatever sits at the workdir path' \
   '    if ! _shmutant_wd_is_marked "$wd" || ! _shmutant_fresh_dir "$wd/$kind-$i" "$wd" || ! SHMUTANT_DIR_IDS["$kind-$i"]="$(_shmutant_dir_id "$wd/$kind-$i")" \' \
@@ -1229,12 +1229,12 @@ shmutant_mut 'the stat form is probed through whatever the name resolves to' \
   '  local st; st="$(command -pv stat 2>/dev/null)" || { SHMUTANT_STAT_STYLE=none; return 0; }' \
   't_pool_refuses_a_modified_pristine_tree'
 shmutant_mut 'the alias setting is saved through a caller printf' \
-  '  \builtin printf -v "$1" '"'"'%s'"'"' "$(\builtin shopt -p expand_aliases localvar_inherit)"' \
-  '  printf -v "$1" '"'"'%s'"'"' "$(\builtin shopt -p expand_aliases localvar_inherit)"' \
+  '  \builtin printf -v "$1" '"'"'%s'"'"' "$2$3"' \
+  '  printf -v "$1" '"'"'%s'"'"' "$2$3"' \
   't_public_helpers_are_immune_to_aliases_at_run_time'
 shmutant_mut 'the alias setting is put back through a caller [' \
-  '  [[ -z "$1" ]] || \builtin eval "$1"' \
-  '  [ -z "$1" ] || \builtin eval "$1"' \
+  '  case "$1" in s?) \builtin shopt -s expand_aliases' \
+  '  [ -z "$1" ] || case "$1" in s?) \builtin shopt -s expand_aliases' \
   't_public_helpers_are_immune_to_aliases_at_run_time'
 shmutant_mut 'RETURN is handed back inside the release' \
   '  if [ -n "${SHMUTANT_TRAP_ERR:-}" ]; then eval "$SHMUTANT_TRAP_ERR"; else trap - ERR; fi' \
@@ -1418,8 +1418,8 @@ shmutant_mut 'a non-ASCII letter is a witness boundary' \
   '        if (pre !~ /[A-Za-z0-9_.-]/ && post !~ /[A-Za-z0-9_.-]/) return 1' \
   't_witness_matches_a_whole_token'
 shmutant_mut 'the bootstrap turns aliases off through an alias-expandable word' \
-  '; :)"; \builtin shopt -u expand_aliases' \
-  '; :)"; builtin shopt -u expand_aliases' \
+  'expand_aliases'"'"'; \builtin shopt -u expand_aliases' \
+  'expand_aliases'"'"'; builtin shopt -u expand_aliases' \
   't_bootstrap_is_immune_to_a_builtin_alias'
 shmutant_mut 'the bootstrap drops a builtin function through an alias-expandable word' \
   '\unset -f builtin 2>/dev/null' \
@@ -2875,12 +2875,12 @@ shmutant_mut 'the entry points run with the localvar_inherit their caller set' \
   '  \builtin shopt -u expand_aliases' \
   't_pool_names_take_no_attribute_of_the_callers'
 shmutant_mut 'the localvar_inherit of the calling shell is not put back' \
-  '"$(\builtin shopt -p expand_aliases localvar_inherit)"' \
-  '"$(\builtin shopt -p expand_aliases)"' \
+  '  if \builtin shopt -q localvar_inherit; then \builtin set -- "$1" "$2" s; fi' \
+  '  :' \
   't_pool_names_take_no_attribute_of_the_callers'
 shmutant_mut 'the option save keeps its answer in a name declared under the localvar_inherit of its caller' \
-  '  \builtin printf -v "$1" '"'"'%s'"'"' "$(\builtin shopt -p expand_aliases localvar_inherit)"' \
-  '  local st; st="$(\builtin shopt -p expand_aliases localvar_inherit; :)"; \builtin printf -v "$1" '"'"'%s'"'"' "$st"' \
+  '  if \builtin shopt -q localvar_inherit; then \builtin set -- "$1" "$2" s; fi' \
+  '  local st=u; if \builtin shopt -q localvar_inherit; then st=s; fi; \builtin set -- "$1" "$2" "$st"' \
   't_pool_names_take_no_attribute_of_the_callers'
 shmutant_mut 'the pool keeps the saved options in a name that took an attribute of its caller' \
   '  local rc pool_aliases; \builtin unset -v rc pool_aliases; _shmutant_aliases_off pool_aliases' \
@@ -3152,3 +3152,25 @@ shmutant_mut 'a lost run whose freeze could not record that it is unsettled is s
   '  [ "$unrecorded" != 1 ] || [ "$SHMUTANT_V_VERDICT" = lost ] || SHMUTANT_V_VERDICT=unsettled' \
   '  [ "$unrecorded" != 1 ] || SHMUTANT_V_VERDICT=unsettled' \
   't_collect_fails_closed'
+
+# --- saved settings and traps go back with nothing a trap or an alias of the caller's added (#99) ---
+shmutant_mut 'the option save reads a setting where an ERR trap of the calling shell runs' \
+  '  if \builtin shopt -q localvar_inherit; then \builtin set -- "$1" "$2" s; fi' \
+  '  \builtin shopt -q localvar_inherit; if [[ "$?" -eq 0 ]]; then \builtin set -- "$1" "$2" s; fi' \
+  't_option_save_takes_in_nothing_an_err_trap_of_the_callers_prints'
+shmutant_mut 'the file reads expand_aliases in a substitution, which takes in what an ERR trap prints' \
+  '_shmutant_alias_state='"'"'shopt -u expand_aliases'"'"'; \builtin shopt -q expand_aliases && _shmutant_alias_state='"'"'shopt -s expand_aliases'"'"'' \
+  '_shmutant_alias_state="$(\builtin shopt -p expand_aliases; :)"' \
+  't_option_save_takes_in_nothing_an_err_trap_of_the_callers_prints'
+shmutant_mut 'a setting is put back by a line evaluated once expand_aliases is back on' \
+  's?) \builtin shopt -s expand_aliases ;;' \
+  's?) \builtin shopt -s expand_aliases; \builtin eval '"'"'shopt -s expand_aliases'"'"' ;;' \
+  't_option_restore_reads_no_alias_of_the_callers'
+shmutant_mut 'the RETURN trap of the caller goes back by a line an alias named trap replaces' \
+  '  if [[ -n "$1" ]]; then builtin eval "\\builtin $1"; else builtin trap - RETURN; fi' \
+  '  if [[ -n "$1" ]]; then builtin eval "$1"; else builtin trap - RETURN; fi' \
+  't_option_restore_reads_no_alias_of_the_callers'
+shmutant_mut 'the DEBUG trap of the caller goes back by a line an alias named trap replaces' \
+  '  if [[ -n "$2" ]]; then builtin eval "\\builtin $2"; else builtin trap - DEBUG; fi' \
+  '  if [[ -n "$2" ]]; then builtin eval "$2"; else builtin trap - DEBUG; fi' \
+  't_option_restore_reads_no_alias_of_the_callers'

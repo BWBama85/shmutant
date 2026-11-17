@@ -4641,6 +4641,79 @@ t_public_helpers_take_no_attribute_of_the_callers() {
 }
 
 # shellcheck disable=SC2034,SC2086
+t_option_save_takes_in_nothing_an_err_trap_of_the_callers_prints() {
+  # A calling shell with errtrace and an ERR trap that prints: reading a setting that is off must
+  # not run it. What it printed inside a substitution became part of the saved text, and was
+  # evaluated when the file ended or an entry point returned. The handler names the function it
+  # ran in; under errexit as well, the shell must reach its last line.
+  mk_toy "$T/toy"; mkdir -p "$T/src"; printf 'x=1\n' > "$T/src/f"
+  local o_al o_e o_tag o_out
+  for o_al in -u -s; do
+    for o_e in E eE; do
+      o_tag="$o_al$o_e"; printf 'x=1\n' > "$T/f$o_tag"
+      SHMUTANT="$SHMUTANT" T="$T" AL="$o_al" E="$o_e" TAG="$o_tag" bash -c '
+        shopt "$AL" expand_aliases
+        set -"$E"; trap '\''printf "ERR-HANDLER %s\n" "${FUNCNAME[0]:-top}"'\'' ERR
+        . "$SHMUTANT"; echo sourced
+        shmutant_mutate "$T/f$TAG" "x=1" "x=2"; echo "mutate rc=$?"
+        shmutant_copy_tree "$T/src" "$T/dst$TAG"; echo "copy rc=$?"
+        prep() { shmutant_copy_tree "$T/toy" "$1"; }; runit() { bash "$1/test.sh"; }
+        shmutant_reset; shmutant_target lib.sh; shmutant_mut a "\$1 + \$2" "\$1 - \$2" add-works
+        SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd$TAG" prep runit > "$T/pool$TAG" 2>&1; echo "pool rc=$?"
+        if shopt -q expand_aliases; then echo "aliases=-s"; else echo "aliases=-u"; fi
+        if shopt -q localvar_inherit; then echo "inherit=on"; else echo "inherit=off"; fi
+        echo done' > "$T/out$o_tag" 2> "$T/err$o_tag"
+      o_out="$(cat "$T/out$o_tag" 2>/dev/null)"
+      eq "$(printf '%s\n' "$o_out" | head -n 1)" sourced "($o_tag) sourcing the file ran no ERR trap of the sourcing shell"
+      has "$o_out" 'mutate rc=0' "($o_tag) shmutant_mutate returns 0"
+      has "$o_out" 'copy rc=0' "($o_tag) shmutant_copy_tree returns 0"
+      has "$o_out" 'pool rc=0' "($o_tag) the pool kills its row [$(tail -n 2 "$T/pool$o_tag" 2>/dev/null | tr '\n' ';' | cut -c1-300)]"
+      has "$o_out" "aliases=$o_al" "($o_tag) expand_aliases is as the caller set it"
+      has "$o_out" 'inherit=off' "($o_tag) localvar_inherit is as the caller left it"
+      has "$o_out" 'done' "($o_tag) the calling shell reached its last line"
+      hasnt "$o_out$(cat "$T/pool$o_tag" 2>/dev/null)" 'ERR-HANDLER _shmutant_aliases_' "($o_tag) the option save or restore ran the ERR trap of the calling shell"
+      [ ! -s "$T/err$o_tag" ] || fail_ "($o_tag) something the ERR trap printed was evaluated, or an entry point complained: $(head -n 2 "$T/err$o_tag" | tr '\n' ';' | cut -c1-300)"
+      eq "$(cat "$T/f$o_tag" 2>/dev/null)" x=2 "($o_tag) the file was rewritten"
+    done
+  done
+}
+
+t_option_restore_reads_no_alias_of_the_callers() {
+  # A calling shell with expand_aliases on and aliases named shopt and trap. Its settings and its
+  # RETURN and DEBUG traps go back as the entry points return, when its aliases are in force
+  # again: a line evaluated then is read with them, and the alias runs in the builtin's place.
+  mk_toy "$T/toy"; mkdir -p "$T/src"; printf 'x=1\n' > "$T/src/f"
+  local r_inh r_out
+  for r_inh in -s -u; do
+    printf 'x=1\n' > "$T/f$r_inh"
+    SHMUTANT="$SHMUTANT" T="$T" INH="$r_inh" bash -c '
+      . "$SHMUTANT"; shopt -s expand_aliases; shopt "$INH" localvar_inherit
+      prep() { shmutant_copy_tree "$T/toy" "$1"; }; runit() { bash "$1/test.sh"; }
+      in_a_function() { SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd$INH" prep runit > "$T/pool$INH" 2>&1; echo "pool rc=$?"; }
+      shmutant_reset; shmutant_target lib.sh; shmutant_mut a "\$1 + \$2" "\$1 - \$2" add-works
+      set -T; trap ": the-return-trap" RETURN; trap ": the-debug-trap" DEBUG
+      alias shopt="echo ALIASED-SHOPT"; alias trap="echo ALIASED-TRAP"
+      shmutant_mutate "$T/f$INH" "x=1" "x=2"; echo "mutate rc=$?"
+      shmutant_copy_tree "$T/src" "$T/dst$INH"; echo "copy rc=$?"
+      in_a_function
+      \builtin trap -p RETURN; \builtin trap -p DEBUG
+      if \builtin shopt -q expand_aliases; then echo "aliases=on"; else echo "aliases=off"; fi
+      if \builtin shopt -q localvar_inherit; then echo "inherit=-s"; else echo "inherit=-u"; fi
+      echo done' > "$T/out$r_inh" 2> "$T/err$r_inh"
+    r_out="$(cat "$T/out$r_inh" 2>/dev/null)"
+    has "$r_out" 'mutate rc=0' "($r_inh) shmutant_mutate returns 0"
+    has "$r_out" 'copy rc=0' "($r_inh) shmutant_copy_tree returns 0"
+    has "$r_out" 'pool rc=0' "($r_inh) the pool kills its row [$(tail -n 2 "$T/pool$r_inh" 2>/dev/null | tr '\n' ';' | cut -c1-300)]"
+    hasnt "$r_out$(cat "$T/pool$r_inh" "$T/err$r_inh" 2>/dev/null)" ALIASED "($r_inh) an alias of the calling shell ran in place of a builtin"
+    has "$r_out" 'aliases=on' "($r_inh) expand_aliases is back on"
+    has "$r_out" "inherit=$r_inh" "($r_inh) localvar_inherit is as the caller set it"
+    has "$r_out" "trap -- ': the-return-trap' RETURN" "($r_inh) the RETURN trap of the caller is back"
+    has "$r_out" "trap -- ': the-debug-trap' DEBUG" "($r_inh) the DEBUG trap of the caller is back"
+    has "$r_out" 'done' "($r_inh) the calling shell reached its last line"
+    [ ! -s "$T/err$r_inh" ] || fail_ "($r_inh) an entry point complained: $(head -n 2 "$T/err$r_inh" | tr '\n' ';' | cut -c1-300)"
+  done
+}
+
 t_pool_turns_off_a_localvar_inherit_prepare_turned_on() {
   # #88: prepare runs in the pool's own shell, and one that turns localvar_inherit on would have
   # every declaration after it take what the caller's variable of that name holds. The pool turns
@@ -7656,9 +7729,12 @@ t_pool_reads_the_table_prepare_declared() {
     toy_prepare() { shmutant_copy_tree "$TOY" "$1"; }
     counting_run() { false; bash "$1/test.sh"; }
     shmutant_reset; shmutant_target lib.sh; shmutant_mut "a" "\$1 + \$2" "\$1 - \$2" add-works
-    SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd5" toy_prepare counting_run > "$T/out" 2>&1; echo "rc=$?" >> "$T/out"' _ "$SHMUTANT" "$T"
+    SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd5" toy_prepare counting_run > "$T/out" 2>&1; echo "rc=$?" >> "$T/out"
+    if shopt -q inherit_errexit; then echo "inherit_errexit=on"; else echo "inherit_errexit=off"; fi >> "$T/out"' _ "$SHMUTANT" "$T"
   has "$(cat "$T/out")" 'killed' 'a run callback owns its own errexit: the caller'"'"'s set -e did not end it at its first false'
   has "$(cat "$T/out")" 'rc=0' 'and the caller shell survived a pool status under set -e'
+  # leaving posix mode, which the shadow check enters, leaves inherit_errexit on under errexit
+  has "$(cat "$T/out")" 'inherit_errexit=off' 'and its inherit_errexit is as it left it: the options the shadow check reset were put back'
   # a harness error from the row pool (a worker directory that cannot be recreated) under the
   # caller's set -e still passes through the pool's own cleanup: the prepared tree is gone
   mkdir -p "$T/wd7"; printf 'shmutant workdir\n' > "$T/wd7/.shmutant"

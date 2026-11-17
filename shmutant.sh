@@ -125,8 +125,10 @@ fi
 
 # Aliases expand while a file is PARSED: a sourcing shell whose dotfiles alias `cp` or `mkdir`
 # would otherwise bake those flags into every function below. Off for the rest of this file,
-# and the caller's setting put back at its end.
-_shmutant_alias_state="$(\builtin shopt -p expand_aliases; :)"; \builtin shopt -u expand_aliases
+# and the caller's setting put back at its end. The setting is read in a list, where neither the
+# errexit nor an ERR trap of the sourcing shell acts, and what is kept is this file's own text:
+# the output of a substitution would take in whatever such a trap prints, to be evaluated below.
+_shmutant_alias_state='shopt -u expand_aliases'; \builtin shopt -q expand_aliases && _shmutant_alias_state='shopt -s expand_aliases'; \builtin shopt -u expand_aliases
 
 # _shmutant_bash_ok <major> <minor> — is that interpreter version at or above the floor?
 # Defined in bash-3.2 syntax: it runs before the rest of this file is parsed.
@@ -347,29 +349,36 @@ shmutant_selected() {
 # shmutant_copy_tree <src> <dst> — copy <src> to <dst> (created), skipping a top-level .git
 # and keeping symlinks as symlinks, modes, ownership and timestamps. Returns 1 when anything
 # fails to copy, or when <dst> lies inside <src>.
-# _shmutant_aliases_off <site> — expand_aliases off for the rest of a public entry point, the
-# caller's setting saved in SHMUTANT_ALIASES for _shmutant_aliases_back. Bash parses a command
-# substitution when it RUNS it, so with the option on in the caller's shell every `$(printf …)`
-# in this file would expand the caller's alias at run time; the prologue covers only parse time.
-# The first word is quoted, so this switch itself is beyond alias expansion. <site> only labels
-# the call.
 # _shmutant_aliases_off <variable> — save the caller's expand_aliases and localvar_inherit
 # settings into <variable> (the entry point's own local, so a helper called from inside a pool's
 # callback does not overwrite the pool's) and turn both options off; _shmutant_aliases_back
-# <saved> puts them back. With localvar_inherit on, every `local` in this file would take the
-# value and the attributes (all but nameref) of a caller's variable of the same name: a path
-# declared under an integer attribute is an arithmetic error, and a name declared to be empty is
-# not.
+# <saved> puts them back. <saved> is two letters, `s` (on) or `u` (off): expand_aliases, then
+# localvar_inherit; empty puts nothing back.
+# expand_aliases: bash parses a command substitution when it RUNS it, so with the option on in
+# the caller's shell every `$(printf …)` in this file would expand the caller's alias at run
+# time; the prologue covers only parse time. The first word of each switch is quoted, so the
+# switch itself is beyond alias expansion.
+# localvar_inherit: with it on, every `local` in this file would take the value and the
+# attributes (all but nameref) of a caller's variable of the same name: a path declared under an
+# integer attribute is an arithmetic error, and a name declared to be empty is not.
 _shmutant_aliases_off() {
-  # Straight into <variable>, with no name of this function's own: one declared here, while
-  # localvar_inherit is still on, would take a caller's attribute with it.
+  # In positional parameters, then straight into <variable>, with no name of this function's own:
+  # one declared here, while localvar_inherit is still on, would take a caller's attribute with it.
+  # Each setting is read in a condition, where neither the errexit nor an ERR trap of the calling
+  # shell acts; no substitution, whose output would take in whatever such a trap prints.
   # The builtin and the keyword: this runs before (and after) the shadow check, and a caller's
   # printf or [ function would otherwise leave the settings unsaved or unrestored.
-  \builtin printf -v "$1" '%s' "$(\builtin shopt -p expand_aliases localvar_inherit)"
+  \builtin set -- "$1" u u
+  if \builtin shopt -q expand_aliases; then \builtin set -- "$1" s "$3"; fi
+  if \builtin shopt -q localvar_inherit; then \builtin set -- "$1" "$2" s; fi
+  \builtin printf -v "$1" '%s' "$2$3"
   \builtin shopt -u expand_aliases localvar_inherit
 }
 _shmutant_aliases_back() {
-  [[ -z "$1" ]] || \builtin eval "$1"
+  # By the letter, with nothing evaluated: a line read once expand_aliases is back on would be
+  # read with the caller's aliases, one named shopt among them.
+  case "$1" in ?s) \builtin shopt -s localvar_inherit ;; ?u) \builtin shopt -u localvar_inherit ;; esac
+  case "$1" in s?) \builtin shopt -s expand_aliases ;; u?) \builtin shopt -u expand_aliases ;; esac
 }
 
 shmutant_copy_tree() {
@@ -2817,8 +2826,10 @@ _shmutant_traps_last() {
   # empty declaration under an integer one is `0`, which would be evaluated as a command).
   builtin set -- "${SHMUTANT_TRAP_RETURN_PENDING:-}" "${SHMUTANT_TRAP_DEBUG_PENDING:-}"
   builtin unset SHMUTANT_TRAP_RETURN_PENDING SHMUTANT_TRAP_DEBUG_PENDING SHMUTANT_TRAPS_PENDING
-  if [[ -n "$1" ]]; then builtin eval "$1"; else builtin trap - RETURN; fi
-  if [[ -n "$2" ]]; then builtin eval "$2"; else builtin trap - DEBUG; fi
+  # Each declaration behind a quoted `builtin`: the caller's expand_aliases is back by now, and
+  # an evaluated line that began with the word `trap` would be read with an alias of that name.
+  if [[ -n "$1" ]]; then builtin eval "\\builtin $1"; else builtin trap - RETURN; fi
+  if [[ -n "$2" ]]; then builtin eval "\\builtin $2"; else builtin trap - DEBUG; fi
 }
 
 # _shmutant_saved_trap <signal> — the caller's current trap declaration for <signal> as
