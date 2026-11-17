@@ -3174,3 +3174,15 @@ shmutant_mut 'the DEBUG trap of the caller goes back by a line an alias named tr
   '  if [[ -n "$2" ]]; then builtin eval "\\builtin $2"; else builtin trap - DEBUG; fi' \
   '  if [[ -n "$2" ]]; then builtin eval "$2"; else builtin trap - DEBUG; fi' \
   't_option_restore_reads_no_alias_of_the_callers'
+shmutant_mut 'shmutant_copy_tree trusts the word builtin before a function of that name is removed' \
+  '  _shmutant_drop_builtin_fn copy_tree || \builtin :' \
+  '  :' \
+  't_entry_points_drop_a_builtin_function_before_they_trust_it'
+shmutant_mut 'shmutant_mutate trusts the word builtin before a function of that name is removed' \
+  '  _shmutant_drop_builtin_fn mutate || \builtin :' \
+  '  :' \
+  't_entry_points_drop_a_builtin_function_before_they_trust_it'
+shmutant_mut 'shmutant_pool trusts the word builtin before a function of that name is removed' \
+  '  _shmutant_drop_builtin_fn pool || \builtin :' \
+  '  :' \
+  't_entry_points_drop_a_builtin_function_before_they_trust_it'

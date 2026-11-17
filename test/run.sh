@@ -4678,6 +4678,41 @@ t_option_save_takes_in_nothing_an_err_trap_of_the_callers_prints() {
   done
 }
 
+t_entry_points_drop_a_builtin_function_before_they_trust_it() {
+  # A function named builtin, defined after the file was sourced: `\builtin …` runs it, so an
+  # entry point that trusted the word before removing the function saved no option and turned
+  # none off. Under the caller's localvar_inherit a path was then declared under an integer
+  # attribute, and a pool left the option off.
+  mk_toy "$T/toy"; mkdir -p "$T/src"; printf 'x=1\n' > "$T/src/f"; printf 'x=1\n' > "$T/f"
+  local b_e b_out
+  for b_e in +e -e; do
+    SHMUTANT="$SHMUTANT" T="$T" E="$b_e" bash -c '
+      . "$SHMUTANT"; set "$E"; shopt -s localvar_inherit
+      prep() { shmutant_copy_tree "$T/toy" "$1"; }; runit() { bash "$1/test.sh"; }
+      shmutant_reset; shmutant_target lib.sh; shmutant_mut a "\$1 + \$2" "\$1 - \$2" add-works
+      declare -i src=7 f=7 rc=7 label=7
+      builtin() { :; }
+      shmutant_copy_tree "$T/src" "$T/dst$E"; echo "copy rc=$?"
+      builtin() { :; }
+      shmutant_mutate "$T/f" "x=1" "x=2"; echo "mutate rc=$?"
+      printf "x=1\n" > "$T/f"
+      builtin() { :; }
+      SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd$E" prep runit > "$T/pool$E" 2>&1; echo "pool rc=$?"
+      if shopt -q localvar_inherit; then echo "inherit=on"; else echo "inherit=off"; fi
+      echo "src=$src f=$f rc=$rc label=$label"
+      echo last-line' > "$T/out$b_e" 2> "$T/err$b_e"
+    b_out="$(cat "$T/out$b_e" 2>/dev/null)"
+    has "$b_out" 'copy rc=0' "($b_e) shmutant_copy_tree returns 0 [$(head -n 1 "$T/err$b_e" 2>/dev/null | cut -c1-200)]"
+    has "$b_out" 'mutate rc=0' "($b_e) shmutant_mutate returns 0"
+    has "$b_out" 'pool rc=0' "($b_e) the pool kills its row [$(tail -n 2 "$T/pool$b_e" 2>/dev/null | tr '\n' ';' | cut -c1-300)]"
+    has "$b_out" 'inherit=on' "($b_e) localvar_inherit is as the caller set it"
+    has "$b_out" 'src=7 f=7 rc=7 label=7' "($b_e) the integers of the caller are as it left them"
+    has "$b_out" 'last-line' "($b_e) the calling shell reached its last line"
+    [ ! -s "$T/err$b_e" ] || fail_ "($b_e) an entry point complained: $(head -n 2 "$T/err$b_e" | tr '\n' ';' | cut -c1-300)"
+    [ -f "$T/dst$b_e/f" ] || fail_ "($b_e) the tree was not copied"
+  done
+}
+
 t_option_restore_reads_no_alias_of_the_callers() {
   # A calling shell with expand_aliases on and aliases named shopt and trap. Its settings and its
   # RETURN and DEBUG traps go back as the entry points return, when its aliases are in force

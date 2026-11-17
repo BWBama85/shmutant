@@ -382,6 +382,9 @@ _shmutant_aliases_back() {
 }
 
 shmutant_copy_tree() {
+  # First of all: while the calling shell has a function named builtin, every `\builtin` below
+  # is that function, and the options would be neither saved nor turned off.
+  _shmutant_drop_builtin_fn copy_tree || \builtin :
   # Before any local: bash refuses a local over a readonly global, and the assignment that
   # follows would end a non-interactive caller's shell. The names are this helper's locals.
   _shmutant_locals_writable copy_tree "the calling shell made" adst asrc comp copy_tree_aliases d dst entry frc kinds linked m made n name norm out probe probe2 rc rest rootls src st t who || \builtin return 1
@@ -537,6 +540,8 @@ _shmutant_mutate_restore() {
 # `sed -i` (BSD and GNU differ), so a failed rewrite cannot half-write. A target whose last line
 # has no newline keeps that shape: the only change is the literal.
 shmutant_mutate() {
+  # First of all, as in shmutant_copy_tree.
+  _shmutant_drop_builtin_fn mutate || \builtin :
   # Before any local: bash refuses a local over a readonly global, and the assignment that
   # follows would end a non-interactive caller's shell. The names are this helper's locals.
   _shmutant_locals_writable mutate "the calling shell made" dir dirmode f kinds m mode mutate_aliases n nl out rc st t tmp who || \builtin return 1
@@ -3372,8 +3377,8 @@ _shmutant_pool_cleanup() {
   unset SHMUTANT_PRISTINE_STATE
 }
 
-# _shmutant_drop_builtin_fn — remove a function named builtin without trusting any command
-# name: an assignment to POSIXLY_CORRECT enters posix mode, where the special builtin `unset`
+# _shmutant_drop_builtin_fn [<label>] — remove a function named builtin without trusting any command
+# name (<label> only tells one call from another): an assignment to POSIXLY_CORRECT enters posix mode, where the special builtin `unset`
 # is found before a function of its name. With `builtin` real, every other shadow (a function
 # named return included) is refused through `builtin …`, never removed. Leaving posix mode resets shell options wholesale
 # (expand_aliases off, inherit_errexit left on, …), so every option that changed is put back
@@ -3476,6 +3481,8 @@ _shmutant_report_keep() {
 shmutant_pool() {
   # Aliases and localvar_inherit off for the whole pool, callbacks included (their bodies were
   # parsed when defined); the caller's settings are put back on return.
+  # First of all, as in shmutant_copy_tree.
+  _shmutant_drop_builtin_fn pool || \builtin :
   # Before any local: bash refuses a local over a readonly global, and the assignment that
   # follows would end a non-interactive caller's shell.
   _shmutant_pool_locals_writable pool "the calling shell made" || \builtin return 2
