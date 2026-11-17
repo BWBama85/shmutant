@@ -4701,13 +4701,23 @@ t_run_that_turns_localvar_inherit_on_has_its_leftovers_recorded() {
   # The option is back on as a snapshot returns: one is taken of a plan's shell before the plan's
   # `exec`, and that shell goes on when the exec did not replace it.
   eq "$( shopt -s localvar_inherit; _shmutant_snapshot "$BASHPID" > /dev/null 2>&1; shopt -p localvar_inherit )" 'shopt -s localvar_inherit' 'a snapshot leaves localvar_inherit as it found it'
-  # And its status is the record's, under either setting: one descendant to name (a stand-in, so
-  # the last line written is the one that fails) and nowhere to write it.
+  # And it returns with the option on what it returns with it off: one descendant to name (a
+  # stand-in, so the line written last is the one that fails) and nowhere to write it, then
+  # somewhere.
   for u_n in -u -s; do
     eq "$( shopt "$u_n" localvar_inherit
            _shmutant_descendants() { printf '4242\n'; }; _shmutant_identity_table() { SHMUTANT_START[4242]=x; }
-           _shmutant_snapshot "$BASHPID" >&- 2>/dev/null; echo "rc=$?" )" 'rc=1' "a snapshot whose record could not be written says so (shopt $u_n localvar_inherit)"
+           _shmutant_snapshot "$BASHPID" >&- 2>/dev/null; echo "rc=$?"; _shmutant_snapshot "$BASHPID" > /dev/null 2>&1; echo "rc=$?" )" $'rc=1\nrc=0' "the status of a snapshot is the same under either setting (shopt $u_n localvar_inherit)"
   done
+  # Under errexit a snapshot that failed ends its shell, with the option back on before it does:
+  # an EXIT handler, a plan's or a callback's, runs under the setting it was written for.
+  # shellcheck disable=SC2016
+  eq "$("$BASH" -c '. "$1" || exit 9
+                   shopt -s localvar_inherit
+                   _shmutant_descendants() { printf "4242\n"; }; _shmutant_identity_table() { SHMUTANT_START[4242]=x; }
+                   trap "shopt -p localvar_inherit >&3" EXIT; set -e
+                   _shmutant_snapshot "$$" >&- 2>/dev/null; echo not-reached >&3' _ "$SHMUTANT" 3>&1)" \
+     'shopt -s localvar_inherit' 'a snapshot that failed under errexit ended its shell with localvar_inherit back on'
 }
 
 t_run_that_aborts_on_an_arithmetic_error_has_its_leftovers_recorded() {

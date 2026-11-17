@@ -1905,11 +1905,15 @@ _shmutant_table_state() {
 # localvar_inherit is off while it reads, for a run or a plan that turned it on: the declarations
 # of every read would otherwise take what the calling shell's variables of their names hold, and
 # the record of what the run left would be lost to the first that did not fit. It is back on as
-# the snapshot returns: the shell of a plan whose `exec` did not replace it goes on. The status is
-# the snapshot's own either way: a record that could not be written is said.
+# the snapshot returns: the shell of a plan whose `exec` did not replace it goes on. The status
+# returned is the one the snapshot returns with the option off.
 _shmutant_snapshot() {
   if builtin shopt -q localvar_inherit; then
-    builtin shopt -u localvar_inherit; _shmutant_snapshot_now "$1"; builtin set -- "$?"; builtin shopt -s localvar_inherit; builtin return "$1"
+    builtin shopt -u localvar_inherit
+    # In a condition: under errexit a snapshot that failed would otherwise end this shell with
+    # the option still off, and an EXIT handler would run under a setting it was not written for.
+    if _shmutant_snapshot_now "$1"; then builtin set -- 0; else builtin set -- "$?"; fi
+    builtin shopt -s localvar_inherit; builtin return "$1"
   else _shmutant_snapshot_now "$1"
   fi
 }
