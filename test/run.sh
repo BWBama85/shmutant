@@ -3570,7 +3570,10 @@ t_verdict_timeout_kills_a_term_ignoring_descendant() {
   shmutant_mut 'hangs' '$1 + $2' '$1 - $2' 'add-works'
   # The descendant sleeps long: the check waits on its record rather than on a fixed window, as in
   # t_verdict_timeout. One left frozen still runs, and fails the wait as one left alive does.
-  stubborn_run() { bash -c 'trap "" TERM; : > "$1/ignoring"; sleep 30; touch "$1/finished"' _ "$T" & note_started "$T/stubborn.id"; wait "$!"; }
+  # It ignores HUP as well as TERM: the kernel hangs up and continues a process group orphaned
+  # while its members are stopped, which would end it whatever the harness had sent it. Only KILL
+  # may end it (D22).
+  stubborn_run() { bash -c 'trap "" TERM HUP; : > "$1/ignoring"; sleep 30; touch "$1/finished"' _ "$T" & note_started "$T/stubborn.id"; wait "$!"; }
   SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=1 pool lbl "$T/wd" toy_prepare stubborn_run
   eq "$(verdict_of 'hangs')" timeout 'verdict is timeout'
   if [ -s "$T/stubborn.id" ]; then run_gone "$T/stubborn.id" 'a descendant that ignores TERM, after the timeout'
