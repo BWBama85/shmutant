@@ -3194,3 +3194,7 @@ shmutant_mut 'a function named builtin is removed after prepare before the traps
   '  _shmutant_hold_traps; _shmutant_drop_builtin_fn stash || \builtin :' \
   '  _shmutant_drop_builtin_fn stash || \builtin :; _shmutant_hold_traps' \
   't_pool_refuses_shadowed_builtins_and_posix_mode'
+shmutant_mut 'the option restore makes a function call for every option, which a FUNCNEST of the caller counts' \
+  '  case "$4" in *:*) _shmutant_opt_put "$1" "$2" "$3" "${4#*:}" ;; esac' \
+  '  case "$4" in *:*) _shmutant_opts_put "$1" "$2" "$3" "${4#*:}"; builtin return 0 ;; esac' \
+  't_option_restore_nests_no_deeper_for_more_options'

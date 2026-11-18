@@ -3408,12 +3408,25 @@ _shmutant_drop_builtin_fn_from() {
   case "$3" in set:*) POSIXLY_CORRECT="${3#set:}" ;; *) [[ -z "${POSIXLY_CORRECT+set}" ]] || builtin unset -v POSIXLY_CORRECT ;; esac
 }
 # _shmutant_opts_put <shopt|set> <flag> <have> <list> — <flag> given to the builtin for each
-# option of the colon-separated <list> that the colon-separated <have> does not hold. One option
-# per call, by recursion, in positional parameters only.
+# option of the colon-separated <list> that the colon-separated <have> does not hold. Eight
+# options to a call, each reached by stripping the fields before it, in positional parameters
+# only: a call per option would count against a FUNCNEST of the calling shell's, and a loop needs
+# `set` or `shift` to move on, either of which the calling shell can have disabled.
 _shmutant_opts_put() {
   [[ -n "$4" ]] || builtin return 0
+  _shmutant_opt_put "$1" "$2" "$3" "$4"
+  case "$4" in *:*) _shmutant_opt_put "$1" "$2" "$3" "${4#*:}" ;; esac
+  case "$4" in *:*:*) _shmutant_opt_put "$1" "$2" "$3" "${4#*:*:}" ;; esac
+  case "$4" in *:*:*:*) _shmutant_opt_put "$1" "$2" "$3" "${4#*:*:*:}" ;; esac
+  case "$4" in *:*:*:*:*) _shmutant_opt_put "$1" "$2" "$3" "${4#*:*:*:*:}" ;; esac
+  case "$4" in *:*:*:*:*:*) _shmutant_opt_put "$1" "$2" "$3" "${4#*:*:*:*:*:}" ;; esac
+  case "$4" in *:*:*:*:*:*:*) _shmutant_opt_put "$1" "$2" "$3" "${4#*:*:*:*:*:*:}" ;; esac
+  case "$4" in *:*:*:*:*:*:*:*) _shmutant_opt_put "$1" "$2" "$3" "${4#*:*:*:*:*:*:*:}" ;; esac
+  case "$4" in *:*:*:*:*:*:*:*:*) _shmutant_opts_put "$1" "$2" "$3" "${4#*:*:*:*:*:*:*:*:}" ;; esac
+}
+# _shmutant_opt_put <shopt|set> <flag> <have> <list> — the same for the first option of <list>.
+_shmutant_opt_put() {
   case ":$3:" in *":${4%%:*}:"*) ;; *) builtin "$1" "$2" "${4%%:*}" 2>/dev/null ;; esac
-  case "$4" in *:*) _shmutant_opts_put "$1" "$2" "$3" "${4#*:}" ;; esac
 }
 
 # _shmutant_no_shadows <label> — refuse to run while a builtin this harness signals, waits and

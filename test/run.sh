@@ -4749,6 +4749,39 @@ t_pool_drops_a_builtin_function_prepare_left_before_it_trusts_it() {
   [ ! -s "$T/err" ] || fail_ "the pool complained outside its own stream: $(head -n 2 "$T/err" | tr '\n' ';' | cut -c1-300)"
 }
 
+t_option_restore_nests_no_deeper_for_more_options() {
+  # Removing a function named builtin leaves posix mode, and every option that changed is put
+  # back. A function call per option counted against a FUNCNEST of the calling shell's: with
+  # enough options on, the restore was cut off part-way and the entry point with it.
+  # Each step on a line of its own: an exceeded FUNCNEST drops the rest of its command list.
+  printf 'x=1\n' > "$T/f"
+  SHMUTANT="$SHMUTANT" T="$T" bash -c '
+    . "$SHMUTANT"
+    shopt -s autocd cdable_vars cdspell checkhash checkjobs direxpand dirspell dotglob extglob globstar histappend histverify nocaseglob nullglob
+    before="$(shopt -p; set +o)"
+    builtin() { :; }
+    FUNCNEST=12
+    _shmutant_drop_builtin_fn
+    echo "drop rc=$?"
+    unset FUNCNEST
+    [ "$before" != "$(shopt -p; set +o)" ] || echo "options=same"
+    declare -F builtin > /dev/null || echo "function=gone"
+    FUNCNEST=26
+    shmutant_mutate "$T/f" "x=1" "x=2"
+    echo "mutate rc=$?"
+    unset FUNCNEST
+    [ "$before" != "$(shopt -p; set +o)" ] || echo "options=same-after-mutate"
+    echo last-line' > "$T/out" 2> "$T/err"
+  has "$(cat "$T/out")" 'drop rc=0' 'the removal returns 0 under a FUNCNEST of 12'
+  has "$(cat "$T/out")" 'options=same' 'and every option is as it was'
+  has "$(cat "$T/out")" 'function=gone' 'and the function is gone'
+  has "$(cat "$T/out")" 'mutate rc=0' 'shmutant_mutate returns 0 under a FUNCNEST of 26'
+  has "$(cat "$T/out")" 'options=same-after-mutate' 'and leaves every option as it was'
+  has "$(cat "$T/out")" 'last-line' 'the calling shell reached its last line'
+  [ ! -s "$T/err" ] || fail_ "the shell complained: $(head -n 2 "$T/err" | tr '\n' ';' | cut -c1-300)"
+  eq "$(cat "$T/f" 2>/dev/null)" x=2 'the file was rewritten'
+}
+
 t_option_restore_reads_no_alias_of_the_callers() {
   # A calling shell with expand_aliases on and aliases named shopt and trap. Its settings and its
   # RETURN and DEBUG traps go back as the entry points return, when its aliases are in force
