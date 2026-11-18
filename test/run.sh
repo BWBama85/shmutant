@@ -314,8 +314,9 @@ note_started() { note_pid "$1" "$!"; }
 # background job. The identity is read first, and nothing is run between that read and the write
 # but the rename: a run's callback records its process before a deadline. The part is opened past
 # a noclobber the caller set, which a pool hands on to a callback, and never through a symbolic
-# link found at its name. A record that could not be written leaves none of an earlier one at
-# <file> either, so no check passes on what an earlier call recorded.
+# link found at its name. A record that could not be written has an earlier one at <file> removed,
+# so that no check passes on what an earlier call recorded; the status is 1 whether or not that
+# removal worked.
 note_pid() {
   local id
   id="$(_shmutant_identity "$2" 2>/dev/null)" || id=""
