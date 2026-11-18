@@ -484,4 +484,6 @@ One line per resolved review thread, newest last.
 - `write-failure-swallowed` `shmutant.sh:1200` `e9835d3` `PRRT_kwDOUT7q9s6weJoi` PR #74 2026-10-26 — a printf feeding awk through a pipe without pipefail let a failed write read as an empty, complete group
 - `host-shell-option-leak` `shmutant.sh:1934` `9ab6388` `PRRT_kwDOUT7q9s62lQ_s` PR #87 2026-11-12 — a scratch name the runner assigns without declaring it local is assigned under the attribute a caller gave it: an integer one makes a start string an arithmetic error
 - `host-shell-option-leak` `shmutant.sh:834` `0c8d173` `PRRT_kwDOUT7q9s63nWc9` PR #96 2026-11-16 — a give-up's words raised SIGPIPE in a freeze's first read, before the shell ignored it, and the give-up went unrecorded; the freeze now ignores PIPE before any read
+- `host-shell-option-leak` `shmutant.sh:368` `b948da3` `PRRT_kwDOUT7q9s64UJ84` PR #100 2026-11-17 — option save read shopt -p in a substitution; under set -E the caller ERR trap printed into the saved text, evaluated on return; now read in a condition and kept as letters
+- `host-shell-option-leak` `shmutant.sh:368` `b948da3` `PRRT_kwDOUT7q9s64UJ8-` PR #100 2026-11-17 — option restore evaluated two shopt lines; the first put expand_aliases back so a caller alias named shopt replaced the second; now restored by letter with nothing evaluated
 <!-- adb:hits:end -->
