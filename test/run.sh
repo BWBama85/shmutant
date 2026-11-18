@@ -311,52 +311,35 @@ end_sampler_group() {
 note_started() { note_pid "$1" "$!"; }
 
 # note_pid <file> <pid> — note_started for a process the caller names: one that is not its last
-# background job. It runs in a subshell of its own: no option it sets reaches the caller, and none
-# of its names takes an attribute of a caller's variable (localvar_inherit, turned off there). The
-# identity is read before anything is written: a run's callback records its process before a
-# deadline. The record is written to a part beside <file>, under a name of this call's own, and
-# renamed onto <file>. The part is opened under noclobber, which creates it and writes nothing
-# where a file is already, or a link to one, whenever it was put there. 1 when the record could not
-# be written, and when <file> is a directory, which the rename would put the part into. An earlier
-# record at <file> is then removed, so that no check passes on what an earlier call recorded; the
-# status is 1 whether or not that removal worked.
-note_pid() (
-  shopt -u localvar_inherit
-  local id part="$1.$BASHPID.$RANDOM.part"
-  id="$(_shmutant_identity "$2" 2>/dev/null)" || id=""
-  set -C
-  if [ ! -d "$1" ] && printf '%s:%s\n' "$2" "$id" > "$part"; then
-    command -p mv -f -- "$part" "$1" && [ ! -d "$1" ] && return 0
-    command -p rm -f -- "$part" 2>/dev/null
-  fi
-  command -p rm -f -- "$1" 2>/dev/null
-  return 1
-)
+# background job. <file> is a name in the unit's own directory, which nothing but the unit writes:
+# the record goes through <file>.part there, and this is no defence against what another process
+# could put at either name meanwhile. It declares no name, so no variable of a caller's is read or
+# set.
+note_pid() {
+  printf '%s:%s\n' "$2" "$(_shmutant_identity "$2" 2>/dev/null)" > "$1.part" && mv -f -- "$1.part" "$1"
+}
 
 # note_written <file> <pidfile> [looks] — record in <file>, as note_pid does, the process whose pid
 # is in <pidfile>: one that wrote its own there (`echo "$$" > …`, the number alone on one line, in
 # one write), or whose parent wrote it. That is how a unit records a process it cannot note itself:
 # one a callback runs in the foreground, one started inside a `bash -c`, one of a pool whose
-# identity reads are stubbed (the caller's are not). It runs in a subshell of its own, as note_pid
-# does. Waits for <pidfile> at most <looks> times a tenth of a second apart (300, thirty seconds,
-# when not given: the process has to be started first, and a loaded host is late with that, not
-# wrong). 1, recording nothing, when no pid came or what came is not one pid alone: a second line,
-# or a NUL, which a plain read would drop and so make another number of. 2 for <looks> that is not
-# a decimal from 1 to 9999. Whatever was at <file> is removed before the wait, so a call that
-# records nothing leaves no earlier record there, and one that cannot be removed fails the call at
-# once.
-note_written() (
-  shopt -u localvar_inherit
-  local i=0 p="" looks="${3-300}"
-  [[ "$looks" =~ ^[1-9][0-9]{0,3}$ ]] || { echo "note_written: looks must be 1 to 9999, got [$looks]" >&2; return 2; }
-  if [ -e "$1" ] || [ -L "$1" ]; then command -p rm -f -- "$1" 2>/dev/null || return 1; fi
-  until [ -s "$2" ]; do i=$((i + 1)); [ "$i" -lt "$looks" ] || return 1; sleep 0.1; done
-  # Read whole, as far as a NUL: a read that found one succeeds, and the file is refused.
-  IFS= read -r -d '' p < "$2" 2>/dev/null && return 1
-  p="${p%$'\n'}"
-  [[ "$p" =~ ^[1-9][0-9]*$ ]] || return 1
-  note_pid "$1" "$p"
-)
+# identity reads are stubbed (the caller's are not). Waits for <pidfile> at most <looks> times a
+# tenth of a second apart (300, thirty seconds, when not given: the process has to be started
+# first, and a loaded host is late with that, not wrong). <file> must be a name nothing is at yet:
+# a call that records nothing then leaves no earlier record for a check to pass on. <pidfile> is
+# the fixture's own output, read as bash reads a file into a word (final newlines dropped, and a
+# NUL), and anything but one decimal pid is refused. 1, recording nothing, when something is at
+# <file>, when no pid came, and when what came is not one; 2 for <looks> that is not a decimal
+# from 1 to 9999. It declares no name either: the looks are counted in its own arguments.
+note_written() {
+  set -- "$1" "$2" "${3-300}" 1
+  [[ "$3" =~ ^[1-9][0-9]{0,3}$ ]] || { echo "note_written: looks must be 1 to 9999, got [$3]" >&2; return 2; }
+  [ ! -e "$1" ] && [ ! -L "$1" ] || return 1
+  until [ -s "$2" ]; do [ "$4" -lt "$3" ] || return 1; set -- "$1" "$2" "$3" "$(($4 + 1))"; sleep 0.1; done
+  { set -- "$1" "$(< "$2")"; } 2>/dev/null
+  [[ "$2" =~ ^[1-9][0-9]*$ ]] || return 1
+  note_pid "$1" "$2"
+}
 
 # seen_by_sampler <pid> — in a unit of a copy of this suite, wait until its sampler has recorded
 # the process now at <pid>, with the start it carries: a fixture that needs its leftover swept waits
@@ -10767,47 +10750,15 @@ t_left_running_names_only_a_recorded_process_still_running() {
 
 t_note_written_records_the_process_a_pid_file_names() {
   # A unit records a process it did not start itself through note_written: the pid another wrote to
-  # a file, with the identity read then (note_pid). No pid within its looks, or a file that holds
-  # none, records nothing and says so by its status, so a check on that record fails instead of
-  # passing on nothing.
+  # a file, with the identity read then (note_pid). No pid within its looks, a file that holds
+  # anything but one pid, or a record already at its file records nothing and says so by its status,
+  # so a check on that record fails instead of passing on nothing, or on an earlier call's.
   local p w c
   sleep 30 & p=$!
   note_pid "$T/named.id" "$p"; rc_is $? 0 'a named process is recorded'
   case "$(cat "$T/named.id" 2>/dev/null)" in "$p:"?*) ;; *) fail_ "note_pid recorded [$(cat "$T/named.id" 2>/dev/null)], not $p with an identity" ;; esac
-  printf 'stale\n' > "$T/clobber.id"
-  ( set -C; note_pid "$T/clobber.id" "$p" ); rc_is $? 0 'an earlier record is replaced, under a caller'"'"'s noclobber too'
-  eq "$(cat "$T/clobber.id" 2>/dev/null)" "$(cat "$T/named.id" 2>/dev/null)" 'and the record is whole'
-  # A link put at the part's name at the last moment, as the write is about to open it (a DEBUG trap
-  # at that command, which reads the name from the helper's own scope), is not written through. The
-  # call records nothing, the earlier record at its file goes, and the link is left as it was found.
-  printf 'precious\n' > "$T/victim"; cp "$T/named.id" "$T/raced.id"
-  plant_link() { case "$BASH_COMMAND" in "printf '%s:%s\n' "*) [ -z "$1" ] || ln -s "$T/victim" "$1" 2>/dev/null ;; esac; }
-  ( set -T; trap 'plant_link "${part:-}"' DEBUG; note_pid "$T/raced.id" "$p" 2>/dev/null ); rc_is $? 1 'a part that became a link as it was opened is refused'
-  eq "$(cat "$T/victim")" precious 'and what the link points at is not written'
-  [ -e "$T/raced.id" ] && fail_ 'a record that could not be written left an earlier one behind'
-  eq "$(n_found "$T" -maxdepth 1 -name 'raced.id.*' -type l)" 1 'fixture: one link was planted at the part'"'"'s name, and it is still there'
-  # A directory at the file, or a link to one, is refused: the rename would put the part inside it.
-  mkdir "$T/dir.id"; ln -s "$T/dir.id" "$T/dirlink.id"
-  for c in dir dirlink; do
-    note_pid "$T/$c.id" "$p" 2>/dev/null; rc_is $? 1 "a directory at the file is refused ($c)"
-  done
-  eq "$(n_found "$T/dir.id" -mindepth 1)" 0 'and nothing is put inside it'
-  # So is one that takes the file's place once the part is written, as the rename is about to run.
-  put_dir() { case "$BASH_COMMAND" in "command -p mv -f -- "*) [ -z "$1" ] || mkdir "$1" 2>/dev/null ;; esac; }
-  ( set -T; trap 'put_dir "${part:+$1}"' DEBUG; note_pid "$T/swapped-dir.id" "$p" 2>/dev/null ); rc_is $? 1 'a directory that took the file'"'"'s place before the rename is refused'
-  [ -d "$T/swapped-dir.id" ] || fail_ 'fixture: no directory was put at the file before the rename'
-  # A caller's variables of the helpers' names, integers under localvar_inherit, give them nothing:
-  # an identity is no number, and a pid file holding a sum is no pid.
-  echo "$p" > "$T/inherit.pid"; echo "$p+0" > "$T/sum.pid"
-  ( shopt -s localvar_inherit; declare -i id=7 part=7
-    note_pid "$T/inherit-pid.id" "$p" ); rc_is $? 0 'a caller'"'"'s integer variables of note_pid'"'"'s names do not reach the record'
-  eq "$(cat "$T/inherit-pid.id" 2>/dev/null)" "$(cat "$T/named.id" 2>/dev/null)" 'and it is recorded as it is elsewhere'
-  ( shopt -s localvar_inherit; declare -i id=7 part=7 p=7 i=7 looks=7
-    note_written "$T/inherit.id" "$T/inherit.pid" ); rc_is $? 0 'nor do those of note_written'"'"'s names'
-  eq "$(cat "$T/inherit.id" 2>/dev/null)" "$(cat "$T/named.id" 2>/dev/null)" 'and it is recorded as it is elsewhere'
-  ( shopt -s localvar_inherit; declare -i p=7
-    note_written "$T/sum.id" "$T/sum.pid" 1 ); rc_is $? 1 'a sum in the pid file is not computed into a pid by a caller'"'"'s integer variable'
-  [ -e "$T/sum.id" ] && fail_ 'a record was written for a pid file that held a sum'
+  ( set -C; note_pid "$T/noclobber.id" "$p" ); rc_is $? 0 'a record at a new name is written under a caller'"'"'s noclobber'
+  eq "$(cat "$T/noclobber.id" 2>/dev/null)" "$(cat "$T/named.id" 2>/dev/null)" 'and is whole'
   ( sleep 0.3; echo "$p" > "$T/late.pid" ) & w=$!
   note_written "$T/late.id" "$T/late.pid"; rc_is $? 0 'a pid file written while it waits is read'
   wait "$w"
@@ -10819,18 +10770,20 @@ t_note_written_records_the_process_a_pid_file_names() {
   : > "$T/empty.pid"; note_written "$T/empty.id" "$T/empty.pid" 1; rc_is $? 1 'an empty pid file holds no pid'
   printf 'x%s\n' "$p" > "$T/bad.pid"; note_written "$T/bad.id" "$T/bad.pid" 1; rc_is $? 1 'a line that is not a pid is refused'
   printf '%s\n%s\n' "$p" "$p" > "$T/two.pid"; note_written "$T/two.id" "$T/two.pid" 1; rc_is $? 1 'two lines are not one pid'
-  # A NUL inside the number: a read that dropped it would make the pid of the two halves.
-  printf '%s\0%s\n' "${p:0:1}" "${p:1}" > "$T/nul.pid"; note_written "$T/nul.id" "$T/nul.pid" 1; rc_is $? 1 'a pid file holding a NUL is refused'
-  [ -e "$T/none.id" ] || [ -e "$T/empty.id" ] || [ -e "$T/bad.id" ] || [ -e "$T/two.id" ] || [ -e "$T/nul.id" ] && fail_ 'a record was written for a pid that never came'
-  # An earlier record at the file does not outlive a call that records nothing.
-  for c in none empty bad; do
-    cp "$T/named.id" "$T/stale-$c.id"
-    note_written "$T/stale-$c.id" "$T/$c.pid" 1; rc_is $? 1 "a call that records nothing says so over an earlier record ($c)"
-    [ -e "$T/stale-$c.id" ] && fail_ "an earlier record outlived a call that recorded nothing ($c)"
-  done
+  [ -e "$T/none.id" ] || [ -e "$T/empty.id" ] || [ -e "$T/bad.id" ] || [ -e "$T/two.id" ] && fail_ 'a record was written for a pid that never came'
+  # A record already at the file is refused at once, with a pid ready to be read: a later call that
+  # recorded nothing would otherwise leave it for a check to pass on. It is left as it was.
+  printf 'earlier\n' > "$T/taken.id"
+  note_written "$T/taken.id" "$T/late.pid" 1; rc_is $? 1 'a file that something is at already is refused'
+  eq "$(cat "$T/taken.id")" earlier 'and is left as it was'
   for c in '' x 0 01 10000; do
     note_written "$T/bound.id" "$T/late.pid" "$c" 2>/dev/null; rc_is $? 2 "a bound of [$c] looks is refused"
   done
+  [ -e "$T/bound.id" ] && fail_ 'a record was written under a bound that was refused'
+  # The recorders declare no name: a caller's variables, readonly and integer, are neither read nor set.
+  ( readonly looks=0 id=1 part=2; declare -ir i=9
+    note_written "$T/readonly.id" "$T/late.pid" 1 ); rc_is $? 0 'a caller'"'"'s readonly variables do not reach the recorders'
+  eq "$(cat "$T/readonly.id" 2>/dev/null)" "$(cat "$T/named.id" 2>/dev/null)" 'and the record is the one made without them'
   note_written "$T/no-such-dir/x.id" "$T/late.pid" 1 2>/dev/null; rc_is $? 1 'a record that could not be written is reported'
   # In a subshell: the failure it reports is the answer looked for, not this unit's.
   ( run_gone "$T/none.id" 'the unrecorded process' 1 ) > /dev/null; rc_is $? 1 'and a wait on a record never written fails'
