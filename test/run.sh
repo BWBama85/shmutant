@@ -311,10 +311,17 @@ end_sampler_group() {
 note_started() { note_pid "$1" "$!"; }
 
 # note_pid <file> <pid> — note_started for a process the caller names: one that is not its last
-# background job. The part is opened past a noclobber the caller set, which a pool hands on to a
-# callback.
+# background job. The identity is read first, and nothing is run between that read and the write
+# but the rename: a run's callback records its process before a deadline. The part is opened past
+# a noclobber the caller set, which a pool hands on to a callback, and never through a symbolic
+# link found at its name. A record that could not be written leaves none of an earlier one at
+# <file> either, so no check passes on what an earlier call recorded.
 note_pid() {
-  printf '%s:%s\n' "$2" "$(_shmutant_identity "$2" 2>/dev/null)" >| "$1.part" && mv -f -- "$1.part" "$1"
+  local id
+  id="$(_shmutant_identity "$2" 2>/dev/null)" || id=""
+  [ ! -L "$1.part" ] && printf '%s:%s\n' "$2" "$id" >| "$1.part" && mv -f -- "$1.part" "$1" && return 0
+  command -p rm -f -- "$1" 2>/dev/null
+  return 1
 }
 
 # note_written <file> <pidfile> [looks] — record in <file>, as note_pid does, the process whose pid
@@ -324,10 +331,13 @@ note_pid() {
 # stubbed (the caller's are not). Waits for <pidfile> at most <looks> times a tenth of a second apart
 # (300, thirty seconds, when not given: the process has to be started first, and a loaded host is
 # late with that, not wrong). 1, recording nothing, when no pid came or what came is not one; 2 for
-# <looks> that is not a decimal from 1 to 9999.
+# <looks> that is not a decimal from 1 to 9999. Whatever was at <file> is removed before the wait,
+# so a call that records nothing leaves no earlier record there, and one that cannot be removed
+# fails the call at once.
 note_written() {
   local i=0 p="" looks="${3-300}"
   [[ "$looks" =~ ^[1-9][0-9]{0,3}$ ]] || { echo "note_written: looks must be 1 to 9999, got [$looks]" >&2; return 2; }
+  if [ -e "$1" ] || [ -L "$1" ]; then command -p rm -f -- "$1" 2>/dev/null || return 1; fi
   until [ -s "$2" ]; do i=$((i + 1)); [ "$i" -lt "$looks" ] || return 1; sleep 0.1; done
   { IFS= read -r p || [ -n "$p" ]; } < "$2" 2>/dev/null || return 1
   [[ "$p" =~ ^[1-9][0-9]*$ ]] || return 1
@@ -7354,18 +7364,20 @@ t_verdict_timeout_without_an_identity() {
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
   shmutant_mut 'hangs' '$1 + $2' '$1 - $2' 'add-works'
-  # The run's command sleeps long and writes its own pid, which this shell records, reading the
-  # identity the pool cannot: the last check waits on that record rather than on a fixed window.
-  slow_run() { bash -c 'echo "$$" > "$1/slow.pid"; sleep 30; touch "$1/finished"' _ "$T"; }
+  # The run's command sleeps long and is recorded as it starts, as in t_verdict_timeout: the last
+  # check waits on that record rather than on a fixed window. The record alone reads an identity
+  # (the stub lets note_pid through to the read it replaced), since one without could not be told
+  # from a reused pid; the pool still reads none.
+  slow_run() { bash -c 'sleep 30; touch "$1/finished"' _ "$T" & note_started "$T/slow.id"; wait "$!"; }
+  eval "_real_identity() $(declare -f _shmutant_identity | sed 1d)"
   # No identity can be read for the wrapper (no usable ps): the root is still the runner's own
   # unreaped child, and the bound must still end it rather than wait forever.
   # A pool that never returns is ended as a whole process group (D7).
   set -m
-  ( _shmutant_identity() { return 1; }; _shmutant_identity_table() { SHMUTANT_START=(); }; _shmutant_descendants() { :; }
+  ( _shmutant_identity() { [ "${FUNCNAME[1]}" != note_pid ] || { _real_identity "$@"; return; }; return 1; }; _shmutant_identity_table() { SHMUTANT_START=(); }; _shmutant_descendants() { :; }
     SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=1 shmutant_pool lbl "$T/wd" toy_prepare slow_run > "$T/out" 2>&1
     touch "$T/pool-done" ) &
   local bg=$!; set +m
-  note_written "$T/slow.id" "$T/slow.pid"
   local i=0; until [ -e "$T/pool-done" ]; do i=$((i + 1)); [ "$i" -lt 150 ] || break; sleep 0.1; done
   if [ ! -e "$T/pool-done" ]; then
     kill -KILL -- -"$bg" 2>/dev/null; wait "$bg" 2>/dev/null; fail_ 'without an identity the timeout never ended the run'
@@ -7416,8 +7428,9 @@ t_run_group_is_not_signalled_by_number_without_its_holder() {
     SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=0 shmutant_pool lbl "$T/wd" toy_prepare holder_killing_run > "$T/out" 2> "$T/err" )
   has "$(cat "$T/out")" 'killed' 'the verdict is the callback'"'"'s own'
   has "$(cat "$T/err")" 'could not be verified' 'the unverifiable group is reported'
-  # Recorded by this shell, whose identity reads are its own, while the survivor still waits.
-  note_written "$T/survivor.id" "$T/survivor.pid" 1 || fail_ 'fixture: what the run left behind never wrote its pid'
+  # Recorded by this shell, whose identity reads are its own, while the survivor still waits. Its
+  # pid is waited for: the pool can return before the survivor has run far enough to write it.
+  note_written "$T/survivor.id" "$T/survivor.pid" || fail_ 'what the run left behind never wrote its pid: it did not start, or was ended before it could'
   : > "$T/go"
   # Its last act is the marker: gone at once after it, or ended here.
   if wait_for "$T/survivor"; then run_gone "$T/survivor.id" 'what the run left behind, once it had written its marker' 50
@@ -10750,6 +10763,13 @@ t_note_written_records_the_process_a_pid_file_names() {
   : > "$T/clobber.id.part"
   ( set -C; note_pid "$T/clobber.id" "$p" 2>/dev/null ); rc_is $? 0 'a part left behind is written over, under noclobber too'
   eq "$(cat "$T/clobber.id" 2>/dev/null)" "$(cat "$T/named.id" 2>/dev/null)" 'and the record is whole'
+  # A symbolic link at the part's name is not written through, and the call records nothing: an
+  # earlier record at its file goes too.
+  printf 'precious\n' > "$T/victim"; ln -s "$T/victim" "$T/linked.id.part"; cp "$T/named.id" "$T/linked.id"
+  note_pid "$T/linked.id" "$p" 2>/dev/null; rc_is $? 1 'a part that is a symbolic link is refused'
+  eq "$(cat "$T/victim")" precious 'and what it points at is not written'
+  [ -e "$T/linked.id" ] && fail_ 'a record that could not be written left an earlier one behind'
+  [ -L "$T/linked.id.part" ] || fail_ 'the link found at the part'"'"'s name was replaced or removed'
   ( sleep 0.3; echo "$p" > "$T/late.pid" ) & w=$!
   note_written "$T/late.id" "$T/late.pid"; rc_is $? 0 'a pid file written while it waits is read'
   wait "$w"
@@ -10761,6 +10781,12 @@ t_note_written_records_the_process_a_pid_file_names() {
   : > "$T/empty.pid"; note_written "$T/empty.id" "$T/empty.pid" 1; rc_is $? 1 'an empty pid file holds no pid'
   printf 'x%s\n' "$p" > "$T/bad.pid"; note_written "$T/bad.id" "$T/bad.pid" 1; rc_is $? 1 'a line that is not a pid is refused'
   [ -e "$T/none.id" ] || [ -e "$T/empty.id" ] || [ -e "$T/bad.id" ] && fail_ 'a record was written for a pid that never came'
+  # An earlier record at the file does not outlive a call that records nothing.
+  for c in none empty bad; do
+    cp "$T/named.id" "$T/stale-$c.id"
+    note_written "$T/stale-$c.id" "$T/$c.pid" 1; rc_is $? 1 "a call that records nothing says so over an earlier record ($c)"
+    [ -e "$T/stale-$c.id" ] && fail_ "an earlier record outlived a call that recorded nothing ($c)"
+  done
   for c in '' x 0 01 10000; do
     note_written "$T/bound.id" "$T/late.pid" "$c" 2>/dev/null; rc_is $? 2 "a bound of [$c] looks is refused"
   done
