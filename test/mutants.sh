@@ -3206,3 +3206,9 @@ shmutant_mut 'the last trap handler of the pool holds the declarations with set,
   '_shmutant_traps_last() { _shmutant_traps_last_put "${SHMUTANT_TRAP_RETURN_PENDING:-}" "${SHMUTANT_TRAP_DEBUG_PENDING:-}"; }' \
   '_shmutant_traps_last() { builtin set -- "${SHMUTANT_TRAP_RETURN_PENDING:-}" "${SHMUTANT_TRAP_DEBUG_PENDING:-}"; _shmutant_traps_last_put "$@"; }' \
   't_entry_points_refuse_a_disabled_set_with_the_settings_kept'
+
+# --- an interrupted CLI ends the command its plan execd into (#89) ---
+shmutant_mut 'the interrupted CLI waits for its plan subshell where it should end it' \
+  '    kill -TERM "$SHMUTANT_CLI_CHILD" 2>/dev/null' \
+  '    wait "$SHMUTANT_CLI_CHILD" 2>/dev/null' \
+  't_cli_interrupted_ends_the_command_its_plan_execd_into'
