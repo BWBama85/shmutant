@@ -4770,16 +4770,66 @@ t_option_restore_nests_no_deeper_for_more_options() {
     shmutant_mutate "$T/f" "x=1" "x=2"
     echo "mutate rc=$?"
     unset FUNCNEST
-    [ "$before" != "$(shopt -p; set +o)" ] || echo "options=same-after-mutate"
+    [ "$before" != "$(shopt -p; set +o)" ] || echo "after-mutate=same"
     echo last-line' > "$T/out" 2> "$T/err"
   has "$(cat "$T/out")" 'drop rc=0' 'the removal returns 0 under a FUNCNEST of 12'
   has "$(cat "$T/out")" 'options=same' 'and every option is as it was'
   has "$(cat "$T/out")" 'function=gone' 'and the function is gone'
   has "$(cat "$T/out")" 'mutate rc=0' 'shmutant_mutate returns 0 under a FUNCNEST of 26'
-  has "$(cat "$T/out")" 'options=same-after-mutate' 'and leaves every option as it was'
+  has "$(cat "$T/out")" 'after-mutate=same' 'and leaves every option as it was'
   has "$(cat "$T/out")" 'last-line' 'the calling shell reached its last line'
   [ ! -s "$T/err" ] || fail_ "the shell complained: $(head -n 2 "$T/err" | tr '\n' ';' | cut -c1-300)"
   eq "$(cat "$T/f" 2>/dev/null)" x=2 'the file was rewritten'
+}
+
+t_entry_points_refuse_a_disabled_set_with_the_settings_kept() {
+  # A calling shell that disabled `set` with `enable -n`: the shadow check refuses it, but the
+  # option save runs before that check. A save that kept its answer with `set` had nothing to
+  # put back, and under nounset it ended the shell on a parameter that was never set. Each call
+  # on a line of its own, as a script's are.
+  mk_toy "$T/toy"; mkdir -p "$T/src"; printf 'x=1\n' > "$T/src/f"; printf 'x=1\n' > "$T/f"; : > "$T/said"
+  SHMUTANT="$SHMUTANT" T="$T" bash -c '
+    . "$SHMUTANT"
+    prep() { shmutant_copy_tree "$T/toy" "$1"; }; runit() { bash "$1/test.sh"; }
+    shmutant_reset; shmutant_target lib.sh; shmutant_mut a "\$1 + \$2" "\$1 - \$2" add-works
+    shopt -s expand_aliases localvar_inherit
+    set -u
+    enable -n set
+    shmutant_mutate "$T/f" "x=1" "x=2" 2>> "$T/said"
+    echo "mutate rc=$?"
+    shmutant_copy_tree "$T/src" "$T/dst" 2>> "$T/said"
+    echo "copy rc=$?"
+    SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd" prep runit > /dev/null 2>> "$T/said"
+    echo "pool rc=$?"
+    if \builtin shopt -q expand_aliases; then echo "aliases=on"; else echo "aliases=off"; fi
+    if \builtin shopt -q localvar_inherit; then echo "inherit=on"; else echo "inherit=off"; fi
+    echo last-line' > "$T/out" 2> "$T/err"
+  has "$(cat "$T/out")" 'mutate rc=1' 'shmutant_mutate refuses a disabled set'
+  has "$(cat "$T/out")" 'copy rc=1' 'shmutant_copy_tree refuses a disabled set'
+  has "$(cat "$T/out")" 'pool rc=2' 'the pool refuses a disabled set'
+  eq "$(grep -c 'set is not the builtin' "$T/said")" 3 "each says why [$(head -n 2 "$T/said" | tr '\n' ';' | cut -c1-300)]"
+  has "$(cat "$T/out")" 'aliases=on' 'expand_aliases is as the caller set it'
+  has "$(cat "$T/out")" 'inherit=on' 'localvar_inherit is as the caller set it'
+  has "$(cat "$T/out")" 'last-line' 'the calling shell reached its last line'
+  [ ! -s "$T/err" ] || fail_ "the shell complained: $(head -n 2 "$T/err" | tr '\n' ';' | cut -c1-300)"
+  eq "$(cat "$T/f" 2>/dev/null)" x=1 'the file was not rewritten'
+  # a prepare that disables it: the pool refuses after prepare, and the RETURN and DEBUG traps of
+  # the caller, which it held from there, still go back as it returns
+  SHMUTANT="$SHMUTANT" T="$T" bash -c '
+    . "$SHMUTANT"
+    prep() { shmutant_copy_tree "$T/toy" "$1" || return 1; enable -n set; }; runit() { bash "$1/test.sh"; }
+    in_a_function() { SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd2" prep runit > /dev/null 2> "$T/said2"; echo "pool rc=$?"; }
+    shmutant_reset; shmutant_target lib.sh; shmutant_mut a "\$1 + \$2" "\$1 - \$2" add-works
+    set -T; trap ": the-return-trap" RETURN; trap ": the-debug-trap" DEBUG
+    in_a_function
+    trap -p RETURN; trap -p DEBUG
+    echo last-line' > "$T/out2" 2> "$T/err2"
+  has "$(cat "$T/out2")" 'pool rc=2' "a prepare that disabled set is refused [$(head -n 2 "$T/said2" 2>/dev/null | tr '\n' ';' | cut -c1-300)]"
+  has "$(cat "$T/said2" 2>/dev/null)" 'set is not the builtin' 'says why'
+  has "$(cat "$T/out2")" "trap -- ': the-return-trap' RETURN" 'the RETURN trap of the caller is back'
+  has "$(cat "$T/out2")" "trap -- ': the-debug-trap' DEBUG" 'the DEBUG trap of the caller is back'
+  has "$(cat "$T/out2")" 'last-line' 'the calling shell reached its last line'
+  [ ! -s "$T/err2" ] || fail_ "the shell complained: $(head -n 2 "$T/err2" | tr '\n' ';' | cut -c1-300)"
 }
 
 t_option_restore_reads_no_alias_of_the_callers() {

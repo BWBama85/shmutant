@@ -362,16 +362,19 @@ shmutant_selected() {
 # attributes (all but nameref) of a caller's variable of the same name: a path declared under an
 # integer attribute is an arithmetic error, and a name declared to be empty is not.
 _shmutant_aliases_off() {
-  # In positional parameters, then straight into <variable>, with no name of this function's own:
-  # one declared here, while localvar_inherit is still on, would take a caller's attribute with it.
+  # Straight into <variable>, one of four answers, with no name of this function's own (one
+  # declared here, while localvar_inherit is still on, would take a caller's attribute with it)
+  # and nothing kept in between: `set` would hold it, but this runs before the shadow check, and
+  # the calling shell can have disabled that builtin.
   # Each setting is read in a condition, where neither the errexit nor an ERR trap of the calling
   # shell acts; no substitution, whose output would take in whatever such a trap prints.
-  # The builtin and the keyword: this runs before (and after) the shadow check, and a caller's
-  # printf or [ function would otherwise leave the settings unsaved or unrestored.
-  \builtin set -- "$1" u u
-  if \builtin shopt -q expand_aliases; then \builtin set -- "$1" s "$3"; fi
-  if \builtin shopt -q localvar_inherit; then \builtin set -- "$1" "$2" s; fi
-  \builtin printf -v "$1" '%s' "$2$3"
+  # The builtin and the keyword: a caller's printf or [ function would otherwise leave the
+  # settings unsaved or unrestored.
+  if \builtin shopt -q expand_aliases; then
+    if \builtin shopt -q localvar_inherit; then \builtin printf -v "$1" ss; else \builtin printf -v "$1" su; fi
+  elif \builtin shopt -q localvar_inherit; then \builtin printf -v "$1" us
+  else \builtin printf -v "$1" uu
+  fi
   \builtin shopt -u expand_aliases localvar_inherit
 }
 _shmutant_aliases_back() {
@@ -2825,11 +2828,14 @@ _shmutant_release_traps() {
 # _shmutant_traps_last — the RETURN trap of shmutant_pool: the caller's RETURN and DEBUG traps
 # go back here, when the pool's status is already settled and no harness command follows —
 # whatever a handler does now cannot change what the pool returned. DEBUG last of all.
-_shmutant_traps_last() {
-  # The two declarations in positional parameters, not in names of this function's: it runs after
-  # the caller's localvar_inherit is back, where a declared name takes a caller's attribute (an
-  # empty declaration under an integer one is `0`, which would be evaluated as a command).
-  builtin set -- "${SHMUTANT_TRAP_RETURN_PENDING:-}" "${SHMUTANT_TRAP_DEBUG_PENDING:-}"
+# The two declarations go on as arguments, not in names of this function's: it runs after the
+# caller's localvar_inherit is back, where a declared name takes a caller's attribute (an empty
+# declaration under an integer one is `0`, which would be evaluated as a command). Arguments, and
+# not `set`: a pool refused because prepare disabled that builtin still hands the traps back.
+_shmutant_traps_last() { _shmutant_traps_last_put "${SHMUTANT_TRAP_RETURN_PENDING:-}" "${SHMUTANT_TRAP_DEBUG_PENDING:-}"; }
+# _shmutant_traps_last_put <RETURN declaration> <DEBUG declaration> — each put back, or the trap
+# cleared when its declaration is empty.
+_shmutant_traps_last_put() {
   builtin unset SHMUTANT_TRAP_RETURN_PENDING SHMUTANT_TRAP_DEBUG_PENDING SHMUTANT_TRAPS_PENDING
   # Each declaration behind a quoted `builtin`: the caller's expand_aliases is back by now, and
   # an evaluated line that began with the word `trap` would be read with an alias of that name.

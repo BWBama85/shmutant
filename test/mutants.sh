@@ -1203,8 +1203,8 @@ shmutant_mut 'the alias state is never put back' \
   '  :' \
   't_public_helpers_are_immune_to_aliases_at_run_time'
 shmutant_mut 'the alias state put back is always off' \
-  '  if \builtin shopt -q expand_aliases; then \builtin set -- "$1" s "$3"; fi' \
-  '  :' \
+  '  if \builtin shopt -q expand_aliases; then' \
+  '  if [[ 1 -eq 0 ]]; then' \
   't_public_helpers_are_immune_to_aliases_at_run_time'
 shmutant_mut 'a worker directory is made in whatever sits at the workdir path' \
   '    if ! _shmutant_wd_is_marked "$wd" || ! _shmutant_fresh_dir "$wd/$kind-$i" "$wd" || ! SHMUTANT_DIR_IDS["$kind-$i"]="$(_shmutant_dir_id "$wd/$kind-$i")" \' \
@@ -1229,8 +1229,8 @@ shmutant_mut 'the stat form is probed through whatever the name resolves to' \
   '  local st; st="$(command -pv stat 2>/dev/null)" || { SHMUTANT_STAT_STYLE=none; return 0; }' \
   't_pool_refuses_a_modified_pristine_tree'
 shmutant_mut 'the alias setting is saved through a caller printf' \
-  '  \builtin printf -v "$1" '"'"'%s'"'"' "$2$3"' \
-  '  printf -v "$1" '"'"'%s'"'"' "$2$3"' \
+  'else \builtin printf -v "$1" su; fi' \
+  'else printf -v "$1" su; fi' \
   't_public_helpers_are_immune_to_aliases_at_run_time'
 shmutant_mut 'the alias setting is put back through a caller [' \
   '  case "$1" in s?) \builtin shopt -s expand_aliases' \
@@ -2875,12 +2875,12 @@ shmutant_mut 'the entry points run with the localvar_inherit their caller set' \
   '  \builtin shopt -u expand_aliases' \
   't_pool_names_take_no_attribute_of_the_callers'
 shmutant_mut 'the localvar_inherit of the calling shell is not put back' \
-  '  if \builtin shopt -q localvar_inherit; then \builtin set -- "$1" "$2" s; fi' \
-  '  :' \
+  '  elif \builtin shopt -q localvar_inherit; then \builtin printf -v "$1" us' \
+  '  elif \builtin shopt -q localvar_inherit; then \builtin printf -v "$1" uu' \
   't_pool_names_take_no_attribute_of_the_callers'
 shmutant_mut 'the option save keeps its answer in a name declared under the localvar_inherit of its caller' \
-  '  if \builtin shopt -q localvar_inherit; then \builtin set -- "$1" "$2" s; fi' \
-  '  local st=u; if \builtin shopt -q localvar_inherit; then st=s; fi; \builtin set -- "$1" "$2" "$st"' \
+  '  elif \builtin shopt -q localvar_inherit; then \builtin printf -v "$1" us' \
+  '  elif \builtin shopt -q localvar_inherit; then local st=us; \builtin printf -v "$1" '"'"'%s'"'"' "$st"' \
   't_pool_names_take_no_attribute_of_the_callers'
 shmutant_mut 'the pool keeps the saved options in a name that took an attribute of its caller' \
   '  local rc pool_aliases; \builtin unset -v rc pool_aliases; _shmutant_aliases_off pool_aliases' \
@@ -2895,8 +2895,8 @@ shmutant_mut 'mutate keeps the saved options in a name that took an attribute of
   '  local rc mutate_aliases; _shmutant_aliases_off mutate_aliases' \
   't_public_helpers_take_no_attribute_of_the_callers'
 shmutant_mut 'the last trap handler of the pool keeps a declaration in a name that took an attribute of its caller' \
-  '  builtin set -- "${SHMUTANT_TRAP_RETURN_PENDING:-}" "${SHMUTANT_TRAP_DEBUG_PENDING:-}"' \
-  '  local ret="${SHMUTANT_TRAP_RETURN_PENDING:-}"; builtin set -- "$ret" "${SHMUTANT_TRAP_DEBUG_PENDING:-}"' \
+  '_shmutant_traps_last() { _shmutant_traps_last_put "${SHMUTANT_TRAP_RETURN_PENDING:-}"' \
+  '_shmutant_traps_last() { local ret="${SHMUTANT_TRAP_RETURN_PENDING:-}"; _shmutant_traps_last_put "$ret"' \
   't_pool_names_take_no_attribute_of_the_callers'
 shmutant_mut 'a localvar_inherit prepare turned on stays on for the rest of the pool' \
   '  \builtin shopt -u localvar_inherit' \
@@ -3155,8 +3155,8 @@ shmutant_mut 'a lost run whose freeze could not record that it is unsettled is s
 
 # --- saved settings and traps go back with nothing a trap or an alias of the caller's added (#99) ---
 shmutant_mut 'the option save reads a setting where an ERR trap of the calling shell runs' \
-  '  if \builtin shopt -q localvar_inherit; then \builtin set -- "$1" "$2" s; fi' \
-  '  \builtin shopt -q localvar_inherit; if [[ "$?" -eq 0 ]]; then \builtin set -- "$1" "$2" s; fi' \
+  '  else \builtin printf -v "$1" uu' \
+  '  else \builtin shopt -q localvar_inherit; \builtin printf -v "$1" uu' \
   't_option_save_takes_in_nothing_an_err_trap_of_the_callers_prints'
 shmutant_mut 'the file reads expand_aliases in a substitution, which takes in what an ERR trap prints' \
   '_shmutant_alias_state='"'"'shopt -u expand_aliases'"'"'; \builtin shopt -q expand_aliases && _shmutant_alias_state='"'"'shopt -s expand_aliases'"'"'' \
@@ -3198,3 +3198,11 @@ shmutant_mut 'the option restore makes a function call for every option, which a
   '  case "$4" in *:*) _shmutant_opt_put "$1" "$2" "$3" "${4#*:}" ;; esac' \
   '  case "$4" in *:*) _shmutant_opts_put "$1" "$2" "$3" "${4#*:}"; builtin return 0 ;; esac' \
   't_option_restore_nests_no_deeper_for_more_options'
+shmutant_mut 'the option save holds its answer with set, which the calling shell can have disabled' \
+  'then \builtin printf -v "$1" ss;' \
+  'then \builtin set -- "$1" ss; \builtin printf -v "$1" '"'"'%s'"'"' "$2";' \
+  't_entry_points_refuse_a_disabled_set_with_the_settings_kept'
+shmutant_mut 'the last trap handler of the pool holds the declarations with set, which prepare can have disabled' \
+  '_shmutant_traps_last() { _shmutant_traps_last_put "${SHMUTANT_TRAP_RETURN_PENDING:-}" "${SHMUTANT_TRAP_DEBUG_PENDING:-}"; }' \
+  '_shmutant_traps_last() { builtin set -- "${SHMUTANT_TRAP_RETURN_PENDING:-}" "${SHMUTANT_TRAP_DEBUG_PENDING:-}"; _shmutant_traps_last_put "$@"; }' \
+  't_entry_points_refuse_a_disabled_set_with_the_settings_kept'
