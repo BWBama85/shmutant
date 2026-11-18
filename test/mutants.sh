@@ -3186,3 +3186,11 @@ shmutant_mut 'shmutant_pool trusts the word builtin before a function of that na
   '  _shmutant_drop_builtin_fn pool || \builtin :' \
   '  :' \
   't_entry_points_drop_a_builtin_function_before_they_trust_it'
+shmutant_mut 'the switch after prepare trusts the word builtin before a function of that name is removed' \
+  '_shmutant_drop_builtin_fn stash || \builtin :' \
+  ':' \
+  't_pool_drops_a_builtin_function_prepare_left_before_it_trusts_it'
+shmutant_mut 'a function named builtin is removed after prepare before the traps are held' \
+  '  _shmutant_hold_traps; _shmutant_drop_builtin_fn stash || \builtin :' \
+  '  _shmutant_drop_builtin_fn stash || \builtin :; _shmutant_hold_traps' \
+  't_pool_refuses_shadowed_builtins_and_posix_mode'

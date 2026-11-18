@@ -3156,12 +3156,14 @@ _shmutant_locals_writable_in() {
 # held and only when prepare did not make that name readonly (dynamic scope reaches it, and the
 # assignment would end a non-interactive caller). The status arrives as a positional parameter,
 # which no callback can mark readonly. Refuses with status 1.
-# localvar_inherit goes off again first, for a prepare that turned it on: every declaration from
-# here to the pool's return would otherwise take what a variable of its name holds at the scope
-# before it.
+# The traps are held first of all (the saves declare no name), so a handler prepare left sees
+# none of what follows. Then a function named builtin that prepare defined is removed: `\builtin`
+# would be that function, and the option below would stay on. Then localvar_inherit goes off
+# again, for a prepare that turned it on: every declaration from here to the pool's return would
+# otherwise take what a variable of its name holds at the scope before it.
 _shmutant_pool_stash() {
+  _shmutant_hold_traps; _shmutant_drop_builtin_fn stash || \builtin :
   \builtin shopt -u localvar_inherit
-  _shmutant_hold_traps
   # if/else, not a return: a `return` function prepare defined would fall through to the
   # assignment; the shadow check that refuses it comes after this.
   if _shmutant_readonly _shmutant_pool_prc; then

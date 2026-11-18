@@ -4713,6 +4713,28 @@ t_entry_points_drop_a_builtin_function_before_they_trust_it() {
   done
 }
 
+t_pool_drops_a_builtin_function_prepare_left_before_it_trusts_it() {
+  # A prepare that turns localvar_inherit on and defines a function named builtin: the switch
+  # that turns the option off again as prepare returns ran that function, the option stayed on,
+  # and the shadow check then declared its names under the caller's integer attributes.
+  mk_toy "$T/toy"
+  SHMUTANT="$SHMUTANT" T="$T" bash -c '
+    . "$SHMUTANT"
+    prep() { shmutant_copy_tree "$T/toy" "$1" || return 1; shopt -s localvar_inherit; builtin() { :; }; }
+    runit() { bash "$1/test.sh"; }
+    shmutant_reset; shmutant_target lib.sh; shmutant_mut a "\$1 + \$2" "\$1 - \$2" add-works
+    declare -i kinds=7 n=7
+    SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd" prep runit > "$T/pool" 2>&1; echo "pool rc=$?"
+    if shopt -q localvar_inherit; then echo "inherit=on"; else echo "inherit=off"; fi
+    echo "kinds=$kinds n=$n"
+    echo last-line' > "$T/out" 2> "$T/err"
+  has "$(cat "$T/out")" 'pool rc=0' "the pool kills its row [$(tail -n 2 "$T/pool" 2>/dev/null | tr '\n' ';' | cut -c1-300)]"
+  has "$(cat "$T/out")" 'inherit=off' 'localvar_inherit is as the caller left it'
+  has "$(cat "$T/out")" 'kinds=7 n=7' 'the integers of the caller are as it left them'
+  has "$(cat "$T/out")" 'last-line' 'the calling shell reached its last line'
+  [ ! -s "$T/err" ] || fail_ "the pool complained outside its own stream: $(head -n 2 "$T/err" | tr '\n' ';' | cut -c1-300)"
+}
+
 t_option_restore_reads_no_alias_of_the_callers() {
   # A calling shell with expand_aliases on and aliases named shopt and trap. Its settings and its
   # RETURN and DEBUG traps go back as the entry points return, when its aliases are in force

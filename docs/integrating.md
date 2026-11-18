@@ -314,7 +314,10 @@ with it on, every `local` in the library would take the value and the attributes
 nameref, which bash does not hand down) of your variable of the same name. A `prepare` that turns it on has it turned off again as it returns,
 and the setting the pool hands back is the one it was called with; a `run` that turns it on
 keeps it for its own commands only. A callback that needs the option turns it on inside its own
-functions. Without the option, an attribute you gave a variable of your own (`declare -i`, an
+functions. The switch holds against your settings, not against your traps: until `prepare`
+returns, and throughout the two helpers, a RETURN or DEBUG trap of yours that `functrace` hands
+to functions still runs between the library's commands, and a handler that turns either option
+back on has undone the switch. Without the option, an attribute you gave a variable of your own (`declare -i`, an
 array, a nameref) does not reach the names the pool and the two helpers assign: each is declared
 by the library before it is assigned, so your variable is neither written nor read in its place
 (the `SHMUTANT_*` globals are the library's own state). The CLI turns the
