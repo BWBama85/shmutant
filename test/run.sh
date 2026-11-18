@@ -1154,6 +1154,20 @@ t_pool_refuses_shadowed_builtins_and_posix_mode() {
   wait "$bg" 2>/dev/null
   eq "$(cat "$T/rc9")" 2 'a builtin faker prepare defined does not get a kill shadow past the check'
   has "$(cat "$T/e9")" 'kill is not the builtin' 'says why'
+  # the same faker defined by a DEBUG trap of the caller's just before the shadow check, after
+  # the pool's own removal on entry: the check removes it itself before it relies on the name
+  set -m; ( kill() { :; }
+    fake_builtin_once() { case "$1" in _shmutant_no_shadows*) trap - DEBUG; eval 'builtin() { case "$1:$2" in type:-at) echo builtin ;; *) command "$@" ;; esac; }' ;; esac; }
+    set -T; trap 'fake_builtin_once "$BASH_COMMAND"' DEBUG
+    marking_prepare() { : > "$T/prepared11"; toy_prepare "$1"; }
+    shmutant_pool lbl "$T/wd" marking_prepare toy_run > /dev/null 2>"$T/e11"; echo "$?" > "$T/rc11" ) > /dev/null 2>&1 & bg=$!; set +m; i=0
+  until [ -e "$T/rc11" ]; do i=$((i + 1)); [ "$i" -lt 100 ] || break; sleep 0.1; done
+  [ -e "$T/rc11" ] || { kill -KILL -- -"$bg" 2>/dev/null; wait "$bg" 2>/dev/null; fail_ 'a pool under a builtin faker a trap defined before the check ran instead of being refused'; return; }
+  wait "$bg" 2>/dev/null
+  eq "$(cat "$T/rc11")" 2 'a builtin faker a DEBUG trap defined before the check does not get a kill shadow past it'
+  has "$(cat "$T/e11")" 'kill is not the builtin' 'says why'
+  # at entry, not at the check after prepare, which the pool makes with the faker already gone
+  [ ! -e "$T/prepared11" ] || fail_ 'a builtin faker a DEBUG trap defined got a kill shadow past the check on entry: prepare ran'
   # a caller function named return (a special builtin) would turn the check's own refusal into
   # a no-op: it is removed, from posix mode, before the check relies on it, and the kill
   # shadow is then refused as usual

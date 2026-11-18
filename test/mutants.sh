@@ -1254,7 +1254,7 @@ shmutant_mut 'a link chain that leaves the root is accepted when it comes back' 
   '      case "$comp" in '"'"''"'"'|.) continue ;; ..) here="${here%/*}"; case "$here" in "$root"|"$root"/*) ;; *) return 1 ;; esac; continue ;; esac' \
   '      case "$comp" in '"'"''"'"'|.) continue ;; ..) here="${here%/*}"; case "$here" in "$root"|"$root"/*) ;; *) return 0 ;; esac; continue ;; esac' \
   't_target_through_a_link_chain_to_an_absolute_link_is_refused'
-shmutant_mut 'a function named builtin prepare defined answers the shadow check' \
+shmutant_mut 'a function named builtin defined just before the shadow check answers it' \
   '  local n kinds; _shmutant_drop_builtin_fn' \
   '  local n kinds; :' \
   't_pool_refuses_shadowed_builtins_and_posix_mode'
