@@ -850,22 +850,29 @@ _shmutant_ps() {
 # reader put a redirection of its own on the read, so the give-up is said there whoever read. The
 # runner is told on the descriptor it named, at once and from here: the read may be in a
 # substitution of the freezing shell, which can set nothing in it. A record that cannot be written
-# there is said too, and told to the pool on the worker's own channel (`unrecorded`), where it makes
-# the pass a harness error and the row unsettled: the run must not be scored without it. Both are
-# written before any word is said: a stderr that is not drained holds the freeze at its first word,
-# and must not keep the run or the pool from being told. Where neither can be written, nothing
-# reaches the collector, and a verdict the worker writes later is accepted; that is only said. A ps
-# that itself ends with status 124 is read as one given up on, as it always was. Returns 0 always.
+# there is told to the pool on the worker's own channel (`unrecorded`), where it makes the pass a
+# harness error and the row unsettled: the run must not be scored without it. Both are written
+# before any word is said, so a word that blocks on a stderr with no room left keeps neither from
+# being made. Where neither can be written, nothing reaches the collector, and a verdict the worker
+# writes later is accepted; that is only said. A ps that itself ends with status 124 is read as one
+# given up on, as it always was. Returns 0 always.
 _shmutant_ps_gave_up() {
   case "${SHMUTANT_PS_UNSETTLES:-}" in ''|0|*[!0-9]*) return 0 ;; esac
-  local unrec=0 untold=0
+  # $2: the runner was told (0) or not (1); $3: the pool was told (0), not (1), or has no channel
+  # here (2). Positional, never a name: the run's own shell may have made any name readonly.
+  builtin set -- "$1" 0 2
   if [ -n "${SHMUTANT_UNSETTLED_FD:-}" ] && ! { printf 'unsettled\n' >&"$SHMUTANT_UNSETTLED_FD"; } 2>/dev/null; then
-    unrec=1
-    [ -z "${SHMUTANT_VERDICT_FD:-}" ] || { printf 'unrecorded\n' >&"$SHMUTANT_VERDICT_FD"; } 2>/dev/null || untold=1
+    builtin set -- "$1" 1 2
+    if [ -n "${SHMUTANT_VERDICT_FD:-}" ]; then
+      if { printf 'unrecorded\n' >&"$SHMUTANT_VERDICT_FD"; } 2>/dev/null; then builtin set -- "$1" 1 0; else builtin set -- "$1" 1 1; fi
+    fi
   fi
   _shmutant_err "a read of the process table did not answer within $1 seconds and was given up on, so the process tree being ended is not known to have been frozen whole" 2>&"$SHMUTANT_PS_UNSETTLES"
-  [ "$unrec" = 0 ] || _shmutant_err "the run could not be told that its freeze is unsettled, so its verdict is not accepted" 2>&"$SHMUTANT_PS_UNSETTLES"
-  [ "$untold" = 0 ] || _shmutant_err "nor could its pool be told" 2>&"$SHMUTANT_PS_UNSETTLES"
+  case "$2$3" in
+    10) _shmutant_err "the run could not be told that its freeze is unsettled; its pool was told, so its verdict is not accepted" 2>&"$SHMUTANT_PS_UNSETTLES" ;;
+    11) _shmutant_err "the run could not be told that its freeze is unsettled, nor could its pool be told, so the verdict it reaches may be accepted" 2>&"$SHMUTANT_PS_UNSETTLES" ;;
+    12) _shmutant_err "the run could not be told that its freeze is unsettled" 2>&"$SHMUTANT_PS_UNSETTLES" ;;
+  esac
   return 0
 }
 
@@ -3256,7 +3263,7 @@ _shmutant_pool_locals_writable() {
     a budget dog e elapsed last leftovers linked lstart old rrc s tampered tmpd tnow victims wroot \
     dog_self done_first orphaned runner runner_gap runnerid \
     b chunk conts g gcont gone_group guard_id guard_lost guard_of guard_of_id guard_pid guard_r guard_up guard_w hs kept kills members out pairs part pg ph phid recs rid rootid_pre seen_ck unfrozen w want \
-    SHMUTANT_GUARD SHMUTANT_GUARD_PID SHMUTANT_PS_LSTART SHMUTANT_PS_BOUND SHMUTANT_PS_UNSETTLES c guard_self guard_gap_ref gap ea eb lp le tbl cands guarded jl w fid_now stopped fgap cont_first cfirst told group_untold first unrec untold \
+    SHMUTANT_GUARD SHMUTANT_GUARD_PID SHMUTANT_PS_LSTART SHMUTANT_PS_BOUND SHMUTANT_PS_UNSETTLES c guard_self guard_gap_ref gap ea eb lp le tbl cands guarded jl w fid_now stopped fgap cont_first cfirst told group_untold first \
     before after ga gb \
     bad hits name names only scope SHMUTANT_PICK SHMUTANT_PICK_N
 }
