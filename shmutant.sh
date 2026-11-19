@@ -907,9 +907,9 @@ _shmutant_descendants_started() {
     return 0
   fi
   # A look at which form ps prints that was given up on leaves that open: no table is read behind it.
+  # One that told the form is taken at its word, whether or not this process's own start was read.
   ist=0; [ "${SHMUTANT_PS_LSTART:-}" = 0 ] || _shmutant_identity "$BASHPID" > /dev/null || ist=$?
-  [ "$ist" != 124 ] || return 1
-  if [ "$ist" = 0 ] && [ "${SHMUTANT_PS_LSTART:-}" = 1 ]; then
+  [ "$ist" != 124 ] || return 1; if [ "${SHMUTANT_PS_LSTART:-}" = 1 ]; then
     table="$(_shmutant_ps -A -o pid= -o ppid= -o lstart= 2>/dev/null)" && [ -n "$table" ] || return 1
     (set -o pipefail; printf '%s\n' "$table" | command -p awk -v root="$1" '
       NF > 2 && $1 ~ /^[0-9]+$/ { i++; child[i] = $1; parent[i] = $2; $1 = ""; $2 = ""; sub(/^ +/, ""); start[i] = $0 }
@@ -1006,9 +1006,9 @@ _shmutant_identity() {
     lstart="$(set -o pipefail; _shmutant_ps -o lstart= -p "$1" 2>/dev/null | command -p awk 'NF { $1 = $1; print; exit }')" || { st=$?; lstart=""; }
     if [ -n "$lstart" ]; then SHMUTANT_PS_LSTART=1; printf '%s' "$lstart"; return 0; fi
     [ "$st" != 124 ] || return 124; [ "${SHMUTANT_PS_LSTART:-}" != 1 ] || return 1
-    st=0; lstart="$(_shmutant_ps -o lstart= -p "$BASHPID" 2>/dev/null)" || st=$?
+    st=0; lstart="$(_shmutant_ps -o lstart= -p "$BASHPID" 2>/dev/null)" || st=$?; [ "$st" != 124 ] || return 124
     if [ -n "$lstart" ]; then SHMUTANT_PS_LSTART=1; return 1; fi
-    [ "$st" != 124 ] || return 124; SHMUTANT_PS_LSTART=0
+    SHMUTANT_PS_LSTART=0
   fi
   before="$(_shmutant_now)"
   st=0; etime="$(set -o pipefail; _shmutant_ps -o etime= -p "$1" 2>/dev/null | command -p tr -d ' ')" || st=$?
@@ -1035,11 +1035,11 @@ _shmutant_identity_table() {
   # The ps tables are read whole, and taken only from a read that succeeded at every stage: a ps that
   # failed, whatever it printed first, gives no table at all, never part of one.
   # A look at which form ps prints that was given up on leaves that open, and fills nothing: a table
-  # of elapsed-time starts read behind it would be in the other form from every later one.
+  # of elapsed-time starts read behind it would be in the other form from every later one. One that
+  # told the form is taken at its word, whether or not this process's own start was read.
   local tbl ist=0
   [ "${SHMUTANT_PS_LSTART:-}" = 0 ] || _shmutant_identity "$BASHPID" > /dev/null || ist=$?
-  [ "$ist" != 124 ] || return 0
-  if [ "$ist" = 0 ] && [ "${SHMUTANT_PS_LSTART:-}" = 1 ]; then
+  [ "$ist" != 124 ] || return 0; if [ "${SHMUTANT_PS_LSTART:-}" = 1 ]; then
     tbl="$(set -o pipefail; _shmutant_ps -A -o pid= -o lstart= 2>/dev/null | command -p awk 'NF > 1 && $1 ~ /^[0-9]+$/ { pid = $1; $1 = ""; sub(/^ +/, ""); print pid, $0 }')" || return 0
     while IFS= read -r line; do
       # shellcheck disable=SC2034
@@ -2081,11 +2081,11 @@ _shmutant_run_bounded() {
     holder=""
     read -t 30 -r holder <&"$hp" || holder=""
     case "$holder" in ''|*[!0-9]*) holder="" ;; esac
-    # Each read of this shell's three before the callback is let go (the holder's start, the root's,
-    # its own) is given up on after five seconds, the runner's own after one, and a start given up on
-    # is one that could not be read: no deadline and no watchdog exist yet to end a ps that does not
-    # answer here. Five, not a freeze's ten: the wrapper waits thirty for its go, and each such read
-    # may take five more than its bound (_shmutant_ps).
+    # The three starts this shell reads before the callback is let go (its holder's, its run's, its
+    # own) are each given up on, the first two after five seconds a read and its own after one, and a
+    # start given up on is one that could not be read: no deadline and no watchdog exist yet to end a
+    # ps that does not answer here. Five, not a freeze's ten: the wrapper waits thirty for its go, and
+    # each read may take five more than its bound (_shmutant_ps).
     holderid="$(SHMUTANT_PS_BOUND=5 _shmutant_identity "$holder")" || holderid=""
     # The root's identity while it is certainly alive: the post-run kill must not stop or signal
     # a reaped root by number.

@@ -3290,8 +3290,8 @@ shmutant_mut 'a start given up on is followed by a look at the form ps prints' \
   '[ "${SHMUTANT_PS_LSTART:-}" != 1 ] || return 1' \
   't_identity_leaves_open_what_a_read_given_up_on_never_showed'
 shmutant_mut 'a look at the form ps prints given up on decides it has no lstart' \
-  '[ "$st" != 124 ] || return 124; SHMUTANT_PS_LSTART=0' \
-  'SHMUTANT_PS_LSTART=0' \
+  'lstart="$(_shmutant_ps -o lstart= -p "$BASHPID" 2>/dev/null)" || st=$?; [ "$st" != 124 ] || return 124' \
+  'lstart="$(_shmutant_ps -o lstart= -p "$BASHPID" 2>/dev/null)" || st=$?' \
   't_identity_leaves_open_what_a_read_given_up_on_never_showed'
 shmutant_mut 'an elapsed time given up on is a plain failure' \
   '[ "$st" != 124 ] || return 124; [ "$st" = 0 ] || return 1' \
@@ -3304,4 +3304,12 @@ shmutant_mut 'a table of starts is read behind a look at the form given up on' \
 shmutant_mut 'a listing of descendants is read behind a look at the form given up on' \
   '[ "$ist" != 124 ] || return 1' \
   ':' \
+  't_identity_leaves_open_what_a_read_given_up_on_never_showed'
+shmutant_mut 'a table of starts is read in the elapsed-time form when the start it looked at was not read' \
+  '[ "$ist" != 124 ] || return 0; if [ "${SHMUTANT_PS_LSTART:-}" = 1 ]; then' \
+  '[ "$ist" != 124 ] || return 0; if [ "$ist" = 0 ] && [ "${SHMUTANT_PS_LSTART:-}" = 1 ]; then' \
+  't_identity_leaves_open_what_a_read_given_up_on_never_showed'
+shmutant_mut 'a listing of descendants is read in the elapsed-time form when the start it looked at was not read' \
+  '[ "$ist" != 124 ] || return 1; if [ "${SHMUTANT_PS_LSTART:-}" = 1 ]; then' \
+  '[ "$ist" != 124 ] || return 1; if [ "$ist" = 0 ] && [ "${SHMUTANT_PS_LSTART:-}" = 1 ]; then' \
   't_identity_leaves_open_what_a_read_given_up_on_never_showed'

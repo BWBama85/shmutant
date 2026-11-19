@@ -4286,21 +4286,29 @@ end_tree() {
 # left as it is, bound and all.
 stall_ps_reads() {
   eval "$(declare -f _shmutant_ps | sed '1s/^_shmutant_ps /_shmutant_ps_real /')"
-  _shmutant_ps() {
-    case "${SHMUTANT_PS_BOUND:-}" in
-      [1-9]|[1-9][0-9]|[1-9][0-9][0-9]) if stalls "$@"; then SHMUTANT_PS_BOUND=1 _shmutant_ps_real "$@"; return; fi ;;
-    esac
-    _shmutant_ps_real "$@"
-  }
+  stall_ps_bound_cut
   command() {
     if [ "${1:-}" = -p ] && [ "${2:-}" = ps ] && stalls "${@:3}"; then printf '%s\n' "$BASHPID" >> "$T/stalled"; builtin exec sleep 300; fi
     builtin command "$@"
   }
 }
 
+# stall_ps_bound_cut — the _shmutant_ps that stall_ps_reads and stall_ps_quietly put in front of
+# _shmutant_ps_real: a read the caller's `stalls` picks that has a bound _shmutant_ps keeps has that
+# bound appended to $T/bounds, as the line the read was given, and cut to a second.
+stall_ps_bound_cut() {
+  _shmutant_ps() {
+    case "${SHMUTANT_PS_BOUND:-}" in
+      [1-9]|[1-9][0-9]|[1-9][0-9][0-9])
+        if stalls "$@"; then printf '%s\n' "$SHMUTANT_PS_BOUND" >> "$T/bounds"; SHMUTANT_PS_BOUND=1 _shmutant_ps_real "$@"; return; fi ;;
+    esac
+    _shmutant_ps_real "$@"
+  }
+}
+
 # stall_ps_quietly — stall_ps_reads with no function of a builtin's name, which the pool and the CLI
 # refuse (_shmutant_no_shadows): the sleep stands in for the ps inside _shmutant_ps itself. The same
-# caller's `stalls`, the same $T/stalled, the same bound of a second; 1, having said so, when the
+# caller's `stalls`, the same $T/stalled and $T/bounds, the same cut to a second; 1, having said so, when the
 # copy of _shmutant_ps could not be made.
 stall_ps_quietly() {
   local body
@@ -4311,12 +4319,12 @@ stall_ps_quietly() {
     if stalls "$@"; then printf '%s\n' "$BASHPID" >> "$T/stalled"; builtin exec sleep 300; fi
     command -p ps "$@"
   }
-  _shmutant_ps() {
-    case "${SHMUTANT_PS_BOUND:-}" in
-      [1-9]|[1-9][0-9]|[1-9][0-9][0-9]) if stalls "$@"; then SHMUTANT_PS_BOUND=1 _shmutant_ps_real "$@"; return; fi ;;
-    esac
-    _shmutant_ps_real "$@"
-  }
+  stall_ps_bound_cut
+}
+
+# bounds_given — the bounds the reads that stalled were given, each once, in order, on one line.
+bounds_given() {
+  sort -nu "$T/bounds" 2>/dev/null | tr '\n' ' ' | sed 's/ $//'
 }
 
 # stalled_ps_ended <label> — every ps that stall_ps_reads put a sleep in the place of has been ended,
@@ -6957,54 +6965,79 @@ t_identity_leaves_open_what_a_read_given_up_on_never_showed() {
   # #94: a read of a start given up on (here a ps that ends with status 124, which _shmutant_ps reads
   # as one it gave up on) says nothing of which form of start ps prints. With that form not yet known,
   # such a start is one that could not be read, with status 124, after that one read and no look at
-  # the form behind it (`target`); a look at the form given up on leaves the form open as well
-  # (`probe`); and a table of starts, or a listing of descendants with theirs, read behind such a look
-  # is none at all, never one in the elapsed-time form (`table`, `listing`). Once ps answers again the
-  # form is learned as it always was (`recovered`). With the elapsed-time form known, a read given up
-  # on is 124 as well (`etime`).
-  local how h hid got
-  sleep 60 > /dev/null 2>&1 & h=$!
-  hid="$(SHMUTANT_PROC=0 _shmutant_identity "$h")"
-  for how in target probe table listing recovered etime; do
-    rm -f "$T/asked"; : > "$T/stall"
-    got="$( SHMUTANT_PROC=0; unset SHMUTANT_PS_LSTART
+  # the form behind it (`target`); a look at the form given up on leaves the form open as well, what
+  # it printed first included (`probe`, `partial`); and a table of starts, or a listing of descendants
+  # with theirs, read behind such a look is none at all, never one in the elapsed-time form (`table`,
+  # `listing`). A look that told the form is taken at its word, though the start it was made for was
+  # not read (`table-told`, `listing-told`). Once ps answers again the form is learned as it always
+  # was, either form (`recovered`, `recovered-etime`). With the elapsed-time form known, a read given
+  # up on is 124 as well (`etime`). Every ps here is a stand-in, so the host's own forms do not count.
+  local how got h="$$" lt='Thu Nov 19 10:00:00 2026'
+  for how in target probe partial table listing table-told listing-told recovered recovered-etime etime; do
+    rm -f "$T/asked" "$T/listing"; echo stall > "$T/phase"
+    got="$( SHMUTANT_PROC=0; unset SHMUTANT_PS_LSTART; me="$BASHPID"
             [ "$how" != etime ] || SHMUTANT_PS_LSTART=0
+            # What a ps that answers prints, in the form <phase> names.
+            answered() {
+              local ph="$1"; shift
+              case "$ph:$*" in
+                nolstart:*lstart*)                return 1 ;;
+                *:"-o lstart= -p "*)              printf '%s\n' "$lt" ;;
+                *:'-A -o pid= -o lstart=')        printf '1 %s\n' "$lt" ;;
+                *:'-A -o pid= -o ppid= -o lstart=') printf '77 %s %s\n' "$me" "$lt" ;;
+                *:'-A -o pid= -o etime=')         printf '1 01:00\n' ;;
+                *:'-A -o pid= -o ppid= -o etime=') printf '77 %s 01:00\n' "$me" ;;
+                *:"-o etime= -p "*)               printf '01:00\n' ;;
+                *)                                return 1 ;;
+              esac
+            }
             command() {
-              if [ "${1:-}" = -p ] && [ "${2:-}" = ps ] && [ -e "$T/stall" ]; then
-                printf '%s\n' "${*:3}" >> "$T/asked"
-                case "$how:${!#}" in
-                  probe:"$h") return 1 ;;
-                  table:*|listing:*) case "${*:3}" in '-A '*) ;; *) return 124 ;; esac ;;
-                  *) return 124 ;;
+              if [ "${1:-}" = -p ] && [ "${2:-}" = ps ]; then
+                shift 2; local a="$*" ph; read -r ph < "$T/phase"
+                printf '%s\n' "$a" >> "$T/asked"
+                case "$how:$ph" in
+                  probe:stall|partial:stall)
+                    case "$a" in *" -p $h") return 1 ;; esac
+                    [ "$how" = probe ] || printf 'Mon\n'
+                    return 124 ;;
+                  table:stall|listing:stall) case "$a" in '-A '*) answered lstart "$@"; return ;; esac; return 124 ;;
+                  table-told:*|listing-told:*) case "$a" in "-o lstart= -p $me") return 1 ;; esac; answered lstart "$@"; return ;;
+                  *:stall) return 124 ;;
+                  *) answered "$ph" "$@"; return ;;
                 esac
               fi
               builtin command "$@"
             }
             case "$how" in
-              table)   declare -A SHMUTANT_START=(); _shmutant_identity_table; printf 'st=%s n=%s' "$?" "${#SHMUTANT_START[@]}" ;;
-              listing) out="$(_shmutant_descendants_started "$BASHPID")"; printf 'st=%s out=[%s]' "$?" "$out" ;;
-              recovered)
-                _shmutant_identity "$h" > /dev/null; printf 'st=%s ' "$?"; rm -f "$T/stall"
-                out="$(_shmutant_identity "$h")"; [ "$out" = "$hid" ] && printf 'again'
-                _shmutant_identity "$h" > /dev/null ;;
-              *)       _shmutant_identity "$h" > /dev/null; printf 'st=%s' "$?" ;;
+              table|table-told)
+                declare -A SHMUTANT_START=(); _shmutant_identity_table; printf 'st=%s n=%s one=[%s]' "$?" "${#SHMUTANT_START[@]}" "${SHMUTANT_START[1]:-}" ;;
+              listing|listing-told)
+                _shmutant_descendants_started "$me" > "$T/listing"; printf 'st=%s out=[%s]' "$?" "$(cat "$T/listing")" ;;
+              recovered|recovered-etime)
+                _shmutant_identity "$h" > /dev/null; printf 'st=%s ' "$?"
+                if [ "$how" = recovered ]; then echo lstart > "$T/phase"; else echo nolstart > "$T/phase"; fi
+                _shmutant_identity "$h" > "$T/listing"; printf 'then=%s out=[%s]' "$?" "$(cat "$T/listing")" ;;
+              *) _shmutant_identity "$h" > /dev/null; printf 'st=%s' "$?" ;;
             esac
             printf ' lstart=[%s]' "${SHMUTANT_PS_LSTART-unset}" )"
     case "$how" in
-      target)    eq "$got" 'st=124 lstart=[unset]' 'target: a start given up on is 124, and leaves the form open' ;;
-      probe)     eq "$got" 'st=124 lstart=[unset]' 'probe: a look at the form given up on leaves the form open, and is 124' ;;
-      table)     eq "$got" 'st=0 n=0 lstart=[unset]' 'table: no table of starts is read behind a look at the form given up on' ;;
-      listing)   eq "$got" 'st=1 out=[] lstart=[unset]' 'listing: no listing of descendants is read behind a look at the form given up on' ;;
-      recovered) eq "$got" 'st=124 again lstart=[1]' 'recovered: once ps answers, the start is read and the form learned' ;;
-      etime)     eq "$got" 'st=124 lstart=[0]' 'etime: an elapsed time given up on is 124' ;;
+      target)       eq "$got" 'st=124 lstart=[unset]' 'target: a start given up on is 124, and leaves the form open' ;;
+      probe)        eq "$got" 'st=124 lstart=[unset]' 'probe: a look at the form given up on leaves the form open, and is 124' ;;
+      partial)      eq "$got" 'st=124 lstart=[unset]' 'partial: what a look given up on printed first tells nothing either' ;;
+      table)        eq "$got" 'st=0 n=0 one=[] lstart=[unset]' 'table: no table of starts is read behind a look at the form given up on' ;;
+      listing)      eq "$got" 'st=1 out=[] lstart=[unset]' 'listing: no listing of descendants is read behind a look at the form given up on' ;;
+      table-told)   eq "$got" "st=0 n=1 one=[$lt] lstart=[1]" 'table-told: a look that told the form has the table read in it' ;;
+      listing-told) eq "$got" "st=0 out=[77 $lt] lstart=[1]" 'listing-told: a look that told the form has the listing read in it' ;;
+      recovered)    eq "$got" "st=124 then=0 out=[$lt] lstart=[1]" 'recovered: once ps answers, the start is read and the form learned' ;;
+      recovered-etime)
+        case "$got" in "st=124 then=0 out=[e"*"] lstart=[0]") ;; *) fail_ "recovered-etime: once a ps with no lstart answers, the elapsed-time form is learned: got [$got]" ;; esac ;;
+      etime)        eq "$got" 'st=124 lstart=[0]' 'etime: an elapsed time given up on is 124' ;;
     esac
     case "$how" in
       target|etime) eq "$(grep -c . "$T/asked")" 1 "$how: one read, and none behind the one given up on" ;;
       table|listing) eq "$(grep -c '^-A' "$T/asked")" 0 "$how: no table was read" ;;
     esac
   done
-  rm -f "$T/stall"
-  kill -KILL "$h" 2>/dev/null; wait "$h" 2>/dev/null
 }
 
 t_run_starts_through_reads_of_its_start_that_stall() {
@@ -7013,7 +7046,7 @@ t_run_starts_through_reads_of_its_start_that_stall() {
   # the start is one that could not be read: the run still starts, with that of its holder alone
   # stalling (`holder`, whose start it then publishes as none), its run's alone (`root`), or every
   # read the runner makes of a start (`all`, its own too), with the form of start not yet known.
-  local how hid
+  local how hid want
   local -a STILL=()
   start_stalls() {
     SHMUTANT_PROC=0; unset SHMUTANT_PS_LSTART
@@ -7024,7 +7057,7 @@ t_run_starts_through_reads_of_its_start_that_stall() {
     stall_ps_quietly
   }
   for how in holder root all; do
-    rm -f "$T/stalled"
+    rm -f "$T/stalled" "$T/bounds"
     if ! run_started "$T/$how" start_stalls; then
       fail_ "$how: a read of a start that stalls kept the runner from starting its run"
     else
@@ -7035,6 +7068,8 @@ t_run_starts_through_reads_of_its_start_that_stall() {
       run_ended
       all_gone 50 "$RUN_KID" "$RUN_HOLDER" || fail_ "$how: fixture: the run was left behind: $(listed "${STILL[@]}")"
     fi
+    if [ "$how" = all ]; then want='1 5'; else want=5; fi
+    eq "$(bounds_given)" "$want" "$how: the bounds those reads were given"
     stalled_ps_ended "$how"
   done
 }
@@ -7060,7 +7095,7 @@ t_run_records_through_its_own_snapshots_that_stall() {
     stall_ps_quietly
   }
   for how in return exit bare trap; do
-    rm -f "$T/stalled" "$T/said" "$T/w-$how.result"; mkdir -p "$T/w-$how"
+    rm -f "$T/stalled" "$T/bounds" "$T/said" "$T/w-$how.result"; mkdir -p "$T/w-$how"
     set -m
     ( wrap_stalls
       cb() {
@@ -7084,7 +7119,8 @@ t_run_records_through_its_own_snapshots_that_stall() {
       wait "$bg" 2>/dev/null
       want="${wants[$how]}"
       eq "$(cat "$T/w-$how.result")" "status=$want unsettled=0" "$how: the run returns with its callback's status, and is not unsettled"
-      eq "$(cat "$T/said" 2>/dev/null)" '' "$how: a snapshot given up on is said nowhere"
+      { [ -e "$T/said" ] && [ ! -s "$T/said" ]; } || fail_ "$how: a snapshot given up on is said nowhere: [$(head -c 200 "$T/said" 2>&1)]"
+      eq "$(bounds_given)" 10 "$how: the bound those reads were given"
     fi
     stalled_ps_ended "$how"
   done
@@ -7098,7 +7134,7 @@ t_pool_spawns_through_a_read_of_its_worker_that_stalls() {
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
   shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
-  rm -f "$T/stalled" "$T/said" "$T/prc"
+  rm -f "$T/stalled" "$T/bounds" "$T/said" "$T/prc"
   set -m
   ( SHMUTANT_PROC=0
     stalls() { case " ${FUNCNAME[*]} " in *" _shmutant_identity _shmutant_run_jobs_loop "*) return 0 ;; esac; return 1; }
@@ -7114,7 +7150,8 @@ t_pool_spawns_through_a_read_of_its_worker_that_stalls() {
     wait "$bg" 2>/dev/null
     eq "$(cat "$T/prc")" 0 "the pool returns as it would have [$(head -c 300 "$T/perr")]"
     has "$(cat "$T/pout")" $'\tkilled\t' 'and scores its row'
-    eq "$(cat "$T/said" 2>/dev/null)" '' 'a read given up on at a spawn is said nowhere'
+    { [ -e "$T/said" ] && [ ! -s "$T/said" ]; } || fail_ "a read given up on at a spawn is said nowhere: [$(head -c 200 "$T/said" 2>&1)]"
+    eq "$(bounds_given)" 10 'the bound that read was given'
   fi
   stalled_ps_ended 'spawn'
 }
@@ -7126,7 +7163,7 @@ t_cli_runs_through_reads_outside_a_freeze_that_stall() {
   # still runs its plan and exits as the plan did, with the holder's read stalling (`holder`), the
   # subshell's (`child`), the sampler's (`sampler`), or the snapshot at the subshell's end (`leave`).
   # None of those reads is a freeze's, whatever the CLI's caller left in SHMUTANT_PS_UNSETTLES.
-  local how bg i
+  local how bg i want
   mk_toy "$T/toy"; TOY="$T/toy"
   cat > "$T/toy/plan.sh" <<'PLAN'
 prepare() { shmutant_copy_tree "$SHMUTANT_PLAN_DIR" "$1"; }
@@ -7135,7 +7172,7 @@ shmutant_target lib.sh
 shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
 PLAN
   for how in holder child sampler leave; do
-    rm -f "$T/stalled" "$T/c-$how.rc"
+    rm -f "$T/stalled" "$T/bounds" "$T/c-$how.rc"
     set -m
     rm -f "$T/said"
     ( SHMUTANT_PROC=0; unset SHMUTANT_CLI_CHILD
@@ -7159,7 +7196,9 @@ PLAN
       wait "$bg" 2>/dev/null
       eq "$(cat "$T/c-$how.rc")" 0 "$how: the CLI exits as its plan did [$(head -c 300 "$T/c-$how.err")]"
       has "$(cat "$T/c-$how.out")" $'\trow\tkilled\ta\t' "$how: and scores its row"
-      eq "$(cat "$T/said" 2>/dev/null)" '' "$how: a read given up on outside a freeze is said nowhere"
+      { [ -e "$T/said" ] && [ ! -s "$T/said" ]; } || fail_ "$how: a read given up on outside a freeze is said nowhere: [$(head -c 200 "$T/said" 2>&1)]"
+      if [ "$how" = sampler ]; then want=5; else want=10; fi
+      eq "$(bounds_given)" "$want" "$how: the bound those reads were given"
     fi
     stalled_ps_ended "$how"
   done
