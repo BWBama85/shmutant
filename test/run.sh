@@ -308,8 +308,37 @@ end_sampler_group() {
 # no other that comes to hold its number. One whose identity could not be read is left as `pid:`.
 # The record is written whole or not at all: a cut identity would read as a pid reused since, and
 # hide the process it names. With none written, left_running fails the check instead.
-note_started() {
-  printf '%s:%s\n' "$!" "$(_shmutant_identity "$!" 2>/dev/null)" > "$1.part" && mv -f -- "$1.part" "$1"
+note_started() { note_pid "$1" "$!"; }
+
+# note_pid <file> <pid> — note_started for a process the caller names: one that is not its last
+# background job. <file> is a name in the unit's own directory, which nothing but the unit writes:
+# the record goes through <file>.part there, and this is no defence against what another process
+# could put at either name meanwhile. It declares no name, so no variable of a caller's is read or
+# set.
+note_pid() {
+  printf '%s:%s\n' "$2" "$(_shmutant_identity "$2" 2>/dev/null)" > "$1.part" && mv -f -- "$1.part" "$1"
+}
+
+# note_written <file> <pidfile> [looks] — record in <file>, as note_pid does, the process whose pid
+# is in <pidfile>: one that wrote its own there (`echo "$$" > …`, the number alone on one line, in
+# one write), or whose parent wrote it. That is how a unit records a process it cannot note itself:
+# one a callback runs in the foreground, one started inside a `bash -c`, one of a pool whose
+# identity reads are stubbed (the caller's are not). Waits for <pidfile> at most <looks> times a
+# tenth of a second apart (300, thirty seconds, when not given: the process has to be started
+# first, and a loaded host is late with that, not wrong). <file> must be a name nothing is at yet:
+# a call that records nothing then leaves no earlier record for a check to pass on. <pidfile> is
+# the fixture's own output, read as bash reads a file into a word (final newlines dropped, and a
+# NUL), and anything but one decimal pid is refused. 1, recording nothing, when something is at
+# <file>, when no pid came, and when what came is not one; 2 for <looks> that is not a decimal
+# from 1 to 9999. It declares no name either: the looks are counted in its own arguments.
+note_written() {
+  set -- "$1" "$2" "${3-300}" 1
+  [[ "$3" =~ ^[1-9][0-9]{0,3}$ ]] || { echo "note_written: looks must be 1 to 9999, got [$3]" >&2; return 2; }
+  [ ! -e "$1" ] && [ ! -L "$1" ] || return 1
+  until [ -s "$2" ]; do [ "$4" -lt "$3" ] || return 1; set -- "$1" "$2" "$3" "$(($4 + 1))"; sleep 0.1; done
+  { set -- "$1" "$(< "$2")"; } 2>/dev/null
+  [[ "$2" =~ ^[1-9][0-9]*$ ]] || return 1
+  note_pid "$1" "$2"
 }
 
 # seen_by_sampler <pid> — in a unit of a copy of this suite, wait until its sampler has recorded
@@ -3605,10 +3634,12 @@ t_verdict_timeout_kills_a_descendant_seen_before_it_detached() {
   # The intermediate lives through two watchdog polls then exits, so at the deadline the
   # survivor has ppid 1 and a process group that is not the leader's; only a snapshot taken
   # while it was still attached can name it.
-  detaching_run() { set -m; bash -c 'bash -c "sleep 7; touch \"\$1/finished\"" _ "$1" & sleep 1.3' _ "$T" & sleep 4; }
+  # The survivor sleeps long and is recorded, from the pid the intermediate wrote: the check waits
+  # on it rather than on a fixed window, as in t_verdict_timeout.
+  detaching_run() { set -m; bash -c 'bash -c "sleep 30; touch \"\$1/finished\"" _ "$1" & echo "$!" > "$1/detached.pid"; sleep 1.3' _ "$T" & note_written "$T/detached.id" "$T/detached.pid"; sleep 4; }
   SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=2 pool lbl "$T/wd" toy_prepare detaching_run
   eq "$(verdict_of 'hangs')" timeout 'verdict is timeout'
-  sleep 6
+  run_gone "$T/detached.id" 'a descendant that detached before the deadline, after the timeout'
   [ -e "$T/finished" ] && fail_ 'a descendant that detached before the deadline outlived the kill'
 }
 
@@ -3767,10 +3798,18 @@ t_run_leftovers_are_killed_after_a_normal_return() {
   shmutant_reset; shmutant_target lib.sh
   shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
   # returns at once, leaving a helper in its own process group and a plain one in the run's
-  leaky_run() { set -m; bash -c 'sleep 4; touch "$1/escaped"' _ "$T" & bash -c 'bash -c "sleep 4; touch \"\$1/grandchild\"" _ "$1" & wait' _ "$T" & set +m; bash -c 'sleep 4; touch "$1/grouped"' _ "$T" & bash "$1/test.sh"; }
+  # Each helper sleeps long and is recorded, the grandchild from the pid its parent wrote: the check
+  # waits on the three rather than on a fixed window, and a survivor is named by its command line.
+  leaky_run() {
+    set -m; bash -c 'sleep 30; touch "$1/escaped"' _ "$T" & note_started "$T/escaped.id"
+    bash -c 'bash -c "sleep 30; touch \"\$1/grandchild\"" _ "$1" & echo "$!" > "$1/grandchild.pid"; wait' _ "$T" & note_written "$T/grandchild.id" "$T/grandchild.pid"
+    set +m; bash -c 'sleep 30; touch "$1/grouped"' _ "$T" & note_started "$T/grouped.id"
+    bash "$1/test.sh"
+  }
   SHMUTANT_BASELINE=0 pool lbl "$T/wd" toy_prepare leaky_run
   eq "$(verdict_of a)" killed 'the verdict is the callback'"'"'s own'
-  sleep 5
+  if cat "$T/escaped.id" "$T/grandchild.id" "$T/grouped.id" > "$T/helpers.ids" 2>/dev/null; then run_gone "$T/helpers.ids" 'a helper the run left behind, after the verdict'
+  else fail_ 'fixture: the run did not record all three of its helpers'; fi
   [ -e "$T/grouped" ] && fail_ 'a helper left in the run'"'"'s process group outlived the verdict'
   [ -e "$T/escaped" ] && fail_ 'a helper in its own process group, seen by the watchdog, outlived the verdict'
   [ -e "$T/grandchild" ] && fail_ 'a child of a retained leftover outlived the verdict: retained victims must be searched from too'
@@ -3782,12 +3821,13 @@ t_run_cannot_redirect_the_leftover_record() {
   shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
   printf 'precious\n' > "$T/victim"
   # shellcheck disable=SC2034
-  meddling_run() { mark="$T/victim"; left_w=1; set -m; bash -c 'sleep 4; touch "$1/escaped"' _ "$T" & set +m; bash "$1/test.sh"; }
+  # The helper sleeps long and is recorded: the check waits on it rather than on a fixed window.
+  meddling_run() { mark="$T/victim"; left_w=1; set -m; bash -c 'sleep 30; touch "$1/escaped"' _ "$T" & note_started "$T/escaped.id"; set +m; bash "$1/test.sh"; }
   SHMUTANT_BASELINE=0 pool lbl "$T/wd" toy_prepare meddling_run
   eq "$(verdict_of a)" killed 'the verdict is the callback'"'"'s own'
   eq "$(cat "$T/victim")" precious 'a callback assigning mark cannot point the leftover record at a caller file'
   [ -e "$T/victim.left" ] && fail_ 'the leftover record was written beside the caller file'
-  sleep 5
+  run_gone "$T/escaped.id" 'the escaped helper, whose leftover record a callback tried to redirect'
   [ -e "$T/escaped" ] && fail_ 'the escaped helper survived because the leftover record was lost'
 }
 
@@ -3958,24 +3998,27 @@ t_run_cannot_lose_the_leftover_record_by_locking_its_dir() {
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
   shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
-  # leaves an escaped helper, then makes its worker directory unwritable before returning
-  locking_run() { set -m; bash -c 'sleep 4; touch "$1/escaped"' _ "$T" & set +m; local rc; bash "$1/test.sh"; rc=$?; chmod 555 "$1/.."; return "$rc"; }
+  # leaves an escaped helper, then makes its worker directory unwritable before returning. Each
+  # helper below sleeps long and is recorded in the unit's directory, outside the one a callback
+  # locks: the checks wait on the records rather than on a fixed window.
+  locking_run() { set -m; bash -c 'sleep 30; touch "$1/escaped"' _ "$T" & note_started "$T/escaped.id"; set +m; local rc; bash "$1/test.sh"; rc=$?; chmod 555 "$1/.."; return "$rc"; }
   SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=0 pool lbl "$T/wd" toy_prepare locking_run
   chmod 755 "$T/wd/mut-0" 2>/dev/null
   eq "$(verdict_of a)" killed 'the verdict is the callback'"'"'s own'
-  sleep 5
+  run_gone "$T/escaped.id" 'the helper of a run that locked its worker directory'
   [ -e "$T/escaped" ] && fail_ 'the leftover record was lost to a locked directory and the helper survived'
-  untrapping_run() { trap - EXIT; set -m; bash -c 'sleep 4; touch "$1/escaped2"' _ "$T" & set +m; bash "$1/test.sh"; }
+  untrapping_run() { trap - EXIT; set -m; bash -c 'sleep 30; touch "$1/escaped2"' _ "$T" & note_started "$T/escaped2.id"; set +m; bash "$1/test.sh"; }
   SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=0 pool lbl "$T/wd2" toy_prepare untrapping_run
-  sleep 5
+  run_gone "$T/escaped2.id" 'the helper of a run that dropped the EXIT trap'
   [ -e "$T/escaped2" ] && fail_ 'a callback that dropped the EXIT trap escaped the snapshot taken on return'
-  exiting_run() { trap - EXIT; set -m; bash -c 'sleep 4; touch "$1/escaped3"' _ "$T" & set +m; exit 0; }
+  exiting_run() { trap - EXIT; set -m; bash -c 'sleep 30; touch "$1/escaped3"' _ "$T" & note_started "$T/escaped3.id"; set +m; exit 0; }
   SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=0 pool lbl "$T/wd3" toy_prepare exiting_run
-  sleep 5
+  run_gone "$T/escaped3.id" 'the helper of a run that dropped the EXIT trap and left by exit'
   [ -e "$T/escaped3" ] && fail_ 'a callback that dropped the EXIT trap and left by exit escaped the snapshot'
 }
 
-leaky_c() { set -m; bash -c 'sleep 3; touch "$1/escaped-c"' _ "$T" & set +m; bash "$1/test.sh"; }
+# The helper sleeps long and is recorded: its unit waits on it rather than on a fixed window.
+leaky_c() { set -m; bash -c 'sleep 30; touch "$1/escaped-c"' _ "$T" & note_started "$T/escaped-c.id"; set +m; bash "$1/test.sh"; }
 
 t_run_cannot_forge_its_output_or_the_marker() {
   mk_toy "$T/toy"; TOY="$T/toy"
@@ -3993,7 +4036,7 @@ t_run_cannot_forge_its_output_or_the_marker() {
   ( set -C; SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd3" toy_prepare toy_run > "$T/o" 2>/dev/null ); rc_is $? 0 'the channels open under a caller noclobber'
   has "$(cat "$T/o")" $'\tkilled\t' 'and the row is scored'
   ( set -C; SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=0 shmutant_pool lbl "$T/wd4" toy_prepare leaky_c > /dev/null 2>&1 )
-  sleep 4
+  run_gone "$T/escaped-c.id" 'the escaped helper of a run under noclobber'
   [ -e "$T/escaped-c" ] && fail_ 'under noclobber the leftover record was not opened and an escaped helper survived'
 }
 
@@ -4013,16 +4056,18 @@ t_pool_never_trusts_a_verdict_from_a_replaced_directory() {
 t_run_errexit_failure_still_snapshots_leftovers() {
   mk_toy "$T/toy"
   # In a fresh process: this suite runs each unit on the left of ||, where bash ignores errexit.
+  # The helper sleeps long and is recorded, by the suite's recorders handed to the fresh process as
+  # their text: the check waits on the record rather than on a fixed window.
   export TOY="$T/toy" T
   bash -c '
-    . "$1"
+    . "$1"; eval "$2"
     toy_prepare() { shmutant_copy_tree "$TOY" "$1"; }
-    strict_leaky_run() { set -e; set -m; bash -c "sleep 4; touch \"\$1/escaped\"" _ "$T" & set +m; false; echo "FAIL: add-works: unreachable"; }
+    strict_leaky_run() { set -e; set -m; bash -c "sleep 30; touch \"\$1/escaped\"" _ "$T" & note_started "$T/escaped.id"; set +m; false; echo "FAIL: add-works: unreachable"; }
     shmutant_target lib.sh
     shmutant_mut a "\$1 + \$2" "\$1 - \$2" add-works
-    SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=0 shmutant_pool lbl "$T/wd" toy_prepare strict_leaky_run 2>/dev/null' _ "$SHMUTANT" > "$T/o"
+    SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=0 shmutant_pool lbl "$T/wd" toy_prepare strict_leaky_run 2>/dev/null' _ "$SHMUTANT" "$(declare -f note_started note_pid)" > "$T/o"
   eq "$(awk -F'\t' '$3 == "row" { print $4 }' "$T/o")" aborted 'the callback'"'"'s own errexit ended the run: aborted'
-  sleep 5
+  run_gone "$T/escaped.id" 'the helper of a callback that errexit-failed'
   [ -e "$T/escaped" ] && fail_ 'a helper left by a callback that errexit-failed outlived the verdict: the snapshot did not run'
 }
 
@@ -4101,27 +4146,29 @@ t_pool_interrupted_kills_its_workers() {
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
   shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
-  unbounded_run() { : > "$T/started"; bash -c 'sleep 4; touch "$1/finished"' _ "$T"; }
+  # Each run's command sleeps long and writes its own pid once it runs (the second once its trap is
+  # set), which this shell records before the interrupt, reading the identity itself: the pool of the
+  # third case reads none. The checks wait on the records rather than on a fixed window.
+  unbounded_run() { bash -c 'echo "$$" > "$1/worker.pid"; sleep 30; touch "$1/finished"' _ "$T"; }
   ( SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=0 shmutant_pool lbl "$T/wd" toy_prepare unbounded_run > /dev/null 2>&1 ) & local pp=$!
-  wait_for "$T/started" || fail_ 'the run never started'
+  note_written "$T/worker.id" "$T/worker.pid" || fail_ 'the run never started'
   kill -TERM "$pp"; wait "$pp" 2>/dev/null
-  # past the worker's own four seconds by a margin: a worker left alive touches the marker late
-  sleep 6
+  run_gone "$T/worker.id" 'a worker of the pool that was interrupted with TERM'
   [ -e "$T/finished" ] && fail_ 'a worker outlived the pool that was interrupted with TERM'
-  stubborn_run() { set -m; bash -c 'trap "" TERM; : > "$1/started2"; sleep 5; touch "$1/stubborn"' _ "$T" & wait; }
+  stubborn_run() { set -m; bash -c 'trap "" TERM; echo "$$" > "$1/stubborn.pid"; sleep 30; touch "$1/stubborn"' _ "$T" & wait; }
   ( SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=0 shmutant_pool lbl "$T/wd2" toy_prepare stubborn_run > /dev/null 2>&1 ) & pp=$!
-  wait_for "$T/started2" || fail_ 'the stubborn run never started'
+  note_written "$T/stubborn.id" "$T/stubborn.pid" || fail_ 'the stubborn run never started'
   kill -TERM "$pp"; wait "$pp" 2>/dev/null
-  sleep 7
+  run_gone "$T/stubborn.id" 'a TERM-ignoring escaped descendant of the interrupted pool'
   [ -e "$T/stubborn" ] && fail_ 'a TERM-ignoring escaped descendant outlived the interrupted pool: the TERM victims were not retained for KILL'
   # with nothing readable from the process table, the run's group is still ended by number,
   # through the group and holder the runner reported on its channel
-  plain_run() { : > "$T/started3"; bash -c 'sleep 4; touch "$1/finished3"' _ "$T"; }
+  plain_run() { bash -c 'echo "$$" > "$1/plain.pid"; sleep 30; touch "$1/finished3"' _ "$T"; }
   ( _shmutant_identity() { return 1; }; _shmutant_identity_table() { SHMUTANT_START=(); }; _shmutant_descendants() { :; }; _shmutant_descendants_started() { :; }
     SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=0 shmutant_pool lbl "$T/wd3" toy_prepare plain_run > /dev/null 2>&1 ) & pp=$!
-  wait_for "$T/started3" || fail_ 'the no-ps run never started'
+  note_written "$T/plain.id" "$T/plain.pid" || fail_ 'the no-ps run never started'
   kill -TERM "$pp"; wait "$pp" 2>/dev/null
-  sleep 6
+  run_gone "$T/plain.id" 'the run of an interrupted pool that could read no process table'
   [ -e "$T/finished3" ] && fail_ 'with no process table, an interrupted run outlived the pool: its group was not ended by number'
 }
 
@@ -7223,17 +7270,19 @@ t_pool_abort_waits_only_for_its_helpers() {
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
   shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
-  unbounded_run() { : > "$T/started"; bash -c 'sleep 4; touch "$1/finished"' _ "$T"; }
+  # The worker's command sleeps long and writes its own pid once it runs, which this shell records
+  # before the interrupt: the last check waits on that record rather than on a fixed window.
+  unbounded_run() { bash -c 'echo "$$" > "$1/worker.pid"; sleep 30; touch "$1/finished"' _ "$T"; }
   # the caller has a long job of its own; the interrupt must not wait for it
   ( sleep 30 & echo "$!" > "$T/own.pid"; SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=0 shmutant_pool lbl "$T/wd" toy_prepare unbounded_run > /dev/null 2>&1 ) & local pp=$!
-  wait_for "$T/started" || fail_ 'the run never started'
+  note_written "$T/worker.id" "$T/worker.pid" || fail_ 'the run never started'
   local own; own="$(cat "$T/own.pid" 2>/dev/null)"
   kill -TERM "$pp"; wait "$pp" 2>/dev/null
   # Timed by nothing: a handler that waited on the caller's job returns only once that job has
   # ended, and the caller's job is the caller's to end, so the pool must have left it running.
   if [ -z "$own" ]; then fail_ 'fixture: the caller'"'"'s own job never started'
   elif ! kill -0 "$own" 2>/dev/null; then fail_ 'the interrupt handler blocked on the caller'"'"'s own background job'; fi
-  sleep 4
+  run_gone "$T/worker.id" 'the worker of the interrupted pool'
   [ -e "$T/finished" ] && fail_ 'the worker survived the interrupt'
   [ -z "$own" ] || { kill -KILL "$own" 2>/dev/null; wait_gone "$own"; }
 }
@@ -7295,17 +7344,19 @@ t_verdict_timeout_kills_a_descendant_seen_then_reparented() {
   # at the deadline A is reachable only through what the watchdog retained.
   # I lives through two watchdog polls and dies well before the deadline: one poll is a
   # coin-flip on a loaded host.
-  orphaning_run() { set -m; bash -c 'bash -c "sleep 7; touch \"\$1/orphan\"" _ "$1" & echo "$!" > "$1/orphan.pid"; sleep 1.3' _ "$T" & sleep 4; }
+  # A sleeps long and is recorded, from the pid I wrote: each check waits on its record rather than
+  # on a fixed window. The two runs name their files apart ($nth), so no record or marker of the
+  # first can stand in for the second's.
+  local nth=first
+  orphaning_run() { set -m; bash -c 'bash -c "sleep 30; touch \"\$1/orphan-\$2\"" _ "$1" "$2" & echo "$!" > "$1/orphan-$2.pid"; sleep 1.3' _ "$T" "$nth" & note_written "$T/orphan-$nth.id" "$T/orphan-$nth.pid"; sleep 4; }
   SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=2 pool lbl "$T/wd" toy_prepare orphaning_run
   eq "$(verdict_of 'hangs')" timeout 'verdict is timeout'
-  sleep 6
-  [ -e "$T/orphan" ] && fail_ 'a descendant seen by the watchdog and then reparented outlived the timeout'
-  local alive; alive="$(left_running "$T/orphan.pid")" || fail_ 'fixture: the run never recorded the descendant'
-  [ -z "$alive" ] || fail_ 'the reparented descendant is still there'
-  rm -f "$T/orphan"
+  run_gone "$T/orphan-first.id" 'a descendant seen by the watchdog and then reparented, after the timeout'
+  [ -e "$T/orphan-first" ] && fail_ 'a descendant seen by the watchdog and then reparented outlived the timeout'
+  nth=second
   ( IFS=''; SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=2 shmutant_pool lbl "$T/wd2" toy_prepare orphaning_run > /dev/null 2>&1 )
-  sleep 6
-  [ -e "$T/orphan" ] && fail_ 'with the caller IFS empty, the retained list was not split and the reparented descendant survived'
+  run_gone "$T/orphan-second.id" 'with the caller IFS empty, the reparented descendant, after the timeout'
+  [ -e "$T/orphan-second" ] && fail_ 'with the caller IFS empty, the retained list was not split and the reparented descendant survived'
 }
 
 # shellcheck disable=SC2034
@@ -7313,20 +7364,29 @@ t_verdict_timeout_without_an_identity() {
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
   shmutant_mut 'hangs' '$1 + $2' '$1 - $2' 'add-works'
-  slow_run() { bash -c 'sleep 6; touch "$1/finished"' _ "$T"; }
+  # The run's command sleeps long and is recorded as it starts, as in t_verdict_timeout: the last
+  # check waits on that record rather than on a fixed window. The record alone reads an identity
+  # (the stub lets note_pid through to the read it replaced), since one without could not be told
+  # from a reused pid; the pool still reads none.
+  slow_run() { bash -c 'sleep 30; touch "$1/finished"' _ "$T" & note_started "$T/slow.id"; wait "$!"; }
+  eval "_real_identity() $(declare -f _shmutant_identity | sed 1d)"
   # No identity can be read for the wrapper (no usable ps): the root is still the runner's own
   # unreaped child, and the bound must still end it rather than wait forever.
   # A pool that never returns is ended as a whole process group (D7).
   set -m
-  ( _shmutant_identity() { return 1; }; _shmutant_identity_table() { SHMUTANT_START=(); }; _shmutant_descendants() { :; }
+  ( _shmutant_identity() { [ "${FUNCNAME[1]}" != note_pid ] || { _real_identity "$@"; return; }; return 1; }; _shmutant_identity_table() { SHMUTANT_START=(); }; _shmutant_descendants() { :; }
     SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=1 shmutant_pool lbl "$T/wd" toy_prepare slow_run > "$T/out" 2>&1
     touch "$T/pool-done" ) &
   local bg=$!; set +m
   local i=0; until [ -e "$T/pool-done" ]; do i=$((i + 1)); [ "$i" -lt 150 ] || break; sleep 0.1; done
-  if [ ! -e "$T/pool-done" ]; then kill -KILL -- -"$bg" 2>/dev/null; wait "$bg" 2>/dev/null; fail_ 'without an identity the timeout never ended the run'; return; fi
+  if [ ! -e "$T/pool-done" ]; then
+    kill -KILL -- -"$bg" 2>/dev/null; wait "$bg" 2>/dev/null; fail_ 'without an identity the timeout never ended the run'
+    # The run is in a group of its own, which the kill above did not reach: ended here.
+    run_gone "$T/slow.id" 'the run of a pool that never returned' 1; return
+  fi
   wait "$bg" 2>/dev/null
   has "$(cat "$T/out")" 'timeout' 'the verdict is timeout'
-  sleep 6
+  run_gone "$T/slow.id" 'the run, after a timeout without an identity'
   [ -e "$T/finished" ] && fail_ 'the run outlived its timeout'
 }
 
@@ -7337,11 +7397,15 @@ t_returned_run_without_an_identity_is_still_cleaned_up() {
   shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
   # The callback returns after backgrounding a helper in its own group, and nothing about the
   # process table can be read: the group the wrapper ran in must still be ended by number.
-  leaving_run() { bash -c 'sleep 4; touch "$1/escaped"' _ "$T" & bash "$1/test.sh"; }
-  ( _shmutant_identity() { return 1; }; _shmutant_identity_table() { SHMUTANT_START=(); }; _shmutant_descendants() { :; }; _shmutant_descendants_started() { :; }
+  # The helper sleeps long and is recorded: the last check waits on it rather than on a fixed
+  # window. The record alone reads an identity (the stub lets note_pid through to the read it
+  # replaced), since one without could not be told from a reused pid; the pool still reads none.
+  leaving_run() { bash -c 'sleep 30; touch "$1/escaped"' _ "$T" & note_started "$T/escaped.id"; bash "$1/test.sh"; }
+  eval "_real_identity() $(declare -f _shmutant_identity | sed 1d)"
+  ( _shmutant_identity() { [ "${FUNCNAME[1]}" != note_pid ] || { _real_identity "$@"; return; }; return 1; }; _shmutant_identity_table() { SHMUTANT_START=(); }; _shmutant_descendants() { :; }; _shmutant_descendants_started() { :; }
     SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=0 shmutant_pool lbl "$T/wd" toy_prepare leaving_run > "$T/out" 2>&1 )
   has "$(cat "$T/out")" 'killed' 'the verdict is the callback'"'"'s own'
-  sleep 5
+  run_gone "$T/escaped.id" 'a helper left in the wrapper'"'"'s group, after a normal return with no process identified'
   [ -e "$T/escaped" ] && fail_ 'a helper left in the wrapper'"'"'s group survived a normal return when no process could be identified'
 }
 
@@ -7354,13 +7418,23 @@ t_run_group_is_not_signalled_by_number_without_its_holder() {
   # with nothing readable from the process table either, what it left behind is not signalled
   # by number, and the run says so.
   # the holder is the member of the run's own process group that is neither the run nor its child
-  holder_killing_run() { local me=$BASHPID h; while read -r h; do kill -KILL "$h" 2>/dev/null; done < <(ps -A -o pid= -o ppid= -o pgid= | awk -v g="$me" '$3 == g && $1 != g && $2 != g { print $1 }'); bash -c 'sleep 3; touch "$1/survivor"' _ "$T" & bash "$1/test.sh"; }
+  # What it leaves behind waits for this unit's word ($T/go, given once the pool has returned) and
+  # then writes its marker, so it is there for all of the pool's cleanup however long that takes,
+  # and gives up after a minute on its own. The marker is polled for, not looked for after a fixed
+  # sleep: a slow host is late with it, not wrong. Its pid is written so that the unit ends only
+  # once it has gone.
+  holder_killing_run() { local me=$BASHPID h; while read -r h; do kill -KILL "$h" 2>/dev/null; done < <(ps -A -o pid= -o ppid= -o pgid= | awk -v g="$me" '$3 == g && $1 != g && $2 != g { print $1 }'); bash -c 'echo "$$" > "$1/survivor.pid"; i=0; until [ -e "$1/go" ]; do i=$((i + 1)); [ "$i" -lt 600 ] || exit 1; sleep 0.1; done; touch "$1/survivor"' _ "$T" & bash "$1/test.sh"; }
   ( _shmutant_identity() { return 1; }; _shmutant_identity_table() { SHMUTANT_START=(); }; _shmutant_descendants() { :; }; _shmutant_descendants_started() { :; }
     SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=0 shmutant_pool lbl "$T/wd" toy_prepare holder_killing_run > "$T/out" 2> "$T/err" )
   has "$(cat "$T/out")" 'killed' 'the verdict is the callback'"'"'s own'
   has "$(cat "$T/err")" 'could not be verified' 'the unverifiable group is reported'
-  sleep 4
-  [ -e "$T/survivor" ] || fail_ 'a group whose holder was gone was still signalled by number'
+  # Recorded by this shell, whose identity reads are its own, while the survivor still waits. Its
+  # pid is waited for: the pool can return before the survivor has run far enough to write it.
+  note_written "$T/survivor.id" "$T/survivor.pid" || fail_ 'what the run left behind never wrote its pid: it did not start, or was ended before it could'
+  : > "$T/go"
+  # Its last act is the marker: gone at once after it, or ended here.
+  if wait_for "$T/survivor"; then run_gone "$T/survivor.id" 'what the run left behind, once it had written its marker' 50
+  else fail_ 'a group whose holder was gone was still signalled by number'; fi
 }
 
 t_diag_snapshot_records_a_run_whose_group_could_not_be_verified() {
@@ -7753,15 +7827,22 @@ t_pool_aborts_running_workers_when_a_dir_cannot_be_recreated() {
   shmutant_reset; shmutant_target lib.sh
   shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
   shmutant_mut 'b' '$1 + $2' '$1 * $2' 'add-works'
-  hanging_run() { : > "$T/started"; bash -c 'sleep 30; touch "$1/finished"' _ "$T"; }
+  # The worker's command writes its own pid once it runs. An observer of this shell's records it and
+  # only then marks the run started, so the abort held for that mark meets a worker already recorded,
+  # and the last check of this case waits on the record.
+  hanging_run() { bash -c 'echo "$$" > "$1/hanging.pid"; sleep 30; touch "$1/finished"' _ "$T"; }
   make_unremovable "$T/wd/mut-1/held" || { echo "note: $_unit: no way to make a directory unremovable here; skipped"; return; }
   printf 'shmutant workdir\n' > "$T/wd/.shmutant"
   # The startup failure on mut-1 is held until mut-0 is RUNNING its callback: the abort must
   # then end a live worker and remove a clone that exists, which is what the assertions below
   # observe (a worker still fingerprinting pristine when aborted has neither).
   eval "$(declare -f _shmutant_fresh_dir | sed '1s/_shmutant_fresh_dir/_shmutant_fresh_dir_real/')"
-  _shmutant_fresh_dir() { local i=0; case "$1" in */mut-1) until [ -e "$T/${WAIT_FOR:-started}" ] || [ "$i" -ge 100 ]; do i=$((i + 1)); sleep 0.1; done ;; esac; _shmutant_fresh_dir_real "$@"; }
+  # Held up to thirty seconds, which is what the first case's observer may take to record the worker
+  # before it marks the run started.
+  _shmutant_fresh_dir() { local i=0; case "$1" in */mut-1) until [ -e "$T/${WAIT_FOR:-started}" ] || [ "$i" -ge 300 ]; do i=$((i + 1)); sleep 0.1; done ;; esac; _shmutant_fresh_dir_real "$@"; }
+  ( note_written "$T/hanging.id" "$T/hanging.pid" && : > "$T/started" ) & local observer=$!
   WAIT_FOR=started SHMUTANT_JOBS=2 SHMUTANT_BASELINE=0 SHMUTANT_TIMEOUT=0 pool lbl "$T/wd" toy_prepare hanging_run
+  wait "$observer" 2>/dev/null
   unmake_unremovable "$T/wd/mut-1/held"
   [ -e "$T/started" ] || fail_ 'fixture: the running worker never started its callback before the abort'
   rc_is "$RC" 2 'the harness error is reported'
@@ -7769,7 +7850,7 @@ t_pool_aborts_running_workers_when_a_dir_cannot_be_recreated() {
   # the worker's last act is the marker
   [ -e "$T/finished" ] && fail_ 'the pool waited on the unbounded worker instead of ending it'
   [ -e "$T/wd/mut-0/tree" ] && fail_ 'the ended worker'"'"'s clone was left behind'
-  sleep 1
+  run_gone "$T/hanging.id" 'the running worker, after the abort'
   [ -e "$T/finished" ] && fail_ 'the running worker survived the abort'
   # with a TERM-ignoring escaped descendant, the abort must not return before it is gone. The run
   # marks itself started only once that descendant is recorded and has said its TERM trap is set,
@@ -8892,14 +8973,17 @@ t_cli_interrupted_ends_the_command_its_plan_execd_into() {
   mk_cli_toy
   mkdir -p "$T/tmpd"
   local cli
-  { cat "$T/toy/plan-base.sh"; printf 'exec bash -c %q _ %q\n' 'sleep 4; touch "$1/execd"' "$T/toy"; } > "$T/toy/plan-exec-hang.sh"
+  # The command sleeps long and writes its own pid once the plan has execd into it, which this shell
+  # records before the TERM: the interrupt meets the command, not a plan still loading, and the last
+  # check waits on the record rather than on a fixed window.
+  { cat "$T/toy/plan-base.sh"; printf 'exec bash -c %q _ %q %q\n' 'echo "$$" > "$2/execd.pid"; sleep 30; touch "$1/execd"' "$T/toy" "$T"; } > "$T/toy/plan-exec-hang.sh"
   TMPDIR="$T/tmpd" bash "$SHMUTANT" run "$T/toy/plan-exec-hang.sh" --timeout 0 > /dev/null 2>&1 & cli=$!
-  sleep 1
+  note_written "$T/execd.id" "$T/execd.pid" || fail_ 'fixture: the plan never execd into its command'
   # Timed by nothing: a CLI that blocked on the command instead of killing it returns only once the
   # command has ended, and the command's last act is the marker.
   kill -TERM "$cli"; wait "$cli" 2>/dev/null
   [ -e "$T/toy/execd" ] && fail_ 'interrupting a CLI whose plan execd a command blocked instead of killing it'
-  sleep 4
+  run_gone "$T/execd.id" 'the command the plan execd into, after the interrupted CLI'
   [ -e "$T/toy/execd" ] && fail_ 'the command the plan execd into outlived the interrupted CLI'
 }
 
@@ -10665,6 +10749,50 @@ t_left_running_names_only_a_recorded_process_still_running() {
   kill -KILL "$p"; wait "$p" 2>/dev/null
   out="$(left_running "$T/live.id")"; rc_is $? 0 'a record of a process that has exited is still read'
   eq "$out" '' 'and names nothing'
+}
+
+t_note_written_records_the_process_a_pid_file_names() {
+  # A unit records a process it did not start itself through note_written: the pid another wrote to
+  # a file, with the identity read then (note_pid). No pid within its looks, a file that holds
+  # anything but one pid, or a record already at its file records nothing and says so by its status,
+  # so a check on that record fails instead of passing on nothing, or on an earlier call's.
+  local p w c
+  sleep 30 & p=$!
+  note_pid "$T/named.id" "$p"; rc_is $? 0 'a named process is recorded'
+  case "$(cat "$T/named.id" 2>/dev/null)" in "$p:"?*) ;; *) fail_ "note_pid recorded [$(cat "$T/named.id" 2>/dev/null)], not $p with an identity" ;; esac
+  ( set -C; note_pid "$T/noclobber.id" "$p" ); rc_is $? 0 'a record at a new name is written under a caller'"'"'s noclobber'
+  eq "$(cat "$T/noclobber.id" 2>/dev/null)" "$(cat "$T/named.id" 2>/dev/null)" 'and is whole'
+  ( sleep 0.3; echo "$p" > "$T/late.pid" ) & w=$!
+  note_written "$T/late.id" "$T/late.pid"; rc_is $? 0 'a pid file written while it waits is read'
+  wait "$w"
+  eq "$(cat "$T/late.id" 2>/dev/null)" "$(cat "$T/named.id" 2>/dev/null)" 'and names that process with its identity'
+  printf '%s' "$p" > "$T/cut.pid"
+  note_written "$T/cut.id" "$T/cut.pid" 1; rc_is $? 0 'a pid without its newline is still read'
+  eq "$(cat "$T/cut.id" 2>/dev/null)" "$(cat "$T/named.id" 2>/dev/null)" 'and recorded'
+  note_written "$T/none.id" "$T/none.pid" 2; rc_is $? 1 'no pid file within its looks records nothing'
+  : > "$T/empty.pid"; note_written "$T/empty.id" "$T/empty.pid" 1; rc_is $? 1 'an empty pid file holds no pid'
+  printf 'x%s\n' "$p" > "$T/bad.pid"; note_written "$T/bad.id" "$T/bad.pid" 1; rc_is $? 1 'a line that is not a pid is refused'
+  printf '%s\n%s\n' "$p" "$p" > "$T/two.pid"; note_written "$T/two.id" "$T/two.pid" 1; rc_is $? 1 'two lines are not one pid'
+  [ -e "$T/none.id" ] || [ -e "$T/empty.id" ] || [ -e "$T/bad.id" ] || [ -e "$T/two.id" ] && fail_ 'a record was written for a pid that never came'
+  # A record already at the file is refused at once, with a pid ready to be read: a later call that
+  # recorded nothing would otherwise leave it for a check to pass on. It is left as it was.
+  printf 'earlier\n' > "$T/taken.id"
+  note_written "$T/taken.id" "$T/late.pid" 1; rc_is $? 1 'a file that something is at already is refused'
+  eq "$(cat "$T/taken.id")" earlier 'and is left as it was'
+  for c in '' x 0 01 10000; do
+    note_written "$T/bound.id" "$T/late.pid" "$c" 2>/dev/null; rc_is $? 2 "a bound of [$c] looks is refused"
+  done
+  [ -e "$T/bound.id" ] && fail_ 'a record was written under a bound that was refused'
+  # The recorders declare no name: a caller's variables, readonly and integer, are neither read nor set.
+  ( readonly looks=0 id=1 part=2; declare -ir i=9
+    note_written "$T/readonly.id" "$T/late.pid" 1 ); rc_is $? 0 'a caller'"'"'s readonly variables do not reach the recorders'
+  eq "$(cat "$T/readonly.id" 2>/dev/null)" "$(cat "$T/named.id" 2>/dev/null)" 'and the record is the one made without them'
+  note_written "$T/no-such-dir/x.id" "$T/late.pid" 1 2>/dev/null; rc_is $? 1 'a record that could not be written is reported'
+  # In a subshell: the failure it reports is the answer looked for, not this unit's.
+  ( run_gone "$T/none.id" 'the unrecorded process' 1 ) > /dev/null; rc_is $? 1 'and a wait on a record never written fails'
+  kill -KILL "$p"; wait "$p" 2>/dev/null
+  note_written "$T/ended.id" "$T/late.pid" 1; rc_is $? 0 'a pid whose process has ended is still recorded'
+  eq "$(cat "$T/ended.id" 2>/dev/null)" "$p:" 'without an identity, which a wait on the record refuses'
 }
 
 t_run_gone_fails_and_ends_what_outlives_the_wait() {
