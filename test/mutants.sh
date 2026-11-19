@@ -522,8 +522,8 @@ shmutant_mut 'the row pool runs as a condition, muting callback errexit' \
 
 # --- guards added for the thirteenth review round ---
 shmutant_mut 'the leftover record descriptor is read after the callback could assign it' \
-  '      _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; trap - EXIT; builtin exit "$rrc" )' \
-  '      _shmutant_snapshot "$BASHPID" >&"$left_w"; trap - EXIT; builtin exit "$rrc" )' \
+  '      SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES="" _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; trap - EXIT; builtin exit "$rrc" )' \
+  '      SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES="" _shmutant_snapshot "$BASHPID" >&"$left_w"; trap - EXIT; builtin exit "$rrc" )' \
   't_run_cannot_redirect_the_leftover_record'
 shmutant_mut 'the hard-link preflight scans the top-level .git the copy skips' \
   'find . -path ./.git -prune -o -type f -links +1 -print' \
@@ -584,8 +584,8 @@ shmutant_mut 'the CLI ignores SHMUTANT_KEEP=1 before the pool settles it' \
 
 # --- guards added for the sixteenth review round ---
 shmutant_mut 'the leftover record is written by path after the callback' \
-  '      _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; trap - EXIT; builtin exit "$rrc" )' \
-  '      _shmutant_snapshot "$BASHPID" > "$dir/.left"; trap - EXIT; builtin exit "$rrc" )' \
+  '      SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES="" _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; trap - EXIT; builtin exit "$rrc" )' \
+  '      SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES="" _shmutant_snapshot "$BASHPID" > "$dir/.left"; trap - EXIT; builtin exit "$rrc" )' \
   't_run_cannot_lose_the_leftover_record_by_locking_its_dir'
 shmutant_mut 'a read-only tree of ours is not made removable' \
   '      command -p find "$path" -type d ! -perm -u+rwx -exec chmod u+rwx {} + 2>/dev/null' \
@@ -642,7 +642,7 @@ shmutant_mut 'the completion marker keeps its path while the plan loads' \
   '  :' \
   't_cli_counts_a_plan_that_ends_early_as_a_load_failure'
 shmutant_mut 'the snapshot on return is dropped, leaving only the trap' \
-  '      _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; trap - EXIT; builtin exit "$rrc" )' \
+  '      SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES="" _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; trap - EXIT; builtin exit "$rrc" )' \
   '      trap - EXIT; builtin exit "$rrc" )' \
   't_run_cannot_lose_the_leftover_record_by_locking_its_dir'
 shmutant_mut 'a rejected root is still searched from while freezing' \
@@ -672,7 +672,7 @@ shmutant_mut 'the pool reads its positionals before checking their count' \
 
 # --- guards added for the twentieth review round ---
 shmutant_mut 'a callback that leaves by exit skips the snapshot' \
-  '      builtin eval '"'"'exit() { local s=$?; _shmutant_snapshot "$BASHPID" >&'"'"'"$_shmutant_wrap_left"'"'"'; if [ "$#" -eq 0 ]; then builtin exit "$s"; else builtin exit "$@"; fi; }'"'"'' \
+  '      builtin eval '"'"'exit() { local s=$?; SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES="" _shmutant_snapshot "$BASHPID" >&'"'"'"$_shmutant_wrap_left"'"'"'; if [ "$#" -eq 0 ]; then builtin exit "$s"; else builtin exit "$@"; fi; }'"'"'' \
   '      :' \
   't_run_cannot_lose_the_leftover_record_by_locking_its_dir'
 shmutant_mut 'a verified holder yields no group to signal' \
@@ -722,8 +722,8 @@ shmutant_mut 'a group is signalled by number after its holder is gone' \
   '  :' \
   't_run_group_is_not_signalled_by_number_without_its_holder'
 shmutant_mut 'a bare exit takes the snapshot status' \
-  '      builtin eval '"'"'exit() { local s=$?; _shmutant_snapshot "$BASHPID" >&'"'"'"$_shmutant_wrap_left"'"'"'; if [ "$#" -eq 0 ]; then builtin exit "$s"; else builtin exit "$@"; fi; }'"'"'' \
-  '      builtin eval '"'"'exit() { _shmutant_snapshot "$BASHPID" >&'"'"'"$_shmutant_wrap_left"'"'"'; builtin exit "$@"; }'"'"'' \
+  '      builtin eval '"'"'exit() { local s=$?; SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES="" _shmutant_snapshot "$BASHPID" >&'"'"'"$_shmutant_wrap_left"'"'"'; if [ "$#" -eq 0 ]; then builtin exit "$s"; else builtin exit "$@"; fi; }'"'"'' \
+  '      builtin eval '"'"'exit() { SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES="" _shmutant_snapshot "$BASHPID" >&'"'"'"$_shmutant_wrap_left"'"'"'; builtin exit "$@"; }'"'"'' \
   't_verdict_aborted_status'
 shmutant_mut 'dot components in the destination are created as typed' \
   '  rest="$norm"' \
@@ -847,8 +847,8 @@ shmutant_mut 'the clone directory is made with -p and follows a planted link' \
   '    || ! command -p mkdir -p -- "$dir/tree" 2>/dev/null; then' \
   't_sibling_cannot_plant_in_another_workers_directory'
 shmutant_mut 'the run output is written by its documented name' \
-  '      _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; trap - EXIT; builtin exit "$rrc" ) < /dev/null >&"$out_w" 2>&1 &' \
-  '      _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; trap - EXIT; builtin exit "$rrc" ) < /dev/null >> "$dir/output" 2>&1 &' \
+  '      SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES="" _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; trap - EXIT; builtin exit "$rrc" ) < /dev/null >&"$out_w" 2>&1 &' \
+  '      SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES="" _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; trap - EXIT; builtin exit "$rrc" ) < /dev/null >> "$dir/output" 2>&1 &' \
   't_sibling_cannot_plant_in_another_workers_directory'
 shmutant_mut 'a verdict from a worker that was killed is believed' \
   '  if [ "$wstatus" != 0 ]; then' \
@@ -2927,8 +2927,8 @@ shmutant_mut 'the wrapper keeps its record descriptor in a name the calling shel
   '      _shmutant_wrap_left="$left_w"' \
   't_run_leftover_record_follows_no_nameref_of_the_callers'
 shmutant_mut 'the EXIT trap of the wrapper reads a name that an abort put out of scope' \
-  '      trap '"'"'_shmutant_snapshot "$BASHPID" >&'"'"'"$_shmutant_wrap_left" EXIT' \
-  '      trap '"'"'_shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"'"'"' EXIT' \
+  '      trap '"'"'SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES="" _shmutant_snapshot "$BASHPID" >&'"'"'"$_shmutant_wrap_left" EXIT' \
+  '      trap '"'"'SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES="" _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"'"'"' EXIT' \
   't_run_that_aborts_on_an_arithmetic_error_has_its_leftovers_recorded'
 shmutant_mut 'the guard of the EXIT trap keeps its text in a name the plan gave an attribute' \
   '  set -- "$(trap -p EXIT)"' \
@@ -3212,3 +3212,96 @@ shmutant_mut 'the interrupted CLI waits for its plan subshell where it should en
   '    kill -TERM "$SHMUTANT_CLI_CHILD" 2>/dev/null' \
   '    wait "$SHMUTANT_CLI_CHILD" 2>/dev/null' \
   't_cli_interrupted_ends_the_command_its_plan_execd_into'
+# --- reads of the process table outside a freeze are given up on (#94) ---
+shmutant_mut 'the runner reads its holder'"'"'s start with no bound before its run starts' \
+  'holderid="$(SHMUTANT_PS_BOUND=5 _shmutant_identity "$holder")"' \
+  'holderid="$(_shmutant_identity "$holder")"' \
+  't_run_starts_through_reads_of_its_start_that_stall'
+shmutant_mut 'the runner reads its run'"'"'s start with no bound before its run starts' \
+  'rootid="$(SHMUTANT_PS_BOUND=5 _shmutant_identity "$pid")"' \
+  'rootid="$(_shmutant_identity "$pid")"' \
+  't_run_starts_through_reads_of_its_start_that_stall'
+shmutant_mut 'the wrapper'"'"'s EXIT trap snapshots with no bound' \
+  'trap '"'"'SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES="" _shmutant_snapshot' \
+  'trap '"'"'SHMUTANT_PS_UNSETTLES="" _shmutant_snapshot' \
+  't_run_records_through_its_own_snapshots_that_stall'
+shmutant_mut 'a value of the callback'"'"'s makes the wrapper'"'"'s EXIT trap snapshot a read of a freeze' \
+  'trap '"'"'SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES="" _shmutant_snapshot' \
+  'trap '"'"'SHMUTANT_PS_BOUND=10 _shmutant_snapshot' \
+  't_run_records_through_its_own_snapshots_that_stall'
+shmutant_mut 'the wrapper'"'"'s exit snapshots with no bound' \
+  'exit() { local s=$?; SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES="" _shmutant_snapshot' \
+  'exit() { local s=$?; SHMUTANT_PS_UNSETTLES="" _shmutant_snapshot' \
+  't_run_records_through_its_own_snapshots_that_stall'
+shmutant_mut 'a value of the callback'"'"'s makes the wrapper'"'"'s exit snapshot a read of a freeze' \
+  'exit() { local s=$?; SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES="" _shmutant_snapshot' \
+  'exit() { local s=$?; SHMUTANT_PS_BOUND=10 _shmutant_snapshot' \
+  't_run_records_through_its_own_snapshots_that_stall'
+shmutant_mut 'the wrapper'"'"'s snapshot on return has no bound' \
+  'SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES="" _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; trap - EXIT' \
+  'SHMUTANT_PS_UNSETTLES="" _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; trap - EXIT' \
+  't_run_records_through_its_own_snapshots_that_stall'
+shmutant_mut 'a value of the callback'"'"'s makes the wrapper'"'"'s snapshot on return a read of a freeze' \
+  'SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES="" _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; trap - EXIT' \
+  'SHMUTANT_PS_BOUND=10 _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; trap - EXIT' \
+  't_run_records_through_its_own_snapshots_that_stall'
+shmutant_mut 'the pool reads a worker'"'"'s start with no bound at its spawn' \
+  '"$(SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES="" _shmutant_identity "$p")"' \
+  '"$(SHMUTANT_PS_UNSETTLES="" _shmutant_identity "$p")"' \
+  't_pool_spawns_through_a_read_of_its_worker_that_stalls'
+shmutant_mut 'a value of the caller'"'"'s makes the pool'"'"'s read of a worker'"'"'s start a read of a freeze' \
+  '"$(SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES="" _shmutant_identity "$p")"' \
+  '"$(SHMUTANT_PS_BOUND=10 _shmutant_identity "$p")"' \
+  't_pool_spawns_through_a_read_of_its_worker_that_stalls'
+shmutant_mut 'the plan subshell reads its holder'"'"'s start with no bound' \
+  '"$(SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES="" _shmutant_identity "$!" 2>/dev/null)"' \
+  '"$(SHMUTANT_PS_UNSETTLES="" _shmutant_identity "$!" 2>/dev/null)"' \
+  't_cli_runs_through_reads_outside_a_freeze_that_stall'
+shmutant_mut 'a value of the caller'"'"'s makes the plan subshell'"'"'s read of its holder a read of a freeze' \
+  '"$(SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES="" _shmutant_identity "$!" 2>/dev/null)"' \
+  '"$(SHMUTANT_PS_BOUND=10 _shmutant_identity "$!" 2>/dev/null)"' \
+  't_cli_runs_through_reads_outside_a_freeze_that_stall'
+shmutant_mut 'the CLI'"'"'s sampler snapshots with no bound' \
+  'do SHMUTANT_PS_BOUND=5 SHMUTANT_PS_UNSETTLES="" _shmutant_snapshot "$SHMUTANT_CLI_CHILD"' \
+  'do SHMUTANT_PS_UNSETTLES="" _shmutant_snapshot "$SHMUTANT_CLI_CHILD"' \
+  't_cli_runs_through_reads_outside_a_freeze_that_stall'
+shmutant_mut 'a value of the caller'"'"'s makes the CLI'"'"'s sampler a read of a freeze' \
+  'do SHMUTANT_PS_BOUND=5 SHMUTANT_PS_UNSETTLES="" _shmutant_snapshot "$SHMUTANT_CLI_CHILD"' \
+  'do SHMUTANT_PS_BOUND=5 _shmutant_snapshot "$SHMUTANT_CLI_CHILD"' \
+  't_cli_runs_through_reads_outside_a_freeze_that_stall'
+shmutant_mut 'the CLI reads its plan subshell'"'"'s start with no bound' \
+  'SHMUTANT_CLI_CHILD_ID="$(SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES="" _shmutant_identity' \
+  'SHMUTANT_CLI_CHILD_ID="$(SHMUTANT_PS_UNSETTLES="" _shmutant_identity' \
+  't_cli_runs_through_reads_outside_a_freeze_that_stall'
+shmutant_mut 'a value of the caller'"'"'s makes the CLI'"'"'s read of its plan subshell a read of a freeze' \
+  'SHMUTANT_CLI_CHILD_ID="$(SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES="" _shmutant_identity' \
+  'SHMUTANT_CLI_CHILD_ID="$(SHMUTANT_PS_BOUND=10 _shmutant_identity' \
+  't_cli_runs_through_reads_outside_a_freeze_that_stall'
+shmutant_mut 'the plan subshell'"'"'s last snapshot has no bound' \
+  '{ SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES="" _shmutant_snapshot "$BASHPID" >&"$SHMUTANT_CLI_SEEN_W"; }' \
+  '{ SHMUTANT_PS_UNSETTLES="" _shmutant_snapshot "$BASHPID" >&"$SHMUTANT_CLI_SEEN_W"; }' \
+  't_cli_runs_through_reads_outside_a_freeze_that_stall'
+shmutant_mut 'a value of the caller'"'"'s makes the plan subshell'"'"'s last snapshot a read of a freeze' \
+  '{ SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES="" _shmutant_snapshot "$BASHPID" >&"$SHMUTANT_CLI_SEEN_W"; }' \
+  '{ SHMUTANT_PS_BOUND=10 _shmutant_snapshot "$BASHPID" >&"$SHMUTANT_CLI_SEEN_W"; }' \
+  't_cli_runs_through_reads_outside_a_freeze_that_stall'
+shmutant_mut 'a start given up on is followed by a look at the form ps prints' \
+  '[ "$st" != 124 ] || return 124; [ "${SHMUTANT_PS_LSTART:-}" != 1 ] || return 1' \
+  '[ "${SHMUTANT_PS_LSTART:-}" != 1 ] || return 1' \
+  't_identity_leaves_open_what_a_read_given_up_on_never_showed'
+shmutant_mut 'a look at the form ps prints given up on decides it has no lstart' \
+  '[ "$st" != 124 ] || return 124; SHMUTANT_PS_LSTART=0' \
+  'SHMUTANT_PS_LSTART=0' \
+  't_identity_leaves_open_what_a_read_given_up_on_never_showed'
+shmutant_mut 'an elapsed time given up on is a plain failure' \
+  '[ "$st" != 124 ] || return 124; [ "$st" = 0 ] || return 1' \
+  '[ "$st" = 0 ] || return 1' \
+  't_identity_leaves_open_what_a_read_given_up_on_never_showed'
+shmutant_mut 'a table of starts is read behind a look at the form given up on' \
+  '[ "$ist" != 124 ] || return 0' \
+  ':' \
+  't_identity_leaves_open_what_a_read_given_up_on_never_showed'
+shmutant_mut 'a listing of descendants is read behind a look at the form given up on' \
+  '[ "$ist" != 124 ] || return 1' \
+  ':' \
+  't_identity_leaves_open_what_a_read_given_up_on_never_showed'

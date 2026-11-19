@@ -891,7 +891,7 @@ _shmutant_ps_end() {
 # a failed one, which a caller can then tell from a pid with no descendants (0, nothing printed).
 # One read across a clock that bounds no elapsed-time start (_shmutant_etime_gap) is a failed one too.
 _shmutant_descendants_started() {
-  local table now before gap
+  local table now before gap ist
   if [ "${SHMUTANT_PROC:-}" = 1 ]; then
     table="$(_shmutant_proc_table)"; [ -n "$table" ] || return 1
     (set -o pipefail; printf '%s\n' "$table" | command -p awk -v root="$1" '
@@ -906,7 +906,10 @@ _shmutant_descendants_started() {
       }' ) || return 1
     return 0
   fi
-  if [ "${SHMUTANT_PS_LSTART:-}" != 0 ] && _shmutant_identity "$BASHPID" > /dev/null && [ "${SHMUTANT_PS_LSTART:-}" = 1 ]; then
+  # A look at which form ps prints that was given up on leaves that open: no table is read behind it.
+  ist=0; [ "${SHMUTANT_PS_LSTART:-}" = 0 ] || _shmutant_identity "$BASHPID" > /dev/null || ist=$?
+  [ "$ist" != 124 ] || return 1
+  if [ "$ist" = 0 ] && [ "${SHMUTANT_PS_LSTART:-}" = 1 ]; then
     table="$(_shmutant_ps -A -o pid= -o ppid= -o lstart= 2>/dev/null)" && [ -n "$table" ] || return 1
     (set -o pipefail; printf '%s\n' "$table" | command -p awk -v root="$1" '
       NF > 2 && $1 ~ /^[0-9]+$/ { i++; child[i] = $1; parent[i] = $2; $1 = ""; $2 = ""; sub(/^ +/, ""); start[i] = $0 }
@@ -979,9 +982,10 @@ _shmutant_etime_gap() {
 # lstart, or `e<seconds>[+<gap>]`, epoch seconds from the clock less POSIX `ps -o etime`
 # (_shmutant_etime_gap). It is the one identity that survives what a daemonising descendant does
 # to itself (setsid changes its group, exec its command line) and still tells a reused pid apart:
-# the newer process started later.
+# the newer process started later. Returns 124 when a read of it was given up on (_shmutant_ps),
+# and 1 for any other start that could not be read.
 _shmutant_identity() {
-  local etime lstart before after gap
+  local etime lstart before after gap st
   if [ "${SHMUTANT_PROC:-}" = 1 ]; then
     # The kernel's own start time in clock ticks (field 22 of /proc/<pid>/stat, after the LAST
     # `)` of the parenthesised name, which may hold a newline or a `)` of its own; the file is
@@ -995,15 +999,20 @@ _shmutant_identity() {
   # the step and would make a live process look reused. Where ps has no lstart, told once by
   # asking about this process ($BASHPID: the top-level shell, $$, may be gone by then, as it is when
   # a freeze's guard acts), the elapsed-time form remains.
+  # A read given up on (_shmutant_ps: 124) says nothing of what this ps prints: the question is left
+  # open, no other read is made behind it, and the status is 124, so a caller can tell it apart.
   if [ "${SHMUTANT_PS_LSTART:-}" != 0 ]; then
-    lstart="$(set -o pipefail; _shmutant_ps -o lstart= -p "$1" 2>/dev/null | command -p awk 'NF { $1 = $1; print; exit }')" || lstart=""
+    st=0
+    lstart="$(set -o pipefail; _shmutant_ps -o lstart= -p "$1" 2>/dev/null | command -p awk 'NF { $1 = $1; print; exit }')" || { st=$?; lstart=""; }
     if [ -n "$lstart" ]; then SHMUTANT_PS_LSTART=1; printf '%s' "$lstart"; return 0; fi
-    if [ "${SHMUTANT_PS_LSTART:-}" = 1 ]; then return 1; fi
-    if [ -n "$(_shmutant_ps -o lstart= -p "$BASHPID" 2>/dev/null)" ]; then SHMUTANT_PS_LSTART=1; return 1; fi
-    SHMUTANT_PS_LSTART=0
+    [ "$st" != 124 ] || return 124; [ "${SHMUTANT_PS_LSTART:-}" != 1 ] || return 1
+    st=0; lstart="$(_shmutant_ps -o lstart= -p "$BASHPID" 2>/dev/null)" || st=$?
+    if [ -n "$lstart" ]; then SHMUTANT_PS_LSTART=1; return 1; fi
+    [ "$st" != 124 ] || return 124; SHMUTANT_PS_LSTART=0
   fi
   before="$(_shmutant_now)"
-  etime="$(set -o pipefail; _shmutant_ps -o etime= -p "$1" 2>/dev/null | command -p tr -d ' ')" || return 1
+  st=0; etime="$(set -o pipefail; _shmutant_ps -o etime= -p "$1" 2>/dev/null | command -p tr -d ' ')" || st=$?
+  [ "$st" != 124 ] || return 124; [ "$st" = 0 ] || return 1
   [ -n "$etime" ] || return 1
   after="$(_shmutant_now)"; gap="$(_shmutant_etime_gap "$before" "$after")" || return 1
   printf 'e%s%s' "$(( after / 1000000 - $(_shmutant_etime_secs "$etime") ))" "$gap"
@@ -1025,8 +1034,12 @@ _shmutant_identity_table() {
   fi
   # The ps tables are read whole, and taken only from a read that succeeded at every stage: a ps that
   # failed, whatever it printed first, gives no table at all, never part of one.
-  local tbl
-  if [ "${SHMUTANT_PS_LSTART:-}" != 0 ] && _shmutant_identity "$BASHPID" > /dev/null && [ "${SHMUTANT_PS_LSTART:-}" = 1 ]; then
+  # A look at which form ps prints that was given up on leaves that open, and fills nothing: a table
+  # of elapsed-time starts read behind it would be in the other form from every later one.
+  local tbl ist=0
+  [ "${SHMUTANT_PS_LSTART:-}" = 0 ] || _shmutant_identity "$BASHPID" > /dev/null || ist=$?
+  [ "$ist" != 124 ] || return 0
+  if [ "$ist" = 0 ] && [ "${SHMUTANT_PS_LSTART:-}" = 1 ]; then
     tbl="$(set -o pipefail; _shmutant_ps -A -o pid= -o lstart= 2>/dev/null | command -p awk 'NF > 1 && $1 ~ /^[0-9]+$/ { pid = $1; $1 = ""; sub(/^ +/, ""); print pid, $0 }')" || return 0
     while IFS= read -r line; do
       # shellcheck disable=SC2034
@@ -2050,25 +2063,33 @@ _shmutant_run_bounded() {
       # No plan code until the runner has published this run's group and holder for the abort
       # path: an interrupt before that would find a run it could not name.
       read -t 30 -r _ <&"$go" || builtin exit 127
-      trap '_shmutant_snapshot "$BASHPID" >&'"$_shmutant_wrap_left" EXIT
-      builtin eval 'exit() { local s=$?; _shmutant_snapshot "$BASHPID" >&'"$_shmutant_wrap_left"'; if [ "$#" -eq 0 ]; then builtin exit "$s"; else builtin exit "$@"; fi; }'
+      # Each snapshot's reads are given up on after ten seconds, and are none of a freeze's whatever
+      # the callback left in SHMUTANT_PS_UNSETTLES: with no deadline nothing else ends a ps that does
+      # not answer here, and a snapshot that could not be read records nothing.
+      trap 'SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES="" _shmutant_snapshot "$BASHPID" >&'"$_shmutant_wrap_left" EXIT
+      builtin eval 'exit() { local s=$?; SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES="" _shmutant_snapshot "$BASHPID" >&'"$_shmutant_wrap_left"'; if [ "$#" -eq 0 ]; then builtin exit "$s"; else builtin exit "$@"; fi; }'
       # The counter describes this run: what the sourcing shell counted before the pool is not
       # this callback's, and a suite that refuses to pass on zero must be able to see zero.
       # The count descriptor is this run's own, by number; with the counts off there is none, so
       # a value an outer pool exported does not reach the callback.
       if [ "${SHMUTANT_COUNTS:-0}" = 1 ]; then export SHMUTANT_COUNTS_FD="$counts_w"; else unset SHMUTANT_COUNTS_FD; fi
       SHMUTANT_SELECTED_N=0; export SHMUTANT_SELECT="$sel"; "$run" "$root" "$sel"; rrc=$?
-      _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; trap - EXIT; builtin exit "$rrc" ) < /dev/null >&"$out_w" 2>&1 &
+      SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES="" _shmutant_snapshot "$BASHPID" >&"$_shmutant_wrap_left"; trap - EXIT; builtin exit "$rrc" ) < /dev/null >&"$out_w" 2>&1 &
     pid=$!
     # The holder's pid arrives on the FIFO, or nothing does: a wrapper that died before
     # starting it ends this read when the runner's own timeout below does.
     holder=""
     read -t 30 -r holder <&"$hp" || holder=""
     case "$holder" in ''|*[!0-9]*) holder="" ;; esac
-    holderid="$(_shmutant_identity "$holder")" || holderid=""
+    # Each read of this shell's three before the callback is let go (the holder's start, the root's,
+    # its own) is given up on after five seconds, the runner's own after one, and a start given up on
+    # is one that could not be read: no deadline and no watchdog exist yet to end a ps that does not
+    # answer here. Five, not a freeze's ten: the wrapper waits thirty for its go, and each such read
+    # may take five more than its bound (_shmutant_ps).
+    holderid="$(SHMUTANT_PS_BOUND=5 _shmutant_identity "$holder")" || holderid=""
     # The root's identity while it is certainly alive: the post-run kill must not stop or signal
     # a reaped root by number.
-    rootid="$(_shmutant_identity "$pid")" || rootid=""
+    rootid="$(SHMUTANT_PS_BOUND=5 _shmutant_identity "$pid")" || rootid=""
     # This shell's own pid and start, for the watchdog to look for it by (_shmutant_runner_there).
     # A read given up on as that look's are: a start that could not be read is one the watchdog
     # does without.
@@ -2886,7 +2907,8 @@ _shmutant_run_jobs_loop() {
     _shmutant_worker "$kind" "$i" "$wd" "$run" "$suffix" &
     p=$!
     pids+=("$p"); SHMUTANT_ACTIVE_KEY["$p"]="$kind-$i"
-    SHMUTANT_ACTIVE_ID["$p"]="$(_shmutant_identity "$p")" || SHMUTANT_ACTIVE_ID["$p"]=""
+    # Given up on after ten seconds, as a start that could not be read: this is the caller's shell.
+    SHMUTANT_ACTIVE_ID["$p"]="$(SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES="" _shmutant_identity "$p")" || SHMUTANT_ACTIVE_ID["$p"]=""
     # The pool's copy of the write end goes: the worker has its own, and a later worker must
     # not inherit every earlier channel.
     vw="${SHMUTANT_VERDICT_W[$kind-$i]}"; exec {vw}>&-; unset "SHMUTANT_VERDICT_W[$kind-$i]"
@@ -3215,7 +3237,7 @@ _shmutant_pool_locals_writable() {
     dog_self done_first orphaned runner runner_gap runnerid \
     b chunk conts g gcont gone_group guard_id guard_lost guard_of guard_of_id guard_pid guard_r guard_up guard_w hs kept kills members out pairs part pg ph phid recs rid rootid_pre seen_ck unfrozen w want \
     SHMUTANT_GUARD SHMUTANT_GUARD_PID SHMUTANT_PS_LSTART SHMUTANT_PS_BOUND SHMUTANT_PS_UNSETTLES c guard_self guard_gap_ref gap ea eb lp le tbl cands guarded jl w fid_now stopped fgap cont_first cfirst told group_untold first \
-    before after ga gb \
+    before after ga gb ist \
     bad hits name names only scope SHMUTANT_PICK SHMUTANT_PICK_N
 }
 
@@ -3926,7 +3948,8 @@ _shmutant_cli_load() {
 # nobody's descendant.
 _shmutant_cli_leave() {
   _shmutant_report_keep "$1"
-  [ -z "${SHMUTANT_CLI_SEEN_W:-}" ] || { _shmutant_snapshot "$BASHPID" >&"$SHMUTANT_CLI_SEEN_W"; } 2>/dev/null
+  # Its reads given up on after ten seconds: the CLI waits for this shell to end.
+  [ -z "${SHMUTANT_CLI_SEEN_W:-}" ] || { SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES="" _shmutant_snapshot "$BASHPID" >&"$SHMUTANT_CLI_SEEN_W"; } 2>/dev/null
 }
 
 # _shmutant_cli_keep_exit_trap — the plan subshell's DEBUG handler while the plan loads: keep
@@ -4168,7 +4191,10 @@ _shmutant_cli_run() {
     # `trap -p` in a subshell reports the parent's traps although none is active: the pool
     # would save this shell's abort handler as the plan subshell's own and re-raise into it.
     trap - INT TERM
-    ( read -r _ <&"$hold_r" ) < /dev/null > /dev/null 2>&1 {keep_w}>&- {keep_r}<&- {hold}>&- & printf 'holder %s %s\n' "$!" "$(_shmutant_identity "$!" 2>/dev/null)" >&"$keep_w"
+    # Every read of the process table that the CLI makes outside a freeze is given up on (_shmutant_ps)
+    # as a start or a sample that could not be read: ten seconds for a start, five for a sample, as the
+    # watchdog's are.
+    ( read -r _ <&"$hold_r" ) < /dev/null > /dev/null 2>&1 {keep_w}>&- {keep_r}<&- {hold}>&- & printf 'holder %s %s\n' "$!" "$(SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES="" _shmutant_identity "$!" 2>/dev/null)" >&"$keep_w"
     readonly SHMUTANT_CLI_WD="$wd" SHMUTANT_CLI_KEEP_FD="$keep_w"
     export SHMUTANT_CLI_KEEP_FD
     SHMUTANT_CLI_DONE_PATH="$done_file"
@@ -4177,8 +4203,8 @@ _shmutant_cli_run() {
   builtin set +m
   # Stopped with TERM: the trap ends the sleep in flight, which would otherwise outlive the run. Its
   # pid is cleared once reaped, so the trap never signals a number that may have been reused since.
-  ( trap 'kill "$s" 2>/dev/null; exit 0' TERM; s=""; while kill -0 "$SHMUTANT_CLI_CHILD" 2>/dev/null; do _shmutant_snapshot "$SHMUTANT_CLI_CHILD"; command -p sleep 0.5 & s=$!; wait "$s"; s=""; done ) 1>&"$SHMUTANT_CLI_SEEN_W" 2>/dev/null < /dev/null & SHMUTANT_CLI_SAMPLER=$!
-  SHMUTANT_CLI_CHILD_ID="$(_shmutant_identity "$SHMUTANT_CLI_CHILD" 2>/dev/null)" || SHMUTANT_CLI_CHILD_ID=""
+  ( trap 'kill "$s" 2>/dev/null; exit 0' TERM; s=""; while kill -0 "$SHMUTANT_CLI_CHILD" 2>/dev/null; do SHMUTANT_PS_BOUND=5 SHMUTANT_PS_UNSETTLES="" _shmutant_snapshot "$SHMUTANT_CLI_CHILD"; command -p sleep 0.5 & s=$!; wait "$s"; s=""; done ) 1>&"$SHMUTANT_CLI_SEEN_W" 2>/dev/null < /dev/null & SHMUTANT_CLI_SAMPLER=$!
+  SHMUTANT_CLI_CHILD_ID="$(SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES="" _shmutant_identity "$SHMUTANT_CLI_CHILD" 2>/dev/null)" || SHMUTANT_CLI_CHILD_ID=""
   SHMUTANT_CLI_SPAWNING=0
   [ -z "${SHMUTANT_CLI_ABORT_PENDING:-}" ] || { local p="$SHMUTANT_CLI_ABORT_PENDING"; SHMUTANT_CLI_ABORT_PENDING=""; _shmutant_cli_abort "$p"; }
   wait "$SHMUTANT_CLI_CHILD"; rc=$?

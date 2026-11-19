@@ -4298,6 +4298,27 @@ stall_ps_reads() {
   }
 }
 
+# stall_ps_quietly — stall_ps_reads with no function of a builtin's name, which the pool and the CLI
+# refuse (_shmutant_no_shadows): the sleep stands in for the ps inside _shmutant_ps itself. The same
+# caller's `stalls`, the same $T/stalled, the same bound of a second; 1, having said so, when the
+# copy of _shmutant_ps could not be made.
+stall_ps_quietly() {
+  local body
+  body="$(declare -f _shmutant_ps | sed '1s/^_shmutant_ps /_shmutant_ps_real /; s/command -p ps "\$@"/_stalling_ps "$@"/')"
+  [ "$(grep -c '_stalling_ps "\$@"' <<< "$body")" = 2 ] || { fail_ 'fixture: _shmutant_ps no longer runs ps where stall_ps_quietly looks for it'; return 1; }
+  eval "$body"
+  _stalling_ps() {
+    if stalls "$@"; then printf '%s\n' "$BASHPID" >> "$T/stalled"; builtin exec sleep 300; fi
+    command -p ps "$@"
+  }
+  _shmutant_ps() {
+    case "${SHMUTANT_PS_BOUND:-}" in
+      [1-9]|[1-9][0-9]|[1-9][0-9][0-9]) if stalls "$@"; then SHMUTANT_PS_BOUND=1 _shmutant_ps_real "$@"; return; fi ;;
+    esac
+    _shmutant_ps_real "$@"
+  }
+}
+
 # stalled_ps_ended <label> — every ps that stall_ps_reads put a sleep in the place of has been ended,
 # looked for at most 30 times a tenth of a second apart: one is still there while the command at its
 # number is that sleep, whole (a number given away since is another command's). Says so for <label>
@@ -6930,6 +6951,218 @@ t_give_up_outside_a_freeze_is_no_freeze_s() {
   done
   eq "$(ls -A "$d" 2>/dev/null)" '' 'a snapshot whose table was given up on writes nothing'
   kill -KILL "$h" 2>/dev/null; wait "$h" 2>/dev/null
+}
+
+t_identity_leaves_open_what_a_read_given_up_on_never_showed() {
+  # #94: a read of a start given up on (here a ps that ends with status 124, which _shmutant_ps reads
+  # as one it gave up on) says nothing of which form of start ps prints. With that form not yet known,
+  # such a start is one that could not be read, with status 124, after that one read and no look at
+  # the form behind it (`target`); a look at the form given up on leaves the form open as well
+  # (`probe`); and a table of starts, or a listing of descendants with theirs, read behind such a look
+  # is none at all, never one in the elapsed-time form (`table`, `listing`). Once ps answers again the
+  # form is learned as it always was (`recovered`). With the elapsed-time form known, a read given up
+  # on is 124 as well (`etime`).
+  local how h hid got
+  sleep 60 > /dev/null 2>&1 & h=$!
+  hid="$(SHMUTANT_PROC=0 _shmutant_identity "$h")"
+  for how in target probe table listing recovered etime; do
+    rm -f "$T/asked"; : > "$T/stall"
+    got="$( SHMUTANT_PROC=0; unset SHMUTANT_PS_LSTART
+            [ "$how" != etime ] || SHMUTANT_PS_LSTART=0
+            command() {
+              if [ "${1:-}" = -p ] && [ "${2:-}" = ps ] && [ -e "$T/stall" ]; then
+                printf '%s\n' "${*:3}" >> "$T/asked"
+                case "$how:${!#}" in
+                  probe:"$h") return 1 ;;
+                  table:*|listing:*) case "${*:3}" in '-A '*) ;; *) return 124 ;; esac ;;
+                  *) return 124 ;;
+                esac
+              fi
+              builtin command "$@"
+            }
+            case "$how" in
+              table)   declare -A SHMUTANT_START=(); _shmutant_identity_table; printf 'st=%s n=%s' "$?" "${#SHMUTANT_START[@]}" ;;
+              listing) out="$(_shmutant_descendants_started "$BASHPID")"; printf 'st=%s out=[%s]' "$?" "$out" ;;
+              recovered)
+                _shmutant_identity "$h" > /dev/null; printf 'st=%s ' "$?"; rm -f "$T/stall"
+                out="$(_shmutant_identity "$h")"; [ "$out" = "$hid" ] && printf 'again'
+                _shmutant_identity "$h" > /dev/null ;;
+              *)       _shmutant_identity "$h" > /dev/null; printf 'st=%s' "$?" ;;
+            esac
+            printf ' lstart=[%s]' "${SHMUTANT_PS_LSTART-unset}" )"
+    case "$how" in
+      target)    eq "$got" 'st=124 lstart=[unset]' 'target: a start given up on is 124, and leaves the form open' ;;
+      probe)     eq "$got" 'st=124 lstart=[unset]' 'probe: a look at the form given up on leaves the form open, and is 124' ;;
+      table)     eq "$got" 'st=0 n=0 lstart=[unset]' 'table: no table of starts is read behind a look at the form given up on' ;;
+      listing)   eq "$got" 'st=1 out=[] lstart=[unset]' 'listing: no listing of descendants is read behind a look at the form given up on' ;;
+      recovered) eq "$got" 'st=124 again lstart=[1]' 'recovered: once ps answers, the start is read and the form learned' ;;
+      etime)     eq "$got" 'st=124 lstart=[0]' 'etime: an elapsed time given up on is 124' ;;
+    esac
+    case "$how" in
+      target|etime) eq "$(grep -c . "$T/asked")" 1 "$how: one read, and none behind the one given up on" ;;
+      table|listing) eq "$(grep -c '^-A' "$T/asked")" 0 "$how: no table was read" ;;
+    esac
+  done
+  rm -f "$T/stall"
+  kill -KILL "$h" 2>/dev/null; wait "$h" 2>/dev/null
+}
+
+t_run_starts_through_reads_of_its_start_that_stall() {
+  # #94: the runner reads its holder's start and its run's before the callback is let go, when no
+  # deadline and no watchdog exist yet to end a ps that does not answer. Each read is given up on and
+  # the start is one that could not be read: the run still starts, with that of its holder alone
+  # stalling (`holder`, whose start it then publishes as none), its run's alone (`root`), or every
+  # read the runner makes of a start (`all`, its own too), with the form of start not yet known.
+  local how hid
+  local -a STILL=()
+  start_stalls() {
+    SHMUTANT_PROC=0; unset SHMUTANT_PS_LSTART
+    stalls() {
+      case " ${FUNCNAME[*]} " in *" _shmutant_identity _shmutant_run_bounded "*) ;; *) return 1 ;; esac
+      case "$how" in holder) [ "${!#}" = "${holder:-none}" ] ;; root) [ "${!#}" = "${pid:-none}" ] ;; *) return 0 ;; esac
+    }
+    stall_ps_quietly
+  }
+  for how in holder root all; do
+    rm -f "$T/stalled"
+    if ! run_started "$T/$how" start_stalls; then
+      fail_ "$how: a read of a start that stalls kept the runner from starting its run"
+    else
+      if [ "$how" = holder ]; then
+        hid="$(awk '$1 == "group" { print $4; exit }' "$T/$how/chan")"
+        eq "$hid" '' 'holder: the start given up on is published as one that could not be read'
+      fi
+      run_ended
+      all_gone 50 "$RUN_KID" "$RUN_HOLDER" || fail_ "$how: fixture: the run was left behind: $(listed "${STILL[@]}")"
+    fi
+    stalled_ps_ended "$how"
+  done
+}
+
+t_run_records_through_its_own_snapshots_that_stall() {
+  # #94: a run's own snapshots of what it leaves (on return, on `exit`, and in its EXIT trap) are
+  # taken in the callback's shell, where with no deadline nothing else ends a ps that does not answer.
+  # Each read is given up on, the snapshot records nothing, and the run returns with the status its
+  # callback left: on return (`return`), by an `exit` after the callback dropped the trap (`exit`, and
+  # `bare`, a bare one that keeps the status before it), and through the trap alone (`trap`, a
+  # `builtin exit`, which passes the exit function by but not the trap). None
+  # of those reads is a freeze's: a descriptor the callback left in SHMUTANT_PS_UNSETTLES is told
+  # nothing, and the run is not unsettled.
+  local how bg i want
+  local -A wants=([return]=3 [exit]=4 [bare]=1 [trap]=5)
+  wrap_stalls() {
+    SHMUTANT_PROC=0
+    stalls() {
+      [ -z "${dog_self:-}" ] || return 1
+      case " ${FUNCNAME[*]} " in *" _shmutant_snapshot "*) return 0 ;; esac
+      return 1
+    }
+    stall_ps_quietly
+  }
+  for how in return exit bare trap; do
+    rm -f "$T/stalled" "$T/said" "$T/w-$how.result"; mkdir -p "$T/w-$how"
+    set -m
+    ( wrap_stalls
+      cb() {
+        exec {sf}> "$T/said"; SHMUTANT_PS_UNSETTLES="$sf"
+        case "$how" in
+          return)  return 3 ;;
+          exit)    trap - EXIT; exit 4 ;;
+          bare)    trap - EXIT; false; exit ;;
+          trap)    builtin exit 5 ;;
+        esac
+      }
+      SHMUTANT_TIMEOUT=0 _shmutant_run_bounded "$T/w-$how" cb "$T/w-$how" sel
+      printf 'status=%s unsettled=%s\n' "$SHMUTANT_RUN_STATUS" "$SHMUTANT_RUN_UNSETTLED" > "$T/w-$how.part" \
+        && mv "$T/w-$how.part" "$T/w-$how.result" ) > /dev/null 2>&1 & bg=$!
+    set +m
+    for (( i = 0; i < 300; i++ )); do [ ! -e "$T/w-$how.result" ] || break; sleep 0.1; done
+    if [ ! -e "$T/w-$how.result" ]; then
+      kill -KILL -- -"$bg" 2>/dev/null; wait "$bg" 2>/dev/null
+      fail_ "$how: a snapshot of the run's own that stalls kept the run from returning"
+    else
+      wait "$bg" 2>/dev/null
+      want="${wants[$how]}"
+      eq "$(cat "$T/w-$how.result")" "status=$want unsettled=0" "$how: the run returns with its callback's status, and is not unsettled"
+      eq "$(cat "$T/said" 2>/dev/null)" '' "$how: a snapshot given up on is said nowhere"
+    fi
+    stalled_ps_ended "$how"
+  done
+}
+
+t_pool_spawns_through_a_read_of_its_worker_that_stalls() {
+  # #94: the pool reads each worker's start as it spawns it, in the caller's shell. That read is given
+  # up on and the start is one that could not be read: the pool still scores its row and returns, and
+  # the read is none of a freeze's, whatever the caller left in SHMUTANT_PS_UNSETTLES.
+  local bg i
+  mk_toy "$T/toy"; TOY="$T/toy"
+  shmutant_reset; shmutant_target lib.sh
+  shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+  rm -f "$T/stalled" "$T/said" "$T/prc"
+  set -m
+  ( SHMUTANT_PROC=0
+    stalls() { case " ${FUNCNAME[*]} " in *" _shmutant_identity _shmutant_run_jobs_loop "*) return 0 ;; esac; return 1; }
+    stall_ps_quietly
+    exec {sf}> "$T/said"; SHMUTANT_PS_UNSETTLES="$sf"
+    SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd" toy_prepare toy_run > "$T/pout" 2> "$T/perr"; echo "$?" > "$T/prc" ) > /dev/null 2>&1 & bg=$!
+  set +m
+  for (( i = 0; i < 600; i++ )); do [ ! -e "$T/prc" ] || break; sleep 0.1; done
+  if [ ! -e "$T/prc" ]; then
+    kill -KILL -- -"$bg" 2>/dev/null; wait "$bg" 2>/dev/null
+    fail_ 'a read of a worker that stalls kept the pool from returning'
+  else
+    wait "$bg" 2>/dev/null
+    eq "$(cat "$T/prc")" 0 "the pool returns as it would have [$(head -c 300 "$T/perr")]"
+    has "$(cat "$T/pout")" $'\tkilled\t' 'and scores its row'
+    eq "$(cat "$T/said" 2>/dev/null)" '' 'a read given up on at a spawn is said nowhere'
+  fi
+  stalled_ps_ended 'spawn'
+}
+
+t_cli_runs_through_reads_outside_a_freeze_that_stall() {
+  # #94: the CLI reads the start of the plan subshell's holder (in that subshell) and the plan
+  # subshell's own, samples the subshell's descendants twice a second, and the subshell snapshots its
+  # own as it leaves. Each read is given up on as a start or a sample that could not be read: the CLI
+  # still runs its plan and exits as the plan did, with the holder's read stalling (`holder`), the
+  # subshell's (`child`), the sampler's (`sampler`), or the snapshot at the subshell's end (`leave`).
+  # None of those reads is a freeze's, whatever the CLI's caller left in SHMUTANT_PS_UNSETTLES.
+  local how bg i
+  mk_toy "$T/toy"; TOY="$T/toy"
+  cat > "$T/toy/plan.sh" <<'PLAN'
+prepare() { shmutant_copy_tree "$SHMUTANT_PLAN_DIR" "$1"; }
+run() { bash "$1/test.sh"; }
+shmutant_target lib.sh
+shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
+PLAN
+  for how in holder child sampler leave; do
+    rm -f "$T/stalled" "$T/c-$how.rc"
+    set -m
+    rm -f "$T/said"
+    ( SHMUTANT_PROC=0; unset SHMUTANT_CLI_CHILD
+      exec {sf}> "$T/said"; SHMUTANT_PS_UNSETTLES="$sf"
+      stalls() {
+        case "$how: ${FUNCNAME[*]} " in
+          holder:*" _shmutant_identity _shmutant_cli_run "*) [ "${!#}" != "${SHMUTANT_CLI_CHILD:-none}" ] ;;
+          child:*" _shmutant_identity _shmutant_cli_run "*)  [ "${!#}" = "${SHMUTANT_CLI_CHILD:-none}" ] ;;
+          sampler:*" _shmutant_snapshot _shmutant_cli_run "*|leave:*" _shmutant_snapshot _shmutant_cli_leave "*) return 0 ;;
+          *) return 1 ;;
+        esac
+      }
+      stall_ps_quietly
+      _shmutant_cli_run "$T/toy/plan.sh" --no-baseline --workdir "$T/wd-$how" > "$T/c-$how.out" 2> "$T/c-$how.err"; echo "$?" > "$T/c-$how.rc" ) > /dev/null 2>&1 & bg=$!
+    set +m
+    for (( i = 0; i < 600; i++ )); do [ ! -e "$T/c-$how.rc" ] || break; sleep 0.1; done
+    if [ ! -e "$T/c-$how.rc" ]; then
+      kill -KILL -- -"$bg" 2>/dev/null; wait "$bg" 2>/dev/null
+      fail_ "$how: a read that stalls kept the CLI from finishing its plan"
+    else
+      wait "$bg" 2>/dev/null
+      eq "$(cat "$T/c-$how.rc")" 0 "$how: the CLI exits as its plan did [$(head -c 300 "$T/c-$how.err")]"
+      has "$(cat "$T/c-$how.out")" $'\trow\tkilled\ta\t' "$how: and scores its row"
+      eq "$(cat "$T/said" 2>/dev/null)" '' "$how: a read given up on outside a freeze is said nowhere"
+    fi
+    stalled_ps_ended "$how"
+  done
 }
 
 # shellcheck disable=SC2034
