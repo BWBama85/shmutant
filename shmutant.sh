@@ -891,7 +891,7 @@ _shmutant_ps_end() {
 # a failed one, which a caller can then tell from a pid with no descendants (0, nothing printed).
 # One read across a clock that bounds no elapsed-time start (_shmutant_etime_gap) is a failed one too.
 _shmutant_descendants_started() {
-  local table now before gap ist
+  local table now before gap
   if [ "${SHMUTANT_PROC:-}" = 1 ]; then
     table="$(_shmutant_proc_table)"; [ -n "$table" ] || return 1
     (set -o pipefail; printf '%s\n' "$table" | command -p awk -v root="$1" '
@@ -906,10 +906,10 @@ _shmutant_descendants_started() {
       }' ) || return 1
     return 0
   fi
-  # A look at which form ps prints that was given up on leaves that open: no table is read behind it.
-  # One that told the form is taken at its word, whether or not this process's own start was read.
-  ist=0; [ "${SHMUTANT_PS_LSTART:-}" = 0 ] || _shmutant_identity "$BASHPID" > /dev/null || ist=$?
-  [ "$ist" != 124 ] || return 1; if [ "${SHMUTANT_PS_LSTART:-}" = 1 ]; then
+  # The form in the second positional parameter, not a name of this function's (_shmutant_ps_form).
+  # A look at it given up on leaves it open, and no table is read behind it.
+  _shmutant_ps_form && builtin set -- "$1" 0 || builtin set -- "$1" "$?"
+  [ "$2" != 124 ] || return 1; if [ "$2" = 0 ]; then
     table="$(_shmutant_ps -A -o pid= -o ppid= -o lstart= 2>/dev/null)" && [ -n "$table" ] || return 1
     (set -o pipefail; printf '%s\n' "$table" | command -p awk -v root="$1" '
       NF > 2 && $1 ~ /^[0-9]+$/ { i++; child[i] = $1; parent[i] = $2; $1 = ""; $2 = ""; sub(/^ +/, ""); start[i] = $0 }
@@ -985,14 +985,14 @@ _shmutant_etime_gap() {
 # the newer process started later. Returns 124 when a read of it was given up on (_shmutant_ps),
 # and 1 for any other start that could not be read.
 _shmutant_identity() {
-  local etime lstart before after gap st
+  local etime lstart before after gap
   if [ "${SHMUTANT_PROC:-}" = 1 ]; then
     # The kernel's own start time in clock ticks (field 22 of /proc/<pid>/stat, after the LAST
     # `)` of the parenthesised name, which may hold a newline or a `)` of its own; the file is
     # read as one record): two processes cannot share a pid and a tick.
     etime="$(command -p awk 'BEGIN { RS = "\001" } { s = $0; while ((k = index(s, ")")) > 0) s = substr(s, k + 1); n = split(s, a, " "); if (n >= 20) print a[20] }' "/proc/$1/stat" 2>/dev/null)" || return 1
     case "$etime" in ''|*[!0-9]*) return 1 ;; esac
-    printf '%s' "$etime"; return 0
+    printf '%s' "$etime"; return
   fi
   # The start time the kernel recorded, as ps prints it (`lstart`): a wall-clock instant fixed
   # at the fork, which a later clock step does not move — unlike `now - etime`, which shifts by
@@ -1000,22 +1000,34 @@ _shmutant_identity() {
   # asking about this process ($BASHPID: the top-level shell, $$, may be gone by then, as it is when
   # a freeze's guard acts), the elapsed-time form remains.
   # A read given up on (_shmutant_ps: 124) says nothing of what this ps prints: the question is left
-  # open, no other read is made behind it, and the status is 124, so a caller can tell it apart.
+  # open, no other read is made behind it, and the status is 124, so a caller can tell it apart. Each
+  # read's status is kept in the second positional parameter, not in a name of this function's: in a
+  # run's own shell, a name the run made readonly would take the start with it.
   if [ "${SHMUTANT_PS_LSTART:-}" != 0 ]; then
-    st=0
-    lstart="$(set -o pipefail; _shmutant_ps -o lstart= -p "$1" 2>/dev/null | command -p awk 'NF { $1 = $1; print; exit }')" || { st=$?; lstart=""; }
-    if [ -n "$lstart" ]; then SHMUTANT_PS_LSTART=1; printf '%s' "$lstart"; return 0; fi
-    [ "$st" != 124 ] || return 124; [ "${SHMUTANT_PS_LSTART:-}" != 1 ] || return 1
-    st=0; lstart="$(_shmutant_ps -o lstart= -p "$BASHPID" 2>/dev/null)" || st=$?; [ "$st" != 124 ] || return 124
-    if [ -n "$lstart" ]; then SHMUTANT_PS_LSTART=1; return 1; fi
+    lstart="$(set -o pipefail; _shmutant_ps -o lstart= -p "$1" 2>/dev/null | command -p awk 'NF { $1 = $1; print; exit }')" && builtin set -- "$1" 0 || { builtin set -- "$1" "$?"; lstart=""; }
+    if [ -n "$lstart" ]; then SHMUTANT_PS_LSTART=1; printf '%s' "$lstart"; return; fi
+    [ "$2" != 124 ] || return 124; [ "${SHMUTANT_PS_LSTART:-}" != 1 ] || return 1
+    # The look at the form counts only when its ps succeeded: what a failed one printed tells nothing.
+    lstart="$(_shmutant_ps -o lstart= -p "$BASHPID" 2>/dev/null)" && builtin set -- "$1" 0 || builtin set -- "$1" "$?"; [ "$2" != 124 ] || return 124
+    if [ "$2" = 0 ] && [ -n "$lstart" ]; then SHMUTANT_PS_LSTART=1; return 1; fi
     SHMUTANT_PS_LSTART=0
   fi
   before="$(_shmutant_now)"
-  st=0; etime="$(set -o pipefail; _shmutant_ps -o etime= -p "$1" 2>/dev/null | command -p tr -d ' ')" || st=$?
-  [ "$st" != 124 ] || return 124; [ "$st" = 0 ] || return 1
+  etime="$(set -o pipefail; _shmutant_ps -o etime= -p "$1" 2>/dev/null | command -p tr -d ' ')" && builtin set -- "$1" 0 || builtin set -- "$1" "$?"
+  [ "$2" != 124 ] || return 124; [ "$2" = 0 ] || return 1
   [ -n "$etime" ] || return 1
   after="$(_shmutant_now)"; gap="$(_shmutant_etime_gap "$before" "$after")" || return 1
   printf 'e%s%s' "$(( after / 1000000 - $(_shmutant_etime_secs "$etime") ))" "$gap"
+}
+
+# _shmutant_ps_form — which form of start this ps prints, from a look at this process's own start
+# (_shmutant_identity), learned once in SHMUTANT_PS_LSTART: 0 for lstart, 1 for the elapsed-time form,
+# and 124 when the look was given up on, which leaves the form open. A look that told the form is
+# taken at its word, whether or not the start it was made for was read. It declares no name: in a
+# run's own shell, a name the run made readonly would take the answer with it.
+_shmutant_ps_form() {
+  if [ "${SHMUTANT_PS_LSTART:-}" != 0 ]; then _shmutant_identity "$BASHPID" > /dev/null || [ "$?" != 124 ] || return 124; fi
+  [ "${SHMUTANT_PS_LSTART:-}" = 1 ] || return 1
 }
 
 # _shmutant_identity_table — fill SHMUTANT_START[pid] with the start time of every live process
@@ -1034,12 +1046,12 @@ _shmutant_identity_table() {
   fi
   # The ps tables are read whole, and taken only from a read that succeeded at every stage: a ps that
   # failed, whatever it printed first, gives no table at all, never part of one.
-  # A look at which form ps prints that was given up on leaves that open, and fills nothing: a table
-  # of elapsed-time starts read behind it would be in the other form from every later one. One that
-  # told the form is taken at its word, whether or not this process's own start was read.
-  local tbl ist=0
-  [ "${SHMUTANT_PS_LSTART:-}" = 0 ] || _shmutant_identity "$BASHPID" > /dev/null || ist=$?
-  [ "$ist" != 124 ] || return 0; if [ "${SHMUTANT_PS_LSTART:-}" = 1 ]; then
+  # The form in the first positional parameter, not a name of this function's (_shmutant_ps_form). A
+  # look at it given up on leaves it open and fills nothing: a table of elapsed-time starts read
+  # behind it would be in the other form from every later one.
+  local tbl
+  _shmutant_ps_form && builtin set -- 0 || builtin set -- "$?"
+  [ "$1" != 124 ] || return 0; if [ "$1" = 0 ]; then
     tbl="$(set -o pipefail; _shmutant_ps -A -o pid= -o lstart= 2>/dev/null | command -p awk 'NF > 1 && $1 ~ /^[0-9]+$/ { pid = $1; $1 = ""; sub(/^ +/, ""); print pid, $0 }')" || return 0
     while IFS= read -r line; do
       # shellcheck disable=SC2034
@@ -3237,7 +3249,7 @@ _shmutant_pool_locals_writable() {
     dog_self done_first orphaned runner runner_gap runnerid \
     b chunk conts g gcont gone_group guard_id guard_lost guard_of guard_of_id guard_pid guard_r guard_up guard_w hs kept kills members out pairs part pg ph phid recs rid rootid_pre seen_ck unfrozen w want \
     SHMUTANT_GUARD SHMUTANT_GUARD_PID SHMUTANT_PS_LSTART SHMUTANT_PS_BOUND SHMUTANT_PS_UNSETTLES c guard_self guard_gap_ref gap ea eb lp le tbl cands guarded jl w fid_now stopped fgap cont_first cfirst told group_untold first \
-    before after ga gb ist \
+    before after ga gb \
     bad hits name names only scope SHMUTANT_PICK SHMUTANT_PICK_N
 }
 
@@ -4192,8 +4204,8 @@ _shmutant_cli_run() {
     # would save this shell's abort handler as the plan subshell's own and re-raise into it.
     trap - INT TERM
     # Every read of the process table that the CLI makes outside a freeze is given up on (_shmutant_ps)
-    # as a start or a sample that could not be read: ten seconds for a start, five for a sample, as the
-    # watchdog's are.
+    # as a start or a sample that could not be read: ten seconds a ps for a start, five for a sample,
+    # the bound the watchdog's own snapshot takes.
     ( read -r _ <&"$hold_r" ) < /dev/null > /dev/null 2>&1 {keep_w}>&- {keep_r}<&- {hold}>&- & printf 'holder %s %s\n' "$!" "$(SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES="" _shmutant_identity "$!" 2>/dev/null)" >&"$keep_w"
     readonly SHMUTANT_CLI_WD="$wd" SHMUTANT_CLI_KEEP_FD="$keep_w"
     export SHMUTANT_CLI_KEEP_FD

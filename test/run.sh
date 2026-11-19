@@ -4324,7 +4324,23 @@ stall_ps_quietly() {
 
 # bounds_given — the bounds the reads that stalled were given, each once, in order, on one line.
 bounds_given() {
-  sort -nu "$T/bounds" 2>/dev/null | tr '\n' ' ' | sed 's/ $//'
+  tr '\n' ' ' < "$T/bounds" 2>/dev/null | sed 's/ $//'
+}
+
+# stalled_bg_ended <pid> <identity> — a unit's red path, where what it started in the background did
+# not finish: end <pid> and everything beneath it while it is still the process that carried
+# <identity>, its process group, and every ps stand-in stall_ps_quietly left, each while its command
+# is still that sleep, whole. Says so when one of those stand-ins is still there afterwards.
+stalled_bg_ended() {
+  local sp args
+  end_tree "$1" "$2"
+  kill -KILL -- -"$1" 2>/dev/null; wait "$1" 2>/dev/null
+  while IFS= read -r sp; do
+    case "$sp" in ''|*[!0-9]*) continue ;; esac
+    args="$(command -p ps -o args= -p "$sp" 2>/dev/null)"; args="${args%"${args##*[![:space:]]}"}"
+    [ "$args" != 'sleep 300' ] || kill -KILL "$sp" 2>/dev/null
+  done < "$T/stalled"
+  stalled_ps_ended 'cleanup'
 }
 
 # stalled_ps_ended <label> — every ps that stall_ps_reads put a sleep in the place of has been ended,
@@ -6969,11 +6985,13 @@ t_identity_leaves_open_what_a_read_given_up_on_never_showed() {
   # it printed first included (`probe`, `partial`); and a table of starts, or a listing of descendants
   # with theirs, read behind such a look is none at all, never one in the elapsed-time form (`table`,
   # `listing`). A look that told the form is taken at its word, though the start it was made for was
-  # not read (`table-told`, `listing-told`). Once ps answers again the form is learned as it always
+  # not read (`table-told`, `listing-told`), and a look that failed tells nothing, whatever it printed
+  # (`failed-probe`). A start that could not be written is not one read (`closed`). Once ps answers
+  # again the form is learned as it always
   # was, either form (`recovered`, `recovered-etime`). With the elapsed-time form known, a read given
   # up on is 124 as well (`etime`). Every ps here is a stand-in, so the host's own forms do not count.
   local how got h="$$" lt='Thu Nov 19 10:00:00 2026'
-  for how in target probe partial table listing table-told listing-told recovered recovered-etime etime; do
+  for how in target probe partial failed-probe closed table listing table-told listing-told recovered recovered-etime etime; do
     rm -f "$T/asked" "$T/listing"; echo stall > "$T/phase"
     got="$( SHMUTANT_PROC=0; unset SHMUTANT_PS_LSTART; me="$BASHPID"
             [ "$how" != etime ] || SHMUTANT_PS_LSTART=0
@@ -7000,6 +7018,10 @@ t_identity_leaves_open_what_a_read_given_up_on_never_showed() {
                     case "$a" in *" -p $h") return 1 ;; esac
                     [ "$how" = probe ] || printf 'Mon\n'
                     return 124 ;;
+                  failed-probe:stall)
+                    case "$a" in "-o lstart= -p $h") return 1 ;; "-o lstart= -p "*) printf 'Mon\n'; return 1 ;; esac
+                    answered lstart "$@"; return ;;
+                  closed:stall) answered lstart "$@"; return ;;
                   table:stall|listing:stall) case "$a" in '-A '*) answered lstart "$@"; return ;; esac; return 124 ;;
                   table-told:*|listing-told:*) case "$a" in "-o lstart= -p $me") return 1 ;; esac; answered lstart "$@"; return ;;
                   *:stall) return 124 ;;
@@ -7017,6 +7039,7 @@ t_identity_leaves_open_what_a_read_given_up_on_never_showed() {
                 _shmutant_identity "$h" > /dev/null; printf 'st=%s ' "$?"
                 if [ "$how" = recovered ]; then echo lstart > "$T/phase"; else echo nolstart > "$T/phase"; fi
                 _shmutant_identity "$h" > "$T/listing"; printf 'then=%s out=[%s]' "$?" "$(cat "$T/listing")" ;;
+              closed) _shmutant_identity "$h" >&- 2>/dev/null; printf 'st=%s' "$?" ;;
               *) _shmutant_identity "$h" > /dev/null; printf 'st=%s' "$?" ;;
             esac
             printf ' lstart=[%s]' "${SHMUTANT_PS_LSTART-unset}" )"
@@ -7024,13 +7047,15 @@ t_identity_leaves_open_what_a_read_given_up_on_never_showed() {
       target)       eq "$got" 'st=124 lstart=[unset]' 'target: a start given up on is 124, and leaves the form open' ;;
       probe)        eq "$got" 'st=124 lstart=[unset]' 'probe: a look at the form given up on leaves the form open, and is 124' ;;
       partial)      eq "$got" 'st=124 lstart=[unset]' 'partial: what a look given up on printed first tells nothing either' ;;
+      failed-probe) eq "$got" 'st=0 lstart=[0]' 'failed-probe: what a look that failed printed tells nothing: the form is the elapsed-time one' ;;
+      closed)       eq "$got" 'st=1 lstart=[1]' 'closed: a start that could not be written is not reported as read' ;;
       table)        eq "$got" 'st=0 n=0 one=[] lstart=[unset]' 'table: no table of starts is read behind a look at the form given up on' ;;
       listing)      eq "$got" 'st=1 out=[] lstart=[unset]' 'listing: no listing of descendants is read behind a look at the form given up on' ;;
       table-told)   eq "$got" "st=0 n=1 one=[$lt] lstart=[1]" 'table-told: a look that told the form has the table read in it' ;;
       listing-told) eq "$got" "st=0 out=[77 $lt] lstart=[1]" 'listing-told: a look that told the form has the listing read in it' ;;
       recovered)    eq "$got" "st=124 then=0 out=[$lt] lstart=[1]" 'recovered: once ps answers, the start is read and the form learned' ;;
       recovered-etime)
-        case "$got" in "st=124 then=0 out=[e"*"] lstart=[0]") ;; *) fail_ "recovered-etime: once a ps with no lstart answers, the elapsed-time form is learned: got [$got]" ;; esac ;;
+        [[ "$got" =~ ^st=124\ then=0\ out=\[e[0-9]+(\+[0-9]+)?\]\ lstart=\[0\]$ ]] || fail_ "recovered-etime: once a ps with no lstart answers, the elapsed-time form is learned: got [$got]" ;;
       etime)        eq "$got" 'st=124 lstart=[0]' 'etime: an elapsed time given up on is 124' ;;
     esac
     case "$how" in
@@ -7068,7 +7093,7 @@ t_run_starts_through_reads_of_its_start_that_stall() {
       run_ended
       all_gone 50 "$RUN_KID" "$RUN_HOLDER" || fail_ "$how: fixture: the run was left behind: $(listed "${STILL[@]}")"
     fi
-    if [ "$how" = all ]; then want='1 5'; else want=5; fi
+    if [ "$how" = all ]; then want='5 5 1'; else want=5; fi
     eq "$(bounds_given)" "$want" "$how: the bounds those reads were given"
     stalled_ps_ended "$how"
   done
@@ -7083,7 +7108,7 @@ t_run_records_through_its_own_snapshots_that_stall() {
   # `builtin exit`, which passes the exit function by but not the trap). None
   # of those reads is a freeze's: a descriptor the callback left in SHMUTANT_PS_UNSETTLES is told
   # nothing, and the run is not unsettled.
-  local how bg i want
+  local how bg bgid i want
   local -A wants=([return]=3 [exit]=4 [bare]=1 [trap]=5)
   wrap_stalls() {
     SHMUTANT_PROC=0
@@ -7110,17 +7135,17 @@ t_run_records_through_its_own_snapshots_that_stall() {
       SHMUTANT_TIMEOUT=0 _shmutant_run_bounded "$T/w-$how" cb "$T/w-$how" sel
       printf 'status=%s unsettled=%s\n' "$SHMUTANT_RUN_STATUS" "$SHMUTANT_RUN_UNSETTLED" > "$T/w-$how.part" \
         && mv "$T/w-$how.part" "$T/w-$how.result" ) > /dev/null 2>&1 & bg=$!
-    set +m
+    set +m; bgid="$(_shmutant_identity "$bg")"
     for (( i = 0; i < 300; i++ )); do [ ! -e "$T/w-$how.result" ] || break; sleep 0.1; done
     if [ ! -e "$T/w-$how.result" ]; then
-      kill -KILL -- -"$bg" 2>/dev/null; wait "$bg" 2>/dev/null
+      stalled_bg_ended "$bg" "$bgid"
       fail_ "$how: a snapshot of the run's own that stalls kept the run from returning"
     else
       wait "$bg" 2>/dev/null
       want="${wants[$how]}"
       eq "$(cat "$T/w-$how.result")" "status=$want unsettled=0" "$how: the run returns with its callback's status, and is not unsettled"
       { [ -e "$T/said" ] && [ ! -s "$T/said" ]; } || fail_ "$how: a snapshot given up on is said nowhere: [$(head -c 200 "$T/said" 2>&1)]"
-      eq "$(bounds_given)" 10 "$how: the bound those reads were given"
+      eq "$(bounds_given)" '10 10' "$how: the bound each ps of the snapshot was given (the look at the form, the listing)"
     fi
     stalled_ps_ended "$how"
   done
@@ -7130,7 +7155,7 @@ t_pool_spawns_through_a_read_of_its_worker_that_stalls() {
   # #94: the pool reads each worker's start as it spawns it, in the caller's shell. That read is given
   # up on and the start is one that could not be read: the pool still scores its row and returns, and
   # the read is none of a freeze's, whatever the caller left in SHMUTANT_PS_UNSETTLES.
-  local bg i
+  local bg bgid i
   mk_toy "$T/toy"; TOY="$T/toy"
   shmutant_reset; shmutant_target lib.sh
   shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
@@ -7141,15 +7166,15 @@ t_pool_spawns_through_a_read_of_its_worker_that_stalls() {
     stall_ps_quietly
     exec {sf}> "$T/said"; SHMUTANT_PS_UNSETTLES="$sf"
     SHMUTANT_BASELINE=0 shmutant_pool lbl "$T/wd" toy_prepare toy_run > "$T/pout" 2> "$T/perr"; echo "$?" > "$T/prc" ) > /dev/null 2>&1 & bg=$!
-  set +m
+  set +m; bgid="$(_shmutant_identity "$bg")"
   for (( i = 0; i < 600; i++ )); do [ ! -e "$T/prc" ] || break; sleep 0.1; done
   if [ ! -e "$T/prc" ]; then
-    kill -KILL -- -"$bg" 2>/dev/null; wait "$bg" 2>/dev/null
+    stalled_bg_ended "$bg" "$bgid"
     fail_ 'a read of a worker that stalls kept the pool from returning'
   else
     wait "$bg" 2>/dev/null
     eq "$(cat "$T/prc")" 0 "the pool returns as it would have [$(head -c 300 "$T/perr")]"
-    has "$(cat "$T/pout")" $'\tkilled\t' 'and scores its row'
+    OUT="$(cat "$T/pout")"; eq "$(verdict_of a)" killed 'and scores its row'
     { [ -e "$T/said" ] && [ ! -s "$T/said" ]; } || fail_ "a read given up on at a spawn is said nowhere: [$(head -c 200 "$T/said" 2>&1)]"
     eq "$(bounds_given)" 10 'the bound that read was given'
   fi
@@ -7163,7 +7188,7 @@ t_cli_runs_through_reads_outside_a_freeze_that_stall() {
   # still runs its plan and exits as the plan did, with the holder's read stalling (`holder`), the
   # subshell's (`child`), the sampler's (`sampler`), or the snapshot at the subshell's end (`leave`).
   # None of those reads is a freeze's, whatever the CLI's caller left in SHMUTANT_PS_UNSETTLES.
-  local how bg i want
+  local how bg bgid i
   mk_toy "$T/toy"; TOY="$T/toy"
   cat > "$T/toy/plan.sh" <<'PLAN'
 prepare() { shmutant_copy_tree "$SHMUTANT_PLAN_DIR" "$1"; }
@@ -7187,18 +7212,21 @@ PLAN
       }
       stall_ps_quietly
       _shmutant_cli_run "$T/toy/plan.sh" --no-baseline --workdir "$T/wd-$how" > "$T/c-$how.out" 2> "$T/c-$how.err"; echo "$?" > "$T/c-$how.rc" ) > /dev/null 2>&1 & bg=$!
-    set +m
+    set +m; bgid="$(_shmutant_identity "$bg")"
     for (( i = 0; i < 600; i++ )); do [ ! -e "$T/c-$how.rc" ] || break; sleep 0.1; done
     if [ ! -e "$T/c-$how.rc" ]; then
-      kill -KILL -- -"$bg" 2>/dev/null; wait "$bg" 2>/dev/null
+      stalled_bg_ended "$bg" "$bgid"
       fail_ "$how: a read that stalls kept the CLI from finishing its plan"
     else
       wait "$bg" 2>/dev/null
       eq "$(cat "$T/c-$how.rc")" 0 "$how: the CLI exits as its plan did [$(head -c 300 "$T/c-$how.err")]"
-      has "$(cat "$T/c-$how.out")" $'\trow\tkilled\ta\t' "$how: and scores its row"
+      OUT="$(cat "$T/c-$how.out")"; eq "$(verdict_of a)" killed "$how: and scores its row"
       { [ -e "$T/said" ] && [ ! -s "$T/said" ]; } || fail_ "$how: a read given up on outside a freeze is said nowhere: [$(head -c 200 "$T/said" 2>&1)]"
-      if [ "$how" = sampler ]; then want=5; else want=10; fi
-      eq "$(bounds_given)" "$want" "$how: the bound those reads were given"
+      case "$how" in
+        sampler) [[ " $(bounds_given) " =~ ^(\ 5)+\ $ ]] || fail_ "sampler: the bound each ps of a sample was given: [$(bounds_given)]" ;;
+        leave)   eq "$(bounds_given)" '10 10' 'leave: the bound each ps of the snapshot was given (the look at the form, the listing)' ;;
+        *)       eq "$(bounds_given)" 10 "$how: the bound that read was given" ;;
+      esac
     fi
     stalled_ps_ended "$how"
   done
