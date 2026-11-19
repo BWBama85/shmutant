@@ -851,15 +851,21 @@ _shmutant_ps() {
 # runner is told on the descriptor it named, at once and from here: the read may be in a
 # substitution of the freezing shell, which can set nothing in it. A record that cannot be written
 # there is said too, and told to the pool on the worker's own channel (`unrecorded`), where it makes
-# the pass a harness error and the row unsettled: the run must not be scored without it. A ps that itself ends with status
-# 124 is read as one given up on, as it always was. Returns 0 always.
+# the pass a harness error and the row unsettled: the run must not be scored without it. Both are
+# written before any word is said: a stderr that is not drained holds the freeze at its first word,
+# and must not keep the run or the pool from being told. Where neither can be written, nothing
+# reaches the collector, and a verdict the worker writes later is accepted; that is only said. A ps
+# that itself ends with status 124 is read as one given up on, as it always was. Returns 0 always.
 _shmutant_ps_gave_up() {
   case "${SHMUTANT_PS_UNSETTLES:-}" in ''|0|*[!0-9]*) return 0 ;; esac
+  local unrec=0 untold=0
+  if [ -n "${SHMUTANT_UNSETTLED_FD:-}" ] && ! { printf 'unsettled\n' >&"$SHMUTANT_UNSETTLED_FD"; } 2>/dev/null; then
+    unrec=1
+    [ -z "${SHMUTANT_VERDICT_FD:-}" ] || { printf 'unrecorded\n' >&"$SHMUTANT_VERDICT_FD"; } 2>/dev/null || untold=1
+  fi
   _shmutant_err "a read of the process table did not answer within $1 seconds and was given up on, so the process tree being ended is not known to have been frozen whole" 2>&"$SHMUTANT_PS_UNSETTLES"
-  [ -n "${SHMUTANT_UNSETTLED_FD:-}" ] || return 0
-  { printf 'unsettled\n' >&"$SHMUTANT_UNSETTLED_FD"; } 2>/dev/null && return 0
-  _shmutant_err "the run could not be told that its freeze is unsettled, so its verdict is not accepted" 2>&"$SHMUTANT_PS_UNSETTLES"
-  [ -z "${SHMUTANT_VERDICT_FD:-}" ] || { printf 'unrecorded\n' >&"$SHMUTANT_VERDICT_FD"; } 2>/dev/null || _shmutant_err "nor could its pool be told" 2>&"$SHMUTANT_PS_UNSETTLES"
+  [ "$unrec" = 0 ] || _shmutant_err "the run could not be told that its freeze is unsettled, so its verdict is not accepted" 2>&"$SHMUTANT_PS_UNSETTLES"
+  [ "$untold" = 0 ] || _shmutant_err "nor could its pool be told" 2>&"$SHMUTANT_PS_UNSETTLES"
   return 0
 }
 
@@ -1237,8 +1243,7 @@ _shmutant_kill_tree_guarded() {
   # descriptor the freeze reports on, or of this shell's stderr where it has none.
   local held="" SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES=""
   # A write to a guard that has gone, or of a give-up's words to a reader that has gone, fails here:
-  # it does not end this shell partway through a freeze, nor a read of it before its give-up is
-  # recorded. So before the first read.
+  # it does not end this shell partway through a freeze. So before the first read.
   trap '' PIPE
   exec {SHMUTANT_PS_UNSETTLES}>&"${err_fd:-2}" || SHMUTANT_PS_UNSETTLES=2
   if [ "${1:-}" = -g ]; then held="$2"; shift 2; fi
@@ -3251,7 +3256,7 @@ _shmutant_pool_locals_writable() {
     a budget dog e elapsed last leftovers linked lstart old rrc s tampered tmpd tnow victims wroot \
     dog_self done_first orphaned runner runner_gap runnerid \
     b chunk conts g gcont gone_group guard_id guard_lost guard_of guard_of_id guard_pid guard_r guard_up guard_w hs kept kills members out pairs part pg ph phid recs rid rootid_pre seen_ck unfrozen w want \
-    SHMUTANT_GUARD SHMUTANT_GUARD_PID SHMUTANT_PS_LSTART SHMUTANT_PS_BOUND SHMUTANT_PS_UNSETTLES c guard_self guard_gap_ref gap ea eb lp le tbl cands guarded jl w fid_now stopped fgap cont_first cfirst told group_untold first \
+    SHMUTANT_GUARD SHMUTANT_GUARD_PID SHMUTANT_PS_LSTART SHMUTANT_PS_BOUND SHMUTANT_PS_UNSETTLES c guard_self guard_gap_ref gap ea eb lp le tbl cands guarded jl w fid_now stopped fgap cont_first cfirst told group_untold first unrec untold \
     before after ga gb \
     bad hits name names only scope SHMUTANT_PICK SHMUTANT_PICK_N
 }

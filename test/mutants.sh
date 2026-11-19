@@ -3109,17 +3109,29 @@ shmutant_mut 'a guard that gave up on a read of its own unsettles its freeze' \
   '  :' \
   't_guard_gives_up_on_a_process_table_that_stalls'
 shmutant_mut 'a give-up that was recorded is told to the pool as one that was not' \
-  '{ printf '"'"'unsettled\n'"'"' >&"$SHMUTANT_UNSETTLED_FD"; } 2>/dev/null && return 0' \
-  '{ printf '"'"'unsettled\n'"'"' >&"$SHMUTANT_UNSETTLED_FD"; } 2>/dev/null' \
+  '! { printf '"'"'unsettled\n'"'"' >&"$SHMUTANT_UNSETTLED_FD"; } 2>/dev/null; then' \
+  '{ printf '"'"'unsettled\n'"'"' >&"$SHMUTANT_UNSETTLED_FD"; } 2>/dev/null; then' \
   't_freeze_gives_up_on_a_process_table_that_stalls'
 shmutant_mut 'a give-up whose record could not be written is dropped in silence' \
-  '  _shmutant_err "the run could not be told that its freeze is unsettled, so its verdict is not accepted" 2>&"$SHMUTANT_PS_UNSETTLES"' \
+  '  [ "$unrec" = 0 ] || _shmutant_err "the run could not be told that its freeze is unsettled, so its verdict is not accepted" 2>&"$SHMUTANT_PS_UNSETTLES"' \
   '  :' \
   't_freeze_gives_up_on_a_process_table_that_stalls'
 shmutant_mut 'a give-up whose record could not be written is not told to the pool' \
   '{ printf '"'"'unrecorded\n'"'"' >&"$SHMUTANT_VERDICT_FD"; } 2>/dev/null ||' \
   '{ :; } 2>/dev/null ||' \
   't_freeze_gives_up_on_a_process_table_that_stalls'
+shmutant_mut 'a give-up that neither the runner nor the pool could be told of is not said (#95)' \
+  '  [ "$untold" = 0 ] || _shmutant_err "nor could its pool be told" 2>&"$SHMUTANT_PS_UNSETTLES"' \
+  '  :' \
+  't_freeze_gives_up_on_a_process_table_that_stalls'
+shmutant_mut 'a give-up says a word before the run or the pool is told (#95)' \
+  '  local unrec=0 untold=0' \
+  '  local unrec=0 untold=0; _shmutant_err "first" 2>&"$SHMUTANT_PS_UNSETTLES"' \
+  't_freeze_gives_up_on_a_process_table_that_stalls'
+shmutant_mut 'a run whose identified holder its freeze could not check leaves its group stopped (#95)' \
+  '      [ -z "${group_untold:-}" ] || gone_group="$SHMUTANT_KILL_GROUP"' \
+  '      :' \
+  't_run_is_ended_through_a_process_table_that_stalls'
 shmutant_mut 'the pool accepts the verdict of a run whose freeze could not record that it is unsettled' \
   '        unrecorded)  unrecorded=1 ;;' \
   '        unrecorded)  : ;;' \
