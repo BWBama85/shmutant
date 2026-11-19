@@ -3294,8 +3294,8 @@ shmutant_mut 'a look at the form ps prints given up on decides it has no lstart'
   'lstart="$(_shmutant_ps -o lstart= -p "$BASHPID" 2>/dev/null)" && builtin set -- "$1" 0 || builtin set -- "$1" "$?"' \
   't_identity_leaves_open_what_a_read_given_up_on_never_showed'
 shmutant_mut 'what a failed look at the form printed decides the form' \
-  'if [ "$2" = 0 ] && [ -n "$lstart" ]; then SHMUTANT_PS_LSTART=1; return 1; fi' \
-  'if [ -n "$lstart" ]; then SHMUTANT_PS_LSTART=1; return 1; fi' \
+  'if [ "$2" = 0 ] && [ -n "${lstart//[[:space:]]/}" ]; then SHMUTANT_PS_LSTART=1; return 1; fi' \
+  'if [ -n "${lstart//[[:space:]]/}" ]; then SHMUTANT_PS_LSTART=1; return 1; fi' \
   't_identity_leaves_open_what_a_read_given_up_on_never_showed'
 shmutant_mut 'a start whose write failed is reported as read' \
   'SHMUTANT_PS_LSTART=1; printf '"'"'%s'"'"' "$lstart"; return; fi' \
@@ -3306,12 +3306,12 @@ shmutant_mut 'an elapsed time given up on is a plain failure' \
   '[ "$2" = 0 ] || return 1' \
   't_identity_leaves_open_what_a_read_given_up_on_never_showed'
 shmutant_mut 'a look at the form given up on is taken as the elapsed-time form' \
-  '_shmutant_identity "$BASHPID" > /dev/null || [ "$?" != 124 ] || return 124; fi' \
-  '_shmutant_identity "$BASHPID" > /dev/null || :; fi' \
+  'case "${SHMUTANT_PS_LSTART:-}" in 1) return 0 ;; 0) return 1 ;; *) return 124 ;; esac' \
+  'case "${SHMUTANT_PS_LSTART:-}" in 1) return 0 ;; 0) return 1 ;; *) return 1 ;; esac' \
   't_identity_leaves_open_what_a_read_given_up_on_never_showed'
 shmutant_mut 'a look that told the form counts only when the start it was made for was read' \
-  '_shmutant_identity "$BASHPID" > /dev/null || [ "$?" != 124 ] || return 124; fi' \
-  '_shmutant_identity "$BASHPID" > /dev/null || { [ "$?" != 124 ] || return 124; return 1; }; fi' \
+  '_shmutant_identity "$BASHPID" > /dev/null || :' \
+  '_shmutant_identity "$BASHPID" > /dev/null || return 1' \
   't_identity_leaves_open_what_a_read_given_up_on_never_showed'
 shmutant_mut 'a table of starts is read behind a look at the form given up on' \
   '[ "$1" != 124 ] || return 0; if [ "$1" = 0 ]; then' \
@@ -3320,4 +3320,16 @@ shmutant_mut 'a table of starts is read behind a look at the form given up on' \
 shmutant_mut 'a listing of descendants is read behind a look at the form given up on' \
   '[ "$2" != 124 ] || return 1; if [ "$2" = 0 ]; then' \
   'if [ "$2" = 0 ]; then' \
+  't_identity_leaves_open_what_a_read_given_up_on_never_showed'
+shmutant_mut 'a form already recorded is looked at again' \
+  'case "${SHMUTANT_PS_LSTART:-}" in 1) return 0 ;; 0) return 1 ;; esac' \
+  ':' \
+  't_identity_leaves_open_what_a_read_given_up_on_never_showed'
+shmutant_mut 'an elapsed time given up on is taken for a look at the form given up on' \
+  '_shmutant_identity "$BASHPID" > /dev/null || :' \
+  '_shmutant_identity "$BASHPID" > /dev/null || [ "$?" != 124 ] || return 124' \
+  't_identity_leaves_open_what_a_read_given_up_on_never_showed'
+shmutant_mut 'a look at the form that printed only blanks tells lstart' \
+  'if [ "$2" = 0 ] && [ -n "${lstart//[[:space:]]/}" ]; then' \
+  'if [ "$2" = 0 ] && [ -n "$lstart" ]; then' \
   't_identity_leaves_open_what_a_read_given_up_on_never_showed'

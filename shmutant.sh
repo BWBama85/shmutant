@@ -1007,9 +1007,10 @@ _shmutant_identity() {
     lstart="$(set -o pipefail; _shmutant_ps -o lstart= -p "$1" 2>/dev/null | command -p awk 'NF { $1 = $1; print; exit }')" && builtin set -- "$1" 0 || { builtin set -- "$1" "$?"; lstart=""; }
     if [ -n "$lstart" ]; then SHMUTANT_PS_LSTART=1; printf '%s' "$lstart"; return; fi
     [ "$2" != 124 ] || return 124; [ "${SHMUTANT_PS_LSTART:-}" != 1 ] || return 1
-    # The look at the form counts only when its ps succeeded: what a failed one printed tells nothing.
+    # The look at the form tells lstart only when its ps succeeded and printed more than blanks; one
+    # that failed, or printed nothing, tells the elapsed-time form. One given up on tells nothing.
     lstart="$(_shmutant_ps -o lstart= -p "$BASHPID" 2>/dev/null)" && builtin set -- "$1" 0 || builtin set -- "$1" "$?"; [ "$2" != 124 ] || return 124
-    if [ "$2" = 0 ] && [ -n "$lstart" ]; then SHMUTANT_PS_LSTART=1; return 1; fi
+    if [ "$2" = 0 ] && [ -n "${lstart//[[:space:]]/}" ]; then SHMUTANT_PS_LSTART=1; return 1; fi
     SHMUTANT_PS_LSTART=0
   fi
   before="$(_shmutant_now)"
@@ -1020,14 +1021,16 @@ _shmutant_identity() {
   printf 'e%s%s' "$(( after / 1000000 - $(_shmutant_etime_secs "$etime") ))" "$gap"
 }
 
-# _shmutant_ps_form — which form of start this ps prints, from a look at this process's own start
-# (_shmutant_identity), learned once in SHMUTANT_PS_LSTART: 0 for lstart, 1 for the elapsed-time form,
-# and 124 when the look was given up on, which leaves the form open. A look that told the form is
+# _shmutant_ps_form — which form of start this ps prints, as its status: 0 for lstart (which
+# SHMUTANT_PS_LSTART records as 1), 1 for the elapsed-time form (recorded as 0), and 124 while it is
+# not known, the look at this process's own start that would have told (_shmutant_identity) having
+# been given up on. A form recorded is taken as it is, with no look; a look that told the form is
 # taken at its word, whether or not the start it was made for was read. It declares no name: in a
 # run's own shell, a name the run made readonly would take the answer with it.
 _shmutant_ps_form() {
-  if [ "${SHMUTANT_PS_LSTART:-}" != 0 ]; then _shmutant_identity "$BASHPID" > /dev/null || [ "$?" != 124 ] || return 124; fi
-  [ "${SHMUTANT_PS_LSTART:-}" = 1 ] || return 1
+  case "${SHMUTANT_PS_LSTART:-}" in 1) return 0 ;; 0) return 1 ;; esac
+  _shmutant_identity "$BASHPID" > /dev/null || :
+  case "${SHMUTANT_PS_LSTART:-}" in 1) return 0 ;; 0) return 1 ;; *) return 124 ;; esac
 }
 
 # _shmutant_identity_table — fill SHMUTANT_START[pid] with the start time of every live process
