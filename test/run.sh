@@ -6131,7 +6131,7 @@ t_guard_verifies_with_its_top_shell_gone() {
   sleep 60 > /dev/null 2>&1 & local a=$!
   local aid g=""
   aid="$(_shmutant_identity "$a")"
-  SHMUTANT="$SHMUTANT" A="$a" AID="$aid" D="$T" WAIT_FOR="$(declare -f wait_for)" bash -c '
+  SHMUTANT="$SHMUTANT" A="$a" AID="$aid" D="$T" WAIT_FOR="$(declare -f looks_bound wait_for)" bash -c '
     . "$SHMUTANT" || exit 9
     eval "$WAIT_FOR"
     # Published by a rename, so the name appears only once its content is whole.
