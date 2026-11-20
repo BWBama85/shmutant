@@ -854,17 +854,19 @@ _shmutant_ps() {
 # harness error and the row unsettled: the run must not be scored without it. Both are written
 # before any word is said, so a word that blocks on a stderr with no room left keeps neither from
 # being made. Where neither can be written, nothing reaches the collector, and a verdict the worker
-# writes later is accepted; that is only said. A ps that itself ends with status 124 is read as one
-# given up on, as it always was. Returns 0 always.
+# writes later may be accepted; that is only said. Each is written through _shmutant_tell_fd, so a
+# closed descriptor or a value that names none is a write that failed. A ps that itself ends with
+# status 124 is read as one given up on, as it always was. Returns 0 always.
 _shmutant_ps_gave_up() {
   case "${SHMUTANT_PS_UNSETTLES:-}" in ''|0|*[!0-9]*) return 0 ;; esac
-  # $2: the runner was told (0) or not (1); $3: the pool was told (0), not (1), or has no channel
-  # here (2). Positional, never a name: the run's own shell may have made any name readonly.
+  # $2: 1 when a runner to tell could not be told, else 0 (told, or none to tell); $3: the pool was
+  # told (0), not (1), or not asked (2). Positional, never a name: the run's own shell may have made
+  # any name readonly.
   builtin set -- "$1" 0 2
-  if [ -n "${SHMUTANT_UNSETTLED_FD:-}" ] && ! { printf 'unsettled\n' >&"$SHMUTANT_UNSETTLED_FD"; } 2>/dev/null; then
+  if [ -n "${SHMUTANT_UNSETTLED_FD:-}" ] && ! _shmutant_tell_fd "$SHMUTANT_UNSETTLED_FD" unsettled; then
     builtin set -- "$1" 1 2
     if [ -n "${SHMUTANT_VERDICT_FD:-}" ]; then
-      if { printf 'unrecorded\n' >&"$SHMUTANT_VERDICT_FD"; } 2>/dev/null; then builtin set -- "$1" 1 0; else builtin set -- "$1" 1 1; fi
+      if _shmutant_tell_fd "$SHMUTANT_VERDICT_FD" unrecorded; then builtin set -- "$1" 1 0; else builtin set -- "$1" 1 1; fi
     fi
   fi
   _shmutant_err "a read of the process table did not answer within $1 seconds and was given up on, so the process tree being ended is not known to have been frozen whole" 2>&"$SHMUTANT_PS_UNSETTLES"
@@ -874,6 +876,20 @@ _shmutant_ps_gave_up() {
     12) _shmutant_err "the run could not be told that its freeze is unsettled" 2>&"$SHMUTANT_PS_UNSETTLES" ;;
   esac
   return 0
+}
+
+# _shmutant_tell_fd <fd> <line> — write <line> and a newline to descriptor <fd>; 1 when <fd> is no
+# decimal number (a word there would name a file to write) or the write fails. The descriptor is made
+# the stdout of a subshell by exec, which saves nothing: a builtin's own redirection saves the stream
+# it replaces in the lowest free number from 10, which may be that of a closed <fd>, and the write
+# then reaches the saved stream and succeeds.
+_shmutant_tell_fd() {
+  case "${1:-}" in ''|*[!0-9]*) return 1 ;; esac
+  # No handler of the caller's runs in here (an ERR trap that errtrace hands down would run on the
+  # failed exec), and no function of that name: `exec` itself, since `builtin exec` is a command like
+  # any other, whose redirections are saved and undone. One redirection to an exec: bash keeps a copy
+  # of stderr while it redirects it, which a second redirection on the same exec can take for <fd>.
+  ( builtin trap - ERR DEBUG RETURN; builtin unset -f exec; exec 2>/dev/null; exec >&"$1" || builtin exit 1; builtin printf '%s\n' "$2" ) || return 1
 }
 
 # _shmutant_ps_end <pid> — KILL <pid> while it is a job of this shell's that bash has not reaped:

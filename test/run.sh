@@ -117,10 +117,12 @@ EOF
 }
 
 # wait_for <file> [<looks>] — block until <file> exists, looking at most <looks> times (100 when not
-# given) a tenth of a second apart; false on expiry.
+# given) a tenth of a second apart; 1 on expiry, 2 for <looks> that is not a decimal from 1 to 9999
+# without leading zeros (an empty one included), whether or not <file> exists.
 wait_for() {
-  local i=0
-  until [ -e "$1" ]; do i=$((i + 1)); [ "$i" -lt "${2:-100}" ] || return 1; sleep 0.1; done
+  local i=0 looks="${2-100}"
+  [[ "$looks" =~ ^[1-9][0-9]{0,3}$ ]] || { echo "wait_for: looks must be 1 to 9999, got [$looks]" >&2; return 2; }
+  until [ -e "$1" ]; do i=$((i + 1)); [ "$i" -lt "$looks" ] || return 1; sleep 0.1; done
 }
 
 # guard_on_pipe <command>… — start <command>… in the background reading the read end of a pipe, as a
@@ -6911,6 +6913,15 @@ t_freeze_gives_up_on_a_process_table_that_stalls() {
     _shmutant_kill_tree KILL "" "${known[@]}"; wait "$root" 2>/dev/null
     all_gone 50 "${known[@]}" || fail_ "first: fixture: the processes of the case were left behind: $(listed "${STILL[@]}")"
   fi
+  # #95: the first read of a freeze is made with SIGPIPE already ignored, as every later one is: the
+  # disposition is read inside that read's own substitution, at the first look of the freeze.
+  rm -f "$T/pipe-at-first"
+  sleep 60 > /dev/null 2>&1 & root=$!
+  ( eval "$(declare -f _shmutant_identity | sed '1s/^_shmutant_identity /_identity_spied /')"
+    _shmutant_identity() { [ -e "$T/pipe-at-first" ] || builtin trap -p PIPE >| "$T/pipe-at-first"; _identity_spied "$@"; }
+    _shmutant_kill_tree_twice "$root:$(_identity_spied "$root")" ) > /dev/null 2>&1
+  wait "$root" 2>/dev/null
+  eq "$(cat "$T/pipe-at-first" 2>/dev/null)" "trap -- '' SIGPIPE" 'the first read of a freeze is made with SIGPIPE ignored'
   # The report itself (_shmutant_ps_gave_up): one line on the descriptor the runner named, and said
   # on the descriptor its freeze kept for it (SHMUTANT_PS_UNSETTLES), never on the stderr of the read.
   local out v
@@ -6923,36 +6934,68 @@ t_freeze_gives_up_on_a_process_table_that_stalls() {
   eq "$(cat "$T/pool" 2>/dev/null)" '' 'a give-up that was recorded tells the pool nothing'
   # A record that cannot be written (here the runner's descriptor is open for reading only) is said,
   # and told to the pool on the worker's channel, which makes the pass a harness error.
+  local said1="shmutant: a read of the process table did not answer within 7 seconds and was given up on, so the process tree being ended is not known to have been frozen whole"
+  local told_pool="shmutant: the run could not be told that its freeze is unsettled; its pool was told, so its verdict is not accepted"
+  local told_none="shmutant: the run could not be told that its freeze is unsettled, nor could its pool be told, so the verdict it reaches may be accepted"
   rm -f "$T/said" "$T/pool"
-  ( exec {sf}> "$T/said" {uf}< /dev/null {vf}> "$T/pool"; SHMUTANT_PS_UNSETTLES="$sf"; SHMUTANT_UNSETTLED_FD="$uf"; SHMUTANT_VERDICT_FD="$vf"
+  ( exec {sf}>| "$T/said" {uf}< /dev/null {vf}>| "$T/pool" || exit 9; SHMUTANT_PS_UNSETTLES="$sf"; SHMUTANT_UNSETTLED_FD="$uf"; SHMUTANT_VERDICT_FD="$vf"
     _shmutant_ps_gave_up 7 ) > /dev/null 2>&1
-  has "$(cat "$T/said" 2>/dev/null)" 'could not be told that its freeze is unsettled; its pool was told, so its verdict is not accepted' 'a give-up whose record could not be written says so, and that its pool was told'
+  eq "$(cat "$T/said" 2>/dev/null)" "$said1"$'\n'"$told_pool" 'a give-up whose record could not be written says so, and that its pool was told'
   eq "$(cat "$T/pool" 2>/dev/null)" unrecorded 'a give-up whose record could not be written is told to the pool'
-  # And a pool that cannot be told either is said as well.
+  # And a pool that cannot be told either is said as well, with no word that its verdict is refused.
   rm -f "$T/said"
-  ( exec {sf}> "$T/said" {uf}< /dev/null {vf}< /dev/null; SHMUTANT_PS_UNSETTLES="$sf"; SHMUTANT_UNSETTLED_FD="$uf"; SHMUTANT_VERDICT_FD="$vf"
+  ( exec {sf}>| "$T/said" {uf}< /dev/null {vf}< /dev/null || exit 9; SHMUTANT_PS_UNSETTLES="$sf"; SHMUTANT_UNSETTLED_FD="$uf"; SHMUTANT_VERDICT_FD="$vf"
     _shmutant_ps_gave_up 7 ) > /dev/null 2>&1
-  has "$(cat "$T/said" 2>/dev/null)" 'nor could its pool be told, so the verdict it reaches may be accepted' 'a give-up that neither the runner nor the pool could be told of says so, and that its verdict may stand'
-  case "$(cat "$T/said" 2>/dev/null)" in *'is not accepted'*) fail_ 'a give-up the pool was never told of says its verdict is not accepted' ;; esac
+  eq "$(cat "$T/said" 2>/dev/null)" "$said1"$'\n'"$told_none" 'a give-up that neither the runner nor the pool could be told of says so, and that its verdict may stand'
   # With a runner that cannot be told and no pool's channel here, only that is said.
   rm -f "$T/said"
-  ( exec {sf}> "$T/said" {uf}< /dev/null; SHMUTANT_PS_UNSETTLES="$sf"; SHMUTANT_UNSETTLED_FD="$uf"; SHMUTANT_VERDICT_FD=""
+  ( exec {sf}>| "$T/said" {uf}< /dev/null || exit 9; SHMUTANT_PS_UNSETTLES="$sf"; SHMUTANT_UNSETTLED_FD="$uf"; SHMUTANT_VERDICT_FD=""
     _shmutant_ps_gave_up 7 ) > /dev/null 2>&1
-  eq "$(sed -n 2p "$T/said" 2>/dev/null)" 'shmutant: the run could not be told that its freeze is unsettled' 'a give-up with no pool to tell says only that its runner was not told'
+  eq "$(cat "$T/said" 2>/dev/null)" "$said1"$'\n''shmutant: the run could not be told that its freeze is unsettled' 'a give-up with no pool to tell says only that its runner was not told'
+  # A closed descriptor is a write that failed, whichever it is: a write to it must not reach a copy of
+  # a stream that took its number meanwhile (here the stdout and stderr of the give-up, a file of its own).
+  local cf
+  rm -f "$T/said" "$T/pool" "$T/out"
+  ( exec {sf}>| "$T/said" {vf}>| "$T/pool" {cf}> /dev/null || exit 9; exec {cf}>&-
+    SHMUTANT_PS_UNSETTLES="$sf"; SHMUTANT_UNSETTLED_FD="$cf"; SHMUTANT_VERDICT_FD="$vf"
+    _shmutant_ps_gave_up 7 ) >| "$T/out" 2>&1
+  eq "$(cat "$T/pool" 2>/dev/null)|$(cat "$T/out" 2>/dev/null)" 'unrecorded|' 'a give-up whose runner'"'"'s descriptor is closed tells the pool, and writes nowhere else'
+  eq "$(cat "$T/said" 2>/dev/null)" "$said1"$'\n'"$told_pool" 'and says its pool was told'
+  rm -f "$T/said" "$T/out"
+  ( exec {sf}>| "$T/said" {uf}< /dev/null {cf}> /dev/null || exit 9; exec {cf}>&-
+    SHMUTANT_PS_UNSETTLES="$sf"; SHMUTANT_UNSETTLED_FD="$uf"; SHMUTANT_VERDICT_FD="$cf"
+    _shmutant_ps_gave_up 7 ) >| "$T/out" 2>&1
+  eq "$(cat "$T/out" 2>/dev/null)" '' 'a give-up whose pool'"'"'s descriptor is closed writes nowhere else'
+  eq "$(cat "$T/said" 2>/dev/null)" "$said1"$'\n'"$told_none" 'and says its pool could not be told'
+  # A value that names no descriptor is no descriptor, and never the name of a file to write.
+  mkdir -p "$T/nowhere"
+  rm -f "$T/said" "$T/pool"
+  ( cd "$T/nowhere" || exit 9; exec {sf}>| "$T/said" {vf}>| "$T/pool" || exit 9
+    SHMUTANT_PS_UNSETTLES="$sf"; SHMUTANT_UNSETTLED_FD=told; SHMUTANT_VERDICT_FD="$vf"
+    _shmutant_ps_gave_up 7 ) > /dev/null 2>&1
+  eq "$(cat "$T/pool" 2>/dev/null)|$(ls -A "$T/nowhere" 2>/dev/null)" 'unrecorded|' 'a runner'"'"'s descriptor that is a word is a record that failed, and no file'
+  rm -f "$T/said"
+  ( cd "$T/nowhere" || exit 9; exec {sf}>| "$T/said" {uf}< /dev/null || exit 9
+    SHMUTANT_PS_UNSETTLES="$sf"; SHMUTANT_UNSETTLED_FD="$uf"; SHMUTANT_VERDICT_FD=pool
+    _shmutant_ps_gave_up 7 ) > /dev/null 2>&1
+  eq "$(cat "$T/said" 2>/dev/null)|$(ls -A "$T/nowhere" 2>/dev/null)" "$said1"$'\n'"$told_none|" 'a pool'"'"'s descriptor that is a word is a word to the pool that failed, and no file'
   # #95: the run, or the pool, is told before any word is said: a word that blocks on a stderr with
   # no room left holds the give-up there, so the record must be made by then. Each word here writes
   # down what the runner's and the pool's descriptors held when it was said, and every one must show
   # the record (how many words there are is the cases above).
+  local gst
   rm -f "$T/order"
-  ( exec {uf}> "$T/told" {vf}> "$T/pool"; SHMUTANT_PS_UNSETTLES=2; SHMUTANT_UNSETTLED_FD="$uf"; SHMUTANT_VERDICT_FD="$vf"
+  ( exec {uf}>| "$T/told" {vf}>| "$T/pool" || exit 9; SHMUTANT_PS_UNSETTLES=2; SHMUTANT_UNSETTLED_FD="$uf"; SHMUTANT_VERDICT_FD="$vf"
     _shmutant_err() { printf '%s|%s\n' "$(cat "$T/told")" "$(cat "$T/pool")" >> "$T/order"; }
     _shmutant_ps_gave_up 7 ) > /dev/null 2>&1
-  { [ -s "$T/order" ] && ! grep -qvx 'unsettled|' "$T/order"; } || fail_ "a give-up is recorded before its words are said: words saw [$(tr '\n' ' ' < "$T/order" 2>/dev/null)]"
+  gst=0; grep -qvx 'unsettled|' "$T/order" 2>/dev/null || gst=$?
+  { [ -s "$T/order" ] && [ "$gst" = 1 ]; } || fail_ "a give-up is recorded before its words are said: words saw [$(tr '\n' ' ' < "$T/order" 2>/dev/null)]"
   rm -f "$T/order"
-  ( exec {uf}< /dev/null {vf}> "$T/pool"; SHMUTANT_PS_UNSETTLES=2; SHMUTANT_UNSETTLED_FD="$uf"; SHMUTANT_VERDICT_FD="$vf"
+  ( exec {uf}< /dev/null {vf}>| "$T/pool" || exit 9; SHMUTANT_PS_UNSETTLES=2; SHMUTANT_UNSETTLED_FD="$uf"; SHMUTANT_VERDICT_FD="$vf"
     _shmutant_err() { printf '%s\n' "$(cat "$T/pool")" >> "$T/order"; }
     _shmutant_ps_gave_up 7 ) > /dev/null 2>&1
-  { [ -s "$T/order" ] && ! grep -qvx 'unrecorded' "$T/order"; } || fail_ "a give-up whose record failed tells the pool before any of its words are said: words saw [$(tr '\n' ' ' < "$T/order" 2>/dev/null)]"
+  gst=0; grep -qvx 'unrecorded' "$T/order" 2>/dev/null || gst=$?
+  { [ -s "$T/order" ] && [ "$gst" = 1 ]; } || fail_ "a give-up whose record failed tells the pool before any of its words are said: words saw [$(tr '\n' ' ' < "$T/order" 2>/dev/null)]"
   # With no runner to tell (an abort, the CLI), it is still said.
   rm -f "$T/said"
   ( exec {sf}> "$T/said"; SHMUTANT_PS_UNSETTLES="$sf"; SHMUTANT_UNSETTLED_FD=""; _shmutant_ps_gave_up 7 ) > /dev/null 2>&1
@@ -7293,6 +7336,25 @@ PLAN
 }
 
 # shellcheck disable=SC2034
+t_wait_for_bounds_its_looks() {
+  # #95: the bound wait_for is given is checked before anything is looked at, a file that is already
+  # there included, and one it is given is the number of looks it takes.
+  local v rc t0 t1
+  : >| "$T/there"
+  for v in 0 -1 x 01 10000 ''; do
+    rc=0; wait_for "$T/there" "$v" 2> /dev/null || rc=$?
+    eq "$rc" 2 "wait_for refuses a bound of [$v] for a file that is there"
+    rc=0; wait_for "$T/not-there" "$v" 2> /dev/null || rc=$?
+    eq "$rc" 2 "wait_for refuses a bound of [$v] for a file that is not"
+  done
+  rc=0; wait_for "$T/there" 1 || rc=$?
+  eq "$rc" 0 'wait_for finds a file that is there'
+  t0="$(_shmutant_now)"; rc=0; wait_for "$T/not-there" 3 || rc=$?; t1="$(_shmutant_now)"
+  eq "$rc" 1 'wait_for gives up on a file that never comes'
+  # Three looks are two sleeps of a tenth of a second: well under a second, never the default ten.
+  [ "$(( t1 - t0 ))" -lt 1000000 ] || fail_ "wait_for took [$t0 -> $t1] microseconds for three looks"
+}
+
 t_run_is_ended_through_a_process_table_that_stalls() {
   # #86: a ps that does not answer must not hold a run past its end. The listing a deadline prints
   # before its freeze is given up on and left out (`listing`), and so is the look at the run's holder
@@ -7342,7 +7404,7 @@ t_run_is_ended_through_a_process_table_that_stalls() {
       wait_for "$T/$how/result" 900 || fail_ 'identified: the run did not return to its caller'
       fired=""; unsettled=""; read -r fired unsettled _ < "$T/$how/result" 2>/dev/null
       eq "$fired $unsettled" 'fired=1 unsettled=1' 'identified: a run whose freeze gave up on its reads was not scored unsettled'
-      ! wait_gone "${RUN_KID%%:*}" "${RUN_KID#*:}" 1 || fail_ 'identified: a process of a group that could not be shown to be the run'"'"'s was killed'
+      carries_identity "${RUN_KID%%:*}" "${RUN_KID#*:}" || fail_ 'identified: a process of a group that could not be shown to be the run'"'"'s was killed'
       left="$(none_stopped 50 "${RUN_KID%%:*}" "${RUN_HOLDER%%:*}")" || fail_ "identified: a group that could not be shown to be the run's was left stopped: [$left]"
       stalled_ps_ended "$how"
       run_ended
@@ -8144,16 +8206,16 @@ t_collect_fails_closed() {
   eq "$SHMUTANT_V_VERDICT" lost 'a run that sent no verdict is lost, unrecorded or not'
   SHMUTANT_CLEANUP_FAILED=0
   # #95, the residual the guide states: a give-up whose record and whose word to the pool both fail,
-  # on the worker's own channel, reaches the collector as nothing, and a verdict the worker writes on
-  # that channel afterwards is accepted. The two writes fail here by a printf that refuses them.
-  local w
+  # delivering nothing, reaches the collector as nothing, and a whole verdict the worker then writes on
+  # its channel is accepted. Both fail here on a descriptor closed in the give-up's own shell: the
+  # runner's, and the worker's channel, which the worker itself still holds open.
+  local w uc
   _shmutant_open_channel "$T" d
-  rm -f "$T/tried" "$T/said"
-  ( exec {sf}> "$T/said" {uf}> /dev/null; SHMUTANT_PS_UNSETTLES="$sf"; SHMUTANT_UNSETTLED_FD="$uf"; SHMUTANT_VERDICT_FD="${SHMUTANT_VERDICT_W[d]}"
-    printf() { case "$1" in 'unsettled\n'|'unrecorded\n') builtin printf '%s\n' "${1%?n}" >> "$T/tried"; return 1 ;; esac; builtin printf "$@"; }
+  rm -f "$T/said"
+  ( w="${SHMUTANT_VERDICT_W[d]}"; exec {sf}>| "$T/said" {uc}> /dev/null || exit 9; exec {uc}>&- {w}>&-
+    SHMUTANT_PS_UNSETTLES="$sf"; SHMUTANT_UNSETTLED_FD="$uc"; SHMUTANT_VERDICT_FD="$w"
     _shmutant_ps_gave_up 7 ) > /dev/null 2>&1
-  eq "$(tr '\n' ' ' < "$T/tried" 2>/dev/null)" 'unsettled unrecorded ' 'a give-up tries its record and then its word to the pool'
-  has "$(cat "$T/said" 2>/dev/null)" 'nor could its pool be told' 'and says it could tell neither'
+  has "$(cat "$T/said" 2>/dev/null)" 'nor could its pool be told' 'a give-up that could tell neither its runner nor its pool says so'
   printf 'verdict killed 5 1\n' >&"${SHMUTANT_VERDICT_W[d]}"
   w="${SHMUTANT_VERDICT_W[d]}"; exec {w}>&-; unset 'SHMUTANT_VERDICT_W[d]'
   _shmutant_collect "$T/d" d 0 2> /dev/null
