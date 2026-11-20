@@ -128,8 +128,9 @@ jobs:
       - name: verdicts
         if: always()
         run: cat mutants.tsv || true
+      # Cancelled as well: a job stopped at its bound keeps what its rows wrote.
       - uses: actions/upload-artifact@v7.0.1
-        if: failure()
+        if: failure() || cancelled()
         with:
           name: mutants-linux
           path: |
@@ -211,9 +212,10 @@ jobs:
       - name: suite
         run: bash test/run.sh
 
+  # A runner of three CPUs runs the table three rows at a time, which takes up to about two hours (D25).
   macos-mutants:
     runs-on: macos-latest
-    timeout-minutes: 90
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v7.0.1
       - run: brew install bash
@@ -233,8 +235,9 @@ jobs:
       - name: verdicts
         if: always()
         run: cat mutants.tsv || true
+      # Cancelled as well: a job stopped at its bound keeps what its rows wrote.
       - uses: actions/upload-artifact@v7.0.1
-        if: failure()
+        if: failure() || cancelled()
         with:
           name: mutants-macos
           path: |
