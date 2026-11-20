@@ -116,12 +116,18 @@ exit $rc
 EOF
 }
 
+# looks_bound <who> <looks> — true for <looks> a decimal from 1 to 9999 without leading zeros; else
+# say so for <who> on stderr and return 1. The bound every wait helper here takes.
+looks_bound() {
+  [[ "$2" =~ ^[1-9][0-9]{0,3}$ ]] || { echo "$1: looks must be 1 to 9999, got [$2]" >&2; return 1; }
+}
+
 # wait_for <file> [<looks>] — block until <file> exists, looking at most <looks> times (100 when not
 # given) a tenth of a second apart; 1 on expiry, 2 for <looks> that is not a decimal from 1 to 9999
 # without leading zeros (an empty one included), whether or not <file> exists.
 wait_for() {
   local i=0 looks="${2-100}"
-  [[ "$looks" =~ ^[1-9][0-9]{0,3}$ ]] || { echo "wait_for: looks must be 1 to 9999, got [$looks]" >&2; return 2; }
+  looks_bound wait_for "$looks" || return 2
   until [ -e "$1" ]; do i=$((i + 1)); [ "$i" -lt "$looks" ] || return 1; sleep 0.1; done
 }
 
@@ -146,7 +152,7 @@ guard_on_pipe() {
 # carrying <identity> (read on entry when none is given): a pid carrying another was reused.
 wait_gone() {
   local i=0 id="${2:-}" looks="${3-30}" now
-  [[ "$looks" =~ ^[1-9][0-9]{0,3}$ ]] || { echo "wait_gone: looks must be 1 to 9999, got [$looks]" >&2; return 2; }
+  looks_bound wait_gone "$looks" || return 2
   [ -n "$id" ] || id="$(_shmutant_identity "$1" 2>/dev/null)"
   while kill -0 "$1" 2>/dev/null; do
     case "$(command -p ps -o stat= -p "$1" 2>/dev/null)" in *Z*) return 0 ;; esac
@@ -336,7 +342,7 @@ note_pid() {
 # from 1 to 9999. It declares no name either: the looks are counted in its own arguments.
 note_written() {
   set -- "$1" "$2" "${3-300}" 1
-  [[ "$3" =~ ^[1-9][0-9]{0,3}$ ]] || { echo "note_written: looks must be 1 to 9999, got [$3]" >&2; return 2; }
+  looks_bound note_written "$3" || return 2
   [ ! -e "$1" ] && [ ! -L "$1" ] || return 1
   until [ -s "$2" ]; do [ "$4" -lt "$3" ] || return 1; set -- "$1" "$2" "$3" "$(($4 + 1))"; sleep 0.1; done
   { set -- "$1" "$(< "$2")"; } 2>/dev/null
@@ -438,7 +444,7 @@ run_gone() {
   local i left p id c now looks="${3-150}" own pg snap
   local -a survivors=() inside=() outside=()
   local -A recorded=()
-  [[ "$looks" =~ ^[1-9][0-9]{0,3}$ ]] || { echo "run_gone: looks must be 1 to 9999, got [$looks]" >&2; return 2; }
+  looks_bound run_gone "$looks" || return 2
   # A last line without its newline is still a record.
   while IFS=: read -r p id || [ -n "$p" ]; do
     [ -n "$p$id" ] || continue
@@ -6914,7 +6920,9 @@ t_freeze_gives_up_on_a_process_table_that_stalls() {
     all_gone 50 "${known[@]}" || fail_ "first: fixture: the processes of the case were left behind: $(listed "${STILL[@]}")"
   fi
   # #95: the first read of a freeze is made with SIGPIPE already ignored, as every later one is: the
-  # disposition is read inside that read's own substitution, at the first look of the freeze.
+  # disposition is read inside that read's own substitution, at the first look of the freeze. (Where
+  # this shell started with SIGPIPE ignored nothing can restore its default, and the row that does so
+  # for that read cannot go red here: the suite's self-mutation runs with it restored.)
   rm -f "$T/pipe-at-first"
   sleep 60 > /dev/null 2>&1 & root=$!
   ( eval "$(declare -f _shmutant_identity | sed '1s/^_shmutant_identity /_identity_spied /')"
@@ -6928,7 +6936,7 @@ t_freeze_gives_up_on_a_process_table_that_stalls() {
   rm -f "$T/told" "$T/said" "$T/pool"
   out="$( exec {sf}> "$T/said" {uf}> "$T/told" {vf}> "$T/pool"; SHMUTANT_PS_UNSETTLES="$sf"; SHMUTANT_UNSETTLED_FD="$uf"; SHMUTANT_VERDICT_FD="$vf"
           _shmutant_ps_gave_up 7 2>&1 )"
-  eq "$(cat "$T/told" 2>/dev/null)" unsettled 'a give-up is one line on the descriptor the runner named'
+  eq "$(cat "$T/told" 2>/dev/null; printf .)" $'unsettled\n.' 'a give-up is one line on the descriptor the runner named'
   has "$(cat "$T/said" 2>/dev/null)" 'did not answer within 7 seconds' 'a give-up is said on the descriptor its freeze kept for it'
   eq "$out" '' 'a give-up says nothing on the stderr of the read itself'
   eq "$(cat "$T/pool" 2>/dev/null)" '' 'a give-up that was recorded tells the pool nothing'
@@ -6941,7 +6949,7 @@ t_freeze_gives_up_on_a_process_table_that_stalls() {
   ( exec {sf}>| "$T/said" {uf}< /dev/null {vf}>| "$T/pool" || exit 9; SHMUTANT_PS_UNSETTLES="$sf"; SHMUTANT_UNSETTLED_FD="$uf"; SHMUTANT_VERDICT_FD="$vf"
     _shmutant_ps_gave_up 7 ) > /dev/null 2>&1
   eq "$(cat "$T/said" 2>/dev/null)" "$said1"$'\n'"$told_pool" 'a give-up whose record could not be written says so, and that its pool was told'
-  eq "$(cat "$T/pool" 2>/dev/null)" unrecorded 'a give-up whose record could not be written is told to the pool'
+  eq "$(cat "$T/pool" 2>/dev/null; printf .)" $'unrecorded\n.' 'a give-up whose record could not be written is told to the pool, one whole line'
   # And a pool that cannot be told either is said as well, with no word that its verdict is refused.
   rm -f "$T/said"
   ( exec {sf}>| "$T/said" {uf}< /dev/null {vf}< /dev/null || exit 9; SHMUTANT_PS_UNSETTLES="$sf"; SHMUTANT_UNSETTLED_FD="$uf"; SHMUTANT_VERDICT_FD="$vf"
@@ -6959,7 +6967,7 @@ t_freeze_gives_up_on_a_process_table_that_stalls() {
   ( exec {sf}>| "$T/said" {vf}>| "$T/pool" {cf}> /dev/null || exit 9; exec {cf}>&-
     SHMUTANT_PS_UNSETTLES="$sf"; SHMUTANT_UNSETTLED_FD="$cf"; SHMUTANT_VERDICT_FD="$vf"
     _shmutant_ps_gave_up 7 ) >| "$T/out" 2>&1
-  eq "$(cat "$T/pool" 2>/dev/null)|$(cat "$T/out" 2>/dev/null)" 'unrecorded|' 'a give-up whose runner'"'"'s descriptor is closed tells the pool, and writes nowhere else'
+  eq "$(cat "$T/pool" 2>/dev/null; printf .)|$(cat "$T/out" 2>/dev/null)" $'unrecorded\n.|' 'a give-up whose runner'"'"'s descriptor is closed tells the pool, and writes nowhere else'
   eq "$(cat "$T/said" 2>/dev/null)" "$said1"$'\n'"$told_pool" 'and says its pool was told'
   rm -f "$T/said" "$T/out"
   ( exec {sf}>| "$T/said" {uf}< /dev/null {cf}> /dev/null || exit 9; exec {cf}>&-
@@ -6967,6 +6975,49 @@ t_freeze_gives_up_on_a_process_table_that_stalls() {
     _shmutant_ps_gave_up 7 ) >| "$T/out" 2>&1
   eq "$(cat "$T/out" 2>/dev/null)" '' 'a give-up whose pool'"'"'s descriptor is closed writes nowhere else'
   eq "$(cat "$T/said" 2>/dev/null)" "$said1"$'\n'"$told_none" 'and says its pool could not be told'
+  # #95: a channel closed before its freeze began is one the freeze cannot write to, though the copy
+  # of its stderr the freeze makes first may take that number: a give-up on the first read goes to the
+  # pool when the runner's channel is closed, is said to be told to neither when the pool's is closed
+  # too, and nothing is written where the words go.
+  for v in runner both; do
+    rm -f "$T/stalled" "$T/pool" "$T/said"
+    sleep 60 > /dev/null 2>&1 & root=$!
+    ( SHMUTANT_PROC=0; SHMUTANT_PS_LSTART=0
+      stalls() {
+        case " ${FUNCNAME[*]} " in
+          *" _shmutant_guard "*) return 1 ;;
+          *" _shmutant_kill_tree_guarded "*) [ -z "${guard_w:-}" ]; return ;;
+        esac
+        return 1
+      }
+      rid="$(_shmutant_identity "$root")"
+      stall_ps_reads
+      if [ "$v" = runner ]; then
+        exec {vf}>| "$T/pool" {err_fd}>| "$T/said" {cf}> /dev/null || exit 9; exec {cf}>&-
+        SHMUTANT_UNSETTLED_FD="$cf"; SHMUTANT_VERDICT_FD="$vf"
+      else
+        exec {uf}< /dev/null {err_fd}>| "$T/said" {cf}> /dev/null || exit 9; exec {cf}>&-
+        SHMUTANT_UNSETTLED_FD="$uf"; SHMUTANT_VERDICT_FD="$cf"
+      fi
+      _shmutant_kill_tree_twice "$root:$rid" ) > /dev/null 2>&1
+    wait "$root" 2>/dev/null
+    stalled_ps_ended "closed-before-$v"
+    if [ "$v" = runner ]; then
+      eq "$(cat "$T/pool" 2>/dev/null; printf .)" $'unrecorded\n.' 'a freeze whose runner'"'"'s channel was closed before it began tells the pool of its give-up'
+    else
+      has "$(cat "$T/said" 2>/dev/null)" 'nor could its pool be told' 'a freeze whose runner'"'"'s and pool'"'"'s channels were closed before it began says it told neither'
+    fi
+    ! grep -qxE 'unsettled|unrecorded' "$T/said" 2>/dev/null || fail_ "$v: a freeze whose channel was closed before it began wrote to it where its words go"
+  done
+  # The descriptor written may be stderr itself, open or closed, and a function named exec that
+  # cannot be unset is a write that failed.
+  rm -f "$T/two"
+  ( exec 2>| "$T/two"; _shmutant_tell_fd 2 hello ) || fail_ 'a line could not be written to an open stderr'
+  eq "$(cat "$T/two" 2>/dev/null; printf .)" $'hello\n.' 'a line written to stderr reaches it'
+  v=0; ( exec 2>&-; _shmutant_tell_fd 2 hello ) > /dev/null || v=$?
+  eq "$v" 1 'a line written to a closed stderr is a write that failed'
+  v=0; out="$( exec() { :; }; readonly -f exec; _shmutant_tell_fd 1 hello )" || v=$?
+  eq "$v|$out" '1|' 'a write made under an exec that cannot be unset is one that failed, and writes nothing'
   # A value that names no descriptor is no descriptor, and never the name of a file to write.
   mkdir -p "$T/nowhere"
   rm -f "$T/said" "$T/pool"
@@ -7339,7 +7390,7 @@ PLAN
 t_wait_for_bounds_its_looks() {
   # #95: the bound wait_for is given is checked before anything is looked at, a file that is already
   # there included, and one it is given is the number of looks it takes.
-  local v rc t0 t1
+  local v rc
   : >| "$T/there"
   for v in 0 -1 x 01 10000 ''; do
     rc=0; wait_for "$T/there" "$v" 2> /dev/null || rc=$?
@@ -7349,10 +7400,14 @@ t_wait_for_bounds_its_looks() {
   done
   rc=0; wait_for "$T/there" 1 || rc=$?
   eq "$rc" 0 'wait_for finds a file that is there'
-  t0="$(_shmutant_now)"; rc=0; wait_for "$T/not-there" 3 || rc=$?; t1="$(_shmutant_now)"
-  eq "$rc" 1 'wait_for gives up on a file that never comes'
-  # Three looks are two sleeps of a tenth of a second: well under a second, never the default ten.
-  [ "$(( t1 - t0 ))" -lt 1000000 ] || fail_ "wait_for took [$t0 -> $t1] microseconds for three looks"
+  # Three looks are two naps of a tenth of a second (counted, with what each was given, by a stub
+  # for the nap), then given up on; a file that appears at the second nap is found at the last look.
+  rm -f "$T/naps" "$T/late"
+  rc=0; ( sleep() { printf '%s\n' "$*" >> "$T/naps"; }; wait_for "$T/not-there" 3 ) || rc=$?
+  eq "$rc|$(tr '\n' ' ' < "$T/naps" 2>/dev/null)" '1|0.1 0.1 ' 'three looks are two naps a tenth of a second apart, then expiry'
+  rm -f "$T/naps"
+  rc=0; ( sleep() { printf '%s\n' "$*" >> "$T/naps"; [ "$(wc -l < "$T/naps")" -lt 2 ] || : >| "$T/late"; }; wait_for "$T/late" 3 ) || rc=$?
+  eq "$rc|$(grep -c . "$T/naps" 2>/dev/null)" '0|2' 'a file that comes at the second nap is found at the third look'
 }
 
 t_run_is_ended_through_a_process_table_that_stalls() {
@@ -7366,7 +7421,7 @@ t_run_is_ended_through_a_process_table_that_stalls() {
   # one that only gave up on the listing or on that look, which are no read of its freeze, is not
   # (D17), whatever its caller left in the name a freeze keeps its report's descriptor in. Each ps
   # that stalls is a sleep in its place, which the read's own bound ends.
-  local how fired unsettled want left
+  local how fired unsettled want left st
   local -a known=() STILL=()
   stalling_table() {
     # (2: a value of the caller's in the name a freeze keeps its report's descriptor in.)
@@ -7405,6 +7460,10 @@ t_run_is_ended_through_a_process_table_that_stalls() {
       fired=""; unsettled=""; read -r fired unsettled _ < "$T/$how/result" 2>/dev/null
       eq "$fired $unsettled" 'fired=1 unsettled=1' 'identified: a run whose freeze gave up on its reads was not scored unsettled'
       carries_identity "${RUN_KID%%:*}" "${RUN_KID#*:}" || fail_ 'identified: a process of a group that could not be shown to be the run'"'"'s was killed'
+      # Running: there, neither a zombie nor stopped. (Its holder is let go by the runner once the
+      # freeze is over, and ends by itself: it is not one of what must survive.)
+      st="$(command -p ps -o stat= -p "${RUN_KID%%:*}" 2>/dev/null | tr -d ' ')"
+      case "$st" in ''|*Z*|*T*) fail_ "identified: a process of a group that could not be shown to be the run's is not running (state [$st])" ;; esac
       left="$(none_stopped 50 "${RUN_KID%%:*}" "${RUN_HOLDER%%:*}")" || fail_ "identified: a group that could not be shown to be the run's was left stopped: [$left]"
       stalled_ps_ended "$how"
       run_ended

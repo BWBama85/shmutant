@@ -2025,7 +2025,7 @@ shmutant_mut 'the held group is taken as checked before the guard started' \
   '    :' \
   't_freeze_checks_its_root_and_holder_after_its_guard_starts'
 shmutant_mut 'a tree killed with no guard is not reported unsettled' \
-  '    [ -z "${SHMUTANT_UNSETTLED_FD:-}" ] || printf '"'"'unsettled\n'"'"' >&"$SHMUTANT_UNSETTLED_FD"' \
+  '    [ -z "${SHMUTANT_UNSETTLED_FD:-}" ] || _shmutant_tell_fd "$SHMUTANT_UNSETTLED_FD" unsettled || :' \
   '    :' \
   't_freeze_without_a_guard_stops_nothing'
 shmutant_mut 'a tree with no guard is not killed' \
@@ -3141,8 +3141,8 @@ shmutant_mut 'a give-up of a freeze tries neither its record nor its word to the
   '  return 0' \
   't_collect_fails_closed'
 shmutant_mut 'a write to a closed descriptor reaches the copy of stderr that took its number (#95)' \
-  'exec 2>/dev/null; exec >&"$1" || builtin exit 1;' \
-  'exec 2>/dev/null >&"$1" || builtin exit 1;' \
+  '    exec >&"$1" || builtin exit 1' \
+  '    exec 2>/dev/null >&"$1" || builtin exit 1' \
   't_freeze_gives_up_on_a_process_table_that_stalls'
 shmutant_mut 'a descriptor that is a word names a file to write (#95)' \
   '  case "${1:-}" in '"'"''"'"'|*[!0-9]*) return 1 ;; esac' \
@@ -3151,6 +3151,22 @@ shmutant_mut 'a descriptor that is a word names a file to write (#95)' \
 shmutant_mut 'the first read of a freeze is made with SIGPIPE at its default (#95)' \
   '  guard_of_id="$(_shmutant_identity "$guard_of")" || guard_of_id=""' \
   '  guard_of_id="$(trap - PIPE; _shmutant_identity "$guard_of")" || guard_of_id=""' \
+  't_freeze_gives_up_on_a_process_table_that_stalls'
+shmutant_mut 'a freeze writes its give-up to a runner'"'"'s channel closed before it began (#95)' \
+  '  [ -z "${SHMUTANT_UNSETTLED_FD:-}" ] || _shmutant_tell_fd "$SHMUTANT_UNSETTLED_FD" || SHMUTANT_UNSETTLED_FD=closed' \
+  '  :' \
+  't_freeze_gives_up_on_a_process_table_that_stalls'
+shmutant_mut 'a freeze writes its give-up to a pool'"'"'s channel closed before it began (#95)' \
+  '  [ -z "${SHMUTANT_VERDICT_FD:-}" ] || _shmutant_tell_fd "$SHMUTANT_VERDICT_FD" || SHMUTANT_VERDICT_FD=closed' \
+  '  :' \
+  't_freeze_gives_up_on_a_process_table_that_stalls'
+shmutant_mut 'a line written to stderr is quieted with it (#95)' \
+  '    [ "$1" = 2 ] || exec 2>/dev/null' \
+  '    exec 2>/dev/null' \
+  't_freeze_gives_up_on_a_process_table_that_stalls'
+shmutant_mut 'a write made under an exec that cannot be unset goes on (#95)' \
+  '  ( builtin trap - ERR DEBUG RETURN; builtin unset -f exec 2>/dev/null || builtin exit 1' \
+  '  ( builtin trap - ERR DEBUG RETURN; builtin unset -f exec 2>/dev/null' \
   't_freeze_gives_up_on_a_process_table_that_stalls'
 shmutant_mut 'a run whose identified holder its freeze could not check leaves its group stopped (#95)' \
   '      [ -z "${group_untold:-}" ] || gone_group="$SHMUTANT_KILL_GROUP"' \
