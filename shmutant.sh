@@ -850,17 +850,54 @@ _shmutant_ps() {
 # reader put a redirection of its own on the read, so the give-up is said there whoever read. The
 # runner is told on the descriptor it named, at once and from here: the read may be in a
 # substitution of the freezing shell, which can set nothing in it. A record that cannot be written
-# there is said too, and told to the pool on the worker's own channel (`unrecorded`), where it makes
-# the pass a harness error and the row unsettled: the run must not be scored without it. A ps that itself ends with status
-# 124 is read as one given up on, as it always was. Returns 0 always.
+# there is told to the pool on the worker's own channel (`unrecorded`), where it makes the pass a
+# harness error and the row unsettled: the run must not be scored without it. Both are written
+# before any word is said, so a word that blocks on a stderr with no room left keeps neither from
+# being made. Where neither write delivered a byte, nothing reaches the collector, and a verdict the
+# worker writes later may be accepted; that is only said (a write cut short leaves its part, which
+# the next line joins). Each is written through _shmutant_tell_fd, so a closed descriptor or a value
+# that names none is a write that failed. A word that cannot be said is not a failure, under errexit
+# too. A ps that itself ends with status 124 is read as one given up on, as it always was. Returns 0
+# always.
 _shmutant_ps_gave_up() {
   case "${SHMUTANT_PS_UNSETTLES:-}" in ''|0|*[!0-9]*) return 0 ;; esac
-  _shmutant_err "a read of the process table did not answer within $1 seconds and was given up on, so the process tree being ended is not known to have been frozen whole" 2>&"$SHMUTANT_PS_UNSETTLES"
-  [ -n "${SHMUTANT_UNSETTLED_FD:-}" ] || return 0
-  { printf 'unsettled\n' >&"$SHMUTANT_UNSETTLED_FD"; } 2>/dev/null && return 0
-  _shmutant_err "the run could not be told that its freeze is unsettled, so its verdict is not accepted" 2>&"$SHMUTANT_PS_UNSETTLES"
-  [ -z "${SHMUTANT_VERDICT_FD:-}" ] || { printf 'unrecorded\n' >&"$SHMUTANT_VERDICT_FD"; } 2>/dev/null || _shmutant_err "nor could its pool be told" 2>&"$SHMUTANT_PS_UNSETTLES"
+  # $2: 1 when a runner to tell could not be told, else 0 (told, or none to tell); $3: the pool was
+  # told (0), not (1), or not asked (2). Positional, never a name: the run's own shell may have made
+  # any name readonly.
+  builtin set -- "$1" 0 2
+  if [ -n "${SHMUTANT_UNSETTLED_FD:-}" ] && ! _shmutant_tell_fd "$SHMUTANT_UNSETTLED_FD" unsettled; then
+    builtin set -- "$1" 1 2
+    if [ -n "${SHMUTANT_VERDICT_FD:-}" ]; then
+      if _shmutant_tell_fd "$SHMUTANT_VERDICT_FD" unrecorded; then builtin set -- "$1" 1 0; else builtin set -- "$1" 1 1; fi
+    fi
+  fi
+  _shmutant_err "a read of the process table did not answer within $1 seconds and was given up on, so the process tree being ended is not known to have been frozen whole" 2>&"$SHMUTANT_PS_UNSETTLES" || :
+  case "$2$3" in
+    10) _shmutant_err "the run could not be told that its freeze is unsettled; its pool was told, so its verdict is not accepted" 2>&"$SHMUTANT_PS_UNSETTLES" || : ;;
+    11) _shmutant_err "the run could not be told that its freeze is unsettled, nor could its pool be told, so the verdict it reaches may be accepted" 2>&"$SHMUTANT_PS_UNSETTLES" || : ;;
+    12) _shmutant_err "the run could not be told that its freeze is unsettled" 2>&"$SHMUTANT_PS_UNSETTLES" || : ;;
+  esac
   return 0
+}
+
+# _shmutant_tell_fd <fd> [<line>] — write <line> and a newline to descriptor <fd>, or with no <line>
+# only show that <fd> is open; 1 when <fd> is no decimal number (a word there would name a file to
+# write), is closed, or the write fails. The descriptor is made the stdout of a subshell by exec,
+# which saves nothing: a builtin's own redirection saves the stream it replaces in the lowest free
+# number from 10, which may be that of a closed <fd>, and the write then reaches the saved stream and
+# succeeds.
+_shmutant_tell_fd() {
+  case "${1:-}" in ''|*[!0-9]*) return 1 ;; esac
+  # Once the traps are cleared no handler of the caller's runs in here (an ERR trap that errtrace
+  # hands down would run on the failed exec), and no function of that name: `exec` itself, since
+  # `builtin exec` is a command like any other, whose redirections are saved and undone; one that
+  # cannot be unset is a write that failed. One redirection to an exec: bash keeps a copy of stderr
+  # while it redirects it, which a second redirection on the same exec can take for <fd>. Stderr is
+  # quieted only when it is not <fd> itself.
+  ( builtin trap - ERR DEBUG RETURN; builtin unset -f exec 2>/dev/null || builtin exit 1
+    [ "$1" = 2 ] || exec 2>/dev/null
+    exec >&"$1" || builtin exit 1
+    [ "$#" -lt 2 ] || builtin printf '%s\n' "$2" ) || return 1
 }
 
 # _shmutant_ps_end <pid> — KILL <pid> while it is a job of this shell's that bash has not reaped:
@@ -1237,9 +1274,13 @@ _shmutant_kill_tree_guarded() {
   # descriptor the freeze reports on, or of this shell's stderr where it has none.
   local held="" SHMUTANT_PS_BOUND=10 SHMUTANT_PS_UNSETTLES=""
   # A write to a guard that has gone, or of a give-up's words to a reader that has gone, fails here:
-  # it does not end this shell partway through a freeze, nor a read of it before its give-up is
-  # recorded. So before the first read.
+  # it does not end this shell partway through a freeze. So before the first read.
   trap '' PIPE
+  # A channel of the run's or the pool's that is closed is one this freeze cannot write to: the copy
+  # made just below, or any descriptor after it, may take its number. It is marked by a value that is
+  # no descriptor, so a write to it is one that failed (_shmutant_tell_fd).
+  [ -z "${SHMUTANT_UNSETTLED_FD:-}" ] || _shmutant_tell_fd "$SHMUTANT_UNSETTLED_FD" || SHMUTANT_UNSETTLED_FD=closed
+  [ -z "${SHMUTANT_VERDICT_FD:-}" ] || _shmutant_tell_fd "$SHMUTANT_VERDICT_FD" || SHMUTANT_VERDICT_FD=closed
   exec {SHMUTANT_PS_UNSETTLES}>&"${err_fd:-2}" || SHMUTANT_PS_UNSETTLES=2
   if [ "${1:-}" = -g ]; then held="$2"; shift 2; fi
   local spec="$1" pid rootid p d rid guard_w="" guard_r="" guard_lost=0 guard_pid="" guard_id=""
@@ -1294,7 +1335,7 @@ _shmutant_kill_tree_guarded() {
   if [ "$guard_up" != 0 ]; then
     # No guard, no freeze: one KILL to what can be reached now, the group included, and the end
     # reported unsettled (before the kill, as below), since a child forked meanwhile may escape it.
-    [ -z "${SHMUTANT_UNSETTLED_FD:-}" ] || printf 'unsettled\n' >&"$SHMUTANT_UNSETTLED_FD"
+    [ -z "${SHMUTANT_UNSETTLED_FD:-}" ] || _shmutant_tell_fd "$SHMUTANT_UNSETTLED_FD" unsettled || :
     if [ -n "${err_fd:-}" ]; then _shmutant_err "the guard of a freeze could not be started, so the process tree was killed without being frozen first" 2>&"$err_fd"; fi
     SHMUTANT_KILL_GROUP="$held"
     if [ "$root_ok" = 1 ]; then _shmutant_kill_tree KILL "$pid" "$pid:${rootid:-}" "$@"
@@ -1382,7 +1423,7 @@ _shmutant_kill_tree_guarded() {
   # may run in the watchdog — and BEFORE the kill: the freeze is complete by now, and the kill
   # may end the wrapper this watchdog's parent is waiting on before this shell runs again.
   if [ "${SHMUTANT_FREEZE_UNSETTLED:-0}" = 1 ]; then
-    if [ -n "${SHMUTANT_UNSETTLED_FD:-}" ]; then printf 'unsettled\n' >&"$SHMUTANT_UNSETTLED_FD"; fi
+    if [ -n "${SHMUTANT_UNSETTLED_FD:-}" ]; then _shmutant_tell_fd "$SHMUTANT_UNSETTLED_FD" unsettled || :; fi
     if [ -n "${err_fd:-}" ]; then _shmutant_err "the process tree being ended did not settle within 32 passes" 2>&"$err_fd"; fi
     if [ "$guard_lost" = 1 ] && [ -n "${err_fd:-}" ]; then _shmutant_err "the guard of the freeze went before its end, so what it was not told of was killed without being frozen first" 2>&"$err_fd"; fi
   fi

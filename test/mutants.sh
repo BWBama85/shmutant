@@ -2025,7 +2025,7 @@ shmutant_mut 'the held group is taken as checked before the guard started' \
   '    :' \
   't_freeze_checks_its_root_and_holder_after_its_guard_starts'
 shmutant_mut 'a tree killed with no guard is not reported unsettled' \
-  '    [ -z "${SHMUTANT_UNSETTLED_FD:-}" ] || printf '"'"'unsettled\n'"'"' >&"$SHMUTANT_UNSETTLED_FD"' \
+  '    [ -z "${SHMUTANT_UNSETTLED_FD:-}" ] || _shmutant_tell_fd "$SHMUTANT_UNSETTLED_FD" unsettled || :' \
   '    :' \
   't_freeze_without_a_guard_stops_nothing'
 shmutant_mut 'a tree with no guard is not killed' \
@@ -3109,17 +3109,73 @@ shmutant_mut 'a guard that gave up on a read of its own unsettles its freeze' \
   '  :' \
   't_guard_gives_up_on_a_process_table_that_stalls'
 shmutant_mut 'a give-up that was recorded is told to the pool as one that was not' \
-  '{ printf '"'"'unsettled\n'"'"' >&"$SHMUTANT_UNSETTLED_FD"; } 2>/dev/null && return 0' \
-  '{ printf '"'"'unsettled\n'"'"' >&"$SHMUTANT_UNSETTLED_FD"; } 2>/dev/null' \
+  '  if [ -n "${SHMUTANT_UNSETTLED_FD:-}" ] && ! _shmutant_tell_fd "$SHMUTANT_UNSETTLED_FD" unsettled; then' \
+  '  if [ -n "${SHMUTANT_UNSETTLED_FD:-}" ] && _shmutant_tell_fd "$SHMUTANT_UNSETTLED_FD" unsettled; then' \
   't_freeze_gives_up_on_a_process_table_that_stalls'
 shmutant_mut 'a give-up whose record could not be written is dropped in silence' \
-  '  _shmutant_err "the run could not be told that its freeze is unsettled, so its verdict is not accepted" 2>&"$SHMUTANT_PS_UNSETTLES"' \
-  '  :' \
+  '    10) _shmutant_err "the run could not be told that its freeze is unsettled; its pool was told, so its verdict is not accepted" 2>&"$SHMUTANT_PS_UNSETTLES" || : ;;' \
+  '    10) : ;;' \
   't_freeze_gives_up_on_a_process_table_that_stalls'
 shmutant_mut 'a give-up whose record could not be written is not told to the pool' \
-  '{ printf '"'"'unrecorded\n'"'"' >&"$SHMUTANT_VERDICT_FD"; } 2>/dev/null ||' \
-  '{ :; } 2>/dev/null ||' \
+  '      if _shmutant_tell_fd "$SHMUTANT_VERDICT_FD" unrecorded; then' \
+  '      if :; then' \
   't_freeze_gives_up_on_a_process_table_that_stalls'
+shmutant_mut 'a give-up that neither the runner nor the pool could be told of is not said (#95)' \
+  '    11) _shmutant_err "the run could not be told that its freeze is unsettled, nor could its pool be told, so the verdict it reaches may be accepted" 2>&"$SHMUTANT_PS_UNSETTLES" || : ;;' \
+  '    11) : ;;' \
+  't_freeze_gives_up_on_a_process_table_that_stalls'
+shmutant_mut 'a give-up that neither the runner nor the pool could be told of says its verdict is not accepted (#95)' \
+  '    11) _shmutant_err "the run could not be told that its freeze is unsettled, nor could its pool be told, so the verdict it reaches may be accepted" 2>&"$SHMUTANT_PS_UNSETTLES" || : ;;' \
+  '    11) _shmutant_err "the run could not be told that its freeze is unsettled, nor could its pool be told, so its verdict is not accepted" 2>&"$SHMUTANT_PS_UNSETTLES" || : ;;' \
+  't_freeze_gives_up_on_a_process_table_that_stalls'
+shmutant_mut 'a give-up with no pool to tell does not say its runner was not told (#95)' \
+  '    12) _shmutant_err "the run could not be told that its freeze is unsettled" 2>&"$SHMUTANT_PS_UNSETTLES" || : ;;' \
+  '    12) : ;;' \
+  't_freeze_gives_up_on_a_process_table_that_stalls'
+shmutant_mut 'a give-up says a word before the run or the pool is told (#95)' \
+  '  builtin set -- "$1" 0 2' \
+  '  _shmutant_err "first" 2>&"$SHMUTANT_PS_UNSETTLES"; builtin set -- "$1" 0 2' \
+  't_freeze_gives_up_on_a_process_table_that_stalls'
+shmutant_mut 'a give-up whose words cannot be said ends a caller under errexit (#95)' \
+  '  _shmutant_err "a read of the process table did not answer within $1 seconds and was given up on, so the process tree being ended is not known to have been frozen whole" 2>&"$SHMUTANT_PS_UNSETTLES" || :' \
+  '  _shmutant_err "a read of the process table did not answer within $1 seconds and was given up on, so the process tree being ended is not known to have been frozen whole" 2>&"$SHMUTANT_PS_UNSETTLES"' \
+  't_freeze_gives_up_on_a_process_table_that_stalls'
+shmutant_mut 'a give-up of a freeze tries neither its record nor its word to the pool (#95)' \
+  '  builtin set -- "$1" 0 2' \
+  '  return 0' \
+  't_collect_fails_closed'
+shmutant_mut 'a write to a closed descriptor reaches the copy of stderr that took its number (#95)' \
+  '    exec >&"$1" || builtin exit 1' \
+  '    exec 2>/dev/null >&"$1" || builtin exit 1' \
+  't_freeze_gives_up_on_a_process_table_that_stalls'
+shmutant_mut 'a descriptor that is a word names a file to write (#95)' \
+  '  case "${1:-}" in '"'"''"'"'|*[!0-9]*) return 1 ;; esac' \
+  '  :' \
+  't_freeze_gives_up_on_a_process_table_that_stalls'
+shmutant_mut 'the first read of a freeze is made with SIGPIPE at its default (#95)' \
+  '  guard_of_id="$(_shmutant_identity "$guard_of")" || guard_of_id=""' \
+  '  guard_of_id="$(trap - PIPE; _shmutant_identity "$guard_of")" || guard_of_id=""' \
+  't_freeze_gives_up_on_a_process_table_that_stalls'
+shmutant_mut 'a freeze writes its give-up to a runner'"'"'s channel closed before it began (#95)' \
+  '  [ -z "${SHMUTANT_UNSETTLED_FD:-}" ] || _shmutant_tell_fd "$SHMUTANT_UNSETTLED_FD" || SHMUTANT_UNSETTLED_FD=closed' \
+  '  :' \
+  't_freeze_gives_up_on_a_process_table_that_stalls'
+shmutant_mut 'a freeze writes its give-up to a pool'"'"'s channel closed before it began (#95)' \
+  '  [ -z "${SHMUTANT_VERDICT_FD:-}" ] || _shmutant_tell_fd "$SHMUTANT_VERDICT_FD" || SHMUTANT_VERDICT_FD=closed' \
+  '  :' \
+  't_freeze_gives_up_on_a_process_table_that_stalls'
+shmutant_mut 'a line written to stderr is quieted with it (#95)' \
+  '    [ "$1" = 2 ] || exec 2>/dev/null' \
+  '    exec 2>/dev/null' \
+  't_freeze_gives_up_on_a_process_table_that_stalls'
+shmutant_mut 'a write made under an exec that cannot be unset goes on (#95)' \
+  '  ( builtin trap - ERR DEBUG RETURN; builtin unset -f exec 2>/dev/null || builtin exit 1' \
+  '  ( builtin trap - ERR DEBUG RETURN; builtin unset -f exec 2>/dev/null' \
+  't_freeze_gives_up_on_a_process_table_that_stalls'
+shmutant_mut 'a run whose identified holder its freeze could not check leaves its group stopped (#95)' \
+  '      [ -z "${group_untold:-}" ] || gone_group="$SHMUTANT_KILL_GROUP"' \
+  '      :' \
+  't_run_is_ended_through_a_process_table_that_stalls'
 shmutant_mut 'the pool accepts the verdict of a run whose freeze could not record that it is unsettled' \
   '        unrecorded)  unrecorded=1 ;;' \
   '        unrecorded)  : ;;' \
