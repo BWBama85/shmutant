@@ -6999,7 +6999,14 @@ t_freeze_gives_up_on_a_process_table_that_stalls() {
         exec {uf}< /dev/null {err_fd}>| "$T/said" {cf}> /dev/null || exit 9; exec {cf}>&-
         SHMUTANT_UNSETTLED_FD="$uf"; SHMUTANT_VERDICT_FD="$cf"
       fi
-      _shmutant_kill_tree_twice "$root:$rid" ) > /dev/null 2>&1
+      _shmutant_kill_tree_twice "$root:$rid" ) > /dev/null 2>&1 & fz=$!
+    if ! wait_gone "$fz" "" 250; then
+      fail_ "closed-before-$v: a freeze waited on a read of the process table that stalled"
+      _shmutant_kill_tree KILL "$fz" "$fz:"; wait "$fz" 2>/dev/null
+      kill -KILL "$root" 2>/dev/null; wait "$root" 2>/dev/null
+      break
+    fi
+    wait "$fz" 2>/dev/null
     wait "$root" 2>/dev/null
     stalled_ps_ended "closed-before-$v"
     if [ "$v" = runner ]; then
