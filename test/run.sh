@@ -6924,13 +6924,16 @@ t_freeze_gives_up_on_a_process_table_that_stalls() {
   # this shell started with SIGPIPE ignored nothing can restore its default, and the row that does so
   # for that read cannot go red here: the suite's self-mutation runs with it restored.)
   rm -f "$T/pipe-at-first"
+  local rid fzid
   sleep 60 > /dev/null 2>&1 & root=$!
+  rid="$(_shmutant_identity "$root")"
   ( eval "$(declare -f _shmutant_identity | sed '1s/^_shmutant_identity /_identity_spied /')"
     _shmutant_identity() { [ -e "$T/pipe-at-first" ] || builtin trap -p PIPE >| "$T/pipe-at-first"; _identity_spied "$@"; }
     _shmutant_kill_tree_twice "$root:$(_identity_spied "$root")" ) > /dev/null 2>&1 & fz=$!
-  wait_gone "$fz" "" 250 || { fail_ 'pipe-at-first: a freeze that stalls on nothing did not return'; _shmutant_kill_tree KILL "$fz" "$fz:"; }
+  fzid="$(_shmutant_identity "$fz")"
+  wait_gone "$fz" "$fzid" 250 || { fail_ 'pipe-at-first: a freeze that stalls on nothing did not return'; _shmutant_kill_tree KILL "$fz" "$fz:$fzid"; }
   wait "$fz" 2>/dev/null
-  wait_gone "$root" "" 50 || { fail_ 'pipe-at-first: the tree a freeze was given was not ended'; kill -KILL "$root" 2>/dev/null; }
+  wait_gone "$root" "$rid" 50 || { fail_ 'pipe-at-first: the tree a freeze was given was not ended'; end_tree "$root" "$rid"; }
   wait "$root" 2>/dev/null
   eq "$(cat "$T/pipe-at-first" 2>/dev/null)" "trap -- '' SIGPIPE" 'the first read of a freeze is made with SIGPIPE ignored'
   # The report itself (_shmutant_ps_gave_up): one line on the descriptor the runner named, and said
@@ -6985,6 +6988,7 @@ t_freeze_gives_up_on_a_process_table_that_stalls() {
   for v in runner both; do
     rm -f "$T/stalled" "$T/pool" "$T/said"
     sleep 60 > /dev/null 2>&1 & root=$!
+    rid="$(_shmutant_identity "$root")"
     ( SHMUTANT_PROC=0; SHMUTANT_PS_LSTART=0
       stalls() {
         case " ${FUNCNAME[*]} " in
@@ -7003,14 +7007,15 @@ t_freeze_gives_up_on_a_process_table_that_stalls() {
         SHMUTANT_UNSETTLED_FD="$uf"; SHMUTANT_VERDICT_FD="$cf"
       fi
       _shmutant_kill_tree_twice "$root:$rid" ) > /dev/null 2>&1 & fz=$!
-    if ! wait_gone "$fz" "" 250; then
+    fzid="$(_shmutant_identity "$fz")"
+    if ! wait_gone "$fz" "$fzid" 250; then
       fail_ "closed-before-$v: a freeze waited on a read of the process table that stalled"
-      _shmutant_kill_tree KILL "$fz" "$fz:"; wait "$fz" 2>/dev/null
-      kill -KILL "$root" 2>/dev/null; wait "$root" 2>/dev/null
+      _shmutant_kill_tree KILL "$fz" "$fz:$fzid"; wait "$fz" 2>/dev/null
+      end_tree "$root" "$rid"
       break
     fi
     wait "$fz" 2>/dev/null
-    wait_gone "$root" "" 50 || { fail_ "closed-before-$v: the tree a freeze was given was not ended"; kill -KILL "$root" 2>/dev/null; }
+    wait_gone "$root" "$rid" 50 || { fail_ "closed-before-$v: the tree a freeze was given was not ended"; end_tree "$root" "$rid"; }
     wait "$root" 2>/dev/null
     stalled_ps_ended "closed-before-$v"
     if [ "$v" = runner ]; then
@@ -7062,6 +7067,14 @@ t_freeze_gives_up_on_a_process_table_that_stalls() {
   rm -f "$T/said"
   ( exec {sf}> "$T/said"; SHMUTANT_PS_UNSETTLES="$sf"; SHMUTANT_UNSETTLED_FD=""; _shmutant_ps_gave_up 7 ) > /dev/null 2>&1
   has "$(cat "$T/said" 2>/dev/null)" 'did not answer within 7 seconds' 'a give-up with no runner to tell is still said'
+  # Words that cannot be said (their descriptor closed) end nothing, under a caller's errexit too: in
+  # a bash of its own, as a unit runs where errexit is ignored. (250 is far above the numbers bash
+  # saves streams in, which a closed one nearby could be taken for.)
+  rm -f "$T/told"
+  out="$( bash -c '. "$1" || exit 9; set -e; exec {uf}>| "$2" 250>&- || exit 9
+          SHMUTANT_PS_UNSETTLES=250; SHMUTANT_UNSETTLED_FD="$uf"; SHMUTANT_VERDICT_FD=""
+          _shmutant_ps_gave_up 7 2>/dev/null; echo returned' _ "$SHMUTANT" "$T/told" )"
+  eq "$out|$(cat "$T/told" 2>/dev/null)" 'returned|unsettled' 'a give-up whose words cannot be said is recorded and returns, under errexit'
   # A read given up on by any other shell (the name empty) is recorded and said nowhere, and so is one
   # under a value of a caller's that names no descriptor: in a directory of its own, where a value
   # taken for a file's name would leave that file. 0 is such a value: it is what the empty one becomes

@@ -853,10 +853,12 @@ _shmutant_ps() {
 # there is told to the pool on the worker's own channel (`unrecorded`), where it makes the pass a
 # harness error and the row unsettled: the run must not be scored without it. Both are written
 # before any word is said, so a word that blocks on a stderr with no room left keeps neither from
-# being made. Where neither can be written, nothing reaches the collector, and a verdict the worker
-# writes later may be accepted; that is only said. Each is written through _shmutant_tell_fd, so a
-# closed descriptor or a value that names none is a write that failed. A ps that itself ends with
-# status 124 is read as one given up on, as it always was. Returns 0 always.
+# being made. Where neither write delivered a byte, nothing reaches the collector, and a verdict the
+# worker writes later may be accepted; that is only said (a write cut short leaves its part, which
+# the next line joins). Each is written through _shmutant_tell_fd, so a closed descriptor or a value
+# that names none is a write that failed. A word that cannot be said is not a failure, under errexit
+# too. A ps that itself ends with status 124 is read as one given up on, as it always was. Returns 0
+# always.
 _shmutant_ps_gave_up() {
   case "${SHMUTANT_PS_UNSETTLES:-}" in ''|0|*[!0-9]*) return 0 ;; esac
   # $2: 1 when a runner to tell could not be told, else 0 (told, or none to tell); $3: the pool was
@@ -869,11 +871,11 @@ _shmutant_ps_gave_up() {
       if _shmutant_tell_fd "$SHMUTANT_VERDICT_FD" unrecorded; then builtin set -- "$1" 1 0; else builtin set -- "$1" 1 1; fi
     fi
   fi
-  _shmutant_err "a read of the process table did not answer within $1 seconds and was given up on, so the process tree being ended is not known to have been frozen whole" 2>&"$SHMUTANT_PS_UNSETTLES"
+  _shmutant_err "a read of the process table did not answer within $1 seconds and was given up on, so the process tree being ended is not known to have been frozen whole" 2>&"$SHMUTANT_PS_UNSETTLES" || :
   case "$2$3" in
-    10) _shmutant_err "the run could not be told that its freeze is unsettled; its pool was told, so its verdict is not accepted" 2>&"$SHMUTANT_PS_UNSETTLES" ;;
-    11) _shmutant_err "the run could not be told that its freeze is unsettled, nor could its pool be told, so the verdict it reaches may be accepted" 2>&"$SHMUTANT_PS_UNSETTLES" ;;
-    12) _shmutant_err "the run could not be told that its freeze is unsettled" 2>&"$SHMUTANT_PS_UNSETTLES" ;;
+    10) _shmutant_err "the run could not be told that its freeze is unsettled; its pool was told, so its verdict is not accepted" 2>&"$SHMUTANT_PS_UNSETTLES" || : ;;
+    11) _shmutant_err "the run could not be told that its freeze is unsettled, nor could its pool be told, so the verdict it reaches may be accepted" 2>&"$SHMUTANT_PS_UNSETTLES" || : ;;
+    12) _shmutant_err "the run could not be told that its freeze is unsettled" 2>&"$SHMUTANT_PS_UNSETTLES" || : ;;
   esac
   return 0
 }

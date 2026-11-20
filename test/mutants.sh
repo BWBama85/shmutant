@@ -3113,7 +3113,7 @@ shmutant_mut 'a give-up that was recorded is told to the pool as one that was no
   '  if [ -n "${SHMUTANT_UNSETTLED_FD:-}" ] && _shmutant_tell_fd "$SHMUTANT_UNSETTLED_FD" unsettled; then' \
   't_freeze_gives_up_on_a_process_table_that_stalls'
 shmutant_mut 'a give-up whose record could not be written is dropped in silence' \
-  '    10) _shmutant_err "the run could not be told that its freeze is unsettled; its pool was told, so its verdict is not accepted" 2>&"$SHMUTANT_PS_UNSETTLES" ;;' \
+  '    10) _shmutant_err "the run could not be told that its freeze is unsettled; its pool was told, so its verdict is not accepted" 2>&"$SHMUTANT_PS_UNSETTLES" || : ;;' \
   '    10) : ;;' \
   't_freeze_gives_up_on_a_process_table_that_stalls'
 shmutant_mut 'a give-up whose record could not be written is not told to the pool' \
@@ -3121,20 +3121,24 @@ shmutant_mut 'a give-up whose record could not be written is not told to the poo
   '      if :; then' \
   't_freeze_gives_up_on_a_process_table_that_stalls'
 shmutant_mut 'a give-up that neither the runner nor the pool could be told of is not said (#95)' \
-  '    11) _shmutant_err "the run could not be told that its freeze is unsettled, nor could its pool be told, so the verdict it reaches may be accepted" 2>&"$SHMUTANT_PS_UNSETTLES" ;;' \
+  '    11) _shmutant_err "the run could not be told that its freeze is unsettled, nor could its pool be told, so the verdict it reaches may be accepted" 2>&"$SHMUTANT_PS_UNSETTLES" || : ;;' \
   '    11) : ;;' \
   't_freeze_gives_up_on_a_process_table_that_stalls'
 shmutant_mut 'a give-up that neither the runner nor the pool could be told of says its verdict is not accepted (#95)' \
-  '    11) _shmutant_err "the run could not be told that its freeze is unsettled, nor could its pool be told, so the verdict it reaches may be accepted" 2>&"$SHMUTANT_PS_UNSETTLES" ;;' \
-  '    11) _shmutant_err "the run could not be told that its freeze is unsettled, nor could its pool be told, so its verdict is not accepted" 2>&"$SHMUTANT_PS_UNSETTLES" ;;' \
+  '    11) _shmutant_err "the run could not be told that its freeze is unsettled, nor could its pool be told, so the verdict it reaches may be accepted" 2>&"$SHMUTANT_PS_UNSETTLES" || : ;;' \
+  '    11) _shmutant_err "the run could not be told that its freeze is unsettled, nor could its pool be told, so its verdict is not accepted" 2>&"$SHMUTANT_PS_UNSETTLES" || : ;;' \
   't_freeze_gives_up_on_a_process_table_that_stalls'
 shmutant_mut 'a give-up with no pool to tell does not say its runner was not told (#95)' \
-  '    12) _shmutant_err "the run could not be told that its freeze is unsettled" 2>&"$SHMUTANT_PS_UNSETTLES" ;;' \
+  '    12) _shmutant_err "the run could not be told that its freeze is unsettled" 2>&"$SHMUTANT_PS_UNSETTLES" || : ;;' \
   '    12) : ;;' \
   't_freeze_gives_up_on_a_process_table_that_stalls'
 shmutant_mut 'a give-up says a word before the run or the pool is told (#95)' \
   '  builtin set -- "$1" 0 2' \
   '  _shmutant_err "first" 2>&"$SHMUTANT_PS_UNSETTLES"; builtin set -- "$1" 0 2' \
+  't_freeze_gives_up_on_a_process_table_that_stalls'
+shmutant_mut 'a give-up whose words cannot be said ends a caller under errexit (#95)' \
+  '  _shmutant_err "a read of the process table did not answer within $1 seconds and was given up on, so the process tree being ended is not known to have been frozen whole" 2>&"$SHMUTANT_PS_UNSETTLES" || :' \
+  '  _shmutant_err "a read of the process table did not answer within $1 seconds and was given up on, so the process tree being ended is not known to have been frozen whole" 2>&"$SHMUTANT_PS_UNSETTLES"' \
   't_freeze_gives_up_on_a_process_table_that_stalls'
 shmutant_mut 'a give-up of a freeze tries neither its record nor its word to the pool (#95)' \
   '  builtin set -- "$1" 0 2' \
