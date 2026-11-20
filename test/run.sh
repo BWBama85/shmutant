@@ -7289,7 +7289,10 @@ t_run_records_through_its_own_snapshots_that_stall() {
   for how in return exit bare trap; do
     rm -f "$T/stalled" "$T/stalled-ids" "$T/bounds" "$T/said" "$T/rec" "$T/w-$how.result"; mkdir -p "$T/w-$how"
     set -m
-    ( wrap_stalls
+    ( # Job control on and off again, first: bash reads the group this shell was moved into, so a hang-up
+      # a substitution of it takes when stalled_bg_ended freezes and ends its tree stays there (D15, D26).
+      set -m; set +m
+      wrap_stalls
       cb() {
         exec {sf}> "$T/said"; SHMUTANT_PS_UNSETTLES="$sf"
         # Something left behind, which a snapshot that answered would record.
@@ -7331,7 +7334,10 @@ t_pool_spawns_through_a_read_of_its_worker_that_stalls() {
   shmutant_mut 'a' '$1 + $2' '$1 - $2' 'add-works'
   rm -f "$T/stalled" "$T/stalled-ids" "$T/bounds" "$T/said" "$T/prc"
   set -m
-  ( SHMUTANT_PROC=0
+  ( # Job control on and off again, first: bash reads the group this shell was moved into, so a hang-up
+    # a substitution of it takes when stalled_bg_ended freezes and ends its tree stays there (D15, D26).
+    set -m; set +m
+    SHMUTANT_PROC=0
     stalls() { case " ${FUNCNAME[*]} " in *" _shmutant_identity _shmutant_run_jobs_loop "*) return 0 ;; esac; return 1; }
     stall_ps_quietly
     exec {sf}> "$T/said"; SHMUTANT_PS_UNSETTLES="$sf"
@@ -7370,7 +7376,10 @@ PLAN
     rm -f "$T/stalled" "$T/stalled-ids" "$T/bounds" "$T/rec" "$T/c-$how.rc"
     set -m
     rm -f "$T/said"
-    ( SHMUTANT_PROC=0; unset SHMUTANT_CLI_CHILD
+    ( # Job control on and off again, first: bash reads the group this shell was moved into, so a hang-up
+      # a substitution of it takes when stalled_bg_ended freezes and ends its tree stays there (D15, D26).
+      set -m; set +m
+      SHMUTANT_PROC=0; unset SHMUTANT_CLI_CHILD
       exec {sf}> "$T/said"; SHMUTANT_PS_UNSETTLES="$sf"
       stalls() {
         case "$how: ${FUNCNAME[*]} " in
