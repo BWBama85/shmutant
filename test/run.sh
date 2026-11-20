@@ -6927,7 +6927,10 @@ t_freeze_gives_up_on_a_process_table_that_stalls() {
   sleep 60 > /dev/null 2>&1 & root=$!
   ( eval "$(declare -f _shmutant_identity | sed '1s/^_shmutant_identity /_identity_spied /')"
     _shmutant_identity() { [ -e "$T/pipe-at-first" ] || builtin trap -p PIPE >| "$T/pipe-at-first"; _identity_spied "$@"; }
-    _shmutant_kill_tree_twice "$root:$(_identity_spied "$root")" ) > /dev/null 2>&1
+    _shmutant_kill_tree_twice "$root:$(_identity_spied "$root")" ) > /dev/null 2>&1 & fz=$!
+  wait_gone "$fz" "" 250 || { fail_ 'pipe-at-first: a freeze that stalls on nothing did not return'; _shmutant_kill_tree KILL "$fz" "$fz:"; }
+  wait "$fz" 2>/dev/null
+  wait_gone "$root" "" 50 || { fail_ 'pipe-at-first: the tree a freeze was given was not ended'; kill -KILL "$root" 2>/dev/null; }
   wait "$root" 2>/dev/null
   eq "$(cat "$T/pipe-at-first" 2>/dev/null)" "trap -- '' SIGPIPE" 'the first read of a freeze is made with SIGPIPE ignored'
   # The report itself (_shmutant_ps_gave_up): one line on the descriptor the runner named, and said
@@ -6962,7 +6965,7 @@ t_freeze_gives_up_on_a_process_table_that_stalls() {
   eq "$(cat "$T/said" 2>/dev/null)" "$said1"$'\n''shmutant: the run could not be told that its freeze is unsettled' 'a give-up with no pool to tell says only that its runner was not told'
   # A closed descriptor is a write that failed, whichever it is: a write to it must not reach a copy of
   # a stream that took its number meanwhile (here the stdout and stderr of the give-up, a file of its own).
-  local cf
+  local cf gst
   rm -f "$T/said" "$T/pool" "$T/out"
   ( exec {sf}>| "$T/said" {vf}>| "$T/pool" {cf}> /dev/null || exit 9; exec {cf}>&-
     SHMUTANT_PS_UNSETTLES="$sf"; SHMUTANT_UNSETTLED_FD="$cf"; SHMUTANT_VERDICT_FD="$vf"
@@ -7007,6 +7010,7 @@ t_freeze_gives_up_on_a_process_table_that_stalls() {
       break
     fi
     wait "$fz" 2>/dev/null
+    wait_gone "$root" "" 50 || { fail_ "closed-before-$v: the tree a freeze was given was not ended"; kill -KILL "$root" 2>/dev/null; }
     wait "$root" 2>/dev/null
     stalled_ps_ended "closed-before-$v"
     if [ "$v" = runner ]; then
@@ -7014,7 +7018,8 @@ t_freeze_gives_up_on_a_process_table_that_stalls() {
     else
       has "$(cat "$T/said" 2>/dev/null)" 'nor could its pool be told' 'a freeze whose runner'"'"'s and pool'"'"'s channels were closed before it began says it told neither'
     fi
-    ! grep -qxE 'unsettled|unrecorded' "$T/said" 2>/dev/null || fail_ "$v: a freeze whose channel was closed before it began wrote to it where its words go"
+    gst=0; grep -qxE 'unsettled|unrecorded' "$T/said" 2>/dev/null || gst=$?
+    [ "$gst" = 1 ] || fail_ "$v: a freeze whose channel was closed before it began wrote to it where its words go (grep status $gst)"
   done
   # The descriptor written may be stderr itself, open or closed, and a function named exec that
   # cannot be unset is a write that failed.
@@ -7041,7 +7046,6 @@ t_freeze_gives_up_on_a_process_table_that_stalls() {
   # no room left holds the give-up there, so the record must be made by then. Each word here writes
   # down what the runner's and the pool's descriptors held when it was said, and every one must show
   # the record (how many words there are is the cases above).
-  local gst
   rm -f "$T/order"
   ( exec {uf}>| "$T/told" {vf}>| "$T/pool" || exit 9; SHMUTANT_PS_UNSETTLES=2; SHMUTANT_UNSETTLED_FD="$uf"; SHMUTANT_VERDICT_FD="$vf"
     _shmutant_err() { printf '%s|%s\n' "$(cat "$T/told")" "$(cat "$T/pool")" >> "$T/order"; }
